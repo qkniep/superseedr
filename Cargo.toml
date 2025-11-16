@@ -3,18 +3,24 @@
 
 [package]
 name = "superseedr"
-version = "0.9.19"
+version = "0.9.20"
 description = "A BitTorrent Client in your Terminal."
 edition = "2021"
 repository = "https://github.com/Jagalite/superseedr"
 license = "GPL-3.0-or-later"
 authors = ["Jaga Tranvo <jagatranvo@prudential.com>"]  # <-- ADD THIS
 
+[profile.release]
+codegen-units = 1 # Allows compiler to perform better optimization.
+lto = true # Enables Link-time Optimization.
+opt-level = 3 # Prioritizes small binary size. Use `3` if you prefer speed.
+strip = true # Ensures debug symbols are removed.
+
 [package.metadata.bundle]
 name = "superseedr"
 identifier = "com.github.jagalite.superseedr"
 icon = ["assets/app_icon.icns"] # Optional: Uncomment and provide path if you have an icon
-version = "0.9.19"
+version = "0.9.20"
 copyright = "Copyright © 2025 Jaga Tranvo. All rights reserved."
 category = "public.app-category.utilities"
 short_description = "A BitTorrent Client in your Terminal."
