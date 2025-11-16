@@ -1,18 +1,33 @@
 # superseedr - A Rust BitTorrent Client in your Terminal
 
-A **standalone** BitTorrent client created with **[Ratatui](https://ratatui.rs/)**.
+![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr)
+![crates.io](https://img.shields.io/crates/v/superseedr)
+![License](https://img.shields.io/github/license/Jagalite/superseedr)
+[![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/)
 
-Includes `docker compose up` [Gluetun](https://github.com/qdm12/gluetun) VPN container integrations with **automatic port-fowarding**.
+superseedr is a modern Rust BitTorrent client featuring a high-performance terminal UI, real-time swarm observability, secure VPN-aware Docker setups, and zero manual network configuration. It is fast, privacy-oriented, and built for both desktop users and homelab/server workflows.
 
 ![Feature Demo](https://github.com/Jagalite/superseedr-assets/blob/main/superseedr_landing.webp)
 
+## 🚀 Features
+- 🎨 Animated, high-performance TUI (1–60 FPS)
+- 🧲 OS-level magnet link support
+- 📊 Real-time network graphs and swarm analytics
+- 🔐 Official Docker + VPN setup with automatic port forwarding
+- 🔄 Dynamic inbound port reloading without restarting the client
+- 🌐 Trackers, DHT, PEX, magnet links, private tracker support
+- ⚡ Rust-based engine for performance and safety
+- 💾 Persistent state with crash recovery
+- 🧵 Peer-level metrics and availability heatmaps
+
 ## Installation
 
-Find releases for all platforms on the [releases page](https://github.com/Jagalite/superseedr/releases).
+Download the latest release for your platform:
+- Windows (.msi)
+- macOS (.pkg)
+- Debian (.deb)
 
-Magnet links and torrent files are fully supported with installation.
-
-Private tracker builds (DHT and PEX removed) are also avaliable.
+👉 Available on the [releases page](https://github.com/Jagalite/superseedr/releases).
 
 ## Usage
 Open up a terminal and run:
@@ -20,13 +35,27 @@ Open up a terminal and run:
 superseedr
 ```
 > [!NOTE]  
-> Add torrents by clicking on magnet links from the browser and or opening torrent files.
+> Add torrents by clicking magnet links in your browser or opening .torrent files.
+
+## ⚡ Quick Start
+```bash
+# Recommended (native install)
+cargo install superseedr
+
+# Or with Docker:
+docker compose run --rm superseedr superseedr
+```
 
 ## Running with Docker
 
+superseedr offers a fully secured Docker setup using Gluetun. All BitTorrent traffic is routed through a VPN tunnel with dynamic port forwarding and zero manual network configuration.
+
+If you want privacy and simplicity, Docker is the recommended way to run superseedr.
+
 Follow steps below to create .env and .gluetun.env files to configure OpenVPN or WireGuard.
 
-
+<details>
+<summary><strong>Click to expand Docker Setup</strong></summary>
 
 ### Setup
 
@@ -80,7 +109,13 @@ Follow steps below to create .env and .gluetun.env files to configure OpenVPN or
 
 #### Option 1: VPN with Gluetun (Recommended)
 
-This setup routes all `superseedr` traffic through a secure Gluetun VPN tunnel, which acts as a kill-switch and handles dynamic port forwarding from your provider.
+Gluetun provides:
+- A VPN kill-switch
+- Automatic port forwarding
+- Dynamic port changes from your VPN provider
+
+Many VPN providers frequently assign new inbound ports. Most BitTorrent clients must be restarted when this port changes, breaking connectability and slowing downloads.
+superseedr can detect Gluetun’s updated port and reload the listener **live**, without a restart, preserving swarm performance.
 
 1.  Make sure you have created and configured your `.gluetun.env` file.
 2.  Run the stack using the default `docker-compose.yml` file:
@@ -113,24 +148,13 @@ This runs the client directly, exposing its port to your host. It's simpler but 
     docker compose -f docker-compose.standalone.yml exec superseedr superseedr
     ```
 
+</details>
+
 ---
 
-### Installing from source
-You can also install from source using `cargo`.
-```bash
-# Standard Build
-cargo install superseedr
-
-# Private Tracker Build
-cargo install superseedr --no-default-features
-```
 ### Private Tracker Builds
 This installation is intended for private trackers, as it disables peer-discovery features (DHT & PEX).
 These features will not be included in the final build of the private versions of superseedr.
-
-## Current Status & Features
-The client is in a late-alpha stage, with most core BitTorrent features implemented and functional.
-Testing and refining for V1.0 release.
 
 ### Core Protocol & Peer Discovery
 - **Real Time Performance Tuning:** Periodic resource optimizations (file handles) to maximize speeds and disk stability.
@@ -150,7 +174,6 @@ Testing and refining for V1.0 release.
 ## Roadmap to V1.0
 - **Testing:** Ongoing testing across various platforms and terminals.
 - **Unit Testing:** Expansion of unit test coverage.
-- **Bugs Startup and Shutdown** Fixing of serveral edge cases when users quit during certain critical phases.
 - **Atomic Config** Configs automatically saved to disk after any change.
 
 ## Future (V2.0 and Beyond)
@@ -170,7 +193,7 @@ Testing and refining for V1.0 release.
 - **Torrent Prioritization / Queueing:** Allow users to set priorities for torrents and configure limits on the number of active downloading or seeding torrents.
 - **Per-Torrent Settings:** Allow setting individual speed limits, ratio goals, or connection limits for specific torrents.
 - **Torrent Log book:** Historic log book of all torrents added and deleted. Allows users to search and redownload.
-- **Fully Async Validations:** Refactor for handling torrent validation and revalidations async.
+- **Fully asynchronous validation:** Refactor for handling torrent validation and revalidations async.
 
 ### User Interface & Experience
 - **Docker Detach Mode:** Allow for detached and attach sessions, TUI off mode.
