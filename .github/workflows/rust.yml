@@ -445,6 +445,7 @@ jobs:
           push: true
           tags: ${{ steps.meta_normal.outputs.tags }}
           labels: ${{ steps.meta_normal.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
           build-args: |
             PRIVATE_BUILD=false
 
@@ -466,6 +467,7 @@ jobs:
           push: true
           tags: ${{ steps.meta_private.outputs.tags }}
           labels: ${{ steps.meta_private.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
           build-args: |
             PRIVATE_BUILD=true
 
