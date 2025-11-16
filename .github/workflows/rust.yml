@@ -446,8 +446,11 @@ jobs:
           tags: ${{ steps.meta_normal.outputs.tags }}
           labels: ${{ steps.meta_normal.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=docker-normal
+          cache-to: type=gha,mode=max,scope=docker-normal
           build-args: |
             PRIVATE_BUILD=false
+
 
       # --- Build and push PRIVATE image ---
       - name: Extract metadata for private build
@@ -455,6 +458,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: jagatranvo/superseedr
+          flavor: |
+            latest=false
           tags: |
             type=ref,event=tag,suffix=-private
             type=raw,value=private
@@ -468,8 +473,18 @@ jobs:
           tags: ${{ steps.meta_private.outputs.tags }}
           labels: ${{ steps.meta_private.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=docker-private
+          cache-to: type=gha,mode=max,scope=docker-private
           build-args: |
             PRIVATE_BUILD=true
+
+      - name: Update Docker Hub Description
+        uses: docker/docker-hub-description@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          repository: jagatranvo/superseedr
+          readme-filepath: ./README.md
 
   release:
     name: Create GitHub Release
