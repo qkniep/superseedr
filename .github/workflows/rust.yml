@@ -458,6 +458,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: jagatranvo/superseedr
+          flavor: |
+            latest=false
           tags: |
             type=ref,event=tag,suffix=-private
             type=raw,value=private

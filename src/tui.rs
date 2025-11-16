@@ -10,8 +10,8 @@ use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
 
 use crate::app::{
-    AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState, PEER_HEADERS,
-    TORRENT_HEADERS,
+    AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState, 
+    
 };
 
 use throbber_widgets_tui::Throbber;
@@ -19,6 +19,7 @@ use throbber_widgets_tui::Throbber;
 use crate::config::get_app_paths;
 
 use crate::config::{PeerSortColumn, Settings, SortDirection, TorrentSortColumn};
+use strum::IntoEnumIterator;
 
 use crate::theme;
 
@@ -357,13 +358,12 @@ fn draw_left_pane(f: &mut Frame, app_state: &AppState, left_pane: Rect) {
     let name_column_width = temp_layout_chunks[name_column_index].width as usize;
 
     let header_cells: Vec<Cell> = {
-        let mut cells: Vec<Cell> = TORRENT_HEADERS
-            .iter()
+        let mut cells: Vec<Cell> = TorrentSortColumn::iter()
             .enumerate()
             .map(|(i, h)| {
                 let is_selected = app_state.selected_header == SelectedHeader::Torrent(i);
                 let (sort_col, sort_dir) = app_state.torrent_sort;
-                let is_sorting_by_this = sort_col == *h;
+                let is_sorting_by_this = sort_col == h;
                 let text = match h {
                     TorrentSortColumn::Name => "Name",
                     TorrentSortColumn::Down => "DL",
@@ -1222,10 +1222,10 @@ fn draw_right_pane(
             if peers_to_display.is_empty() {
                 draw_swarm_heatmap(f, &state.peers, state.number_of_pieces_total, peers_chunk);
             } else {
-                let peer_header_cells = PEER_HEADERS.iter().enumerate().map(|(i, h)| {
+                let peer_header_cells = PeerSortColumn::iter().enumerate().map(|(i, h)| {
                     let is_selected = app_state.selected_header == SelectedHeader::Peer(i);
                     let (sort_col, sort_dir) = app_state.peer_sort;
-                    let is_sorting_by_this = sort_col == *h;
+                    let is_sorting_by_this = sort_col == h;
                     let mut style = Style::default().fg(theme::YELLOW);
                     let text = match h {
                         PeerSortColumn::Flags => "Flags",

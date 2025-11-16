@@ -267,12 +267,6 @@ impl Default for SelectedHeader {
     }
 }
 
-pub const TORRENT_HEADERS: &[TorrentSortColumn] = &[
-    TorrentSortColumn::Name,
-    TorrentSortColumn::Down,
-    TorrentSortColumn::Up,
-];
-
 pub enum AppCommand {
     AddTorrentFromFile(PathBuf),
     AddTorrentFromPathFile(PathBuf),
@@ -322,17 +316,6 @@ pub enum TorrentControlState {
     Deleting,
 }
 
-pub const PEER_HEADERS: &[PeerSortColumn] = &[
-    PeerSortColumn::Flags,
-    PeerSortColumn::Address,
-    PeerSortColumn::Client,
-    PeerSortColumn::Action,
-    PeerSortColumn::Completed,
-    PeerSortColumn::DL,
-    PeerSortColumn::UL,
-    PeerSortColumn::TotalDL,
-    PeerSortColumn::TotalUL,
-];
 #[derive(Debug, Clone, Default)]
 pub struct PeerInfo {
     pub address: String,

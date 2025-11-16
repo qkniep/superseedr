@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::{
-    App, AppMode, ConfigItem, SelectedHeader, TorrentControlState, PEER_HEADERS, TORRENT_HEADERS,
+    App, AppMode, ConfigItem, SelectedHeader, TorrentControlState,
 };
 use crate::torrent_manager::ManagerCommand;
 
 use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
+use strum::EnumCount;
 
 use crate::config::SortDirection;
+use crate::config::PeerSortColumn;
+use crate::config::TorrentSortColumn;
+
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::style::{Color, Style};
 use ratatui_explorer::{FileExplorer, Theme};
@@ -216,7 +219,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         KeyCode::Char('s') => {
                             match app.app_state.selected_header {
                                 SelectedHeader::Torrent(i) => {
-                                    let column = TORRENT_HEADERS[i];
+                                    let Some(column) = TorrentSortColumn::iter().nth(i) else { continue };
                                     if app.app_state.torrent_sort.0 == column {
                                         app.app_state.torrent_sort.1 =
                                             if app.app_state.torrent_sort.1
@@ -233,7 +236,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     app.sort_and_filter_torrent_list();
                                 }
                                 SelectedHeader::Peer(i) => {
-                                    let column = PEER_HEADERS[i];
+                                    let Some(column) = PeerSortColumn::iter().nth(i) else { continue };
                                     if app.app_state.peer_sort.0 == column {
                                         app.app_state.peer_sort.1 = if app.app_state.peer_sort.1
                                             == SortDirection::Ascending
@@ -266,21 +269,21 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             app.app_state.selected_header = match app.app_state.selected_header {
                                 SelectedHeader::Torrent(0) => {
                                     if !app.app_state.torrent_list_order.is_empty() {
-                                        SelectedHeader::Peer(PEER_HEADERS.len() - 1)
+                                        SelectedHeader::Peer(PeerSortColumn::COUNT - 1)
                                     } else {
                                         SelectedHeader::Torrent(0)
                                     }
                                 }
                                 SelectedHeader::Torrent(i) => SelectedHeader::Torrent(i - 1),
                                 SelectedHeader::Peer(0) => {
-                                    SelectedHeader::Torrent(TORRENT_HEADERS.len() - 1)
+                                    SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1)
                                 }
                                 SelectedHeader::Peer(i) => SelectedHeader::Peer(i - 1),
                             };
                         }
                         KeyCode::Right | KeyCode::Char('l') => {
                             app.app_state.selected_header = match app.app_state.selected_header {
-                                SelectedHeader::Torrent(i) if i < TORRENT_HEADERS.len() - 1 => {
+                                SelectedHeader::Torrent(i) if i < TorrentSortColumn::COUNT - 1 => {
                                     SelectedHeader::Torrent(i + 1)
                                 }
                                 SelectedHeader::Torrent(i) => {
@@ -290,7 +293,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                         SelectedHeader::Torrent(i)
                                     }
                                 }
-                                SelectedHeader::Peer(i) if i < PEER_HEADERS.len() - 1 => {
+                                SelectedHeader::Peer(i) if i < PeerSortColumn::COUNT - 1 => {
                                     SelectedHeader::Peer(i + 1)
                                 }
                                 SelectedHeader::Peer(_) => SelectedHeader::Torrent(0),
