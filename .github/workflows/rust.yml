@@ -446,8 +446,11 @@ jobs:
           tags: ${{ steps.meta_normal.outputs.tags }}
           labels: ${{ steps.meta_normal.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=docker-normal
+          cache-to: type=gha,mode=max,scope=docker-normal
           build-args: |
             PRIVATE_BUILD=false
+
 
       # --- Build and push PRIVATE image ---
       - name: Extract metadata for private build
@@ -468,6 +471,8 @@ jobs:
           tags: ${{ steps.meta_private.outputs.tags }}
           labels: ${{ steps.meta_private.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=docker-private
+          cache-to: type=gha,mode=max,scope=docker-private
           build-args: |
             PRIVATE_BUILD=true
 

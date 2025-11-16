@@ -12,6 +12,8 @@ use magnet_url::Magnet;
 
 use fuzzy_matcher::FuzzyMatcher;
 
+use strum_macros::EnumIter;
+
 use crate::torrent_manager::DiskIoOperation;
 
 use crate::config::{PeerSortColumn, Settings, SortDirection, TorrentSettings, TorrentSortColumn};
@@ -279,7 +281,7 @@ pub enum AppCommand {
     PortFileChanged(PathBuf),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, EnumIter)]
 pub enum ConfigItem {
     ClientPort,
     DefaultDownloadFolder,

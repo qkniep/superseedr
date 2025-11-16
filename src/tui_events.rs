@@ -6,6 +6,9 @@ use crate::app::{
 };
 use crate::torrent_manager::ManagerCommand;
 
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
+
 use crate::config::SortDirection;
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::style::{Color, Style};
@@ -122,13 +125,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             app.app_state.should_quit = true;
                         }
                         KeyCode::Char('c') => {
-                            let items = vec![
-                                ConfigItem::ClientPort,
-                                ConfigItem::DefaultDownloadFolder,
-                                ConfigItem::WatchFolder,
-                                ConfigItem::GlobalDownloadLimit,
-                                ConfigItem::GlobalUploadLimit,
-                            ];
+                            let items = ConfigItem::iter().collect::<Vec<_>>();
                             app.app_state.mode = AppMode::Config {
                                 settings_edit: Box::new(app.client_configs.clone()),
                                 selected_index: 0,
@@ -523,15 +520,8 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
             file_explorer,
         } => {
             if let CrosstermEvent::Key(key) = event {
-                let items = || {
-                    vec![
-                        ConfigItem::ClientPort,
-                        ConfigItem::DefaultDownloadFolder,
-                        ConfigItem::WatchFolder,
-                    ]
-                };
+                let config_items = ConfigItem::iter().collect::<Vec<_>>();
                 let return_to_config = |settings_edit, for_item| -> AppMode {
-                    let config_items = items();
                     let selected_index = config_items
                         .iter()
                         .position(|&item| item == for_item)
