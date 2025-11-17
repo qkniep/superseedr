@@ -120,15 +120,10 @@ superseedr can detect Gluetun’s updated port and reload the listener **live**,
 1.  Make sure you have created and configured your `.gluetun.env` file.
 2.  Run the stack using the default `docker-compose.yml` file:
 
-* **Interactive:**
-    ```bash
-    docker compose run --rm superseedr superseedr
-    ```
-* **Detached:**
-    ```bash
-    docker compose up -d
-    docker compose exec superseedr superseedr
-    ```
+```bash
+docker compose up -d && docker compose attach superseedr
+```
+[!TIP] To detach from the TUI without stopping the container, use the Docker key sequence: `Ctrl+P` followed by `Ctrl+Q`. Optional: press [z] to enter power-saving mode.
 
 ---
 
@@ -138,15 +133,10 @@ This runs the client directly, exposing its port to your host. It's simpler but 
 
 1.  Run using the `docker-compose.standalone.yml` file:
 
-* **Interactive:**
-    ```bash
-    docker compose -f docker-compose.standalone.yml run --rm superseedr
-    ```
-* **Detached:**
-    ```bash
-    docker compose -f docker-compose.standalone.yml up -d
-    docker compose -f docker-compose.standalone.yml exec superseedr superseedr
-    ```
+```bash
+docker compose up -f docker-compose-standalone.yml -d && docker compose attach superseedr
+```
+[!TIP] To detach from the TUI without stopping the container, use the Docker key sequence: `Ctrl+P` followed by `Ctrl+Q`. Optional: press [z] to enter power-saving mode.
 
 </details>
 

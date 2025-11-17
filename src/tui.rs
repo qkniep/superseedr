@@ -9,10 +9,7 @@ use crate::tui_formatters::*;
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
 
-use crate::app::{
-    AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState, 
-    
-};
+use crate::app::{AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState};
 
 use throbber_widgets_tui::Throbber;
 

@@ -12,8 +12,8 @@ use std::path::PathBuf;
 
 use crate::app::TorrentControlState;
 
-use strum_macros::EnumIter;
 use strum_macros::EnumCount;
+use strum_macros::EnumIter;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default, EnumIter, EnumCount)]
 pub enum TorrentSortColumn {

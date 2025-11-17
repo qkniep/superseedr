@@ -454,6 +454,7 @@ pub struct AppState {
     pub torrent_sort: (TorrentSortColumn, SortDirection),
     pub peer_sort: (PeerSortColumn, SortDirection),
     pub selected_torrent_index: usize,
+    pub selected_peer_index: usize,
 
     pub is_searching: bool,
     pub search_query: String,
@@ -963,7 +964,6 @@ impl App {
                     }
 
 
-                    self.sort_and_filter_torrent_list();
                     self.app_state.ui_needs_redraw = true;
 
                         }
@@ -1185,6 +1185,7 @@ impl App {
                 },
 
                 Some(event) = self.tui_event_rx.recv() => {
+                    self.clamp_selected_indices();
                     tui_events::handle_event(event, self).await;
                 }
 
@@ -1628,6 +1629,30 @@ impl App {
         Ok(())
     }
 
+    // Constantly ensures all table selected indices are in-bounds
+    fn clamp_selected_indices(&mut self) {
+        let torrent_count = self.app_state.torrent_list_order.len();
+
+        if torrent_count == 0 {
+            self.app_state.selected_torrent_index = 0;
+        } else if self.app_state.selected_torrent_index >= torrent_count {
+            self.app_state.selected_torrent_index = torrent_count - 1;
+        }
+
+        let peer_count = self
+            .app_state
+            .torrent_list_order
+            .get(self.app_state.selected_torrent_index)
+            .and_then(|info_hash| self.app_state.torrents.get(info_hash))
+            .map_or(0, |torrent| torrent.latest_state.peers.len());
+
+        if peer_count == 0 {
+            self.app_state.selected_peer_index = 0;
+        } else if self.app_state.selected_peer_index >= peer_count {
+            self.app_state.selected_peer_index = peer_count - 1;
+        }
+    }
+
     pub fn sort_and_filter_torrent_list(&mut self) {
         let torrents_map = &self.app_state.torrents;
         let (sort_by, sort_direction) = self.app_state.torrent_sort;
@@ -1681,11 +1706,7 @@ impl App {
         });
 
         self.app_state.torrent_list_order = torrent_list;
-
-        if self.app_state.selected_torrent_index >= self.app_state.torrent_list_order.len() {
-            self.app_state.selected_torrent_index =
-                self.app_state.torrent_list_order.len().saturating_sub(1);
-        }
+        self.clamp_selected_indices();
     }
 
     pub fn find_most_common_download_path(&mut self) -> Option<PathBuf> {

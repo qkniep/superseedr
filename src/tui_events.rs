@@ -1,16 +1,15 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::app::{
-    App, AppMode, ConfigItem, SelectedHeader, TorrentControlState,
-};
+use crate::app::AppState;
+use crate::app::{App, AppMode, ConfigItem, SelectedHeader, TorrentControlState};
 use crate::torrent_manager::ManagerCommand;
 
-use strum::IntoEnumIterator;
 use strum::EnumCount;
+use strum::IntoEnumIterator;
 
-use crate::config::SortDirection;
 use crate::config::PeerSortColumn;
+use crate::config::SortDirection;
 use crate::config::TorrentSortColumn;
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
@@ -219,7 +218,9 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         KeyCode::Char('s') => {
                             match app.app_state.selected_header {
                                 SelectedHeader::Torrent(i) => {
-                                    let Some(column) = TorrentSortColumn::iter().nth(i) else { continue };
+                                    let Some(column) = TorrentSortColumn::iter().nth(i) else {
+                                        return;
+                                    };
                                     if app.app_state.torrent_sort.0 == column {
                                         app.app_state.torrent_sort.1 =
                                             if app.app_state.torrent_sort.1
@@ -236,7 +237,9 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     app.sort_and_filter_torrent_list();
                                 }
                                 SelectedHeader::Peer(i) => {
-                                    let Some(column) = PeerSortColumn::iter().nth(i) else { continue };
+                                    let Some(column) = PeerSortColumn::iter().nth(i) else {
+                                        return;
+                                    };
                                     if app.app_state.peer_sort.0 == column {
                                         app.app_state.peer_sort.1 = if app.app_state.peer_sort.1
                                             == SortDirection::Ascending
@@ -252,52 +255,16 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 }
                             };
                         }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            app.app_state.selected_torrent_index =
-                                app.app_state.selected_torrent_index.saturating_sub(1);
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if !app.app_state.torrent_list_order.is_empty() {
-                                let new_index =
-                                    app.app_state.selected_torrent_index.saturating_add(1);
-                                if new_index < app.app_state.torrent_list_order.len() {
-                                    app.app_state.selected_torrent_index = new_index;
-                                }
-                            }
-                        }
-                        KeyCode::Left | KeyCode::Char('h') => {
-                            app.app_state.selected_header = match app.app_state.selected_header {
-                                SelectedHeader::Torrent(0) => {
-                                    if !app.app_state.torrent_list_order.is_empty() {
-                                        SelectedHeader::Peer(PeerSortColumn::COUNT - 1)
-                                    } else {
-                                        SelectedHeader::Torrent(0)
-                                    }
-                                }
-                                SelectedHeader::Torrent(i) => SelectedHeader::Torrent(i - 1),
-                                SelectedHeader::Peer(0) => {
-                                    SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1)
-                                }
-                                SelectedHeader::Peer(i) => SelectedHeader::Peer(i - 1),
-                            };
-                        }
-                        KeyCode::Right | KeyCode::Char('l') => {
-                            app.app_state.selected_header = match app.app_state.selected_header {
-                                SelectedHeader::Torrent(i) if i < TorrentSortColumn::COUNT - 1 => {
-                                    SelectedHeader::Torrent(i + 1)
-                                }
-                                SelectedHeader::Torrent(i) => {
-                                    if !app.app_state.torrent_list_order.is_empty() {
-                                        SelectedHeader::Peer(0)
-                                    } else {
-                                        SelectedHeader::Torrent(i)
-                                    }
-                                }
-                                SelectedHeader::Peer(i) if i < PeerSortColumn::COUNT - 1 => {
-                                    SelectedHeader::Peer(i + 1)
-                                }
-                                SelectedHeader::Peer(_) => SelectedHeader::Torrent(0),
-                            };
+
+                        KeyCode::Up
+                        | KeyCode::Char('k')
+                        | KeyCode::Down
+                        | KeyCode::Char('j')
+                        | KeyCode::Left
+                        | KeyCode::Char('h')
+                        | KeyCode::Right
+                        | KeyCode::Char('l') => {
+                            handle_navigation(&mut app.app_state, key.code);
                         }
 
                         #[cfg(windows)]
@@ -664,6 +631,95 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     }
     app.app_state.ui_needs_redraw = true;
 }
+
+fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
+    // --- Get state needed for navigation ---
+    let selected_torrent = app_state
+        .torrent_list_order
+        .get(app_state.selected_torrent_index)
+        .and_then(|info_hash| app_state.torrents.get(info_hash));
+
+    let selected_torrent_has_peers =
+        selected_torrent.is_some_and(|torrent| !torrent.latest_state.peers.is_empty());
+
+    let selected_torrent_peer_count =
+        selected_torrent.map_or(0, |torrent| torrent.latest_state.peers.len());
+
+    match key_code {
+        // --- UP/DOWN/J/K Navigation ---
+        KeyCode::Up | KeyCode::Char('k') => {
+            match app_state.selected_header {
+                SelectedHeader::Torrent(_) => {
+                    app_state.selected_torrent_index =
+                        app_state.selected_torrent_index.saturating_sub(1);
+                    // Reset peer index when changing torrents
+                    app_state.selected_peer_index = 0;
+                }
+                SelectedHeader::Peer(_) => {
+                    app_state.selected_peer_index = app_state.selected_peer_index.saturating_sub(1);
+                }
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            match app_state.selected_header {
+                SelectedHeader::Torrent(_) => {
+                    if !app_state.torrent_list_order.is_empty() {
+                        let new_index = app_state.selected_torrent_index.saturating_add(1);
+                        if new_index < app_state.torrent_list_order.len() {
+                            app_state.selected_torrent_index = new_index;
+                        }
+                    }
+                    // Reset peer index when changing torrents
+                    app_state.selected_peer_index = 0;
+                }
+                SelectedHeader::Peer(_) => {
+                    if selected_torrent_peer_count > 0 {
+                        let new_index = app_state.selected_peer_index.saturating_add(1);
+                        if new_index < selected_torrent_peer_count {
+                            app_state.selected_peer_index = new_index;
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- LEFT/RIGHT/H/L Navigation ---
+        KeyCode::Left | KeyCode::Char('h') => {
+            app_state.selected_header = match app_state.selected_header {
+                SelectedHeader::Torrent(0) => {
+                    if selected_torrent_has_peers {
+                        SelectedHeader::Peer(PeerSortColumn::COUNT - 1)
+                    } else {
+                        SelectedHeader::Torrent(0)
+                    }
+                }
+                SelectedHeader::Torrent(i) => SelectedHeader::Torrent(i - 1),
+                SelectedHeader::Peer(0) => SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1),
+                SelectedHeader::Peer(i) => SelectedHeader::Peer(i - 1),
+            };
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            app_state.selected_header = match app_state.selected_header {
+                SelectedHeader::Torrent(i) if i < TorrentSortColumn::COUNT - 1 => {
+                    SelectedHeader::Torrent(i + 1)
+                }
+                SelectedHeader::Torrent(i) => {
+                    if selected_torrent_has_peers {
+                        SelectedHeader::Peer(0)
+                    } else {
+                        SelectedHeader::Torrent(i)
+                    }
+                }
+                SelectedHeader::Peer(i) if i < PeerSortColumn::COUNT - 1 => {
+                    SelectedHeader::Peer(i + 1)
+                }
+                SelectedHeader::Peer(_) => SelectedHeader::Torrent(0),
+            };
+        }
+        _ => {} // Ignore other keys
+    }
+}
+
 async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
     if pasted_text.starts_with("magnet:") {
         // If a default download folder is configured, use it directly.
@@ -737,5 +793,199 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
                 "Clipboard content not recognized as magnet link or torrent file.".to_string(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*; // Import handle_navigation from parent
+
+    // --- Corrected Imports ---
+    // We import the specific structs our AppState actually stores
+    use crate::app::{AppState, PeerInfo, SelectedHeader, TorrentDisplayState, TorrentState};
+    use crate::config::{PeerSortColumn, TorrentSortColumn};
+    use ratatui::crossterm::event::KeyCode;
+
+    /// Creates a mock TorrentState with a specific number of peers
+    fn create_mock_state(peer_count: usize) -> TorrentState {
+        let mut state = TorrentState::default(); // Assumes TorrentState implements Default
+        let mut peers = Vec::new();
+        for _ in 0..peer_count {
+            peers.push(PeerInfo::default()); // Assumes PeerInfo implements Default
+        }
+        state.peers = peers;
+        state
+    }
+
+    /// Creates a mock TorrentDisplayState for testing
+    fn create_mock_display_state(peer_count: usize) -> TorrentDisplayState {
+        let mut display_state = TorrentDisplayState::default(); // Assumes TorrentDisplayState implements Default
+        display_state.latest_state = create_mock_state(peer_count);
+        display_state
+    }
+
+    /// Creates a mock AppState for testing navigation
+    fn create_test_app_state() -> AppState {
+        let mut app_state = AppState::default(); // AppState is Default
+
+        // Create two mock display states
+        let torrent_a = create_mock_display_state(2); // Has 2 peers
+        let torrent_b = create_mock_display_state(0); // Has 0 peers
+
+        // Insert them into the app state
+        app_state
+            .torrents
+            .insert("hash_a".as_bytes().to_vec(), torrent_a);
+        app_state
+            .torrents
+            .insert("hash_b".as_bytes().to_vec(), torrent_b);
+
+        app_state.torrent_list_order =
+            vec!["hash_a".as_bytes().to_vec(), "hash_b".as_bytes().to_vec()];
+
+        app_state
+    }
+
+    // --- NAVIGATION TESTS ---
+    // (These tests are unchanged, but will now work)
+
+    #[test]
+    fn test_nav_down_torrents() {
+        let mut app_state = create_test_app_state();
+        app_state.selected_torrent_index = 0;
+        app_state.selected_header = SelectedHeader::Torrent(0);
+
+        handle_navigation(&mut app_state, KeyCode::Down);
+
+        assert_eq!(app_state.selected_torrent_index, 1);
+        assert_eq!(app_state.selected_peer_index, 0); // Should reset
+    }
+
+    #[test]
+    fn test_nav_up_torrents() {
+        let mut app_state = create_test_app_state();
+        app_state.selected_torrent_index = 1;
+        app_state.selected_header = SelectedHeader::Torrent(0);
+
+        handle_navigation(&mut app_state, KeyCode::Up);
+
+        assert_eq!(app_state.selected_torrent_index, 0);
+        assert_eq!(app_state.selected_peer_index, 0); // Should reset
+    }
+
+    #[test]
+    fn test_nav_down_peers() {
+        let mut app_state = create_test_app_state();
+        app_state.selected_torrent_index = 0; // "hash_a" has 2 peers
+        app_state.selected_peer_index = 0;
+        app_state.selected_header = SelectedHeader::Peer(0);
+
+        handle_navigation(&mut app_state, KeyCode::Down);
+
+        assert_eq!(app_state.selected_torrent_index, 0); // Stays on same torrent
+        assert_eq!(app_state.selected_peer_index, 1); // Moves down peer list
+    }
+
+    #[test]
+    fn test_nav_right_to_peers_when_peers_exist() {
+        let mut app_state = create_test_app_state();
+        app_state.selected_torrent_index = 0; // "hash_a" has peers
+        app_state.selected_header = SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1);
+
+        handle_navigation(&mut app_state, KeyCode::Right);
+
+        assert_eq!(app_state.selected_header, SelectedHeader::Peer(0));
+    }
+
+    #[test]
+    fn test_nav_right_to_peers_when_no_peers() {
+        let mut app_state = create_test_app_state();
+        app_state.selected_torrent_index = 1; // "hash_b" has 0 peers
+        app_state.selected_header = SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1);
+
+        handle_navigation(&mut app_state, KeyCode::Right);
+
+        // This is the important bug fix test
+        assert_eq!(
+            app_state.selected_header,
+            SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1)
+        );
+    }
+
+    #[test]
+    fn test_nav_left_from_peers() {
+        let mut app_state = create_test_app_state();
+        app_state.selected_torrent_index = 0;
+        app_state.selected_header = SelectedHeader::Peer(0);
+
+        handle_navigation(&mut app_state, KeyCode::Left);
+
+        assert_eq!(
+            app_state.selected_header,
+            SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1)
+        );
+    }
+
+    #[test]
+    fn test_nav_up_peers() {
+        let mut app_state = create_test_app_state();
+        app_state.selected_torrent_index = 0; // "hash_a" has 2 peers
+        app_state.selected_peer_index = 1;
+        app_state.selected_header = SelectedHeader::Peer(0);
+
+        handle_navigation(&mut app_state, KeyCode::Up);
+
+        assert_eq!(app_state.selected_torrent_index, 0); // Stays on same torrent
+        assert_eq!(app_state.selected_peer_index, 0); // Moves up peer list
+    }
+
+    #[test]
+    fn test_nav_up_at_top_of_list() {
+        let mut app_state = create_test_app_state();
+        app_state.selected_torrent_index = 0; // At the top
+        app_state.selected_header = SelectedHeader::Torrent(0);
+
+        handle_navigation(&mut app_state, KeyCode::Up);
+
+        // Should stay at 0, thanks to saturating_sub
+        assert_eq!(app_state.selected_torrent_index, 0);
+    }
+
+    #[test]
+    fn test_nav_down_at_bottom_of_list() {
+        let mut app_state = create_test_app_state();
+        app_state.selected_torrent_index = 1; // At the bottom (index 1 of 2)
+        app_state.selected_header = SelectedHeader::Torrent(0);
+
+        handle_navigation(&mut app_state, KeyCode::Down);
+
+        // Should stay at 1, as it's the last index
+        assert_eq!(app_state.selected_torrent_index, 1);
+    }
+
+    #[test]
+    fn test_nav_up_peers_at_top_of_list() {
+        let mut app_state = create_test_app_state();
+        app_state.selected_torrent_index = 0; // "hash_a" has 2 peers
+        app_state.selected_peer_index = 0; // At the top
+        app_state.selected_header = SelectedHeader::Peer(0);
+
+        handle_navigation(&mut app_state, KeyCode::Up);
+
+        // Should stay at 0
+        assert_eq!(app_state.selected_peer_index, 0);
+    }
+
+    #[test]
+    fn test_nav_down_peers_at_bottom_of_list() {
+        let mut app_state = create_test_app_state();
+        app_state.selected_torrent_index = 0; // "hash_a" has 2 peers
+        app_state.selected_peer_index = 1; // At the bottom (index 1 of 2)
+        app_state.selected_header = SelectedHeader::Peer(0);
+
+        handle_navigation(&mut app_state, KeyCode::Down);
+
+        // Should stay at 1
+        assert_eq!(app_state.selected_peer_index, 1);
     }
 }
