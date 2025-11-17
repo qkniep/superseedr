@@ -83,25 +83,19 @@ Follow steps below to create .env and .gluetun.env files to configure OpenVPN or
       -O https://raw.githubusercontent.com/Jagalite/superseedr/main/.env.example \
       -O https://raw.githubusercontent.com/Jagalite/superseedr/main/.gluetun.env.example
 
+    # Note the example files might be hidden run the commands below to make a copy.
     cp .env.example .env
     cp .gluetun.env.example .gluetun.env
     ```
 
 2.  **Recommended: Create your environment files:**
-    * **App Paths & Build Choice:** Create your `.env` file from the example. This file controls your data paths and which build to use.
+    * **App Paths & Build Choice:** Edit your `.env` file from the example. This file controls your data paths and which build to use.
         ```bash
         cp .env.example .env
         ```
         Edit `.env` to set your absolute host paths (e.g., `HOST_SUPERSEEDR_DATA_PATH=/my/path/data`). **This is important:** it maps the container's internal folders (like `/superseedr-data`) to real folders on your computer. This ensures your downloads and config files are saved safely on your host machine, so no data is lost when the container stops or is updated.
 
-        **To use the Private Build**, edit `.env` and change the `IMAGE_NAME` to point to the `:private` tag:
-        ```ini
-        # .env file
-        IMAGE_NAME=jagatranvo/superseedr:private
-        ```
-        If you leave this commented out, it will default to the public `:latest` build.
-
-    * **VPN Config:** Create your `.gluetun.env` file from the example.
+    * **VPN Config:** Edit your `.gluetun.env` file from the example.
         ```bash
         cp .gluetun.env.example .gluetun.env
         ```
