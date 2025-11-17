@@ -12,7 +12,10 @@ use std::path::PathBuf;
 
 use crate::app::TorrentControlState;
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+use strum_macros::EnumCount;
+use strum_macros::EnumIter;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default, EnumIter, EnumCount)]
 pub enum TorrentSortColumn {
     Name,
     Down,
@@ -20,7 +23,7 @@ pub enum TorrentSortColumn {
     Up,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default, EnumIter, EnumCount)]
 pub enum PeerSortColumn {
     Flags,
     Address,

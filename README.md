@@ -42,8 +42,14 @@ superseedr
 # Recommended (native install)
 cargo install superseedr
 
-# Or with Docker:
-docker compose run --rm superseedr superseedr
+# Docker (No VPN):
+# Uses internal container storage. Data persists until the container is removed.
+docker run -it jagatranvo/superseedr:latest
+
+# Docker Compose (Gluetun with your VPN):
+# Requires .env and .gluetun.env configuration (see below).
+docker compose up -d && docker compose attach superseedr
+
 ```
 
 ## Running with Docker
@@ -83,25 +89,19 @@ Follow steps below to create .env and .gluetun.env files to configure OpenVPN or
       -O https://raw.githubusercontent.com/Jagalite/superseedr/main/.env.example \
       -O https://raw.githubusercontent.com/Jagalite/superseedr/main/.gluetun.env.example
 
+    # Note the example files might be hidden run the commands below to make a copy.
     cp .env.example .env
     cp .gluetun.env.example .gluetun.env
     ```
 
 2.  **Recommended: Create your environment files:**
-    * **App Paths & Build Choice:** Create your `.env` file from the example. This file controls your data paths and which build to use.
+    * **App Paths & Build Choice:** Edit your `.env` file from the example. This file controls your data paths and which build to use.
         ```bash
         cp .env.example .env
         ```
         Edit `.env` to set your absolute host paths (e.g., `HOST_SUPERSEEDR_DATA_PATH=/my/path/data`). **This is important:** it maps the container's internal folders (like `/superseedr-data`) to real folders on your computer. This ensures your downloads and config files are saved safely on your host machine, so no data is lost when the container stops or is updated.
 
-        **To use the Private Build**, edit `.env` and change the `IMAGE_NAME` to point to the `:private` tag:
-        ```ini
-        # .env file
-        IMAGE_NAME=jagatranvo/superseedr:private
-        ```
-        If you leave this commented out, it will default to the public `:latest` build.
-
-    * **VPN Config:** Create your `.gluetun.env` file from the example.
+    * **VPN Config:** Edit your `.gluetun.env` file from the example.
         ```bash
         cp .gluetun.env.example .gluetun.env
         ```
@@ -120,15 +120,12 @@ superseedr can detect Gluetun’s updated port and reload the listener **live**,
 1.  Make sure you have created and configured your `.gluetun.env` file.
 2.  Run the stack using the default `docker-compose.yml` file:
 
-* **Interactive:**
-    ```bash
-    docker compose run --rm superseedr superseedr
-    ```
-* **Detached:**
-    ```bash
-    docker compose up -d
-    docker compose exec superseedr superseedr
-    ```
+```bash
+docker compose up -d && docker compose attach superseedr
+```
+> [!TIP]
+> To detach from the TUI without stopping the container, use the Docker key sequence: `Ctrl+P` followed by `Ctrl+Q`.
+> **Optional:** press `[z]` first to enter power-saving mode.
 
 ---
 
@@ -138,15 +135,12 @@ This runs the client directly, exposing its port to your host. It's simpler but 
 
 1.  Run using the `docker-compose.standalone.yml` file:
 
-* **Interactive:**
-    ```bash
-    docker compose -f docker-compose.standalone.yml run --rm superseedr
-    ```
-* **Detached:**
-    ```bash
-    docker compose -f docker-compose.standalone.yml up -d
-    docker compose -f docker-compose.standalone.yml exec superseedr superseedr
-    ```
+```bash
+docker compose -f docker-compose.standalone.yml up -d && docker compose attach superseedr
+```
+> [!TIP]
+> To detach from the TUI without stopping the container, use the Docker key sequence: `Ctrl+P` followed by `Ctrl+Q`.
+> **Optional:** press `[z]` first to enter power-saving mode.
 
 </details>
 
