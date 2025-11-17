@@ -42,8 +42,14 @@ superseedr
 # Recommended (native install)
 cargo install superseedr
 
-# Or with Docker:
-docker compose run --rm superseedr superseedr
+# Docker (No VPN):
+# Uses internal container storage. Data persists until the container is removed.
+docker run -it jagatranvo/superseedr:latest
+
+# Docker Compose (Gluetun with your VPN):
+# Requires .env and .gluetun.env configuration (see below).
+docker compose up -d && docker compose attach superseedr
+
 ```
 
 ## Running with Docker
@@ -117,7 +123,9 @@ superseedr can detect Gluetun’s updated port and reload the listener **live**,
 ```bash
 docker compose up -d && docker compose attach superseedr
 ```
-[!TIP] To detach from the TUI without stopping the container, use the Docker key sequence: `Ctrl+P` followed by `Ctrl+Q`. Optional: press [z] to enter power-saving mode.
+> [!TIP]
+> To detach from the TUI without stopping the container, use the Docker key sequence: `Ctrl+P` followed by `Ctrl+Q`.
+> **Optional:** press `[z]` first to enter power-saving mode.
 
 ---
 
@@ -128,9 +136,11 @@ This runs the client directly, exposing its port to your host. It's simpler but 
 1.  Run using the `docker-compose.standalone.yml` file:
 
 ```bash
-docker compose up -f docker-compose-standalone.yml -d && docker compose attach superseedr
+docker compose -f docker-compose.standalone.yml up -d && docker compose attach superseedr
 ```
-[!TIP] To detach from the TUI without stopping the container, use the Docker key sequence: `Ctrl+P` followed by `Ctrl+Q`. Optional: press [z] to enter power-saving mode.
+> [!TIP]
+> To detach from the TUI without stopping the container, use the Docker key sequence: `Ctrl+P` followed by `Ctrl+Q`.
+> **Optional:** press `[z]` first to enter power-saving mode.
 
 </details>
 
