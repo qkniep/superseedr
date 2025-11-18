@@ -679,54 +679,7 @@ impl App {
         });
 
         let (notify_tx, mut notify_rx) = mpsc::channel::<Result<Event, NotifyError>>(100);
-        let mut watcher = RecommendedWatcher::new(
-            move |res: Result<Event, NotifyError>| {
-                if let Err(e) = notify_tx.blocking_send(res) {
-                    tracing_event!(
-                        Level::ERROR,
-                        "Failed to send file event to main loop: {}",
-                        e
-                    );
-                }
-            },
-            Config::default(),
-        )?;
-        if let Some(path) = &self.client_configs.watch_folder {
-            if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
-                tracing_event!(Level::ERROR, "Failed to watch user path {:?}: {}", path, e);
-            } else {
-                tracing_event!(Level::INFO, "Watching user path: {:?}", path);
-            }
-        }
-        if let Some((watch_path, _)) = get_watch_path() {
-            if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
-                tracing_event!(
-                    Level::ERROR,
-                    "Failed to watch system path {:?}: {}",
-                    watch_path,
-                    e
-                );
-            } else {
-                tracing_event!(Level::INFO, "Watching system path: {:?}", watch_path);
-            }
-        }
-        let port_file_path = PathBuf::from("/port-data/forwarded_port");
-        if let Some(port_dir) = port_file_path.parent() {
-            if let Err(e) = watcher.watch(port_dir, RecursiveMode::NonRecursive) {
-                tracing_event!(
-                    Level::WARN,
-                    "Failed to watch port file directory {:?}: {}",
-                    port_dir,
-                    e
-                );
-            } else {
-                tracing_event!(
-                    Level::INFO,
-                    "Watching for port file changes in {:?}",
-                    port_dir
-                );
-            }
-        }
+        let _watcher = self.setup_file_watcher(notify_tx);
 
         let mut sys = System::new();
 
@@ -1045,81 +998,7 @@ impl App {
                             }
                         }
                         AppCommand::PortFileChanged(path) => {
-                            tracing_event!(Level::INFO, "Processing port file change...");
-                            match fs::read_to_string(&path) {
-                                Ok(port_str) => match port_str.trim().parse::<u16>() {
-                                    Ok(new_port) => {
-                                        if new_port > 0 && new_port != self.client_configs.client_port {
-                                            tracing_event!(
-                                                Level::INFO,
-                                                "Port changed: {} -> {}. Attempting to re-bind listener.",
-                                                self.client_configs.client_port,
-                                                new_port
-                                            );
-
-                                            match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", new_port)).await {
-                                                Ok(new_listener) => {
-                                                    self.listener = new_listener;
-                                                    self.client_configs.client_port = new_port;
-
-                                                    tracing_event!(Level::INFO, "Successfully bound to new port {}", new_port);
-                                                    self.save_state_to_disk();
-
-                                                    for manager_tx in self.torrent_manager_command_txs.values() {
-                                                        let _ = manager_tx.try_send(ManagerCommand::UpdateListenPort(new_port));
-                                                    }
-
-                                                    #[cfg(feature = "dht")]
-                                                    {
-                                                        tracing::event!(Level::INFO, "Rebinding DHT server to new port...");
-                                                        let bootstrap_nodes: Vec<&str> = self.client_configs
-                                                            .bootstrap_nodes
-                                                            .iter()
-                                                            .map(AsRef::as_ref)
-                                                            .collect();
-
-                                                        match Dht::builder()
-                                                            .bootstrap(&bootstrap_nodes)
-                                                            .port(new_port)
-                                                            .server_mode()
-                                                            .build()
-                                                        {
-                                                            Ok(new_dht_server) => {
-                                                                let new_dht_handle = new_dht_server.as_async();
-                                                                self.distributed_hash_table = new_dht_handle.clone();
-
-                                                                for manager_tx in self.torrent_manager_command_txs.values() {
-                                                                    let _ = manager_tx.try_send(ManagerCommand::UpdateDhtHandle(new_dht_handle.clone()));
-                                                                }
-                                                                tracing::event!(Level::INFO, "DHT server rebound and handles updated.");
-                                                            },
-                                                            Err(e) => {
-                                                                tracing::event!(Level::ERROR, "Failed to build new DHT server: {}", e);
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    tracing_event!(
-                                                        Level::ERROR,
-                                                        "Failed to bind to new port {}: {}. Retaining old listener.",
-                                                        new_port,
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                        } else if new_port == self.client_configs.client_port {
-                                            tracing_event!(Level::DEBUG, "Port file updated, but port is unchanged ({}).", new_port);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing_event!(Level::ERROR, "Failed to parse new port from file {:?}: {}", &path, e);
-                                    }
-                                },
-                                Err(e) => {
-                                    tracing_event!(Level::ERROR, "Failed to read port file {:?}: {}", &path, e);
-                                }
-                            }
+                            self.handle_port_change(path).await;
                         }
                     }
                 },
@@ -1132,56 +1011,7 @@ impl App {
                 Some(result) = notify_rx.recv() => {
                     match result {
                         Ok(event) => {
-
-                            if event.kind.is_create() || event.kind.is_modify() {
-                                const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
-                                for path in &event.paths {
-                                    if path.to_string_lossy().ends_with(".tmp") {
-                                        tracing_event!(Level::DEBUG, "Skipping temporary file: {:?}", path);
-                                        continue;
-                                    }
-                                    let now = Instant::now();
-                                    if let Some(last_time) = self.app_state.recently_processed_files.get(path) {
-                                        if now.duration_since(*last_time) < DEBOUNCE_DURATION {
-                                            tracing_event!(Level::DEBUG, "Skipping file {:?} due to debounce. (Accessing via app_state)", path);
-                                            continue;
-                                        }
-                                    }
-
-                                    self.app_state.recently_processed_files.insert(path.clone(), now);
-                                    tracing_event!(Level::INFO, "Processing file event: {:?} for path: {:?}", event.kind, path);
-
-                                    if path.extension().is_some_and(|ext| ext == "torrent") {
-                                        let _ = self.app_command_tx
-                                            .send(AppCommand::AddTorrentFromFile(path.clone()))
-                                            .await;
-                                    }
-                                    if path.extension().is_some_and(|ext| ext == "path") {
-                                        let _ = self.app_command_tx
-                                            .send(AppCommand::AddTorrentFromPathFile(path.clone()))
-                                            .await;
-                                    }
-                                    if path.extension().is_some_and(|ext| ext == "magnet") {
-                                        let _ = self.app_command_tx
-                                            .send(AppCommand::AddMagnetFromFile(path.clone()))
-                                            .await;
-                                    }
-
-                                    if path.file_name().is_some_and(|name| name == "shutdown.cmd") {
-                                        tracing_event!(Level::INFO, "Shutdown command detected: {:?}", path);
-                                        let _ = self.app_command_tx
-                                            .send(AppCommand::ClientShutdown(path.clone()))
-                                            .await;
-                                    }
-
-                                    if path.file_name().is_some_and(|name| name == "forwarded_port") {
-                                        tracing_event!(Level::INFO, "Port file change detected: {:?}", path);
-                                        let _ = self.app_command_tx
-                                            .send(AppCommand::PortFileChanged(path.clone()))
-                                            .await;
-                                    }
-                                }
-                            }
+                            self.handle_file_event(event).await;
                         }
                         Err(error) => {
                             tracing_event!(Level::ERROR, "File watcher error: {:?}", error);
@@ -1273,20 +1103,203 @@ impl App {
         Ok(())
     }
 
+    fn setup_file_watcher(
+        &self,
+        tx: mpsc::Sender<Result<Event, NotifyError>>,
+    ) -> Result<RecommendedWatcher, Box<dyn std::error::Error>> {
+        let mut watcher = RecommendedWatcher::new(
+            move |res: Result<Event, NotifyError>| {
+                if let Err(e) = tx.blocking_send(res) {
+                    tracing_event!(Level::ERROR, "Failed to send file event to main loop: {}", e);
+                }
+            },
+            Config::default(),
+        )?;
+
+        // Watch User Configured Folder
+        if let Some(path) = &self.client_configs.watch_folder {
+            if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
+                tracing_event!(Level::ERROR, "Failed to watch user path {:?}: {}", path, e);
+            } else {
+                tracing_event!(Level::INFO, "Watching user path: {:?}", path);
+            }
+        }
+
+        // Watch System/Container Folders
+        if let Some((watch_path, _)) = get_watch_path() {
+            if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
+                tracing_event!(Level::ERROR, "Failed to watch system path {:?}: {}", watch_path, e);
+            } else {
+                tracing_event!(Level::INFO, "Watching system path: {:?}", watch_path);
+            }
+        }
+
+        // Watch Port File Directory
+        let port_file_path = PathBuf::from("/port-data/forwarded_port");
+        if let Some(port_dir) = port_file_path.parent() {
+            if let Err(e) = watcher.watch(port_dir, RecursiveMode::NonRecursive) {
+                tracing_event!(Level::WARN, "Failed to watch port file directory {:?}: {}", port_dir, e);
+            } else {
+                tracing_event!(Level::INFO, "Watching for port file changes in {:?}", port_dir);
+            }
+        }
+
+        Ok(watcher)
+    }
+
+    async fn handle_file_event(&mut self, event: Event) {
+        if event.kind.is_create() || event.kind.is_modify() {
+            const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+
+            for path in &event.paths {
+                if path.to_string_lossy().ends_with(".tmp") {
+                    tracing_event!(Level::DEBUG, "Skipping temporary file: {:?}", path);
+                    continue;
+                }
+
+                let now = Instant::now();
+                if let Some(last_time) = self.app_state.recently_processed_files.get(path) {
+                    if now.duration_since(*last_time) < DEBOUNCE_DURATION {
+                        tracing_event!(Level::DEBUG, "Skipping file {:?} due to debounce.", path);
+                        continue;
+                    }
+                }
+
+                self.app_state.recently_processed_files.insert(path.clone(), now);
+                tracing_event!(Level::INFO, "Processing file event: {:?} for path: {:?}", event.kind, path);
+
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                     match ext {
+                        "torrent" => {
+                            let _ = self.app_command_tx.send(AppCommand::AddTorrentFromFile(path.clone())).await;
+                        },
+                        "path" => {
+                            let _ = self.app_command_tx.send(AppCommand::AddTorrentFromPathFile(path.clone())).await;
+                        },
+                        "magnet" => {
+                             let _ = self.app_command_tx.send(AppCommand::AddMagnetFromFile(path.clone())).await;
+                        },
+                        _ => {}
+                    }
+                }
+
+                if path.file_name().is_some_and(|name| name == "shutdown.cmd") {
+                    tracing_event!(Level::INFO, "Shutdown command detected: {:?}", path);
+                    let _ = self.app_command_tx.send(AppCommand::ClientShutdown(path.clone())).await;
+                }
+
+                if path.file_name().is_some_and(|name| name == "forwarded_port") {
+                    tracing_event!(Level::INFO, "Port file change detected: {:?}", path);
+                    let _ = self.app_command_tx.send(AppCommand::PortFileChanged(path.clone())).await;
+                }
+            }
+        }
+    }
+
+    async fn handle_port_change(&mut self, path: PathBuf) {
+        tracing_event!(Level::INFO, "Processing port file change...");
+        let port_str = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing_event!(Level::ERROR, "Failed to read port file {:?}: {}", &path, e);
+                return;
+            }
+        };
+
+        match port_str.trim().parse::<u16>() {
+            Ok(new_port) => {
+                if new_port > 0 && new_port != self.client_configs.client_port {
+                    tracing_event!(
+                        Level::INFO,
+                        "Port changed: {} -> {}. Attempting to re-bind listener.",
+                        self.client_configs.client_port,
+                        new_port
+                    );
+
+                    match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", new_port)).await {
+                        Ok(new_listener) => {
+                            self.listener = new_listener;
+                            self.client_configs.client_port = new_port;
+
+                            tracing_event!(Level::INFO, "Successfully bound to new port {}", new_port);
+                            
+                            // Persist the new port immediately
+                            self.save_state_to_disk();
+
+                            // Notify all running managers
+                            for manager_tx in self.torrent_manager_command_txs.values() {
+                                let _ = manager_tx.try_send(ManagerCommand::UpdateListenPort(new_port));
+                            }
+
+                            // Rebuild DHT if enabled
+                            #[cfg(feature = "dht")]
+                            {
+                                tracing::event!(Level::INFO, "Rebinding DHT server to new port...");
+                                let bootstrap_nodes: Vec<&str> = self.client_configs
+                                    .bootstrap_nodes
+                                    .iter()
+                                    .map(AsRef::as_ref)
+                                    .collect();
+
+                                match Dht::builder()
+                                    .bootstrap(&bootstrap_nodes)
+                                    .port(new_port)
+                                    .server_mode()
+                                    .build()
+                                {
+                                    Ok(new_dht_server) => {
+                                        let new_dht_handle = new_dht_server.as_async();
+                                        self.distributed_hash_table = new_dht_handle.clone();
+
+                                        for manager_tx in self.torrent_manager_command_txs.values() {
+                                            let _ = manager_tx.try_send(ManagerCommand::UpdateDhtHandle(new_dht_handle.clone()));
+                                        }
+                                        tracing::event!(Level::INFO, "DHT server rebound and handles updated.");
+                                    },
+                                    Err(e) => {
+                                        tracing::event!(Level::ERROR, "Failed to build new DHT server: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing_event!(
+                                Level::ERROR,
+                                "Failed to bind to new port {}: {}. Retaining old listener.",
+                                new_port,
+                                e
+                            );
+                        }
+                    }
+                } else if new_port == self.client_configs.client_port {
+                    tracing_event!(Level::DEBUG, "Port file updated, but port is unchanged ({}).", new_port);
+                }
+            }
+            Err(e) => {
+                tracing_event!(Level::ERROR, "Failed to parse new port from file {:?}: {}", &path, e);
+            }
+        }
+    }
+
     fn calculate_stats(&mut self, sys: &mut System) {
+        self.app_state
+            .throbber_holder
+            .borrow_mut()
+            .torrent_sparkline
+            .calc_next();
 
-       self.app_state.throbber_holder.borrow_mut().torrent_sparkline.calc_next();
-
-        if matches!(self.app_state.mode, AppMode::PowerSaving) && !self.app_state.run_time.is_multiple_of(5) {
+        if matches!(self.app_state.mode, AppMode::PowerSaving)
+            && !self.app_state.run_time.is_multiple_of(5)
+        {
             self.app_state.run_time += 1;
-            return
+            return;
         }
 
         let pid = match sysinfo::get_current_pid() {
             Ok(pid) => pid,
             Err(e) => {
                 tracing_event!(Level::ERROR, "Could not get current PID: {}", e);
-                return
+                return;
             }
         };
 
@@ -1294,24 +1307,30 @@ impl App {
         sys.refresh_memory();
         sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
 
-
         if let Some(process) = sys.process(pid) {
             self.app_state.cpu_usage = process.cpu_usage() / sys.cpus().len() as f32;
             self.app_state.app_ram_usage = process.memory();
-            self.app_state.ram_usage_percent = (process.memory() as f32 / sys.total_memory() as f32) * 100.0;
+            self.app_state.ram_usage_percent =
+                (process.memory() as f32 / sys.total_memory() as f32) * 100.0;
             self.app_state.run_time = process.run_time();
         }
 
         // --- Calculate all thrash scores ---
-        self.app_state.global_disk_read_thrash_score = calculate_thrash_score(&self.app_state.global_disk_read_history_log);
-        self.app_state.global_disk_write_thrash_score = calculate_thrash_score(&self.app_state.global_disk_write_history_log);
+        self.app_state.global_disk_read_thrash_score =
+            calculate_thrash_score(&self.app_state.global_disk_read_history_log);
+        self.app_state.global_disk_write_thrash_score =
+            calculate_thrash_score(&self.app_state.global_disk_write_history_log);
 
-        let global_read_thrash_f64 = calculate_thrash_score_seek_cost_f64(&self.app_state.global_disk_read_history_log);
-        let global_write_thrash_f64 = calculate_thrash_score_seek_cost_f64(&self.app_state.global_disk_write_history_log);
+        let global_read_thrash_f64 =
+            calculate_thrash_score_seek_cost_f64(&self.app_state.global_disk_read_history_log);
+        let global_write_thrash_f64 =
+            calculate_thrash_score_seek_cost_f64(&self.app_state.global_disk_write_history_log);
         self.app_state.global_disk_thrash_score = global_read_thrash_f64 + global_write_thrash_f64;
 
         if self.app_state.global_disk_thrash_score > 0.01 {
-             self.app_state.global_seek_cost_per_byte_history.push(self.app_state.global_disk_thrash_score);
+            self.app_state
+                .global_seek_cost_per_byte_history
+                .push(self.app_state.global_disk_thrash_score);
         }
         if self.app_state.global_seek_cost_per_byte_history.len() > 1000 {
             self.app_state.global_seek_cost_per_byte_history.remove(0);
@@ -1324,7 +1343,6 @@ impl App {
             let new_scpb_max = sorted_history[percentile_index];
             self.app_state.adaptive_max_scpb = new_scpb_max.max(1.0);
         }
-
 
         let mut global_disk_read_bps = 0;
         let mut global_disk_write_bps = 0;
@@ -1340,12 +1358,18 @@ impl App {
             torrent.bytes_written_this_tick = 0;
 
             torrent.disk_read_thrash_score = calculate_thrash_score(&torrent.disk_read_history_log);
-            torrent.disk_write_thrash_score = calculate_thrash_score(&torrent.disk_write_history_log);
+            torrent.disk_write_thrash_score =
+                calculate_thrash_score(&torrent.disk_write_history_log);
 
-
-            torrent.peer_discovery_history.push(torrent.peers_discovered_this_tick);
-            torrent.peer_connection_history.push(torrent.peers_connected_this_tick);
-            torrent.peer_disconnect_history.push(torrent.peers_disconnected_this_tick);
+            torrent
+                .peer_discovery_history
+                .push(torrent.peers_discovered_this_tick);
+            torrent
+                .peer_connection_history
+                .push(torrent.peers_connected_this_tick);
+            torrent
+                .peer_disconnect_history
+                .push(torrent.peers_disconnected_this_tick);
             torrent.peers_discovered_this_tick = 0;
             torrent.peers_connected_this_tick = 0;
             torrent.peers_disconnected_this_tick = 0;
@@ -1355,8 +1379,14 @@ impl App {
                 torrent.peer_disconnect_history.remove(0);
             }
 
-            torrent.latest_state.blocks_in_history.push(torrent.latest_state.blocks_in_this_tick);
-            torrent.latest_state.blocks_out_history.push(torrent.latest_state.blocks_out_this_tick);
+            torrent
+                .latest_state
+                .blocks_in_history
+                .push(torrent.latest_state.blocks_in_this_tick);
+            torrent
+                .latest_state
+                .blocks_out_history
+                .push(torrent.latest_state.blocks_out_this_tick);
             torrent.latest_state.blocks_in_this_tick = 0;
             torrent.latest_state.blocks_out_this_tick = 0;
             if torrent.latest_state.blocks_in_history.len() > 200 {
@@ -1367,7 +1397,9 @@ impl App {
 
         // Update the global history with the new, accurate totals
         self.app_state.disk_read_history.push(global_disk_read_bps);
-        self.app_state.disk_write_history.push(global_disk_write_bps);
+        self.app_state
+            .disk_write_history
+            .push(global_disk_write_bps);
         if self.app_state.disk_read_history.len() > 60 {
             self.app_state.disk_read_history.remove(0);
             self.app_state.disk_write_history.remove(0);
@@ -1376,12 +1408,14 @@ impl App {
         self.app_state.avg_disk_read_bps = if self.app_state.disk_read_history.is_empty() {
             0
         } else {
-            self.app_state.disk_read_history.iter().sum::<u64>() / self.app_state.disk_read_history.len() as u64
+            self.app_state.disk_read_history.iter().sum::<u64>()
+                / self.app_state.disk_read_history.len() as u64
         };
         self.app_state.avg_disk_write_bps = if self.app_state.disk_write_history.is_empty() {
             0
         } else {
-            self.app_state.disk_write_history.iter().sum::<u64>() / self.app_state.disk_write_history.len() as u64
+            self.app_state.disk_write_history.iter().sum::<u64>()
+                / self.app_state.disk_write_history.len() as u64
         };
 
         let mut total_dl = 0;
@@ -1402,7 +1436,9 @@ impl App {
         self.app_state.writes_completed_this_tick = 0;
 
         // Record the maximum backoff duration seen during the tick that just ended
-        self.app_state.disk_backoff_history_ms.push_back(self.app_state.max_disk_backoff_this_tick_ms);
+        self.app_state
+            .disk_backoff_history_ms
+            .push_back(self.app_state.max_disk_backoff_this_tick_ms);
         if self.app_state.disk_backoff_history_ms.len() > SECONDS_HISTORY_MAX {
             self.app_state.disk_backoff_history_ms.pop_front();
         }
@@ -1413,25 +1449,29 @@ impl App {
             let history_len = self.app_state.disk_backoff_history_ms.len();
             let start_index = history_len.saturating_sub(60);
 
-            let backoff_slice_ms = &self.app_state.disk_backoff_history_ms.make_contiguous()[start_index..];
+            let backoff_slice_ms =
+                &self.app_state.disk_backoff_history_ms.make_contiguous()[start_index..];
             let max_backoff_in_minute_ms = backoff_slice_ms.iter().max().copied().unwrap_or(0);
-            self.app_state.minute_disk_backoff_history_ms.push_back(max_backoff_in_minute_ms);
+            self.app_state
+                .minute_disk_backoff_history_ms
+                .push_back(max_backoff_in_minute_ms);
             if self.app_state.minute_disk_backoff_history_ms.len() > MINUTES_HISTORY_MAX {
-               self.app_state.minute_disk_backoff_history_ms.pop_front();
+                self.app_state.minute_disk_backoff_history_ms.pop_front();
             }
-
 
             let seconds_dl = &self.app_state.avg_download_history;
             let minute_slice_dl = &seconds_dl[seconds_dl.len().saturating_sub(60)..];
             if !minute_slice_dl.is_empty() {
-                let minute_avg_dl = minute_slice_dl.iter().sum::<u64>() / minute_slice_dl.len() as u64;
+                let minute_avg_dl =
+                    minute_slice_dl.iter().sum::<u64>() / minute_slice_dl.len() as u64;
                 self.app_state.minute_avg_dl_history.push(minute_avg_dl);
             }
 
             let seconds_ul = &self.app_state.avg_upload_history;
             let minute_slice_ul = &seconds_ul[seconds_ul.len().saturating_sub(60)..];
             if !minute_slice_ul.is_empty() {
-                let minute_avg_ul = minute_slice_ul.iter().sum::<u64>() / minute_slice_ul.len() as u64;
+                let minute_avg_ul =
+                    minute_slice_ul.iter().sum::<u64>() / minute_slice_ul.len() as u64;
                 self.app_state.minute_avg_ul_history.push(minute_avg_ul);
             }
         }
@@ -1454,7 +1494,11 @@ impl App {
 
         // If the objective has changed, reset the tuning baseline immediately.
         if is_seeding != self.app_state.is_seeding {
-            tracing_event!(Level::DEBUG, "Self-Tune: Objective changed to {}. Resetting score.", if is_seeding { "Seeding" } else { "Leeching" });
+            tracing_event!(
+                Level::DEBUG,
+                "Self-Tune: Objective changed to {}. Resetting score.",
+                if is_seeding { "Seeding" } else { "Leeching" }
+            );
             self.app_state.last_tuning_score = 0;
             self.app_state.current_tuning_score = 0;
             self.app_state.last_tuning_limits = self.app_state.limits.clone();
@@ -1569,7 +1613,13 @@ impl App {
         if new_score > best_score {
             self.app_state.last_tuning_score = new_score;
             self.app_state.last_tuning_limits = self.app_state.limits.clone();
-            tracing_event!(Level::DEBUG, "Self-Tune: SUCCESS. New best score: {} (raw: {}, penalty: {:.2}x)", new_score, new_raw_score, penalty_factor);
+            tracing_event!(
+                Level::DEBUG,
+                "Self-Tune: SUCCESS. New best score: {} (raw: {}, penalty: {:.2}x)",
+                new_score,
+                new_raw_score,
+                penalty_factor
+            );
         } else {
             self.app_state.limits = self.app_state.last_tuning_limits.clone();
 
@@ -1577,8 +1627,7 @@ impl App {
 
             const REALITY_CHECK_FACTOR: f64 = 2.0;
             if best_score > 10_000
-                && best_score
-                    > (self.app_state.baseline_speed_ema * REALITY_CHECK_FACTOR) as u64
+                && best_score > (self.app_state.baseline_speed_ema * REALITY_CHECK_FACTOR) as u64
             {
                 self.app_state.last_tuning_score = baseline_u64;
                 tracing_event!(Level::DEBUG, "Self-Tune: REALITY CHECK. Score {} (raw: {}) failed. Old best {} is stale vs. baseline {}. Resetting best to baseline.", new_score, new_raw_score, best_score, baseline_u64);
@@ -1586,7 +1635,8 @@ impl App {
                 tracing_event!(Level::DEBUG, "Self-Tune: REVERTING. Score {} (raw: {}, penalty: {:.2}x) was not better than {}. (Baseline is {})", new_score, new_raw_score, penalty_factor, best_score, baseline_u64);
             }
 
-            let _ = self.resource_manager
+            let _ = self
+                .resource_manager
                 .update_limits(self.app_state.limits.clone().into_map())
                 .await;
         }
@@ -1595,7 +1645,8 @@ impl App {
         self.app_state.limits = next_limits;
 
         tracing_event!(Level::DEBUG, "Self-Tune: Trying next change... {}", desc);
-        let _ = self.resource_manager
+        let _ = self
+            .resource_manager
             .update_limits(self.app_state.limits.clone().into_map())
             .await;
     }
