@@ -647,36 +647,10 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+
         self.process_pending_commands().await;
 
-        let tui_event_tx_clone = self.tui_event_tx.clone();
-        let mut tui_shutdown_rx = self.shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = tui_shutdown_rx.recv() => break,
-
-                    result = tokio::task::spawn_blocking(event::read) => {
-                        let event = match result {
-                            Ok(Ok(e)) => e,
-                            Ok(Err(e)) => {
-                                tracing_event!(Level::ERROR, "Crossterm event read error: {}", e);
-                                break;
-                            }
-                            Err(e) => {
-                                tracing_event!(Level::ERROR, "Blocking TUI read task panicked: {}", e);
-                                break;
-                            }
-                        };
-
-                        if tui_event_tx_clone.send(event).await.is_err() {
-                            break;
-                        }
-                    }
-
-                }
-            }
-        });
+        self.startup_crossterm_event_listener();
 
         let (notify_tx, mut notify_rx) = mpsc::channel::<Result<Event, NotifyError>>(100);
         let _watcher = self.setup_file_watcher(notify_tx)?;
@@ -686,6 +660,8 @@ impl App {
         let mut stats_interval = time::interval(Duration::from_secs(1));
         let mut tuning_interval = time::interval(Duration::from_secs(90));
         let mut draw_interval = time::interval(Duration::from_millis(17));
+
+        self.save_state_to_disk();
 
         while !self.app_state.should_quit {
             tokio::select! {
@@ -737,10 +713,47 @@ impl App {
             }
         }
 
-        let _ = self.shutdown_tx.send(());
-
         self.save_state_to_disk();
 
+        self.shutdown_sequence(terminal).await;
+
+        Ok(())
+    }
+
+    fn startup_crossterm_event_listener(&mut self) {
+        let tui_event_tx_clone = self.tui_event_tx.clone();
+        let mut tui_shutdown_rx = self.shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tui_shutdown_rx.recv() => break,
+
+                    result = tokio::task::spawn_blocking(event::read) => {
+                        let event = match result {
+                            Ok(Ok(e)) => e,
+                            Ok(Err(e)) => {
+                                tracing_event!(Level::ERROR, "Crossterm event read error: {}", e);
+                                break;
+                            }
+                            Err(e) => {
+                                tracing_event!(Level::ERROR, "Blocking TUI read task panicked: {}", e);
+                                break;
+                            }
+                        };
+
+                        if tui_event_tx_clone.send(event).await.is_err() {
+                            break;
+                        }
+                    }
+
+                }
+            }
+        });
+    }
+
+    async fn shutdown_sequence(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
+
+        let _ = self.shutdown_tx.send(());
         let total_managers_to_shut_down = self.torrent_manager_command_txs.len();
         let mut managers_shut_down = 0;
 
@@ -749,7 +762,7 @@ impl App {
         }
 
         if total_managers_to_shut_down == 0 {
-            return Ok(());
+            return;
         }
 
         let shutdown_timeout = time::sleep(Duration::from_secs(5));
@@ -765,17 +778,23 @@ impl App {
         loop {
             self.app_state.shutdown_progress =
                 managers_shut_down as f64 / total_managers_to_shut_down as f64;
-            terminal.draw(|f| {
+            let _ = terminal.draw(|f| {
                 tui::draw(f, &self.app_state, &self.client_configs);
-            })?;
+            });
 
             tokio::select! {
                 Some(event) = self.manager_event_rx.recv() => {
-                    if let ManagerEvent::DeletionComplete(..) = event {
-                        managers_shut_down += 1;
-                        if managers_shut_down == total_managers_to_shut_down {
-                            tracing_event!(Level::INFO, "All torrents shut down gracefully.");
-                            break;
+                    match event {
+                        ManagerEvent::DeletionComplete(..) => {
+                            managers_shut_down += 1;
+                            if managers_shut_down == total_managers_to_shut_down {
+                                tracing_event!(Level::INFO, "All torrents shut down gracefully.");
+                                break;
+                            }
+                        }
+                        _ => {
+                            // CRITICAL: We must aggressively drain other events (Stats, BlockReceived, etc.)
+                            // so the managers don't get blocked on a full channel while trying to die.
                         }
                     }
                 }
@@ -792,13 +811,6 @@ impl App {
                 }
             }
         }
-
-        self.app_state.shutdown_progress = 1.0;
-        terminal.draw(|f| {
-            tui::draw(f, &self.app_state, &self.client_configs);
-        })?;
-
-        Ok(())
     }
 
     async fn handle_incoming_peer(&mut self, mut stream: TcpStream) {
