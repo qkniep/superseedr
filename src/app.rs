@@ -649,7 +649,6 @@ impl App {
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.process_pending_commands().await;
 
-        // --- Spawn TUI event handler task ---
         let tui_event_tx_clone = self.tui_event_tx.clone();
         let mut tui_shutdown_rx = self.shutdown_tx.subscribe();
         tokio::spawn(async move {
@@ -729,15 +728,12 @@ impl App {
             }
         }
 
-        // --- System Stats Setup ---
-        let mut stats_interval = time::interval(Duration::from_secs(1));
         let mut sys = System::new();
 
-        // Self tuning torrent limits
+        let mut stats_interval = time::interval(Duration::from_secs(1));
         let mut tuning_interval = time::interval(Duration::from_secs(90));
-
-        // Main application loop
         let mut draw_interval = time::interval(Duration::from_millis(17));
+
         while !self.app_state.should_quit {
             tokio::select! {
                 _ = signal::ctrl_c() => {
@@ -810,6 +806,8 @@ impl App {
                             if self.app_state.selected_torrent_index >= self.app_state.torrent_list_order.len() && !self.app_state.torrent_list_order.is_empty() {
                                 self.app_state.selected_torrent_index = self.app_state.torrent_list_order.len() - 1;
                             }
+
+                            self.save_state_to_disk();
 
                             self.app_state.ui_needs_redraw = true;
                         }
@@ -908,64 +906,10 @@ impl App {
                 }
 
                 result = self.torrent_rx.recv() => {
-
                     match result {
                         Ok(message) => {
-
-                    self.app_state.session_total_downloaded += message.bytes_downloaded_this_tick;
-                    self.app_state.session_total_uploaded += message.bytes_uploaded_this_tick;
-
-                    let display_state = self.app_state.torrents.entry(message.info_hash).or_default();
-
-                    display_state.latest_state.number_of_successfully_connected_peers = message.number_of_successfully_connected_peers;
-                    display_state.latest_state.number_of_pieces_total = message.number_of_pieces_total;
-                    display_state.latest_state.number_of_pieces_completed = message.number_of_pieces_completed;
-                    display_state.latest_state.download_speed_bps = message.download_speed_bps;
-                    display_state.latest_state.upload_speed_bps = message.upload_speed_bps;
-                    display_state.latest_state.eta = message.eta;
-                    display_state.latest_state.next_announce_in = message.next_announce_in;
-
-                    // Also update the name if the manager discovered it from metadata
-                    if !message.torrent_name.is_empty() {
-                        display_state.latest_state.torrent_name = message.torrent_name;
-                    }
-                    display_state.latest_state.total_size = message.total_size;
-                    display_state.latest_state.bytes_written = message.bytes_written;
-
-                    display_state.download_history.push(display_state.latest_state.download_speed_bps);
-                    display_state.upload_history.push(display_state.latest_state.upload_speed_bps);
-
-                    if display_state.download_history.len() > 200 {
-                        display_state.download_history.remove(0);
-                        display_state.upload_history.remove(0);
-                    }
-
-                    if self.app_state.total_download_history.len() > 200 {
-                        self.app_state.total_download_history.remove(0);
-                        self.app_state.total_upload_history.remove(0);
-                    }
-
-                    display_state.smoothed_download_speed_bps = display_state.latest_state.download_speed_bps;
-                    display_state.smoothed_upload_speed_bps = display_state.latest_state.upload_speed_bps;
-                    display_state.latest_state.peers = message.peers;
-
-                    display_state.latest_state.activity_message = message.activity_message;
-
-
-                    let current_swarm_availability = aggregate_peers_to_availability(
-                        &display_state.latest_state.peers,
-                        display_state.latest_state.number_of_pieces_total as usize,
-                    );
-                    if !display_state.latest_state.peers.is_empty() && !current_swarm_availability.is_empty() {
-                        display_state.swarm_availability_history.push(current_swarm_availability);
-                    }
-                    if display_state.swarm_availability_history.len() > 200 {
-                        display_state.swarm_availability_history.remove(0);
-                    }
-
-
-                    self.app_state.ui_needs_redraw = true;
-
+                            self.update_torrent_state(message);
+                            self.app_state.ui_needs_redraw = true;
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             tracing_event!(Level::DEBUG, "TUI metrics lagged, skipped {} updates", n);
@@ -978,7 +922,6 @@ impl App {
                 Some(command) = self.app_command_rx.recv() => {
                     match command {
                         AppCommand::AddTorrentFromFile(path) => {
-                            // All state mutation happens here, in the main task.
                             if let Some(download_path) = &self.client_configs.default_download_folder {
 
                                 self.add_torrent_from_file(
@@ -988,7 +931,6 @@ impl App {
                                     TorrentControlState::Running
                                 ).await;
 
-                                // Move or rename file for it not to reprocess.
                                 let move_successful = if let Some(watch_folder) = &self.client_configs.watch_folder {
                                     (|| {
                                         let parent_dir = watch_folder.parent()?;
@@ -1005,7 +947,8 @@ impl App {
                                     false
                                 };
 
-                                // If the move operation failed for any reason, fall back to renaming.
+                                self.save_state_to_disk();
+
                                 if !move_successful {
                                     tracing_event!(Level::WARN, "Could not move torrent file. Defaulting to renaming in place.");
                                     let mut new_path = path.clone();
@@ -1034,6 +977,7 @@ impl App {
                                         let torrent_file_path = PathBuf::from(torrent_file_path_str.trim());
                                         if let Some(download_path) = self.client_configs.default_download_folder.clone() {
                                             self.add_torrent_from_file(torrent_file_path, download_path, false, TorrentControlState::Running).await;
+                                            self.save_state_to_disk();
                                         } else {
                                             self.app_state.pending_torrent_path = Some(torrent_file_path);
                                             if let Ok(mut explorer) = FileExplorer::new() {
@@ -1052,7 +996,6 @@ impl App {
                                     }
                                 }
 
-                                // Move the .path file to the processed directory to prevent re-processing
                                 if let Some(file_name) = path.file_name() {
                                     let new_path = processed_path.join(file_name);
                                     if let Err(e) = fs::rename(&path, &new_path) {
@@ -1062,22 +1005,22 @@ impl App {
                             }
                         }
                         AppCommand::AddMagnetFromFile(path) => {
-                            // This now uses the consolidated processed_path
                             if let Some((_, processed_path)) = get_watch_path() {
                                 match fs::read_to_string(&path) {
-                                                                         Ok(magnet_link) => {
-                                                                            if let Some(download_path) = self.client_configs.default_download_folder.clone() {
-                                                                                self.add_magnet_torrent("Fetching name...".to_string(), magnet_link.trim().to_string(), download_path, false, TorrentControlState::Running).await;
-                                                                            } else if let Ok(mut explorer) = FileExplorer::new() {
-                                                                                    let initial_path = self
-                                                                                        .find_most_common_download_path()
-                                                                                        .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()));
-                                                                                    if let Some(common_path) = initial_path {
-                                                                                        explorer.set_cwd(common_path).ok();
-                                                                                    }
-                                                                                    self.app_state.mode = AppMode::DownloadPathPicker(explorer);
-                                                                            }
-                                                                        }                                    Err(e) => {
+                                         Ok(magnet_link) => {
+                                            if let Some(download_path) = self.client_configs.default_download_folder.clone() {
+                                                self.add_magnet_torrent("Fetching name...".to_string(), magnet_link.trim().to_string(), download_path, false, TorrentControlState::Running).await;
+                                                self.save_state_to_disk();
+                                            } else if let Ok(mut explorer) = FileExplorer::new() {
+                                                    let initial_path = self
+                                                        .find_most_common_download_path()
+                                                        .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()));
+                                                    if let Some(common_path) = initial_path {
+                                                        explorer.set_cwd(common_path).ok();
+                                                    }
+                                                    self.app_state.mode = AppMode::DownloadPathPicker(explorer);
+                                            }
+                                        }                                    Err(e) => {
                                         tracing_event!(Level::ERROR, "Failed to read magnet file {:?}: {}", &path, e);
                                     }
                                 }
@@ -1114,15 +1057,13 @@ impl App {
                                                 new_port
                                             );
 
-                                            // Attempt to bind to the new port
                                             match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", new_port)).await {
                                                 Ok(new_listener) => {
-                                                    // Success! Replace the old listener.
-                                                    // The old one is dropped, closing the old socket.
                                                     self.listener = new_listener;
                                                     self.client_configs.client_port = new_port;
 
                                                     tracing_event!(Level::INFO, "Successfully bound to new port {}", new_port);
+                                                    self.save_state_to_disk();
 
                                                     for manager_tx in self.torrent_manager_command_txs.values() {
                                                         let _ = manager_tx.try_send(ManagerCommand::UpdateListenPort(new_port));
@@ -1147,7 +1088,6 @@ impl App {
                                                                 let new_dht_handle = new_dht_server.as_async();
                                                                 self.distributed_hash_table = new_dht_handle.clone();
 
-                                                                // 3. Tell all managers to use the new handle
                                                                 for manager_tx in self.torrent_manager_command_txs.values() {
                                                                     let _ = manager_tx.try_send(ManagerCommand::UpdateDhtHandle(new_dht_handle.clone()));
                                                                 }
@@ -1250,267 +1190,12 @@ impl App {
                 }
 
                 _ = stats_interval.tick() => {
-
-                   self.app_state.throbber_holder.borrow_mut().torrent_sparkline.calc_next();
-
-                    if matches!(self.app_state.mode, AppMode::PowerSaving) && !self.app_state.run_time.is_multiple_of(5) {
-                        self.app_state.run_time += 1;
-                        continue;
-                    }
-
-                    let pid = match sysinfo::get_current_pid() {
-                        Ok(pid) => pid,
-                        Err(e) => {
-                            tracing_event!(Level::ERROR, "Could not get current PID: {}", e);
-                            continue;
-                        }
-                    };
-
-                    sys.refresh_cpu_usage();
-                    sys.refresh_memory();
-                    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
-
-
-                    if let Some(process) = sys.process(pid) {
-                        self.app_state.cpu_usage = process.cpu_usage() / sys.cpus().len() as f32;
-                        self.app_state.app_ram_usage = process.memory();
-                        self.app_state.ram_usage_percent = (process.memory() as f32 / sys.total_memory() as f32) * 100.0;
-                        self.app_state.run_time = process.run_time();
-                    }
-
-
-                    // --- Calculate all thrash scores ---
-                    self.app_state.global_disk_read_thrash_score = calculate_thrash_score(&self.app_state.global_disk_read_history_log);
-                    self.app_state.global_disk_write_thrash_score = calculate_thrash_score(&self.app_state.global_disk_write_history_log);
-
-                    let global_read_thrash_f64 = calculate_thrash_score_seek_cost_f64(&self.app_state.global_disk_read_history_log);
-                    let global_write_thrash_f64 = calculate_thrash_score_seek_cost_f64(&self.app_state.global_disk_write_history_log);
-                    self.app_state.global_disk_thrash_score = global_read_thrash_f64 + global_write_thrash_f64;
-
-                    if self.app_state.global_disk_thrash_score > 0.01 {
-                         self.app_state.global_seek_cost_per_byte_history.push(self.app_state.global_disk_thrash_score);
-                    }
-                    if self.app_state.global_seek_cost_per_byte_history.len() > 1000 {
-                        self.app_state.global_seek_cost_per_byte_history.remove(0);
-                    }
-                    const MIN_SAMPLES_TO_LEARN: usize = 50;
-                    if self.app_state.global_seek_cost_per_byte_history.len() > MIN_SAMPLES_TO_LEARN {
-                        let mut sorted_history = self.app_state.global_seek_cost_per_byte_history.clone();
-                        sorted_history.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                        let percentile_index = (sorted_history.len() as f64 * 0.95) as usize;
-                        let new_scpb_max = sorted_history[percentile_index];
-                        self.app_state.adaptive_max_scpb = new_scpb_max.max(1.0);
-                    }
-
-
-                    let mut global_disk_read_bps = 0;
-                    let mut global_disk_write_bps = 0;
-
-                    for torrent in self.app_state.torrents.values_mut() {
-                        torrent.disk_read_speed_bps = torrent.bytes_read_this_tick * 8;
-                        torrent.disk_write_speed_bps = torrent.bytes_written_this_tick * 8;
-
-                        global_disk_read_bps += torrent.disk_read_speed_bps;
-                        global_disk_write_bps += torrent.disk_write_speed_bps;
-
-                        torrent.bytes_read_this_tick = 0;
-                        torrent.bytes_written_this_tick = 0;
-
-                        torrent.disk_read_thrash_score = calculate_thrash_score(&torrent.disk_read_history_log);
-                        torrent.disk_write_thrash_score = calculate_thrash_score(&torrent.disk_write_history_log);
-
-
-                        torrent.peer_discovery_history.push(torrent.peers_discovered_this_tick);
-                        torrent.peer_connection_history.push(torrent.peers_connected_this_tick);
-                        torrent.peer_disconnect_history.push(torrent.peers_disconnected_this_tick);
-                        torrent.peers_discovered_this_tick = 0;
-                        torrent.peers_connected_this_tick = 0;
-                        torrent.peers_disconnected_this_tick = 0;
-                        if torrent.peer_discovery_history.len() > 200 {
-                            torrent.peer_discovery_history.remove(0);
-                            torrent.peer_connection_history.remove(0);
-                            torrent.peer_disconnect_history.remove(0);
-                        }
-
-                        torrent.latest_state.blocks_in_history.push(torrent.latest_state.blocks_in_this_tick);
-                        torrent.latest_state.blocks_out_history.push(torrent.latest_state.blocks_out_this_tick);
-                        torrent.latest_state.blocks_in_this_tick = 0;
-                        torrent.latest_state.blocks_out_this_tick = 0;
-                        if torrent.latest_state.blocks_in_history.len() > 200 {
-                            torrent.latest_state.blocks_in_history.remove(0);
-                            torrent.latest_state.blocks_out_history.remove(0);
-                        }
-                    }
-
-                    // Update the global history with the new, accurate totals
-                    self.app_state.disk_read_history.push(global_disk_read_bps);
-                    self.app_state.disk_write_history.push(global_disk_write_bps);
-                    if self.app_state.disk_read_history.len() > 60 {
-                        self.app_state.disk_read_history.remove(0);
-                        self.app_state.disk_write_history.remove(0);
-                    }
-
-                    self.app_state.avg_disk_read_bps = if self.app_state.disk_read_history.is_empty() {
-                        0
-                    } else {
-                        self.app_state.disk_read_history.iter().sum::<u64>() / self.app_state.disk_read_history.len() as u64
-                    };
-                    self.app_state.avg_disk_write_bps = if self.app_state.disk_write_history.is_empty() {
-                        0
-                    } else {
-                        self.app_state.disk_write_history.iter().sum::<u64>() / self.app_state.disk_write_history.len() as u64
-                    };
-
-                    let mut total_dl = 0;
-                    let mut total_ul = 0;
-                    for torrent in self.app_state.torrents.values() {
-                        total_dl += torrent.smoothed_download_speed_bps;
-                        total_ul += torrent.smoothed_upload_speed_bps;
-                    }
-
-                    self.app_state.total_download_history.push(total_dl);
-                    self.app_state.total_upload_history.push(total_ul);
-                    self.app_state.avg_download_history.push(total_dl);
-                    self.app_state.avg_upload_history.push(total_ul);
-
-                    self.app_state.read_iops = self.app_state.reads_completed_this_tick;
-                    self.app_state.write_iops = self.app_state.writes_completed_this_tick;
-                    self.app_state.reads_completed_this_tick = 0;
-                    self.app_state.writes_completed_this_tick = 0;
-
-                    // Record the maximum backoff duration seen during the tick that just ended
-                    self.app_state.disk_backoff_history_ms.push_back(self.app_state.max_disk_backoff_this_tick_ms);
-                    if self.app_state.disk_backoff_history_ms.len() > SECONDS_HISTORY_MAX {
-                        self.app_state.disk_backoff_history_ms.pop_front();
-                    }
-
-                    // System Runtime calculations ==================================
-                    let run_time = self.app_state.run_time;
-                    if run_time > 0 && run_time.is_multiple_of(60) {
-                        let history_len = self.app_state.disk_backoff_history_ms.len();
-                        let start_index = history_len.saturating_sub(60);
-
-                        let backoff_slice_ms = &self.app_state.disk_backoff_history_ms.make_contiguous()[start_index..];
-                        let max_backoff_in_minute_ms = backoff_slice_ms.iter().max().copied().unwrap_or(0);
-                        self.app_state.minute_disk_backoff_history_ms.push_back(max_backoff_in_minute_ms);
-                        if self.app_state.minute_disk_backoff_history_ms.len() > MINUTES_HISTORY_MAX {
-                           self.app_state.minute_disk_backoff_history_ms.pop_front();
-                        }
-
-
-                        let seconds_dl = &self.app_state.avg_download_history;
-                        let minute_slice_dl = &seconds_dl[seconds_dl.len().saturating_sub(60)..];
-                        if !minute_slice_dl.is_empty() {
-                            let minute_avg_dl = minute_slice_dl.iter().sum::<u64>() / minute_slice_dl.len() as u64;
-                            self.app_state.minute_avg_dl_history.push(minute_avg_dl);
-                        }
-
-                        let seconds_ul = &self.app_state.avg_upload_history;
-                        let minute_slice_ul = &seconds_ul[seconds_ul.len().saturating_sub(60)..];
-                        if !minute_slice_ul.is_empty() {
-                            let minute_avg_ul = minute_slice_ul.iter().sum::<u64>() / minute_slice_ul.len() as u64;
-                            self.app_state.minute_avg_ul_history.push(minute_avg_ul);
-                        }
-                    }
-                    self.app_state.max_disk_backoff_this_tick_ms = 0;
-
-                    if self.app_state.avg_download_history.len() > SECONDS_HISTORY_MAX {
-                        self.app_state.avg_download_history.remove(0);
-                        self.app_state.avg_upload_history.remove(0);
-                    }
-                    if self.app_state.minute_avg_dl_history.len() > MINUTES_HISTORY_MAX {
-                        self.app_state.minute_avg_dl_history.remove(0);
-                        self.app_state.minute_avg_ul_history.remove(0);
-                    }
-
-                    // Check if the primary objective (seeding vs. leeching) has changed.
-                    let is_leeching = self.app_state.torrents.values().any(|t| {
-                        t.latest_state.number_of_pieces_completed < t.latest_state.number_of_pieces_total
-                    });
-                    let is_seeding = !is_leeching;
-
-                    // If the objective has changed, reset the tuning baseline immediately.
-                    if is_seeding != self.app_state.is_seeding {
-                        tracing_event!(Level::DEBUG, "Self-Tune: Objective changed to {}. Resetting score.", if is_seeding { "Seeding" } else { "Leeching" });
-                        self.app_state.last_tuning_score = 0;
-                        self.app_state.current_tuning_score = 0;
-                        self.app_state.last_tuning_limits = self.app_state.limits.clone();
-
-                        if is_seeding {
-                            self.app_state.torrent_sort = (TorrentSortColumn::Up, SortDirection::Descending);
-                            self.app_state.peer_sort = (PeerSortColumn::UL, SortDirection::Descending);
-                        } else {
-                            self.app_state.torrent_sort = (TorrentSortColumn::Down, SortDirection::Descending);
-                            self.app_state.peer_sort = (PeerSortColumn::DL, SortDirection::Descending);
-                        }
-                    }
-                    self.app_state.is_seeding = is_seeding;
-                    self.app_state.tuning_countdown = self.app_state.tuning_countdown.saturating_sub(1);
+                    self.calculate_stats(&mut sys);
                     self.app_state.ui_needs_redraw = true;
                 }
 
                 _ = tuning_interval.tick() => {
-                    self.app_state.tuning_countdown = 90;
-                    let history = if !self.app_state.is_seeding { // if leeching
-                        &self.app_state.avg_download_history
-                    } else {
-                        &self.app_state.avg_upload_history
-                    };
-
-                    let relevant_history = &history[history.len().saturating_sub(60)..];
-                    let new_raw_score = if relevant_history.is_empty() {
-                        0
-                    } else {
-                        relevant_history.iter().sum::<u64>() / relevant_history.len() as u64
-                    };
-                    let current_scpb = self.app_state.global_disk_thrash_score;
-                    let scpb_max = self.app_state.adaptive_max_scpb;
-                    let penalty_factor = (current_scpb / scpb_max - 1.0).max(0.0);
-                    let new_score = (new_raw_score as f64 / (1.0 + penalty_factor)) as u64;
-                    self.app_state.current_tuning_score = new_score;
-
-                    const BASELINE_ALPHA: f64 = 0.1; // Slower-moving average
-                    let new_score_f64 = new_score as f64;
-                    if self.app_state.baseline_speed_ema == 0.0 {
-                        self.app_state.baseline_speed_ema = new_score_f64;
-                    } else {
-                        self.app_state.baseline_speed_ema = (new_score_f64 * BASELINE_ALPHA)
-                            + (self.app_state.baseline_speed_ema * (1.0 - BASELINE_ALPHA));
-                    }
-
-                    let best_score = self.app_state.last_tuning_score;
-                    if new_score > best_score {
-                        self.app_state.last_tuning_score = new_score;
-                        self.app_state.last_tuning_limits = self.app_state.limits.clone();
-                        tracing_event!(Level::DEBUG, "Self-Tune: SUCCESS. New best score: {} (raw: {}, penalty: {:.2}x)", new_score, new_raw_score, penalty_factor);
-                    } else {
-                        self.app_state.limits = self.app_state.last_tuning_limits.clone();
-
-                        let baseline_u64 = self.app_state.baseline_speed_ema as u64;
-
-                        const REALITY_CHECK_FACTOR: f64 = 2.0;
-                        if best_score > 10_000
-                            && best_score
-                                > (self.app_state.baseline_speed_ema * REALITY_CHECK_FACTOR) as u64
-                        {
-                            self.app_state.last_tuning_score = baseline_u64;
-                            tracing_event!(Level::DEBUG, "Self-Tune: REALITY CHECK. Score {} (raw: {}) failed. Old best {} is stale vs. baseline {}. Resetting best to baseline.", new_score, new_raw_score, best_score, baseline_u64);
-                        } else {
-                            tracing_event!(Level::DEBUG, "Self-Tune: REVERTING. Score {} (raw: {}, penalty: {:.2}x) was not better than {}. (Baseline is {})", new_score, new_raw_score, penalty_factor, best_score, baseline_u64);
-                        }
-
-                        let _ = self.resource_manager
-                            .update_limits(self.app_state.limits.clone().into_map())
-                            .await;
-                    }
-
-                    let (next_limits, desc) = make_random_adjustment(self.app_state.limits.clone());
-                    self.app_state.limits = next_limits;
-
-                    tracing_event!(Level::DEBUG, "Self-Tune: Trying next change... {}", desc);
-                    let _ = self.resource_manager
-                        .update_limits(self.app_state.limits.clone().into_map())
-                        .await;
+                    self.tuning_resource_limits().await;
                 }
 
                 _ = draw_interval.tick() => {
@@ -1526,48 +1211,7 @@ impl App {
 
         let _ = self.shutdown_tx.send(());
 
-        self.client_configs.lifetime_downloaded += self.app_state.session_total_downloaded;
-        self.client_configs.lifetime_uploaded += self.app_state.session_total_uploaded;
-        self.client_configs.torrent_sort_column = self.app_state.torrent_sort.0;
-        self.client_configs.torrent_sort_direction = self.app_state.torrent_sort.1;
-        self.client_configs.peer_sort_column = self.app_state.peer_sort.0;
-        self.client_configs.peer_sort_direction = self.app_state.peer_sort.1;
-
-        let old_validation_statuses: HashMap<String, bool> = self
-            .client_configs
-            .torrents
-            .iter()
-            .map(|cfg| (cfg.torrent_or_magnet.clone(), cfg.validation_status))
-            .collect();
-
-        self.client_configs.torrents = self
-            .app_state
-            .torrents
-            .values()
-            .map(|torrent| {
-                let torrent_state = &torrent.latest_state;
-
-                let is_complete = torrent_state.number_of_pieces_total > 0
-                    && torrent_state.number_of_pieces_total
-                        == torrent_state.number_of_pieces_completed;
-
-                let old_status = old_validation_statuses
-                    .get(&torrent_state.torrent_or_magnet)
-                    .cloned()
-                    .unwrap_or(false);
-
-                let final_validation_status = if is_complete { true } else { old_status };
-
-                TorrentSettings {
-                    torrent_or_magnet: torrent_state.torrent_or_magnet.clone(),
-                    name: torrent_state.torrent_name.clone(),
-                    validation_status: final_validation_status,
-                    download_path: torrent_state.download_path.clone(),
-                    torrent_control_state: torrent_state.torrent_control_state.clone(),
-                }
-            })
-            .collect();
-        save_settings(&self.client_configs)?;
+        self.save_state_to_disk();
 
         let total_managers_to_shut_down = self.torrent_manager_command_txs.len();
         let mut managers_shut_down = 0;
@@ -1627,6 +1271,386 @@ impl App {
         })?;
 
         Ok(())
+    }
+
+    fn calculate_stats(&mut self, sys: &mut System) {
+
+       self.app_state.throbber_holder.borrow_mut().torrent_sparkline.calc_next();
+
+        if matches!(self.app_state.mode, AppMode::PowerSaving) && !self.app_state.run_time.is_multiple_of(5) {
+            self.app_state.run_time += 1;
+            return
+        }
+
+        let pid = match sysinfo::get_current_pid() {
+            Ok(pid) => pid,
+            Err(e) => {
+                tracing_event!(Level::ERROR, "Could not get current PID: {}", e);
+                return
+            }
+        };
+
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+
+
+        if let Some(process) = sys.process(pid) {
+            self.app_state.cpu_usage = process.cpu_usage() / sys.cpus().len() as f32;
+            self.app_state.app_ram_usage = process.memory();
+            self.app_state.ram_usage_percent = (process.memory() as f32 / sys.total_memory() as f32) * 100.0;
+            self.app_state.run_time = process.run_time();
+        }
+
+        // --- Calculate all thrash scores ---
+        self.app_state.global_disk_read_thrash_score = calculate_thrash_score(&self.app_state.global_disk_read_history_log);
+        self.app_state.global_disk_write_thrash_score = calculate_thrash_score(&self.app_state.global_disk_write_history_log);
+
+        let global_read_thrash_f64 = calculate_thrash_score_seek_cost_f64(&self.app_state.global_disk_read_history_log);
+        let global_write_thrash_f64 = calculate_thrash_score_seek_cost_f64(&self.app_state.global_disk_write_history_log);
+        self.app_state.global_disk_thrash_score = global_read_thrash_f64 + global_write_thrash_f64;
+
+        if self.app_state.global_disk_thrash_score > 0.01 {
+             self.app_state.global_seek_cost_per_byte_history.push(self.app_state.global_disk_thrash_score);
+        }
+        if self.app_state.global_seek_cost_per_byte_history.len() > 1000 {
+            self.app_state.global_seek_cost_per_byte_history.remove(0);
+        }
+        const MIN_SAMPLES_TO_LEARN: usize = 50;
+        if self.app_state.global_seek_cost_per_byte_history.len() > MIN_SAMPLES_TO_LEARN {
+            let mut sorted_history = self.app_state.global_seek_cost_per_byte_history.clone();
+            sorted_history.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let percentile_index = (sorted_history.len() as f64 * 0.95) as usize;
+            let new_scpb_max = sorted_history[percentile_index];
+            self.app_state.adaptive_max_scpb = new_scpb_max.max(1.0);
+        }
+
+
+        let mut global_disk_read_bps = 0;
+        let mut global_disk_write_bps = 0;
+
+        for torrent in self.app_state.torrents.values_mut() {
+            torrent.disk_read_speed_bps = torrent.bytes_read_this_tick * 8;
+            torrent.disk_write_speed_bps = torrent.bytes_written_this_tick * 8;
+
+            global_disk_read_bps += torrent.disk_read_speed_bps;
+            global_disk_write_bps += torrent.disk_write_speed_bps;
+
+            torrent.bytes_read_this_tick = 0;
+            torrent.bytes_written_this_tick = 0;
+
+            torrent.disk_read_thrash_score = calculate_thrash_score(&torrent.disk_read_history_log);
+            torrent.disk_write_thrash_score = calculate_thrash_score(&torrent.disk_write_history_log);
+
+
+            torrent.peer_discovery_history.push(torrent.peers_discovered_this_tick);
+            torrent.peer_connection_history.push(torrent.peers_connected_this_tick);
+            torrent.peer_disconnect_history.push(torrent.peers_disconnected_this_tick);
+            torrent.peers_discovered_this_tick = 0;
+            torrent.peers_connected_this_tick = 0;
+            torrent.peers_disconnected_this_tick = 0;
+            if torrent.peer_discovery_history.len() > 200 {
+                torrent.peer_discovery_history.remove(0);
+                torrent.peer_connection_history.remove(0);
+                torrent.peer_disconnect_history.remove(0);
+            }
+
+            torrent.latest_state.blocks_in_history.push(torrent.latest_state.blocks_in_this_tick);
+            torrent.latest_state.blocks_out_history.push(torrent.latest_state.blocks_out_this_tick);
+            torrent.latest_state.blocks_in_this_tick = 0;
+            torrent.latest_state.blocks_out_this_tick = 0;
+            if torrent.latest_state.blocks_in_history.len() > 200 {
+                torrent.latest_state.blocks_in_history.remove(0);
+                torrent.latest_state.blocks_out_history.remove(0);
+            }
+        }
+
+        // Update the global history with the new, accurate totals
+        self.app_state.disk_read_history.push(global_disk_read_bps);
+        self.app_state.disk_write_history.push(global_disk_write_bps);
+        if self.app_state.disk_read_history.len() > 60 {
+            self.app_state.disk_read_history.remove(0);
+            self.app_state.disk_write_history.remove(0);
+        }
+
+        self.app_state.avg_disk_read_bps = if self.app_state.disk_read_history.is_empty() {
+            0
+        } else {
+            self.app_state.disk_read_history.iter().sum::<u64>() / self.app_state.disk_read_history.len() as u64
+        };
+        self.app_state.avg_disk_write_bps = if self.app_state.disk_write_history.is_empty() {
+            0
+        } else {
+            self.app_state.disk_write_history.iter().sum::<u64>() / self.app_state.disk_write_history.len() as u64
+        };
+
+        let mut total_dl = 0;
+        let mut total_ul = 0;
+        for torrent in self.app_state.torrents.values() {
+            total_dl += torrent.smoothed_download_speed_bps;
+            total_ul += torrent.smoothed_upload_speed_bps;
+        }
+
+        self.app_state.total_download_history.push(total_dl);
+        self.app_state.total_upload_history.push(total_ul);
+        self.app_state.avg_download_history.push(total_dl);
+        self.app_state.avg_upload_history.push(total_ul);
+
+        self.app_state.read_iops = self.app_state.reads_completed_this_tick;
+        self.app_state.write_iops = self.app_state.writes_completed_this_tick;
+        self.app_state.reads_completed_this_tick = 0;
+        self.app_state.writes_completed_this_tick = 0;
+
+        // Record the maximum backoff duration seen during the tick that just ended
+        self.app_state.disk_backoff_history_ms.push_back(self.app_state.max_disk_backoff_this_tick_ms);
+        if self.app_state.disk_backoff_history_ms.len() > SECONDS_HISTORY_MAX {
+            self.app_state.disk_backoff_history_ms.pop_front();
+        }
+
+        // System Runtime calculations ==================================
+        let run_time = self.app_state.run_time;
+        if run_time > 0 && run_time.is_multiple_of(60) {
+            let history_len = self.app_state.disk_backoff_history_ms.len();
+            let start_index = history_len.saturating_sub(60);
+
+            let backoff_slice_ms = &self.app_state.disk_backoff_history_ms.make_contiguous()[start_index..];
+            let max_backoff_in_minute_ms = backoff_slice_ms.iter().max().copied().unwrap_or(0);
+            self.app_state.minute_disk_backoff_history_ms.push_back(max_backoff_in_minute_ms);
+            if self.app_state.minute_disk_backoff_history_ms.len() > MINUTES_HISTORY_MAX {
+               self.app_state.minute_disk_backoff_history_ms.pop_front();
+            }
+
+
+            let seconds_dl = &self.app_state.avg_download_history;
+            let minute_slice_dl = &seconds_dl[seconds_dl.len().saturating_sub(60)..];
+            if !minute_slice_dl.is_empty() {
+                let minute_avg_dl = minute_slice_dl.iter().sum::<u64>() / minute_slice_dl.len() as u64;
+                self.app_state.minute_avg_dl_history.push(minute_avg_dl);
+            }
+
+            let seconds_ul = &self.app_state.avg_upload_history;
+            let minute_slice_ul = &seconds_ul[seconds_ul.len().saturating_sub(60)..];
+            if !minute_slice_ul.is_empty() {
+                let minute_avg_ul = minute_slice_ul.iter().sum::<u64>() / minute_slice_ul.len() as u64;
+                self.app_state.minute_avg_ul_history.push(minute_avg_ul);
+            }
+        }
+        self.app_state.max_disk_backoff_this_tick_ms = 0;
+
+        if self.app_state.avg_download_history.len() > SECONDS_HISTORY_MAX {
+            self.app_state.avg_download_history.remove(0);
+            self.app_state.avg_upload_history.remove(0);
+        }
+        if self.app_state.minute_avg_dl_history.len() > MINUTES_HISTORY_MAX {
+            self.app_state.minute_avg_dl_history.remove(0);
+            self.app_state.minute_avg_ul_history.remove(0);
+        }
+
+        // Check if the primary objective (seeding vs. leeching) has changed.
+        let is_leeching = self.app_state.torrents.values().any(|t| {
+            t.latest_state.number_of_pieces_completed < t.latest_state.number_of_pieces_total
+        });
+        let is_seeding = !is_leeching;
+
+        // If the objective has changed, reset the tuning baseline immediately.
+        if is_seeding != self.app_state.is_seeding {
+            tracing_event!(Level::DEBUG, "Self-Tune: Objective changed to {}. Resetting score.", if is_seeding { "Seeding" } else { "Leeching" });
+            self.app_state.last_tuning_score = 0;
+            self.app_state.current_tuning_score = 0;
+            self.app_state.last_tuning_limits = self.app_state.limits.clone();
+
+            if is_seeding {
+                self.app_state.torrent_sort = (TorrentSortColumn::Up, SortDirection::Descending);
+                self.app_state.peer_sort = (PeerSortColumn::UL, SortDirection::Descending);
+            } else {
+                self.app_state.torrent_sort = (TorrentSortColumn::Down, SortDirection::Descending);
+                self.app_state.peer_sort = (PeerSortColumn::DL, SortDirection::Descending);
+            }
+        }
+        self.app_state.is_seeding = is_seeding;
+        self.app_state.tuning_countdown = self.app_state.tuning_countdown.saturating_sub(1);
+    }
+
+    fn update_torrent_state(&mut self, message: TorrentState) {
+        self.app_state.session_total_downloaded += message.bytes_downloaded_this_tick;
+        self.app_state.session_total_uploaded += message.bytes_uploaded_this_tick;
+
+        let display_state = self
+            .app_state
+            .torrents
+            .entry(message.info_hash)
+            .or_default();
+
+        display_state
+            .latest_state
+            .number_of_successfully_connected_peers =
+            message.number_of_successfully_connected_peers;
+        display_state.latest_state.number_of_pieces_total = message.number_of_pieces_total;
+        display_state.latest_state.number_of_pieces_completed = message.number_of_pieces_completed;
+        display_state.latest_state.download_speed_bps = message.download_speed_bps;
+        display_state.latest_state.upload_speed_bps = message.upload_speed_bps;
+        display_state.latest_state.eta = message.eta;
+        display_state.latest_state.next_announce_in = message.next_announce_in;
+
+        // Also update the name if the manager discovered it from metadata
+        if !message.torrent_name.is_empty() {
+            display_state.latest_state.torrent_name = message.torrent_name;
+        }
+        display_state.latest_state.total_size = message.total_size;
+        display_state.latest_state.bytes_written = message.bytes_written;
+
+        display_state
+            .download_history
+            .push(display_state.latest_state.download_speed_bps);
+        display_state
+            .upload_history
+            .push(display_state.latest_state.upload_speed_bps);
+
+        if display_state.download_history.len() > 200 {
+            display_state.download_history.remove(0);
+            display_state.upload_history.remove(0);
+        }
+
+        if self.app_state.total_download_history.len() > 200 {
+            self.app_state.total_download_history.remove(0);
+            self.app_state.total_upload_history.remove(0);
+        }
+
+        display_state.smoothed_download_speed_bps = display_state.latest_state.download_speed_bps;
+        display_state.smoothed_upload_speed_bps = display_state.latest_state.upload_speed_bps;
+        display_state.latest_state.peers = message.peers;
+
+        display_state.latest_state.activity_message = message.activity_message;
+
+        let current_swarm_availability = aggregate_peers_to_availability(
+            &display_state.latest_state.peers,
+            display_state.latest_state.number_of_pieces_total as usize,
+        );
+        if !display_state.latest_state.peers.is_empty() && !current_swarm_availability.is_empty() {
+            display_state
+                .swarm_availability_history
+                .push(current_swarm_availability);
+        }
+        if display_state.swarm_availability_history.len() > 200 {
+            display_state.swarm_availability_history.remove(0);
+        }
+    }
+
+    async fn tuning_resource_limits(&mut self) {
+        self.app_state.tuning_countdown = 90;
+        let history = if !self.app_state.is_seeding {
+            &self.app_state.avg_download_history
+        } else {
+            &self.app_state.avg_upload_history
+        };
+
+        let relevant_history = &history[history.len().saturating_sub(60)..];
+        let new_raw_score = if relevant_history.is_empty() {
+            0
+        } else {
+            relevant_history.iter().sum::<u64>() / relevant_history.len() as u64
+        };
+        let current_scpb = self.app_state.global_disk_thrash_score;
+        let scpb_max = self.app_state.adaptive_max_scpb;
+        let penalty_factor = (current_scpb / scpb_max - 1.0).max(0.0);
+        let new_score = (new_raw_score as f64 / (1.0 + penalty_factor)) as u64;
+        self.app_state.current_tuning_score = new_score;
+
+        const BASELINE_ALPHA: f64 = 0.1; // Slower-moving average
+        let new_score_f64 = new_score as f64;
+        if self.app_state.baseline_speed_ema == 0.0 {
+            self.app_state.baseline_speed_ema = new_score_f64;
+        } else {
+            self.app_state.baseline_speed_ema = (new_score_f64 * BASELINE_ALPHA)
+                + (self.app_state.baseline_speed_ema * (1.0 - BASELINE_ALPHA));
+        }
+
+        let best_score = self.app_state.last_tuning_score;
+        if new_score > best_score {
+            self.app_state.last_tuning_score = new_score;
+            self.app_state.last_tuning_limits = self.app_state.limits.clone();
+            tracing_event!(Level::DEBUG, "Self-Tune: SUCCESS. New best score: {} (raw: {}, penalty: {:.2}x)", new_score, new_raw_score, penalty_factor);
+        } else {
+            self.app_state.limits = self.app_state.last_tuning_limits.clone();
+
+            let baseline_u64 = self.app_state.baseline_speed_ema as u64;
+
+            const REALITY_CHECK_FACTOR: f64 = 2.0;
+            if best_score > 10_000
+                && best_score
+                    > (self.app_state.baseline_speed_ema * REALITY_CHECK_FACTOR) as u64
+            {
+                self.app_state.last_tuning_score = baseline_u64;
+                tracing_event!(Level::DEBUG, "Self-Tune: REALITY CHECK. Score {} (raw: {}) failed. Old best {} is stale vs. baseline {}. Resetting best to baseline.", new_score, new_raw_score, best_score, baseline_u64);
+            } else {
+                tracing_event!(Level::DEBUG, "Self-Tune: REVERTING. Score {} (raw: {}, penalty: {:.2}x) was not better than {}. (Baseline is {})", new_score, new_raw_score, penalty_factor, best_score, baseline_u64);
+            }
+
+            let _ = self.resource_manager
+                .update_limits(self.app_state.limits.clone().into_map())
+                .await;
+        }
+
+        let (next_limits, desc) = make_random_adjustment(self.app_state.limits.clone());
+        self.app_state.limits = next_limits;
+
+        tracing_event!(Level::DEBUG, "Self-Tune: Trying next change... {}", desc);
+        let _ = self.resource_manager
+            .update_limits(self.app_state.limits.clone().into_map())
+            .await;
+    }
+
+    fn save_state_to_disk(&mut self) {
+        self.client_configs.lifetime_downloaded = self.app_state.lifetime_downloaded_from_config
+            + self.app_state.session_total_downloaded;
+        self.client_configs.lifetime_uploaded =
+            self.app_state.lifetime_uploaded_from_config + self.app_state.session_total_uploaded;
+
+        self.client_configs.torrent_sort_column = self.app_state.torrent_sort.0;
+        self.client_configs.torrent_sort_direction = self.app_state.torrent_sort.1;
+        self.client_configs.peer_sort_column = self.app_state.peer_sort.0;
+        self.client_configs.peer_sort_direction = self.app_state.peer_sort.1;
+
+        let old_validation_statuses: HashMap<String, bool> = self
+            .client_configs
+            .torrents
+            .iter()
+            .map(|cfg| (cfg.torrent_or_magnet.clone(), cfg.validation_status))
+            .collect();
+
+        self.client_configs.torrents = self
+            .app_state
+            .torrents
+            .values()
+            .map(|torrent| {
+                let torrent_state = &torrent.latest_state;
+
+                let is_complete = torrent_state.number_of_pieces_total > 0
+                    && torrent_state.number_of_pieces_total
+                        == torrent_state.number_of_pieces_completed;
+
+                let old_status = old_validation_statuses
+                    .get(&torrent_state.torrent_or_magnet)
+                    .cloned()
+                    .unwrap_or(false);
+
+                let final_validation_status = if is_complete { true } else { old_status };
+
+                TorrentSettings {
+                    torrent_or_magnet: torrent_state.torrent_or_magnet.clone(),
+                    name: torrent_state.torrent_name.clone(),
+                    validation_status: final_validation_status,
+                    download_path: torrent_state.download_path.clone(),
+                    torrent_control_state: torrent_state.torrent_control_state.clone(),
+                }
+            })
+            .collect();
+
+        if let Err(e) = save_settings(&self.client_configs) {
+            tracing_event!(Level::ERROR, "Failed to auto-save settings: {}", e);
+        } else {
+            tracing_event!(Level::DEBUG, "Settings auto-saved successfully.");
+        }
     }
 
     // Constantly ensures all table selected indices are in-bounds
