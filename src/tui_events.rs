@@ -803,7 +803,7 @@ mod tests {
     // --- Corrected Imports ---
     // We import the specific structs our AppState actually stores
     use crate::app::{AppState, PeerInfo, SelectedHeader, TorrentDisplayState, TorrentState};
-    use crate::config::{PeerSortColumn, TorrentSortColumn};
+    use crate::config::TorrentSortColumn;
     use ratatui::crossterm::event::KeyCode;
 
     /// Creates a mock TorrentState with a specific number of peers
