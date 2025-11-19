@@ -108,9 +108,6 @@ const MAX_VALIDATION_ATTEMPTS: u32 = MAX_PIECE_WRITE_ATTEMPTS;
 const BASE_BACKOFF_MS: u64 = 1000;
 const JITTER_MS: u64 = 100;
 
-const BITS_PER_BYTE: u64 = 8;
-const SMOOTHING_PERIOD_MS: f64 = 5000.0;
-
 pub struct TorrentManager {
     state: TorrentState,
 
@@ -1030,7 +1027,7 @@ impl TorrentManager {
         }
     }
 
-    fn send_metrics(&mut self, actual_ms_since_last_tick: u64) {
+    fn send_metrics(&mut self, _actual_ms_since_last_tick: u64, bytes_dl: u64, bytes_ul: u64) {
         if let Some(ref torrent) = self.state.torrent {
             let multi_file_info = self.multi_file_info.as_ref().expect("File info not ready.");
 
@@ -1043,31 +1040,12 @@ impl TorrentManager {
                     t.saturating_duration_since(Instant::now())
                 });
 
-            let bytes_downloaded_this_tick = self.state.bytes_downloaded_in_interval;
-            let bytes_uploaded_this_tick = self.state.bytes_uploaded_in_interval;
-            self.state.bytes_downloaded_in_interval = 0;
-            self.state.bytes_uploaded_in_interval = 0;
 
-            let scaling_factor = if actual_ms_since_last_tick > 0 {
-                1000.0 / actual_ms_since_last_tick as f64
-            } else {
-                1.0
-            };
-            let dt = actual_ms_since_last_tick as f64;
-            let alpha = 1.0 - (-dt / SMOOTHING_PERIOD_MS).exp();
-            let inst_total_dl_speed =
-                (bytes_downloaded_this_tick * BITS_PER_BYTE) as f64 * scaling_factor;
-            let inst_total_ul_speed =
-                (bytes_uploaded_this_tick * BITS_PER_BYTE) as f64 * scaling_factor;
-            let new_total_avg_dl =
-                (inst_total_dl_speed * alpha) + (self.state.total_dl_prev_avg_ema * (1.0 - alpha));
-            self.state.total_dl_prev_avg_ema = new_total_avg_dl;
-            let smoothed_total_dl_speed = new_total_avg_dl as u64;
-
-            let new_total_avg_ul =
-                (inst_total_ul_speed * alpha) + (self.state.total_ul_prev_avg_ema * (1.0 - alpha));
-            self.state.total_ul_prev_avg_ema = new_total_avg_ul;
-            let smoothed_total_ul_speed = new_total_avg_ul as u64;
+            let smoothed_total_dl_speed = self.state.total_dl_prev_avg_ema as u64;
+            let smoothed_total_ul_speed = self.state.total_ul_prev_avg_ema as u64;
+            
+            let bytes_downloaded_this_tick = bytes_dl;
+            let bytes_uploaded_this_tick = bytes_ul;
 
             let activity_message =
                 self.generate_activity_message(smoothed_total_dl_speed, smoothed_total_ul_speed);
@@ -1338,31 +1316,17 @@ impl TorrentManager {
                         }
                     }
 
-                    let scaling_factor = if actual_ms > 0 {
-                        1000.0 / actual_ms as f64
-                    } else {
-                        1.0
-                    };
-                    let dt = actual_ms as f64;
-                    let alpha = 1.0 - (-dt / SMOOTHING_PERIOD_MS).exp();
 
-                    for peer in self.state.peers.values_mut() {
-                        let inst_dl_speed = (peer.bytes_downloaded_in_tick * BITS_PER_BYTE) as f64 * scaling_factor;
-                        let inst_ul_speed = (peer.bytes_uploaded_in_tick * BITS_PER_BYTE) as f64 * scaling_factor;
-
-                        let new_avg_dl = (inst_dl_speed * alpha) + (peer.prev_avg_dl_ema * (1.0 - alpha));
-                        peer.prev_avg_dl_ema = new_avg_dl;
-                        peer.download_speed_bps = new_avg_dl as u64;
-
-                        let new_avg_ul = (inst_ul_speed * alpha) + (peer.prev_avg_ul_ema * (1.0 - alpha));
-                        peer.prev_avg_ul_ema = new_avg_ul;
-                        peer.upload_speed_bps = new_avg_ul as u64;
-
-                        peer.bytes_downloaded_in_tick = 0;
-                        peer.bytes_uploaded_in_tick = 0;
+                    let action = crate::torrent_manager::state::Action::Tick { dt_ms: actual_ms };
+                    let effects = self.state.update(action);
+                    for effect in effects {
+                        match effect {
+                            crate::torrent_manager::state::Effect::EmitMetrics { bytes_dl, bytes_ul } => {
+                                self.send_metrics(actual_ms, bytes_dl, bytes_ul);
+                            }
+                            _ => {}
+                        }
                     }
-
-                    self.send_metrics(actual_ms);
                 }
 
                  _ = choke_timer.tick(), if !self.state.is_paused => {
@@ -1415,7 +1379,7 @@ impl TorrentManager {
 
                             self.state.bytes_downloaded_in_interval = 0;
                             self.state.bytes_uploaded_in_interval = 0;
-                            self.send_metrics(data_rate_ms);
+                            self.send_metrics(data_rate_ms, 0, 0);
 
                             event!(Level::INFO, info_hash = %BASE32.encode(&self.state.info_hash), "Torrent paused. Disconnected from all peers.");
 

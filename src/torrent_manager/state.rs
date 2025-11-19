@@ -16,7 +16,28 @@ use crate::torrent_file::Torrent;
 use crate::torrent_manager::piece_manager::PieceManager;
 use std::collections::{HashMap, HashSet};
 
+use crate::torrent_manager::ManagerCommand;
 
+#[derive(Debug)]
+pub enum Action {
+    Tick { dt_ms: u64 },
+    PeerEvent(TorrentCommand),
+    ManagerEvent(ManagerCommand),
+}
+
+#[derive(Debug)]
+#[must_use]
+pub enum Effect {
+    DoNothing,
+    EmitMetrics {
+        bytes_dl: u64,
+        bytes_ul: u64,
+    },
+    SendToPeer { peer_id: String, cmd: TorrentCommand },
+}
+
+const BITS_PER_BYTE: u64 = 8;
+const SMOOTHING_PERIOD_MS: f64 = 5000.0;
 const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 4;
 
 #[derive(Debug)]
@@ -99,6 +120,63 @@ impl TorrentState {
             torrent_validation_status,
             optimistic_unchoke_timer: Some(Instant::now()),
             ..Default::default()
+        }
+    }
+
+    pub fn update(&mut self, action: Action) -> Vec<Effect> {
+        match action {
+            Action::Tick { dt_ms } => {
+                // 1. Calculate Scaling Factors
+                let scaling_factor = if dt_ms > 0 {
+                    1000.0 / dt_ms as f64
+                } else {
+                    1.0
+                };
+                let dt = dt_ms as f64;
+                let alpha = 1.0 - (-dt / SMOOTHING_PERIOD_MS).exp();
+
+                // 2. Update Global Session Speeds
+                // Note: We use the counters accumulated in self
+                let inst_total_dl_speed = (self.bytes_downloaded_in_interval * BITS_PER_BYTE) as f64 * scaling_factor;
+                let inst_total_ul_speed = (self.bytes_uploaded_in_interval * BITS_PER_BYTE) as f64 * scaling_factor;
+                
+                let dl_tick = self.bytes_downloaded_in_interval;
+                let ul_tick = self.bytes_uploaded_in_interval;
+
+                // Reset the interval counters immediately
+                self.bytes_downloaded_in_interval = 0;
+                self.bytes_uploaded_in_interval = 0;
+
+                // Apply Smoothing (EMA)
+                self.total_dl_prev_avg_ema = (inst_total_dl_speed * alpha) + (self.total_dl_prev_avg_ema * (1.0 - alpha));
+                self.total_ul_prev_avg_ema = (inst_total_ul_speed * alpha) + (self.total_ul_prev_avg_ema * (1.0 - alpha));
+
+                // 3. Update Per-Peer Speeds
+                for peer in self.peers.values_mut() {
+                    let inst_dl_speed = (peer.bytes_downloaded_in_tick * BITS_PER_BYTE) as f64 * scaling_factor;
+                    let inst_ul_speed = (peer.bytes_uploaded_in_tick * BITS_PER_BYTE) as f64 * scaling_factor;
+
+                    // Update Peer EMA
+                    peer.prev_avg_dl_ema = (inst_dl_speed * alpha) + (peer.prev_avg_dl_ema * (1.0 - alpha));
+                    peer.download_speed_bps = peer.prev_avg_dl_ema as u64;
+
+                    peer.prev_avg_ul_ema = (inst_ul_speed * alpha) + (peer.prev_avg_ul_ema * (1.0 - alpha));
+                    peer.upload_speed_bps = peer.prev_avg_ul_ema as u64;
+
+                    // Reset peer tick counters
+                    peer.bytes_downloaded_in_tick = 0;
+                    peer.bytes_uploaded_in_tick = 0;
+                }
+
+                // 4. Return the output effect: "Go update the UI"
+                vec![Effect::EmitMetrics {
+                    bytes_dl: dl_tick,
+                    bytes_ul: ul_tick,
+                }]
+            }
+
+            // We will handle other actions later
+            _ => vec![Effect::DoNothing],
         }
     }
 }
