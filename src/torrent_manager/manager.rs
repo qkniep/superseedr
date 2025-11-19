@@ -16,10 +16,13 @@ use crate::torrent_manager::DiskIoOperation;
 use crate::config::Settings;
 
 use crate::torrent_manager::piece_manager::PieceStatus;
+
+use crate::torrent_manager::state::Effect;
 use crate::torrent_manager::state::ChokeStatus;
 use crate::torrent_manager::state::PeerState;
 use crate::torrent_manager::state::TorrentActivity;
 use crate::torrent_manager::state::TorrentState;
+use crate::torrent_manager::state::Action;
 
 use crate::torrent_manager::state::TorrentStatus;
 use crate::torrent_manager::state::TrackerState;
@@ -45,7 +48,6 @@ use crate::tracker::client::{
     announce_completed, announce_periodic, announce_started, announce_stopped,
 };
 
-use rand::prelude::IndexedRandom;
 use rand::Rng;
 
 use crate::torrent_file::Torrent;
@@ -379,6 +381,32 @@ impl TorrentManager {
         })
     }
 
+    fn apply_action(&mut self, action: Action) {
+        // 1. The Brain decides (Borrows self.state)
+        // The borrow of self.state ENDS here because 'effects' is an owned Vec.
+        let effects = self.state.update(action);
+
+        // 2. The Muscle executes (Borrows self)
+        for effect in effects {
+            self.handle_effect(effect);
+        }
+    }
+
+    /// The "Muscle": Executes a single side-effect
+    fn handle_effect(&mut self, effect: Effect) {
+        match effect {
+            Effect::DoNothing => {}
+            Effect::EmitMetrics { bytes_dl, bytes_ul } => {
+                self.send_metrics(0, bytes_dl, bytes_ul);
+            }
+            Effect::SendToPeer { peer_id, cmd } => {
+                if let Some(peer) = self.state.peers.get(&peer_id) {
+                    let _ = peer.peer_tx.try_send(cmd);
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "dht")]
     fn spawn_dht_lookup_task(&mut self) {
         if let Some(handle) = self.dht_task_handle.take() {
@@ -432,66 +460,6 @@ impl TorrentManager {
             biased; // Prioritize shutdown
             _ = shutdown_rx.recv() => Err(()),
             _ = tokio::time::sleep(duration) => Ok(()),
-        }
-    }
-
-    fn recalculate_chokes(&mut self) {
-        // Implements BitTorrent's choking algorithm to manage upload slots.
-        // 1. Sort interested peers by their download rate (or upload rate if seeding).
-        // 2. Unchoke the top N peers (`upload_slots`).
-        // 3. Every 30 seconds, optimistically unchoke one additional random peer.
-        // 4. Choke all other interested peers.
-        let mut interested_peers: Vec<_> = self
-            .state.peers
-            .values_mut()
-            .filter(|p| p.peer_is_interested_in_us)
-            .collect();
-
-        if self.state.torrent_status == TorrentStatus::Done {
-            interested_peers
-                .sort_by(|a, b| b.bytes_uploaded_to_peer.cmp(&a.bytes_uploaded_to_peer));
-        } else {
-            interested_peers.sort_by(|a, b| {
-                b.bytes_downloaded_from_peer
-                    .cmp(&a.bytes_downloaded_from_peer)
-            });
-        }
-
-        let mut unchoke_candidates: HashSet<String> = interested_peers
-            .iter()
-            .take(self.settings.upload_slots)
-            .map(|p| p.ip_port.clone())
-            .collect();
-
-        if self.state.optimistic_unchoke_timer.map_or(false, |t| t.elapsed() > Duration::from_secs(30)) {
-            let optimistic_candidates: Vec<_> = interested_peers
-                .iter()
-                .filter(|p| !unchoke_candidates.contains(&p.ip_port))
-                .collect();
-
-            if let Some(optimistic_peer) = optimistic_candidates.choose(&mut rand::rng()) {
-                unchoke_candidates.insert(optimistic_peer.ip_port.clone());
-            }
-            self.state.optimistic_unchoke_timer = Some(Instant::now());
-        }
-
-        for (peer_id, peer) in self.state.peers.iter_mut() {
-            if unchoke_candidates.contains(peer_id) {
-                if peer.am_choking == ChokeStatus::Choke {
-                    peer.am_choking = ChokeStatus::Unchoke;
-                    let peer_tx = peer.peer_tx.clone();
-                    let _ = peer_tx.try_send(TorrentCommand::PeerUnchoke);
-                }
-            } else if peer.am_choking == ChokeStatus::Unchoke {
-                peer.am_choking = ChokeStatus::Choke;
-                let peer_tx = peer.peer_tx.clone();
-                let _ = peer_tx.try_send(TorrentCommand::PeerChoke);
-            }
-        }
-
-        for peer in self.state.peers.values_mut() {
-            peer.bytes_downloaded_from_peer = 0;
-            peer.bytes_uploaded_to_peer = 0;
         }
     }
 
@@ -1316,26 +1284,18 @@ impl TorrentManager {
                         }
                     }
 
-
-                    let action = crate::torrent_manager::state::Action::Tick { dt_ms: actual_ms };
-                    let effects = self.state.update(action);
-                    for effect in effects {
-                        match effect {
-                            crate::torrent_manager::state::Effect::EmitMetrics { bytes_dl, bytes_ul } => {
-                                self.send_metrics(actual_ms, bytes_dl, bytes_ul);
-                            }
-                            _ => {}
-                        }
-                    }
+                    self.apply_action(Action::Tick { dt_ms: actual_ms });
                 }
 
-                 _ = choke_timer.tick(), if !self.state.is_paused => {
-
+                _ = choke_timer.tick(), if !self.state.is_paused => {
                     if self.state.torrent_status != TorrentStatus::Done {
                         let peer_bitfields = self.state.peers.values().map(|p| &p.bitfield);
                         self.state.piece_manager.update_rarity(peer_bitfields);
                     }
-                    self.recalculate_chokes();
+
+                    self.apply_action(Action::RecalculateChokes { 
+                        upload_slots: self.settings.upload_slots 
+                    });
                 }
 
                 _ = pex_timer.tick(), if !self.state.is_paused => {

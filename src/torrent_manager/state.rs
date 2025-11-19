@@ -18,9 +18,12 @@ use std::collections::{HashMap, HashSet};
 
 use crate::torrent_manager::ManagerCommand;
 
+use rand::prelude::IndexedRandom;
+
 #[derive(Debug)]
 pub enum Action {
     Tick { dt_ms: u64 },
+    RecalculateChokes { upload_slots: usize },
     PeerEvent(TorrentCommand),
     ManagerEvent(ManagerCommand),
 }
@@ -118,7 +121,7 @@ impl TorrentState {
             piece_manager,
             trackers,
             torrent_validation_status,
-            optimistic_unchoke_timer: Some(Instant::now()),
+            optimistic_unchoke_timer: Some(Instant::now().checked_sub(Duration::from_secs(31)).unwrap_or(Instant::now())),
             ..Default::default()
         }
     }
@@ -173,6 +176,82 @@ impl TorrentState {
                     bytes_dl: dl_tick,
                     bytes_ul: ul_tick,
                 }]
+            }
+
+            Action::RecalculateChokes { upload_slots } => {
+                let mut effects = Vec::new();
+
+                // 1. Identify Interested Peers
+                // We collect mutable references so we can modify them later
+                let mut interested_peers: Vec<&mut PeerState> = self
+                    .peers
+                    .values_mut()
+                    .filter(|p| p.peer_is_interested_in_us)
+                    .collect();
+
+                // 2. Sort by Speed
+                // If we are seeding (Done), sort by Upload to us.
+                // If we are leeching, sort by Download from us (Reciprocity).
+                if self.torrent_status == TorrentStatus::Done {
+                    interested_peers.sort_by(|a, b| b.bytes_uploaded_to_peer.cmp(&a.bytes_uploaded_to_peer));
+                } else {
+                    interested_peers.sort_by(|a, b| b.bytes_downloaded_from_peer.cmp(&a.bytes_downloaded_from_peer));
+                }
+
+                // 3. Select Top N Peers (Standard Unchoke)
+                let mut unchoke_candidates: HashSet<String> = interested_peers
+                    .iter()
+                    .take(upload_slots)
+                    .map(|p| p.ip_port.clone())
+                    .collect();
+
+                // 4. Optimistic Unchoke (Random)
+                // Logic: Every 30 seconds, pick a random interested peer who isn't already unchoked
+                if self.optimistic_unchoke_timer.map_or(false, |t| t.elapsed() > Duration::from_secs(30)) {
+                    let optimistic_candidates: Vec<&mut PeerState> = interested_peers
+                        .into_iter()
+                        .filter(|p| !unchoke_candidates.contains(&p.ip_port))
+                        .collect();
+
+                    if let Some(optimistic_peer) = optimistic_candidates.choose(&mut rand::rng()) {
+                        unchoke_candidates.insert(optimistic_peer.ip_port.clone());
+                    }
+                    
+                    self.optimistic_unchoke_timer = Some(Instant::now());
+                }
+
+
+                // 5. Apply Changes & Generate Effects
+                // We iterate over ALL peers to ensure we choke those who didn't make the cut
+                for peer in self.peers.values_mut() {
+                    if unchoke_candidates.contains(&peer.ip_port) {
+                        // If they should be unchoked...
+                        if peer.am_choking == ChokeStatus::Choke {
+                            peer.am_choking = ChokeStatus::Unchoke;
+                            // EFFECT: Tell the networking layer to send "Unchoke"
+                            effects.push(Effect::SendToPeer {
+                                peer_id: peer.ip_port.clone(),
+                                cmd: TorrentCommand::PeerUnchoke
+                            });
+                        }
+                    } else {
+                        // If they should be choked...
+                        if peer.am_choking == ChokeStatus::Unchoke {
+                            peer.am_choking = ChokeStatus::Choke;
+                            // EFFECT: Tell the networking layer to send "Choke"
+                            effects.push(Effect::SendToPeer {
+                                peer_id: peer.ip_port.clone(),
+                                cmd: TorrentCommand::PeerChoke
+                            });
+                        }
+                    }
+                    
+                    // 6. Reset Interval Counters (Reciprocity logic relies on "bytes since last choke calc")
+                    peer.bytes_downloaded_from_peer = 0;
+                    peer.bytes_uploaded_to_peer = 0;
+                }
+
+                effects
             }
 
             // We will handle other actions later
