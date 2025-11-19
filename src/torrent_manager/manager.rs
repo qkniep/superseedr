@@ -1825,20 +1825,19 @@ impl TorrentManager {
                         },
 
                         TorrentCommand::PieceWrittenToDisk { peer_id, piece_index } => {
-                            for peer_id_to_cancel in self.state.piece_manager.mark_as_complete(piece_index) {
+                            let peers_to_cancel = self.state.piece_manager.mark_as_complete(piece_index);
+
+                            self.apply_action(Action::CheckCompletion);
+
+                            for peer_id_to_cancel in peers_to_cancel {
                                 if peer_id_to_cancel != peer_id {
                                     if let Some(peer) = self.state.peers.get_mut(&peer_id_to_cancel) {
-                                        event!(
-                                            Level::DEBUG,
-                                            "ENDGAME: Cancelling redundant request for piece {} from {}",
-                                            piece_index,
-                                            peer_id_to_cancel
-                                        );
+                                        event!(Level::DEBUG, "Cancelling redundant request...");
                                         let peer_tx = peer.peer_tx.clone();
                                         peer.pending_requests.remove(&piece_index);
                                         let _ = peer_tx.try_send(TorrentCommand::Cancel(piece_index));
                                     }
-                                    self.apply_action(Action::AssignWork { peer_id: peer_id.clone() });
+                                    self.apply_action(Action::AssignWork { peer_id: peer_id_to_cancel });
                                 }
                             }
 
@@ -1846,9 +1845,9 @@ impl TorrentManager {
                                 let peer_tx = peer.peer_tx.clone();
                                 let _ = peer_tx.try_send(TorrentCommand::PieceAcquired(piece_index));
                             }
+                            
+                        }
 
-                            self.apply_action(Action::CheckCompletion);
-                        },
                         TorrentCommand::PieceWriteFailed { piece_index } => {
                             event!(Level::WARN, piece = piece_index, "Re-queuing piece for download after disk write failure.");
                             self.state.piece_manager.requeue_pending_to_need(piece_index);
