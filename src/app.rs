@@ -333,7 +333,7 @@ pub struct PeerInfo {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct TorrentState {
+pub struct TorrentMetrics {
     pub torrent_control_state: TorrentControlState,
     pub info_hash: Vec<u8>,
     pub torrent_or_magnet: String,
@@ -361,7 +361,7 @@ pub struct TorrentState {
 
 #[derive(Default, Debug)]
 pub struct TorrentDisplayState {
-    pub latest_state: TorrentState,
+    pub latest_state: TorrentMetrics,
     pub download_history: Vec<u64>,
     pub upload_history: Vec<u64>,
 
@@ -491,8 +491,8 @@ pub struct App {
     pub global_dl_bucket: Arc<Mutex<TokenBucket>>,
     pub global_ul_bucket: Arc<Mutex<TokenBucket>>,
 
-    pub torrent_tx: broadcast::Sender<TorrentState>,
-    pub torrent_rx: broadcast::Receiver<TorrentState>,
+    pub torrent_tx: broadcast::Sender<TorrentMetrics>,
+    pub torrent_rx: broadcast::Receiver<TorrentMetrics>,
     pub manager_event_tx: mpsc::Sender<ManagerEvent>,
     pub manager_event_rx: mpsc::Receiver<ManagerEvent>,
     pub app_command_tx: mpsc::Sender<AppCommand>,
@@ -510,7 +510,7 @@ impl App {
         let (manager_event_tx, manager_event_rx) = mpsc::channel::<ManagerEvent>(100);
         let (app_command_tx, app_command_rx) = mpsc::channel::<AppCommand>(10);
         let (tui_event_tx, tui_event_rx) = mpsc::channel::<CrosstermEvent>(100);
-        let (torrent_tx, torrent_rx) = broadcast::channel::<TorrentState>(100);
+        let (torrent_tx, torrent_rx) = broadcast::channel::<TorrentMetrics>(100);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let (limits, system_warning) = calculate_adaptive_limits(&client_configs);
@@ -1676,7 +1676,7 @@ impl App {
         self.app_state.tuning_countdown = self.app_state.tuning_countdown.saturating_sub(1);
     }
 
-    fn update_torrent_state(&mut self, result: Result<TorrentState, broadcast::error::RecvError>) {
+    fn update_torrent_state(&mut self, result: Result<TorrentMetrics, broadcast::error::RecvError>) {
 
         match result {
             Ok(message) => {
@@ -2065,7 +2065,7 @@ impl App {
         }
 
         let placeholder_state = TorrentDisplayState {
-            latest_state: TorrentState {
+            latest_state: TorrentMetrics {
                 torrent_control_state: torrent_control_state.clone(),
                 info_hash: info_hash.clone(),
                 torrent_or_magnet: permanent_torrent_path.to_string_lossy().to_string(),
@@ -2173,7 +2173,7 @@ impl App {
         }
 
         let placeholder_state = TorrentDisplayState {
-            latest_state: TorrentState {
+            latest_state: TorrentMetrics {
                 torrent_control_state: torrent_control_state.clone(),
                 info_hash: info_hash.clone(),
                 torrent_or_magnet: magnet_link.clone(),

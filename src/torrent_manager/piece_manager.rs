@@ -10,19 +10,21 @@ use tracing::{event, Level};
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-#[derive(PartialEq, Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub enum PieceStatus {
+    #[default]
     Need,
     Done,
 }
 
+#[derive(Default, Debug)]
 pub struct PieceAssembler {
     buffer: Vec<u8>,
-    received_blocks: HashSet<u32>, // Store block offsets
+    received_blocks: HashSet<u32>,
     total_blocks: usize,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct PieceManager {
     pub bitfield: Vec<PieceStatus>,
     pub need_queue: Vec<u32>,

@@ -9,10 +9,13 @@ use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Semaphore;
 
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::mem::Discriminant;
 use std::sync::Arc;
+
+use crate::torrent_file::Torrent;
+use crate::torrent_manager::piece_manager::PieceManager;
+use std::collections::{HashMap, HashSet};
+
 
 const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 4;
 
@@ -23,8 +26,9 @@ pub struct TrackerState {
     pub seeding_interval: Option<Duration>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum TorrentActivity {
+    #[default]
     Initializing,
     Paused,
     ConnectingToPeers,
@@ -37,8 +41,9 @@ pub enum TorrentActivity {
     SearchingDht,
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Default)]
 pub enum TorrentStatus {
+    #[default]
     Standard,
     Endgame,
     Done,
@@ -51,6 +56,54 @@ pub enum ChokeStatus {
     Pending,
 }
 
+#[derive(Debug, Default)]
+pub struct TorrentState {
+    pub info_hash: Vec<u8>,
+    pub torrent: Option<Torrent>,
+    pub torrent_metadata_length: Option<i64>,
+    pub is_paused: bool,
+    pub torrent_status: TorrentStatus,
+    pub torrent_validation_status: bool,
+    pub last_activity: TorrentActivity,
+    pub has_made_first_connection: bool,
+    pub session_total_uploaded: u64,
+    pub session_total_downloaded: u64,
+    pub bytes_downloaded_in_interval: u64,
+    pub bytes_uploaded_in_interval: u64,
+    pub total_dl_prev_avg_ema: f64,
+    pub total_ul_prev_avg_ema: f64,
+    pub number_of_successfully_connected_peers: usize,
+    pub peers: HashMap<String, PeerState>,
+    pub piece_manager: PieceManager,
+    pub trackers: HashMap<String, TrackerState>,
+    pub timed_out_peers: HashMap<String, (u32, Instant)>,
+    pub last_known_peers: HashSet<String>,
+    pub optimistic_unchoke_timer: Option<Instant>,
+}
+
+impl TorrentState {
+    pub fn new(
+        info_hash: Vec<u8>,
+        torrent: Option<Torrent>,
+        torrent_metadata_length: Option<i64>,
+        piece_manager: PieceManager,
+        trackers: HashMap<String, TrackerState>,
+        torrent_validation_status: bool,
+    ) -> Self {
+        Self {
+            info_hash,
+            torrent,
+            torrent_metadata_length,
+            piece_manager,
+            trackers,
+            torrent_validation_status,
+            optimistic_unchoke_timer: Some(Instant::now()),
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct PeerState {
     pub ip_port: String,
     pub peer_id: Vec<u8>,

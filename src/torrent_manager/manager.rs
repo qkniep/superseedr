@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::PeerInfo;
-use crate::app::TorrentState;
+use crate::app::TorrentMetrics;
 
 use crate::resource_manager::ResourceManagerClient;
 use crate::resource_manager::ResourceManagerError;
@@ -19,6 +19,7 @@ use crate::torrent_manager::piece_manager::PieceStatus;
 use crate::torrent_manager::state::ChokeStatus;
 use crate::torrent_manager::state::PeerState;
 use crate::torrent_manager::state::TorrentActivity;
+use crate::torrent_manager::state::TorrentState;
 
 use crate::torrent_manager::state::TorrentStatus;
 use crate::torrent_manager::state::TrackerState;
@@ -111,40 +112,22 @@ const BITS_PER_BYTE: u64 = 8;
 const SMOOTHING_PERIOD_MS: f64 = 5000.0;
 
 pub struct TorrentManager {
-    info_hash: Vec<u8>,
-    torrent_metadata_length: Option<i64>,
-    torrent: Option<Torrent>,
+    state: TorrentState,
 
     root_download_path: PathBuf,
     multi_file_info: Option<MultiFileInfo>,
 
-    is_paused: bool,
-
-    trackers: HashMap<String, TrackerState>,
-
-    torrent_status: TorrentStatus,
-
-    number_of_successfully_connected_peers: usize,
-    torrent_validation_status: bool,
-
-    dht_handle: AsyncDht,
-
-    last_known_peers: HashSet<String>,
-
-    peers_map: HashMap<String, PeerState>,
-    timed_out_peers: HashMap<String, (u32, Instant)>,
     torrent_manager_tx: Sender<TorrentCommand>,
+    torrent_manager_rx: Receiver<TorrentCommand>,
 
     #[cfg(feature = "dht")]
     dht_tx: Sender<Vec<SocketAddrV4>>,
     #[cfg(not(feature = "dht"))]
     dht_tx: Sender<()>,
 
-    metrics_tx: broadcast::Sender<TorrentState>,
+    metrics_tx: broadcast::Sender<TorrentMetrics>,
     manager_event_tx: Sender<ManagerEvent>,
     shutdown_tx: broadcast::Sender<()>,
-
-    torrent_manager_rx: Receiver<TorrentCommand>,
 
     #[cfg(feature = "dht")]
     dht_rx: Receiver<Vec<SocketAddrV4>>,
@@ -153,19 +136,6 @@ pub struct TorrentManager {
 
     incoming_peer_rx: Receiver<(TcpStream, Vec<u8>)>,
     manager_command_rx: Receiver<ManagerCommand>,
-
-    session_total_uploaded: u64,
-    session_total_downloaded: u64,
-    bytes_downloaded_in_interval: u64,
-    bytes_uploaded_in_interval: u64,
-    total_dl_prev_avg_ema: f64,
-    total_ul_prev_avg_ema: f64,
-
-    piece_manager: PieceManager,
-
-    optimistic_unchoke_timer: Instant,
-
-    has_made_first_connection: bool,
 
     in_flight_uploads: HashMap<String, HashMap<BlockInfo, JoinHandle<()>>>,
 
@@ -179,16 +149,16 @@ pub struct TorrentManager {
     #[cfg(not(feature = "dht"))]
     dht_task_handle: (),
 
+    dht_handle: AsyncDht,
     settings: Arc<Settings>,
     resource_manager: ResourceManagerClient,
-
-    last_activity: TorrentActivity,
 
     global_dl_bucket: Arc<Mutex<TokenBucket>>,
     global_ul_bucket: Arc<Mutex<TokenBucket>>,
 }
 
 impl TorrentManager {
+
     pub fn from_torrent(
         torrent_parameters: TorrentParameters,
         torrent: Torrent,
@@ -267,20 +237,21 @@ impl TorrentManager {
         )
         .map_err(|e| format!("Failed to initialize file manager: {}", e))?;
 
+        let state = TorrentState::new(
+            info_hash.to_vec(),
+            Some(torrent),
+            Some(torrent_length as i64),
+            piece_manager,
+            trackers,
+            torrent_validation_status,
+        );
+
         Ok(Self {
-            torrent: Some(torrent),
-            torrent_metadata_length: Some(torrent_length as i64),
+            state,
             root_download_path: download_dir,
             multi_file_info: Some(multi_file_info),
-            is_paused: false,
-            info_hash: info_hash.to_vec(),
-            peers_map: HashMap::new(),
-            timed_out_peers: HashMap::new(),
-            trackers,
-            torrent_status: TorrentStatus::Standard,
             torrent_manager_tx,
             torrent_manager_rx,
-            number_of_successfully_connected_peers: 0,
             dht_handle,
             dht_tx,
             dht_rx,
@@ -288,24 +259,12 @@ impl TorrentManager {
             incoming_peer_rx,
             metrics_tx,
             shutdown_tx,
-            torrent_validation_status,
-            session_total_uploaded: 0,
-            session_total_downloaded: 0,
-            bytes_downloaded_in_interval: 0,
-            bytes_uploaded_in_interval: 0,
-            total_dl_prev_avg_ema: 0.0,
-            total_ul_prev_avg_ema: 0.0,
             manager_command_rx,
             manager_event_tx,
-            last_known_peers: HashSet::new(),
-            piece_manager,
-            optimistic_unchoke_timer: Instant::now(),
-            has_made_first_connection: false,
             in_flight_uploads: HashMap::new(),
             dht_trigger_tx,
             settings,
             resource_manager,
-            last_activity: TorrentActivity::Initializing,
             global_dl_bucket,
             global_ul_bucket,
         })
@@ -390,20 +349,21 @@ impl TorrentManager {
         #[cfg(not(feature = "dht"))]
         let dht_trigger_tx = ();
 
+        let state = TorrentState::new(
+            info_hash,
+            None,
+            None,
+            PieceManager::new(),
+            trackers,
+            torrent_validation_status,
+        );
+
         Ok(Self {
-            torrent: None,
-            torrent_metadata_length: None,
+            state,
             root_download_path: download_dir,
             multi_file_info: None,
-            is_paused: false,
-            info_hash,
-            trackers,
-            peers_map: HashMap::new(),
-            timed_out_peers: HashMap::new(),
-            torrent_status: TorrentStatus::Standard,
             torrent_manager_tx,
             torrent_manager_rx,
-            number_of_successfully_connected_peers: 0,
             dht_handle,
             dht_tx,
             dht_rx,
@@ -411,24 +371,12 @@ impl TorrentManager {
             shutdown_tx,
             incoming_peer_rx,
             metrics_tx,
-            torrent_validation_status,
-            session_total_uploaded: 0,
-            session_total_downloaded: 0,
-            bytes_downloaded_in_interval: 0,
-            bytes_uploaded_in_interval: 0,
-            total_dl_prev_avg_ema: 0.0,
-            total_ul_prev_avg_ema: 0.0,
             manager_command_rx,
             manager_event_tx,
-            last_known_peers: HashSet::new(),
-            piece_manager: PieceManager::new(),
-            optimistic_unchoke_timer: Instant::now(),
-            has_made_first_connection: false,
             in_flight_uploads: HashMap::new(),
             dht_trigger_tx,
             settings,
             resource_manager,
-            last_activity: TorrentActivity::Initializing,
             global_dl_bucket,
             global_ul_bucket,
         })
@@ -1001,7 +949,7 @@ impl TorrentManager {
                         let number_of_pieces_total = (torrent.info.pieces.len() / 20) as u32;
                         let number_of_pieces_completed = (piece_index + 1) as u32;
 
-                        let torrent_state = TorrentState {
+                        let torrent_state = TorrentMetrics {
                             info_hash: info_hash_clone,
                             torrent_name: torrent_name_clone,
                             number_of_pieces_total,
@@ -1205,7 +1153,7 @@ impl TorrentManager {
                 (number_of_pieces_completed as u64) * torrent.info.piece_length as u64
             };
 
-            let torrent_state = TorrentState {
+            let torrent_state = TorrentMetrics {
                 info_hash: info_hash_clone,
                 torrent_name: torrent_name_clone,
                 number_of_successfully_connected_peers,
