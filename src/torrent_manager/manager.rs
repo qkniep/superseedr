@@ -17,6 +17,8 @@ use crate::config::Settings;
 
 use crate::torrent_manager::piece_manager::PieceStatus;
 
+
+
 use crate::torrent_manager::state::Effect;
 use crate::torrent_manager::state::ChokeStatus;
 use crate::torrent_manager::state::PeerState;
@@ -24,11 +26,11 @@ use crate::torrent_manager::state::TorrentActivity;
 use crate::torrent_manager::state::TorrentState;
 use crate::torrent_manager::state::Action;
 
+
 use crate::torrent_manager::state::TorrentStatus;
 use crate::torrent_manager::state::TrackerState;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
-
 use crate::torrent_manager::piece_manager::PieceManager;
 
 use crate::errors::StorageError;
@@ -381,18 +383,15 @@ impl TorrentManager {
         })
     }
 
+    // Apply actions to update state and get effects resulting from the mutate.
     fn apply_action(&mut self, action: Action) {
-        // 1. The Brain decides (Borrows self.state)
-        // The borrow of self.state ENDS here because 'effects' is an owned Vec.
         let effects = self.state.update(action);
-
-        // 2. The Muscle executes (Borrows self)
         for effect in effects {
             self.handle_effect(effect);
         }
     }
 
-    /// The "Muscle": Executes a single side-effect
+    // Handles the aftermath of the mutate effects
     fn handle_effect(&mut self, effect: Effect) {
         match effect {
             Effect::DoNothing => {}
@@ -403,6 +402,24 @@ impl TorrentManager {
                 if let Some(peer) = self.state.peers.get(&peer_id) {
                     let _ = peer.peer_tx.try_send(cmd);
                 }
+            }
+            Effect::AnnounceCompleted { url } => {
+                let info_hash = self.state.info_hash.clone();
+                let client_id = self.settings.client_id.clone();
+                let client_port = self.settings.client_port;
+                let uploaded = self.state.session_total_uploaded as usize;
+                let downloaded = self.state.session_total_downloaded as usize;
+
+                tokio::spawn(async move {
+                    let _ = announce_completed(
+                        url,
+                        &info_hash,
+                        client_id,
+                        client_port,
+                        uploaded,
+                        downloaded,
+                    ).await;
+                });
             }
         }
     }
@@ -480,52 +497,6 @@ impl TorrentManager {
         }
 
         bitfield_bytes
-    }
-
-    /// Checks if all pieces have been downloaded. If so, it transitions the torrent
-    /// to the 'Done' state, sends a 'completed' announcement to trackers, and updates
-    /// peer states to 'not interested'.
-    fn check_for_completion(&mut self) {
-        let _torrent = self.state.torrent.clone().expect("Torrent metadata not ready.");
-
-        if self.state.torrent_status != TorrentStatus::Done
-            && self
-                .state.piece_manager
-                .bitfield
-                .iter()
-                .all(|status| *status == PieceStatus::Done)
-        {
-            self.state.torrent_status = TorrentStatus::Done;
-
-            for url in self.state.trackers.keys() {
-                let url_clone = url.clone();
-                let info_hash_clone = self.state.info_hash.clone();
-                let client_port_clone = self.settings.client_port;
-                let client_id_clone = self.settings.client_id.clone();
-                let session_total_uploaded_clone = self.state.session_total_uploaded as usize;
-                let session_total_downloaded_clone = self.state.session_total_downloaded as usize;
-                tokio::spawn(async move {
-                    let _ = announce_completed(
-                        url_clone,
-                        &info_hash_clone,
-                        client_id_clone,
-                        client_port_clone,
-                        session_total_uploaded_clone,
-                        session_total_downloaded_clone,
-                    )
-                    .await;
-                });
-            }
-            for tracker in self.state.trackers.values_mut() {
-                tracker.next_announce_time = Instant::now();
-            }
-
-            for peer in self.state.peers.values_mut() {
-                peer.am_interested = false;
-                let peer_tx_cloned = peer.peer_tx.clone();
-                let _ = peer_tx_cloned.try_send(TorrentCommand::NotInterested);
-            }
-        }
     }
 
     /// Identifies the rarest available piece that a peer has and assigns it to them for download.
@@ -935,8 +906,7 @@ impl TorrentManager {
             }
         }
 
-        self.check_for_completion();
-
+        self.apply_action(Action::CheckCompletion);
         Ok(())
     }
 
@@ -1897,7 +1867,7 @@ impl TorrentManager {
                                         }
                                     });
 
-                                    self.check_for_completion();
+                                    self.apply_action(Action::CheckCompletion);
                                     self.find_and_assign_work(peer_id);
                                 },
                                 Err(_) => {
@@ -1936,7 +1906,7 @@ impl TorrentManager {
                                 let _ = peer_tx.try_send(TorrentCommand::PieceAcquired(piece_index));
                             }
 
-                            self.check_for_completion();
+                            self.apply_action(Action::CheckCompletion);
                         },
                         TorrentCommand::PieceWriteFailed { piece_index } => {
                             event!(Level::WARN, piece = piece_index, "Re-queuing piece for download after disk write failure.");

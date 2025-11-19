@@ -14,11 +14,17 @@ use std::sync::Arc;
 
 use crate::torrent_file::Torrent;
 use crate::torrent_manager::piece_manager::PieceManager;
+use crate::torrent_manager::piece_manager::PieceStatus;
 use std::collections::{HashMap, HashSet};
 
 use crate::torrent_manager::ManagerCommand;
 
 use rand::prelude::IndexedRandom;
+
+
+const BITS_PER_BYTE: u64 = 8;
+const SMOOTHING_PERIOD_MS: f64 = 5000.0;
+const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 4;
 
 #[derive(Debug)]
 pub enum Action {
@@ -26,6 +32,7 @@ pub enum Action {
     RecalculateChokes { upload_slots: usize },
     PeerEvent(TorrentCommand),
     ManagerEvent(ManagerCommand),
+    CheckCompletion,
 }
 
 #[derive(Debug)]
@@ -37,11 +44,9 @@ pub enum Effect {
         bytes_ul: u64,
     },
     SendToPeer { peer_id: String, cmd: TorrentCommand },
+    AnnounceCompleted { url: String }
 }
 
-const BITS_PER_BYTE: u64 = 8;
-const SMOOTHING_PERIOD_MS: f64 = 5000.0;
-const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 4;
 
 #[derive(Debug)]
 pub struct TrackerState {
@@ -254,7 +259,41 @@ impl TorrentState {
                 effects
             }
 
-            // We will handle other actions later
+            Action::CheckCompletion => {
+                if self.torrent_status == TorrentStatus::Done {
+                    return vec![Effect::DoNothing]; 
+                }
+
+                let all_done = self.piece_manager.bitfield.iter().all(|s| *s == PieceStatus::Done);
+                
+                if all_done {
+                    let mut effects = Vec::new();
+                    
+                    self.torrent_status = TorrentStatus::Done;
+
+                    for (url, tracker) in self.trackers.iter_mut() {
+                        tracker.next_announce_time = Instant::now();
+                        effects.push(Effect::AnnounceCompleted { 
+                            url: url.clone() 
+                        });
+                    }
+
+                    for peer in self.peers.values_mut() {
+                        if peer.am_interested {
+                            peer.am_interested = false;
+                            effects.push(Effect::SendToPeer {
+                                peer_id: peer.ip_port.clone(),
+                                cmd: TorrentCommand::NotInterested
+                            });
+                        }
+                    }
+                    
+                    return effects;
+                }
+
+                vec![Effect::DoNothing]
+            }
+
             _ => vec![Effect::DoNothing],
         }
     }
