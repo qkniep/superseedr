@@ -190,10 +190,9 @@ mod tests {
     use crate::errors::StorageError; // As used in your file
     use crate::torrent_file::InfoFile; // As used in your file
 
-    use std::path::PathBuf;
     use tempfile::tempdir;
-    use tokio::fs::{self, File};
-    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
+    use tokio::fs::File;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 
     /// Helper to create a single-file setup
     fn setup_single_file() -> (tempfile::TempDir, MultiFileInfo) {
