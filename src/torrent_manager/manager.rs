@@ -499,65 +499,6 @@ impl TorrentManager {
         bitfield_bytes
     }
 
-    /// Identifies the rarest available piece that a peer has and assigns it to them for download.
-    /// This is the core of the piece selection strategy.
-    fn find_and_assign_work(&mut self, peer_id: String) {
-        if self.state.piece_manager.need_queue.is_empty() && self.state.piece_manager.pending_queue.is_empty() {
-            return;
-        }
-
-        let torrent = self.state.torrent.clone().expect("Torrent metadata not ready.");
-        let multi_file_info = self.multi_file_info.as_ref().expect("File info not ready.");
-
-        if let Some(peer) = self.state.peers.get_mut(&peer_id) {
-            if peer.bitfield.is_empty() || peer.peer_choking == ChokeStatus::Choke {
-                if peer.peer_choking == ChokeStatus::Choke
-                    && !peer.am_interested
-                    && self
-                        .state.piece_manager
-                        .need_queue
-                        .iter()
-                        .any(|&p| peer.bitfield.get(p as usize) == Some(&true))
-                {
-                    peer.am_interested = true;
-                    peer.peer_choking = ChokeStatus::Pending;
-                    let peer_tx_cloned = peer.peer_tx.clone();
-                    let _ = peer_tx_cloned.try_send(TorrentCommand::ClientInterested);
-                }
-                return;
-            }
-
-            let piece_to_assign = self.state.piece_manager.choose_piece_for_peer(
-                &peer.bitfield,
-                &peer.pending_requests,
-                &self.state.torrent_status,
-            );
-
-            if let Some(piece_index) = piece_to_assign {
-                event!(Level::DEBUG, peer = %peer_id, piece = piece_index, "Assigning rarest piece.");
-
-                peer.pending_requests.insert(piece_index);
-                self.state.piece_manager
-                    .mark_as_pending(piece_index, peer_id.clone());
-
-                if self.state.piece_manager.need_queue.is_empty()
-                    && self.state.torrent_status != TorrentStatus::Endgame
-                {
-                    event!(Level::DEBUG, "All pieces requested, entering ENDGAME mode!");
-                    self.state.torrent_status = TorrentStatus::Endgame;
-                }
-
-                let torrent_size = multi_file_info.total_size as i64;
-                let peer_tx_cloned = peer.peer_tx.clone();
-                let _ = peer_tx_cloned.try_send(TorrentCommand::RequestDownload(
-                    piece_index,
-                    torrent.info.piece_length,
-                    torrent_size,
-                ));
-            }
-        }
-    }
-
     /// Initiates a connection to a new peer. It handles peer session creation,
     /// exponential backoff for failed connections, and acquiring connection permits.
     pub async fn connect_to_peer(&mut self, peer_ip: String, peer_port: u16) {
@@ -1248,7 +1189,7 @@ impl TorrentManager {
                         for peer_id in peer_ids {
                             if let Some(peer) = self.state.peers.get(&peer_id) {
                                 if peer.pending_requests.is_empty() {
-                                    self.find_and_assign_work(peer_id.clone());
+                                    self.apply_action(Action::AssignWork { peer_id: peer_id.clone() });
                                 }
                             }
                         }
@@ -1587,7 +1528,7 @@ impl TorrentManager {
                             }
 
                             self.state.number_of_successfully_connected_peers += 1;
-                            self.find_and_assign_work(peer_id);
+                            self.apply_action(Action::AssignWork { peer_id: peer_id.clone() });
                         let _ = self.manager_event_tx.try_send(ManagerEvent::PeerConnected { info_hash: self.state.info_hash.clone() });
                         },
                         TorrentCommand::PeerId(peer_ip_port, peer_id) => {
@@ -1610,7 +1551,7 @@ impl TorrentManager {
                                 if let Some(ref torrent) = self.state.torrent {
                                     let total_pieces = torrent.info.pieces.len() / 20;
                                     peer.bitfield.resize(total_pieces, false);
-                                    self.find_and_assign_work(peer_id);
+                                    self.apply_action(Action::AssignWork { peer_id: peer_id.clone() });
                                 } else {
                                     event!(Level::DEBUG, peer_id = %peer_id, "Storing raw bitfield, metadata not yet available.");
                                 }
@@ -1645,7 +1586,7 @@ impl TorrentManager {
                             if self.state.torrent_status != TorrentStatus::Done {
                                 if let Some(peer) = self.state.peers.get_mut(&peer_id) {
                                     peer.peer_choking = ChokeStatus::Unchoke;
-                                    self.find_and_assign_work(peer_id);
+                                    self.apply_action(Action::AssignWork { peer_id: peer_id.clone() });
                                 }
                             }
                         }
@@ -1729,7 +1670,7 @@ impl TorrentManager {
                                         if let Some(peer) = self.state.peers.get_mut(&peer_id) {
                                             peer.pending_requests.remove(&piece_index);
                                         }
-                                        self.find_and_assign_work(peer_id);
+                                        self.apply_action(Action::AssignWork { peer_id: peer_id.clone() });
                                         continue;
                                     }
 
@@ -1868,7 +1809,7 @@ impl TorrentManager {
                                     });
 
                                     self.apply_action(Action::CheckCompletion);
-                                    self.find_and_assign_work(peer_id);
+                                    self.apply_action(Action::AssignWork { peer_id: peer_id.clone() });
                                 },
                                 Err(_) => {
                                     event!(Level::WARN, piece = piece_index, bad_peer = %peer_id, "Piece validation failed.");
@@ -1897,7 +1838,7 @@ impl TorrentManager {
                                         peer.pending_requests.remove(&piece_index);
                                         let _ = peer_tx.try_send(TorrentCommand::Cancel(piece_index));
                                     }
-                                    self.find_and_assign_work(peer_id_to_cancel);
+                                    self.apply_action(Action::AssignWork { peer_id: peer_id.clone() });
                                 }
                             }
 
