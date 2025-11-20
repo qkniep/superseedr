@@ -1743,6 +1743,7 @@ impl App {
                     display_state.swarm_availability_history.remove(0);
                 }
 
+                self.sort_and_filter_torrent_list();
                 self.app_state.ui_needs_redraw = true;
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
