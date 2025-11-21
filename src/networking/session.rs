@@ -535,7 +535,7 @@ impl PeerSession {
                             self.block_request_joinset = JoinSet::new();
 
                         }
-                        TorrentCommand::PieceAcquired(piece_index) => {
+                        TorrentCommand::Have(_peer_id, piece_index) => {
                                 let _ = self.writer_tx
                                     .try_send(Message::Have(piece_index));
                         }
