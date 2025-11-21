@@ -70,6 +70,8 @@ pub enum TorrentCommand {
     UnresponsivePeer(String),
 
     ValidationComplete(Vec<u32>),
+
+    BlockSent { peer_id: String, bytes: u64 }
 }
 
 pub struct TorrentCommandSummary<'a>(pub &'a TorrentCommand);

@@ -98,11 +98,7 @@ use crate::torrent_manager::TorrentParameters;
 
 const HASH_LENGTH: usize = 20;
 const MAX_BLOCK_SIZE: u32 = 131_072;
-const CLIENT_LEECHING_FALLBACK_INTERVAL: u64 = 60;
-const FALLBACK_ANNOUNCE_INTERVAL: u64 = 1800;
 
-const BASE_COOLDOWN_SECS: u64 = 15;
-const MAX_COOLDOWN_SECS: u64 = 1800;
 const MAX_TIMEOUT_COUNT: u32 = 10;
 
 const MAX_UPLOAD_REQUEST_ATTEMPTS: u32 = 7;
@@ -609,9 +605,14 @@ impl TorrentManager {
                          let _ = peer_tx.try_send(TorrentCommand::Upload(
                             block_info.piece_index, block_info.offset, data
                         ));
-                        let _ = event_tx.try_send(ManagerEvent::BlockSent { info_hash: info_hash.clone() });
+                        
+                        let _ = tx.send(TorrentCommand::BlockSent { 
+                            peer_id: peer_id_clone.clone(), 
+                            bytes: block_info.length as u64 
+                        }).await;
                     }
 
+                    let _ = event_tx.try_send(ManagerEvent::DiskReadFinished);
                     let _ = tx.try_send(TorrentCommand::UploadTaskCompleted { 
                         peer_id: peer_id_clone, block_info: block_info_clone 
                     });
@@ -711,9 +712,11 @@ impl TorrentManager {
                 let info_hash = self.state.info_hash.clone();
                 let manager_tx = self.torrent_manager_tx.clone();
 
+                let is_validated = self.state.torrent_validation_status;
+
                 tokio::spawn(async move {
                     let res = Self::perform_validation(
-                        mfi, torrent, rm, shutdown_rx, metrics_tx, event_tx, info_hash
+                        mfi, torrent, rm, shutdown_rx, metrics_tx, event_tx, info_hash, is_validated
                     ).await;
                     
                     if let Ok(pieces) = res {
@@ -768,12 +771,60 @@ impl TorrentManager {
                     });
                 }
             }
-            
-            // Stub for AnnounceToTracker (requires moving Tick logic to state)
-            Effect::AnnounceToTracker { .. } => {
-                // TODO: Move the spawn logic from `tick` and `AnnounceResponse` here
-            }
 
+            Effect::AnnounceToTracker { url } => {
+                let info_hash = self.state.info_hash.clone();
+                let client_id = self.settings.client_id.clone();
+                let port = self.settings.client_port;
+                let ul = self.state.session_total_uploaded as usize;
+                let dl = self.state.session_total_downloaded as usize;
+                
+                let torrent_size_left = if let Some(mfi) = &self.multi_file_info {
+                     let completed = self.state.piece_manager.bitfield.iter().filter(|&&s| s == PieceStatus::Done).count();
+                     let piece_len = self.state.torrent.as_ref().map(|t| t.info.piece_length).unwrap_or(0) as u64;
+                     let completed_bytes = (completed as u64) * piece_len;
+                     mfi.total_size.saturating_sub(completed_bytes) as usize
+                } else {
+                    0
+                };
+
+                let tx = self.torrent_manager_tx.clone();
+                let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+                tokio::spawn(async move {
+                    let res = tokio::select! {
+                        biased;
+                        _ = shutdown_rx.recv() => return,
+                        r = announce_periodic(
+                            url.clone(), 
+                            &info_hash, 
+                            client_id, 
+                            port, 
+                            ul, 
+                            dl, 
+                            torrent_size_left
+                        ) => r
+                    };
+                    
+                    match res {
+                        Ok(resp) => { 
+                            let _ = tx.send(TorrentCommand::AnnounceResponse(url, resp)).await; 
+                        },
+                        Err(e) => { 
+                            let _ = tx.send(TorrentCommand::AnnounceFailed(url, e.to_string())).await; 
+                        }
+                    }
+                });
+            }
+            
+            Effect::AbortUpload { peer_id, block_info } => {
+                if let Some(peer_uploads) = self.in_flight_uploads.get_mut(&peer_id) {
+                    if let Some(handle) = peer_uploads.remove(&block_info) {
+                        handle.abort();
+                        event!(Level::TRACE, peer = %peer_id, ?block_info, "Aborted in-flight upload task.");
+                    }
+                }
+            }
         }
     }
 
@@ -785,7 +836,16 @@ impl TorrentManager {
         metrics_tx: broadcast::Sender<TorrentMetrics>,
         event_tx: Sender<ManagerEvent>,
         info_hash: Vec<u8>,
+        skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
+
+        let num_pieces = torrent.info.pieces.len() / 20;
+        if skip_hashing {
+            event!(Level::INFO, "Torrent already validated. Skipping hash check.");
+            let all_pieces: Vec<u32> = (0..num_pieces).map(|i| i as u32).collect();
+            return Ok(all_pieces);
+        }
+
         let mut completed_pieces = Vec::new();
 
         tokio::select! {
@@ -797,7 +857,6 @@ impl TorrentManager {
         };
 
         let piece_length_u64 = torrent.info.piece_length as u64;
-        let num_pieces = torrent.info.pieces.len() / 20;
         let total_size = multi_file_info.total_size;
 
         for piece_index in 0..num_pieces {
@@ -1150,44 +1209,6 @@ impl TorrentManager {
         });
     }
 
-    /// Announces to trackers to get a list of peers and then attempts to connect to them.
-    pub async fn connect_to_tracker_peers(&mut self) {
-        let torrent_size_left = self
-            .multi_file_info
-            .as_ref()
-            .map_or(1, |info| info.total_size as usize);
-
-        let mut peers = HashSet::new();
-
-        for url in self.state.trackers.keys() {
-            let info_hash_clone = self.state.info_hash.clone();
-            let client_port_clone = self.settings.client_port;
-            let client_id_clone = self.settings.client_id.clone();
-            let tracker_response = announce_started(
-                url.to_string(),
-                &info_hash_clone,
-                client_id_clone,
-                client_port_clone,
-                torrent_size_left,
-            )
-            .await;
-
-            match tracker_response {
-                Ok(value) => {
-                    for peer in value.peers {
-                        peers.insert((peer.ip, peer.port));
-                    }
-                }
-                Err(e) => {
-                    event!(Level::DEBUG, ?e);
-                }
-            }
-        }
-
-        for peer in peers {
-            self.connect_to_peer(peer.0, peer.1).await;
-        }
-    }
 
     /// Verifies the integrity of the torrent's data on disk by checking each piece against the
     /// hashes in the torrent metadata. This is done at startup to determine which pieces are
@@ -1638,21 +1659,7 @@ impl TorrentManager {
                     break Ok(());
                 }
                 _ = cleanup_timer.tick(), if !self.state.is_paused => {
-                    self.state.timed_out_peers.retain(|_, (retry_count, _)| *retry_count < MAX_TIMEOUT_COUNT);
-
-                    if self.state.torrent_status == TorrentStatus::Done {
-                        for peer in self.state.peers.values() {
-                            let peer_is_fully_seeded = peer.bitfield.iter().all(|&has| has);
-
-                            if peer_is_fully_seeded {
-                                let manager_tx_clone = self.torrent_manager_tx.clone();
-                                let peer_id_clone = peer.ip_port.clone();
-                                tokio::spawn(async move {
-                                    let _ = manager_tx_clone.send(TorrentCommand::Disconnect(peer_id_clone)).await;
-                                });
-                            }
-                        }
-                    }
+                    self.apply_action(Action::Cleanup);
                 }
                 _ = tick.tick(), if !self.state.is_paused => {
 
@@ -1660,57 +1667,6 @@ impl TorrentManager {
                     let actual_duration = now.duration_since(last_tick_time);
                     last_tick_time = now;
                     let actual_ms = actual_duration.as_millis() as u64;
-
-                    let mut trackers_to_announce = Vec::new();
-
-                    for (url, tracker_state) in &self.state.trackers {
-                        if now >= tracker_state.next_announce_time {
-                            trackers_to_announce.push(url.clone());
-                        }
-                    }
-
-                    if !trackers_to_announce.is_empty() {
-                        let mut torrent_size_left = 1;
-                        if let Some(torrent) = &self.state.torrent {
-                            torrent_size_left = torrent.info.length as usize;
-                            if !torrent.info.files.is_empty() {
-                                torrent_size_left = torrent.info.files.iter().map(|file| file.length as usize).sum();
-                            }
-                        }
-                        for url in trackers_to_announce {
-                            if let Some(tracker_state) = self.state.trackers.get_mut(&url) {
-                                tracker_state.next_announce_time = now + Duration::from_secs(2048 * 2);
-                                let torrent_manager_tx_clone = self.torrent_manager_tx.clone();
-                                let url_clone = url.clone();
-                                let info_hash_clone = self.state.info_hash.clone();
-                                let client_port_clone = self.settings.client_port;
-                                let client_id_clone = self.settings.client_id.clone();
-                                let session_total_uploaded_clone = self.state.session_total_uploaded as usize;
-                                let session_total_downloaded_clone = self.state.session_total_downloaded as usize;
-                                tokio::spawn(async move {
-                                    let tracker_response = announce_periodic(
-                                        url.to_string(),
-                                        &info_hash_clone,
-                                        client_id_clone,
-                                        client_port_clone,
-                                        session_total_uploaded_clone,
-                                        session_total_downloaded_clone,
-                                        torrent_size_left,
-                                    ).await;
-
-                                    match tracker_response {
-                                        Ok(response) => {
-                                            let _ = torrent_manager_tx_clone.send(TorrentCommand::AnnounceResponse(url_clone, response)).await;
-                                        },
-                                        Err(e) => {
-                                            let _ = torrent_manager_tx_clone.send(TorrentCommand::AnnounceFailed(url_clone, e.to_string())).await;
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    }
-
 
                     if self.state.torrent_status == TorrentStatus::Endgame {
                         let peer_ids: Vec<String> = self.state.peers.keys().cloned().collect();
@@ -2045,17 +2001,12 @@ impl TorrentManager {
 
                     match command {
                         TorrentCommand::SuccessfullyConnected(peer_id) => self.apply_action(Action::PeerSuccessfullyConnected { peer_id }),
-                        TorrentCommand::PeerId(peer_ip_port, peer_id) => {
-                            if let Some(peer) = self.state.peers.get_mut(&peer_ip_port) {
-                                peer.peer_id = peer_id;
-                            }
-                        }
+                        TorrentCommand::PeerId(addr, id) => self.apply_action(Action::UpdatePeerId { peer_addr: addr, new_id: id }),
                         TorrentCommand::AddPexPeers(_peer_id, new_peers) => {
                             for peer_tuple in new_peers {
                                 self.connect_to_peer(peer_tuple.0, peer_tuple.1).await;
                             }
                         },
-
                         TorrentCommand::PeerBitfield(pid, bf) => self.apply_action(Action::PeerBitfieldReceived { peer_id: pid, bitfield: bf }),
                         TorrentCommand::Choke(pid) => self.apply_action(Action::PeerChoked { peer_id: pid }),
                         TorrentCommand::Unchoke(pid) => self.apply_action(Action::PeerUnchoked { peer_id: pid }),
@@ -2089,142 +2040,62 @@ impl TorrentManager {
                             });
                         },
                         TorrentCommand::CancelUpload(peer_id, piece_index, block_offset, block_length) => {
-                            let block_to_cancel = BlockInfo { piece_index, offset: block_offset, length: block_length };
-                            if let Some(peer_uploads) = self.in_flight_uploads.get_mut(&peer_id) {
-                                if let Some(handle) = peer_uploads.remove(&block_to_cancel) {
-                                    handle.abort();
-                                    event!(Level::TRACE, peer = %peer_id, ?block_to_cancel, "Aborted in-flight upload task.");
-                                }
-                            }
+                            self.apply_action(Action::CancelUpload { 
+                                peer_id, 
+                                piece_index, 
+                                block_offset, 
+                                length: block_length 
+                            });
                         },
                         TorrentCommand::UploadTaskCompleted { peer_id, block_info } => {
                             if let Some(peer_uploads) = self.in_flight_uploads.get_mut(&peer_id) {
                                 peer_uploads.remove(&block_info);
                             }
                         },
-                        TorrentCommand::DhtTorrent(torrent, torrent_metadata_length) => {
-                            if self.state.torrent.is_none() {
-                                let mut info_dict_hasher = Sha1::new();
-                                info_dict_hasher.update(torrent.clone().info_dict_bencode);
-                                let dht_info_hash = info_dict_hasher.finalize();
 
-                                if *self.state.info_hash == *dht_info_hash {
-
-                                    #[cfg(all(feature = "dht", feature = "pex"))]
-                                    {
-                                        // Check if the 'private' key exists and is set to 1
-                                        if torrent.info.private == Some(1) {
-                                            event!(Level::ERROR, info_hash = %BASE32.encode(&self.state.info_hash), "Rejecting private torrent (from metadata) in normal build.");
-
-                                            let _ = self.manager_event_tx.send(ManagerEvent::DeletionComplete(self.state.info_hash.clone(), Ok(()))).await;
-                                            break Ok(());
-                                        }
-                                    }
-
-                                    self.state.torrent = Some(torrent.clone());
-                                    self.state.torrent_metadata_length = Some(torrent_metadata_length);
-
-                                    let multi_file_info = MultiFileInfo::new(
-                                        &self.root_download_path,
-                                        &torrent.info.name,
-                                        if torrent.info.files.is_empty() { None } else { Some(&torrent.info.files) },
-                                        if torrent.info.files.is_empty() { Some(torrent.info.length as u64) } else { None },
-                                    )
-                                    .expect("Failed to create multi-file info from DHT metadata");
-                                    self.multi_file_info = Some(multi_file_info);
-
-                                    let pieces_len = torrent.info.pieces.len();
-                                    let total_pieces = pieces_len / 20;
-
-                                    self.state.piece_manager.set_initial_fields(pieces_len / 20, self.state.torrent_validation_status);
-                                    let bitfield = self.generate_bitfield();
-
-                                    let _ = self.validate_local_file().await;
-
-                                    if let Some(announce) = torrent.announce {
-                                        self.state.trackers.insert(announce.clone(), TrackerState {
-                                            next_announce_time: Instant::now(),
-                                            leeching_interval: None,
-                                            seeding_interval: None,
-                                        });
-                                    }
-                                    self.connect_to_tracker_peers().await;
-
-                                    for peer in self.state.peers.values_mut() {
-                                        peer.bitfield.resize(total_pieces, false);
-                                        let peer_tx_cloned = peer.peer_tx.clone();
-                                        let bitfield_clone = bitfield.clone();
-                                        let torrent_metadata_length_clone = self.state.torrent_metadata_length;
-                                        let _ =
-                                            peer_tx_cloned.try_send(TorrentCommand::ClientBitfield(bitfield_clone, torrent_metadata_length_clone));
-                                    }
-                                }
-                            }
-                        }
-                        TorrentCommand::AnnounceResponse(url, response) => {
-                            self.state.last_activity = TorrentActivity::AnnouncingToTracker;
-                            for peer in response.peers {
-                                self.connect_to_peer(peer.ip, peer.port).await;
+                        TorrentCommand::DhtTorrent(torrent, metadata_length) => {
+                            #[cfg(all(feature = "dht", feature = "pex"))]
+                            if torrent.info.private == Some(1) {
+                                break Ok(());
                             }
 
-                            if let Some(tracker) = self.state.trackers.get_mut(&url) {
-                                let seeding_interval_secs = if response.interval > 0 { (response.interval as u64) + 1 } else { FALLBACK_ANNOUNCE_INTERVAL };
-                                tracker.seeding_interval = Some(Duration::from_secs(seeding_interval_secs));
-
-                                let leeching_interval_secs = match response.min_interval {
-                                    Some(min) if min > 0 => (min as u64) + 1,
-                                    _ => CLIENT_LEECHING_FALLBACK_INTERVAL,
-                                };
-                                tracker.leeching_interval = Some(Duration::from_secs(leeching_interval_secs));
-
-                                let next_interval = if self.state.torrent_status != TorrentStatus::Done {
-                                    tracker.leeching_interval.unwrap()
-                                } else {
-                                    tracker.seeding_interval.unwrap()
-                                };
-
-                                tracker.next_announce_time = Instant::now() + next_interval;
-                                event!(Level::DEBUG, tracker = %url, next_announce_in_secs = next_interval.as_secs(), "Announce successful. STATUS {:?}", self.state.torrent_status);
+                            let mut hasher = Sha1::new();
+                            hasher.update(&torrent.info_dict_bencode);
+                            if hasher.finalize().as_slice() != self.state.info_hash.as_slice() {
+                                continue;
                             }
+
+                            self.apply_action(Action::MetadataReceived { 
+                                torrent, metadata_length 
+                            });
                         },
 
-                        TorrentCommand::AnnounceFailed(url, error_message) => {
-                            if let Some(tracker) = self.state.trackers.get_mut(&url) {
+                        TorrentCommand::AnnounceResponse(url, response) => {
+                            self.apply_action(Action::TrackerResponse {
+                                url,
+                                peers: response.peers.into_iter().map(|p| (p.ip, p.port)).collect(),
+                                interval: response.interval as u64,
+                                min_interval: response.min_interval.map(|i| i as u64)
+                            });
+                        },
 
-                                let current_interval = if self.state.torrent_status != TorrentStatus::Done {
-                                    tracker.leeching_interval.unwrap_or(Duration::from_secs(CLIENT_LEECHING_FALLBACK_INTERVAL))
-                                } else {
-                                    tracker.seeding_interval.unwrap_or(Duration::from_secs(FALLBACK_ANNOUNCE_INTERVAL))
-                                };
-
-                                let backoff_secs = (current_interval.as_secs() * 2).min(FALLBACK_ANNOUNCE_INTERVAL * 2);
-                                let backoff_duration = Duration::from_secs(backoff_secs);
-
-                                tracker.next_announce_time = Instant::now() + backoff_duration;
-                                event!(Level::DEBUG, tracker = %url, error = %error_message, retry_in_secs = backoff_secs, "Announce failed.");
-                            }
+                        TorrentCommand::AnnounceFailed(url, error) => {
+                            self.apply_action(Action::TrackerError { url, error });
                         },
 
                         TorrentCommand::UnresponsivePeer(peer_ip_port) => {
-                            let now = Instant::now();
-
-                            let (failure_count, _) = self.state.timed_out_peers.get(&peer_ip_port).cloned().unwrap_or((0, now));
-                            let new_failure_count = (failure_count + 1).min(10);
-                            let backoff_duration_secs = (BASE_COOLDOWN_SECS * 2u64.pow(new_failure_count - 1))
-                                                        .min(MAX_COOLDOWN_SECS);
-                            let next_attempt_time = now + Duration::from_secs(backoff_duration_secs);
-
-                            event!(Level::DEBUG,
-                                peer = %peer_ip_port,
-                                failures = new_failure_count,
-                                cooldown_secs = backoff_duration_secs,
-                                "Peer timed out. Applying exponential backoff."
-                            );
-                            self.state.timed_out_peers.insert(peer_ip_port.clone(), (new_failure_count, next_attempt_time));
-                        }
+                            self.apply_action(Action::PeerConnectionFailed { peer_addr: peer_ip_port });
+                        },
 
                         TorrentCommand::ValidationComplete(pieces) => {
                             self.apply_action(Action::ValidationComplete { completed_pieces: pieces });
+                        },
+
+                        TorrentCommand::BlockSent { peer_id, bytes } => {
+                            self.apply_action(Action::BlockSentToPeer { 
+                                peer_id, 
+                                byte_count: bytes 
+                            });
                         },
 
                         _ => {
