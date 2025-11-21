@@ -493,8 +493,21 @@ impl TorrentManager {
 
 
             Effect::WriteToDisk { peer_id, piece_index, data } => {
-                let multi_file_info = self.multi_file_info.as_ref().expect("File info missing").clone();
-                let piece_length = self.state.torrent.as_ref().unwrap().info.piece_length as u64;
+                let multi_file_info = match self.multi_file_info.as_ref() {
+                    Some(m) => m.clone(),
+                    None => {
+                        event!(Level::ERROR, "WriteToDisk failed: Storage not ready");
+                        return;
+                    }
+                };
+                let piece_length = match self.state.torrent.as_ref() {
+                    Some(t) => t.info.piece_length as u64,
+                    None => {
+                        event!(Level::ERROR, "WriteToDisk failed: Metadata missing");
+                        return;
+                    }
+                };
+
                 let global_offset = piece_index as u64 * piece_length;
                 
                 let tx = self.torrent_manager_tx.clone();
@@ -508,60 +521,21 @@ impl TorrentManager {
                     let op = DiskIoOperation {
                         piece_index, offset: global_offset, length: data.len()
                     };
-                    let _ = event_tx.try_send(ManagerEvent::DiskWriteStarted { info_hash, op });
 
-                    let mut attempt = 0;
-                    loop {
-                        let permit_result = tokio::select! {
-                            biased;
-                            _ = shutdown_rx.recv() => return ,
-                            res = resource_manager.acquire_disk_write() => res,
-                        };
-                        
-                        match permit_result {
-                            Ok(_p) => {
-                                let write_future = write_data_to_disk(&multi_file_info, global_offset, &data);
-                                let res = tokio::select! {
-                                    biased;
-                                    _ = shutdown_rx.recv() => return,
-                                    r = write_future => r,
-                                };
+                    let result = Self::write_block_with_retry(
+                        &multi_file_info, &resource_manager, &mut shutdown_rx, &event_tx, &info_hash, op, &data
+                    ).await;
 
-                                match res {
-                                    Ok(_) => {
-                                        let _ = tx.send(TorrentCommand::PieceWrittenToDisk { 
-                                            peer_id: peer_id_clone.clone(), 
-                                            piece_index 
-                                        }).await;
-                                        let _ = event_tx.try_send(ManagerEvent::DiskWriteFinished);
-                                        return;
-                                    }
-                                    Err(e) => {
-                                        event!(Level::WARN, "Disk write failed for piece {}: {}", piece_index, e);
-                                    }
-                                }
-                            }
-                            Err(ResourceManagerError::QueueFull) => {
-                                event!(Level::DEBUG, "Disk write queue full. Retrying...");
-                            }
-                            Err(ResourceManagerError::ManagerShutdown) => return,
+                    match result {
+                        Ok(_) => {
+                            let _ = tx.send(TorrentCommand::PieceWrittenToDisk { 
+                                peer_id: peer_id_clone, 
+                                piece_index 
+                            }).await;
                         }
-                        
-                        attempt += 1;
-                        if attempt > MAX_PIECE_WRITE_ATTEMPTS {
+                        Err(e) => {
+                            event!(Level::ERROR, "Write failed for piece {}: {}", piece_index, e);
                             let _ = tx.send(TorrentCommand::PieceWriteFailed { piece_index }).await;
-                            let _ = event_tx.try_send(ManagerEvent::DiskWriteFinished);
-                            return;
-                        }
-
-                        let backoff = BASE_BACKOFF_MS.saturating_mul(2u64.pow(attempt));
-                        let jitter = rand::rng().random_range(0..=JITTER_MS);
-                        let _ = event_tx.try_send(ManagerEvent::DiskIoBackoff { duration: Duration::from_millis(backoff + jitter) });
-
-                        tokio::select! {
-                            biased;
-                            _ = shutdown_rx.recv() => return ,
-                            _ = tokio::time::sleep(Duration::from_millis(backoff + jitter)) => {},
                         }
                     }
                 });
@@ -579,8 +553,22 @@ impl TorrentManager {
                     Err(_) => return,
                 };
 
-                let multi_file_info = self.multi_file_info.as_ref().expect("File info missing").clone();
-                let torrent = self.state.torrent.as_ref().unwrap();
+                let multi_file_info = match self.multi_file_info.as_ref() {
+                    Some(m) => m.clone(),
+                    None => {
+                        event!(Level::ERROR, "WriteToDisk failed: Storage not ready");
+                        return;
+                    }
+                };
+
+                let torrent = match self.state.torrent.as_ref() {
+                    Some(t) => t,
+                    None => {
+                        event!(Level::ERROR, "ReadFromDisk triggered but metadata missing. Ignoring.");
+                        return;
+                    }
+                };
+
                 let global_offset = (block_info.piece_index as u64 * torrent.info.piece_length as u64) + block_info.offset as u64;
                 
                 let tx = self.torrent_manager_tx.clone();
@@ -825,6 +813,59 @@ impl TorrentManager {
                     }
                 }
             }
+
+            Effect::ClearAllUploads => {
+                for (_, handles) in self.in_flight_uploads.drain() {
+                    for (_, handle) in handles {
+                        handle.abort();
+                    }
+                }
+            }
+
+            Effect::TriggerDhtSearch => {
+                #[cfg(feature = "dht")]
+                let _ = self.dht_trigger_tx.send(());
+            }
+
+            Effect::DeleteFiles => {
+                let info_hash = self.state.info_hash.clone();
+                let root_path = self.root_download_path.clone();
+                let multi_file_info = self.multi_file_info.clone();
+                let tx = self.manager_event_tx.clone();
+                let torrent_name = self.state.torrent.as_ref().map(|t| t.info.name.clone());
+
+                tokio::spawn(async move {
+                    let mut result = Ok(());
+
+                    if let Some(mfi) = multi_file_info {
+                        for file_info in &mfi.files {
+                            if let Err(e) = fs::remove_file(&file_info.path).await {
+                                if e.kind() != std::io::ErrorKind::NotFound {
+                                    let error_msg = format!("Failed to delete file {:?}: {}", &file_info.path, e);
+                                    event!(Level::ERROR, "{}", error_msg);
+                                    result = Err(error_msg);
+                                }
+                            }
+                        }
+
+                        if result.is_ok() && mfi.files.len() > 1 {
+                            if let Some(name) = torrent_name {
+                                let content_dir = root_path.join(name);
+                                event!(Level::INFO, "Cleaning up directory: {:?}", &content_dir);
+                                let _ = fs::remove_dir(&content_dir).await; 
+                            }
+                        }
+                    } else {
+                        let msg = "Cannot delete files: Metadata missing.".to_string();
+                        event!(Level::WARN, "{}", msg);
+                        result = Err(msg);
+                    }
+
+                    let _ = tx.send(ManagerEvent::DeletionComplete(info_hash, result)).await;
+                });
+            }
+
+
         }
     }
 
@@ -955,6 +996,65 @@ impl TorrentManager {
         }
 
         Ok(completed_pieces)
+    }
+
+    async fn write_block_with_retry(
+        multi_file_info: &MultiFileInfo,
+        resource_manager: &ResourceManagerClient,
+        shutdown_rx: &mut broadcast::Receiver<()>,
+        event_tx: &Sender<ManagerEvent>,
+        info_hash: &[u8],
+        op: DiskIoOperation,
+        data: &[u8],
+    ) -> Result<(), StorageError> {
+        let mut attempt = 0;
+        let _ = event_tx.try_send(ManagerEvent::DiskWriteStarted { info_hash: info_hash.to_vec(), op });
+
+        loop {
+            let permit_res = tokio::select! {
+                biased;
+                _ = shutdown_rx.recv() => return Err(StorageError::Io(std::io::Error::other("Shutdown"))),
+                res = resource_manager.acquire_disk_write() => res,
+            };
+
+            match permit_res {
+                Ok(_permit) => {
+                    let write_future = write_data_to_disk(multi_file_info, op.offset, data);
+                    let res = tokio::select! {
+                        biased;
+                        _ = shutdown_rx.recv() => return Err(StorageError::Io(std::io::Error::other("Shutdown"))),
+                        r = write_future => r,
+                    };
+
+                    match res {
+                        Ok(_) => {
+                            let _ = event_tx.try_send(ManagerEvent::DiskWriteFinished);
+                            return Ok(());
+                        }
+                        Err(_) => { /* Fallthrough to retry */ }
+                    }
+                }
+                Err(ResourceManagerError::ManagerShutdown) => return Err(StorageError::Io(std::io::Error::other("Manager Shutdown"))),
+                Err(ResourceManagerError::QueueFull) => { /* Fallthrough to retry */ }
+            }
+
+            attempt += 1;
+            if attempt > MAX_PIECE_WRITE_ATTEMPTS {
+                let _ = event_tx.try_send(ManagerEvent::DiskWriteFinished);
+                return Err(StorageError::Io(std::io::Error::other("Max write attempts exceeded")));
+            }
+
+            let backoff = BASE_BACKOFF_MS.saturating_mul(2u64.pow(attempt));
+            let jitter = rand::rng().random_range(0..=JITTER_MS);
+            
+            let _ = event_tx.try_send(ManagerEvent::DiskIoBackoff { duration: Duration::from_millis(backoff + jitter) });
+
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.recv() => return Err(StorageError::Io(std::io::Error::other("Shutdown"))),
+                _ = tokio::time::sleep(Duration::from_millis(backoff + jitter)) => {},
+            }
+        }
     }
 
     async fn read_block_with_retry(
@@ -1209,199 +1309,50 @@ impl TorrentManager {
         });
     }
 
-
-    /// Verifies the integrity of the torrent's data on disk by checking each piece against the
-    /// hashes in the torrent metadata. This is done at startup to determine which pieces are
-    /// already downloaded and correct.
     pub async fn validate_local_file(&mut self) -> Result<(), StorageError> {
-        let torrent = self.state.torrent.clone().expect("Torrent metadata not ready.");
+        let mfi = match &self.multi_file_info {
+            Some(i) => i.clone(),
+            None => return Ok(()),
+        };
+        
+        // We can safely expect metadata here because this is called on startup 
+        // for existing torrents, which must have metadata to exist.
+        let torrent = self.state.torrent.clone().expect("Metadata missing during startup validation");
+        
+        let rm = self.resource_manager.clone();
+        let shutdown_rx = self.shutdown_tx.subscribe();
+        let metrics = self.metrics_tx.clone();
+        let event = self.manager_event_tx.clone();
+        let hash = self.state.info_hash.clone();
+        let skip = self.state.torrent_validation_status;
+        
+        let manager_tx = self.torrent_manager_tx.clone();
 
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
-
-        let manager_event_tx_clone = self.manager_event_tx.clone();
-
-        if self.state.torrent_validation_status {
-            for piece_index in 0..self.state.piece_manager.bitfield.len() {
-                self.state.piece_manager.mark_as_complete(piece_index as u32);
-            }
-        } else {
-            let multi_file_info = match &self.multi_file_info {
-                Some(info) => info.clone(),
-                None => return Ok(()),
-            };
-
-            tokio::select! {
-                biased; // Prioritize shutdown
-                _ = shutdown_rx.recv() => {
-                    event!(Level::INFO, "Shutdown signal received during file allocation. Aborting validation.");
-                    return Ok(());
+        tokio::spawn(async move {
+            let result = Self::perform_validation(
+                mfi, 
+                torrent, 
+                rm, 
+                shutdown_rx, 
+                metrics, 
+                event, 
+                hash, 
+                skip
+            ).await;
+            
+            match result {
+                Ok(pieces) => {
+                    let _ = manager_tx.send(TorrentCommand::ValidationComplete(pieces)).await;
                 }
-                res = create_and_allocate_files(&multi_file_info) => res?,
-            };
-
-            let piece_length_u64 = torrent.info.piece_length as u64;
-            let num_pieces = self.state.piece_manager.bitfield.len();
-
-            for piece_index in 0..num_pieces {
-                let start_offset = (piece_index as u64) * piece_length_u64;
-                let len_this_piece = self.get_piece_size(piece_index as u32);
-
-                if len_this_piece == 0 {
-                    continue;
-                }
-
-                let start_hash_index = piece_index * HASH_LENGTH;
-                let end_hash_index = start_hash_index + HASH_LENGTH;
-                let expected_hash = torrent
-                    .info
-                    .pieces
-                    .get(start_hash_index..end_hash_index)
-                    .map(|s| s.to_vec());
-
-                let mut attempt = 0;
-
-                let piece_data = loop {
-                    let disk_permit_result = tokio::select! {
-                        biased;
-                        _ = shutdown_rx.recv() => {
-                            event!(Level::INFO, "Shutdown signal received while acquiring disk permit. Aborting validation.");
-                            return Ok(());
-                        }
-                        acquire_result = self.resource_manager.acquire_disk_read() => acquire_result
-                    };
-
-                    match disk_permit_result {
-                        Ok(_permit) => {
-                            let read_result = tokio::select! {
-                                biased;
-                                _ = shutdown_rx.recv() => {
-                                    event!(Level::INFO, "Shutdown signal received during disk read. Aborting validation.");
-                                    Err(StorageError::Io(std::io::Error::other("Shutdown during read")))
-                                }
-                                res = read_data_from_disk(&multi_file_info, start_offset, len_this_piece) => res
-                            };
-
-                            match read_result {
-                                Ok(data) => {
-                                    break data;
-                                }
-                                Err(e) => {
-                                    event!(Level::WARN, piece = piece_index, error = %e, "Read from disk failed during validation.");
-                                }
-                            }
-                        }
-                        Err(ResourceManagerError::QueueFull) => {
-                            event!(Level::DEBUG, "Disk read queue full during validation.");
-                        }
-                        Err(ResourceManagerError::ManagerShutdown) => {
-                            event!(
-                                Level::WARN,
-                                "Resource manager shut down. Aborting validation."
-                            );
-                            return Ok(());
-                        }
-                    }
-
-                    if attempt >= MAX_VALIDATION_ATTEMPTS {
-                        event!(
-                            Level::ERROR,
-                            piece = piece_index,
-                            "Validation read failed after {} attempts. Giving up.",
-                            MAX_VALIDATION_ATTEMPTS
-                        );
-                        return Ok(());
-                    }
-
-                    let backoff_duration_ms = BASE_BACKOFF_MS.saturating_mul(2u64.pow(attempt));
-                    let jitter = rand::rng().random_range(0..=JITTER_MS);
-                    let total_delay = Duration::from_millis(backoff_duration_ms + jitter);
-                    attempt += 1;
-
-                    let _ = manager_event_tx_clone.try_send(ManagerEvent::DiskIoBackoff {
-                        duration: total_delay,
-                    });
-                    event!(
-                        Level::WARN,
-                        piece = piece_index,
-                        "Retrying validation read in {:?} (Attempt {})...",
-                        total_delay,
-                        attempt
-                    );
-
-                    if Self::sleep_with_shutdown(total_delay, &mut shutdown_rx)
-                        .await
-                        .is_err()
-                    {
-                        event!(Level::INFO, "Shutdown signal received while waiting to retry disk read. Aborting validation.");
-                        return Ok(());
-                    }
-                };
-
-                let mut validation_task = tokio::task::spawn_blocking(move || {
-                    if let Some(expected) = expected_hash {
-                        sha1::Sha1::digest(&piece_data).as_slice() == expected.as_slice()
-                    } else {
-                        false
-                    }
-                });
-
-                let validation_result = tokio::select! {
-                    biased;
-                    _ = shutdown_rx.recv() => {
-                        event!(Level::INFO, "Shutdown signal received during hash validation. Aborting validation.");
-                        validation_task.abort();
-                        return Ok(());
-                    }
-                    join_handle_result = &mut validation_task => join_handle_result
-                };
-
-                if let Ok(is_valid) = validation_result {
-                    if is_valid {
-                        self.state.piece_manager.mark_as_complete(piece_index as u32);
-                    }
-                } else {
-                    event!(
-                        Level::WARN,
-                        "Hash validation task failed to complete. Aborting validation."
-                    );
-                    return Ok(());
-                }
-
-                if piece_index % 20 == 0 {
-                    if let Some(ref torrent) = self.state.torrent {
-                        let metrics_tx_clone = self.metrics_tx.clone();
-                        let info_hash_clone = self.state.info_hash.clone();
-                        let torrent_name_clone = torrent.info.name.clone();
-                        let number_of_pieces_total = (torrent.info.pieces.len() / 20) as u32;
-                        let number_of_pieces_completed = (piece_index + 1) as u32;
-
-                        let torrent_state = TorrentMetrics {
-                            info_hash: info_hash_clone,
-                            torrent_name: torrent_name_clone,
-                            number_of_pieces_total,
-                            number_of_pieces_completed,
-                            activity_message: "Validating local files...".to_string(),
-                            ..Default::default()
-                        };
-
-                        if let Err(e) = metrics_tx_clone.send(torrent_state) {
-                            tracing::event!(
-                                Level::ERROR,
-                                "Failed to send validation metrics to TUI: {}",
-                                e
-                            );
-                        }
-                    }
+                Err(e) => {
+                    event!(Level::ERROR, "Startup validation failed: {}", e);
                 }
             }
-        }
+        });
 
-        self.apply_action(Action::CheckCompletion);
         Ok(())
     }
 
-    /// Calculates the size of a specific piece. Most pieces have a fixed size, but the last
-    /// piece is often smaller.
     fn get_piece_size(&self, piece_index: u32) -> usize {
         let torrent = self.state.torrent.clone().expect("Torrent metadata not ready.");
         let multi_file_info = self.multi_file_info.as_ref().expect("File info not ready.");
@@ -1713,48 +1664,22 @@ impl TorrentManager {
                 Some(manager_command) = self.manager_command_rx.recv() => {
                     event!(Level::TRACE, ?manager_command);
                     match manager_command {
+                        ManagerCommand::Pause => self.apply_action(Action::Pause),
+                        ManagerCommand::Resume => self.apply_action(Action::Resume),
+                        ManagerCommand::DeleteFile => self.apply_action(Action::Delete),
+                        ManagerCommand::UpdateListenPort(new_port) => {
+                            let mut settings = (*self.settings).clone();
+                            if settings.client_port != new_port {
+                                settings.client_port = new_port;
+                                self.settings = Arc::new(settings);
+                                self.apply_action(Action::UpdateListenPort);
+                            }
+                        },
                         ManagerCommand::SetDataRate(new_rate_ms) => {
                             data_rate_ms = new_rate_ms;
                             tick = tokio::time::interval(Duration::from_millis(data_rate_ms));
                             tick.reset();
                             last_tick_time = Instant::now();
-                        },
-                        ManagerCommand::Pause => {
-                            self.state.last_activity = TorrentActivity::Paused;
-                            self.state.is_paused = true;
-
-                            for peer in self.state.peers.values() {
-                                let peer_tx = peer.peer_tx.clone();
-                                let peer_ip_port = peer.ip_port.clone();
-                                let _ = peer_tx.try_send(TorrentCommand::Disconnect(peer_ip_port));
-                            }
-
-                            self.state.last_known_peers = self.state.peers.keys().cloned().collect();
-                            self.state.peers.clear();
-
-                            self.state.bytes_downloaded_in_interval = 0;
-                            self.state.bytes_uploaded_in_interval = 0;
-                            self.send_metrics(data_rate_ms, 0, 0);
-
-                            event!(Level::INFO, info_hash = %BASE32.encode(&self.state.info_hash), "Torrent paused. Disconnected from all peers.");
-
-                        },
-                        ManagerCommand::Resume => {
-                            self.state.last_activity = TorrentActivity::ConnectingToPeers;
-                            self.state.is_paused = false;
-                            event!(Level::INFO, info_hash = %BASE32.encode(&self.state.info_hash), "Torrent resumed. Re-announcing to trackers.");
-
-                            #[cfg(feature = "dht")]
-                            let _ = self.dht_trigger_tx.send(());
-
-                            for peer_addr in std::mem::take(&mut self.state.last_known_peers) {
-                                if let Ok(socket_addr) = peer_addr.parse::<std::net::SocketAddr>() {
-                                    self.connect_to_peer(socket_addr.ip().to_string(), socket_addr.port()).await;
-                                }
-                            }
-                            for tracker_state in self.state.trackers.values_mut() {
-                                tracker_state.next_announce_time = Instant::now();
-                            }
                         },
                         ManagerCommand::Shutdown => {
                             event!(Level::INFO, info_hash = %BASE32.encode(&self.state.info_hash), "Torrent shutting down.");
@@ -1817,64 +1742,6 @@ impl TorrentManager {
                             self.state.peers.clear();
                             let _ = self.manager_event_tx.try_send(ManagerEvent::DeletionComplete(self.state.info_hash.clone(), Ok(())));
                             break Ok(());
-                        },
-                        ManagerCommand::DeleteFile => {
-                            let torrent = if let Some(t) = self.state.torrent.clone() {
-                                t
-                            } else {
-                                let error_msg = "Cannot delete files: Torrent metadata has not been downloaded yet (magnet link?).".to_string();
-                                event!(Level::ERROR, "{}", error_msg);
-                                let _ = self.manager_event_tx.try_send(ManagerEvent::DeletionComplete(self.state.info_hash.clone(), Err(error_msg)));
-                                break Ok(());
-                            };
-
-                            self.state.peers.clear();
-                            let mut event_result = Ok(());
-
-                            if let Some(multi_file_info) = &self.multi_file_info {
-                                for file_info in &multi_file_info.files {
-                                    if let Err(e) = fs::remove_file(&file_info.path).await {
-                                        if e.kind() != std::io::ErrorKind::NotFound {
-                                            let error_msg = format!("Failed to delete torrent file {:?}: {}", &file_info.path, e);
-                                            event!(Level::ERROR, "{}", error_msg);
-                                            event_result = Err(error_msg);
-                                            break;
-                                        }
-                                    }
-                                }
-                                if event_result.is_ok() && multi_file_info.files.len() > 1 {
-                                    let content_dir = self.root_download_path.join(&torrent.info.name);
-                                    event!(Level::INFO, "Attempting to clean up directory: {:?}", &content_dir);
-                                    let _ = fs::remove_dir(&content_dir).await.ok();
-                                }
-                            } else {
-                                let error_msg = "Could not delete files: torrent metadata unavailable.".to_string();
-                                event!(Level::WARN, "{}", error_msg);
-                                event_result = Err(error_msg);
-                            }
-                            let _ = self.manager_event_tx.send(ManagerEvent::DeletionComplete(self.state.info_hash.clone(), event_result)).await;
-                            break Ok(());
-                        },
-
-                        ManagerCommand::UpdateListenPort(new_port) => {
-                            // self.settings is an Arc, so we must clone and replace it
-                            let mut settings = (*self.settings).clone();
-
-                            if settings.client_port != new_port {
-                                event!(
-                                    Level::INFO,
-                                    "Listen port updated: {} -> {}. Triggering re-announce.",
-                                    settings.client_port,
-                                    new_port
-                                );
-                                settings.client_port = new_port;
-                                self.settings = Arc::new(settings); // Update the Arc
-
-                                // Force an immediate re-announce to all trackers with the new port
-                                for tracker_state in self.state.trackers.values_mut() {
-                                    tracker_state.next_announce_time = Instant::now();
-                                }
-                            }
                         },
                         #[cfg(feature = "dht")]
                         ManagerCommand::UpdateDhtHandle(new_dht_handle) => {
@@ -2031,14 +1898,7 @@ impl TorrentManager {
 
                         TorrentCommand::PieceWrittenToDisk { peer_id, piece_index } => self.apply_action(Action::PieceWrittenToDisk { peer_id, piece_index }),
                         TorrentCommand::PieceWriteFailed { piece_index } => self.apply_action(Action::PieceWriteFailed { piece_index }),
-                        TorrentCommand::RequestUpload(peer_id, piece_index, block_offset, block_length) => {
-                            if block_length > MAX_BLOCK_SIZE {
-                                continue;
-                            }
-                            self.apply_action(Action::RequestUpload { 
-                                peer_id, piece_index, block_offset, length: block_length 
-                            });
-                        },
+                        TorrentCommand::RequestUpload(peer_id, piece_index, block_offset, block_length) => self.apply_action(Action::RequestUpload { peer_id, piece_index, block_offset, length: block_length }),
                         TorrentCommand::CancelUpload(peer_id, piece_index, block_offset, block_length) => {
                             self.apply_action(Action::CancelUpload { 
                                 peer_id, 

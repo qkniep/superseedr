@@ -26,6 +26,7 @@ const MAX_TIMEOUT_COUNT: u32 = 10;
 const BITS_PER_BYTE: u64 = 8;
 const SMOOTHING_PERIOD_MS: f64 = 5000.0;
 const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 4;
+const MAX_BLOCK_SIZE: u32 = 131_072;
 
 pub type PeerAddr = (String, u16);
 
@@ -87,6 +88,10 @@ pub enum Action {
     },
 
     Cleanup,
+    Pause,
+    Resume,
+    Delete,
+    UpdateListenPort,
 }
 
 #[derive(Debug)]
@@ -117,6 +122,10 @@ pub enum Effect {
     ConnectToPeersFromTrackers,
 
     AbortUpload { peer_id: String, block_info: BlockInfo },
+
+    ClearAllUploads,
+    DeleteFiles,
+    TriggerDhtSearch,
 }
 
 #[derive(Debug)]
@@ -593,14 +602,20 @@ impl TorrentState {
                 vec![Effect::EmitManagerEvent(ManagerEvent::DiskWriteFinished)]
             }
 
-            // --- Upload Actions ---
 
             Action::RequestUpload { peer_id, piece_index, block_offset, length } => {
+                if self.torrent.is_none() {
+                    return vec![Effect::DoNothing];
+                }
+
+                if length > MAX_BLOCK_SIZE {
+                    return vec![Effect::DoNothing];
+                }
+
                 self.last_activity = TorrentActivity::SendingPiece(piece_index);
 
                 let mut allowed = false;
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    
                     if peer.am_choking == ChokeStatus::Unchoke 
                        && self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
                         allowed = true;
@@ -772,6 +787,66 @@ impl TorrentState {
                         effects.push(Effect::DisconnectPeer { peer_id });
                     }
                 }
+                effects
+            }
+        
+            Action::Pause => {
+                self.last_activity = TorrentActivity::Paused;
+                self.is_paused = true;
+                
+                self.last_known_peers = self.peers.keys().cloned().collect();
+                self.peers.clear();
+                
+                self.bytes_downloaded_in_interval = 0;
+                self.bytes_uploaded_in_interval = 0;
+
+                vec![
+                    Effect::ClearAllUploads,
+                    Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { info_hash: self.info_hash.clone() }) 
+                ]
+            }
+
+            Action::Resume => {
+                self.last_activity = TorrentActivity::ConnectingToPeers; // Or Announcing
+                self.is_paused = false;
+                
+                let mut effects = vec![Effect::TriggerDhtSearch];
+                let now = Instant::now();
+
+                for (url, tracker) in self.trackers.iter_mut() {
+                    tracker.next_announce_time = now + Duration::from_secs(60);
+                    effects.push(Effect::AnnounceToTracker { url: url.clone() });
+                }
+
+                let peers_to_connect: Vec<String> = std::mem::take(&mut self.last_known_peers).into_iter().collect();
+                for peer_addr in peers_to_connect {
+                    if let Ok(addr) = peer_addr.parse::<std::net::SocketAddr>() {
+                        if let std::net::SocketAddr::V4(v4) = addr {
+                            effects.push(Effect::ConnectToPeer { 
+                                ip: v4.ip().to_string(), 
+                                port: v4.port() 
+                            });
+                        }
+                    }
+                }
+                
+                effects
+            }
+
+            Action::Delete => {
+                self.peers.clear();
+                vec![Effect::DeleteFiles]
+            }
+
+            Action::UpdateListenPort => {
+                let mut effects = Vec::new();
+                let now = Instant::now();
+
+                for (url, tracker) in self.trackers.iter_mut() {
+                    tracker.next_announce_time = now + Duration::from_secs(60);
+                    effects.push(Effect::AnnounceToTracker { url: url.clone() });
+                }
+                
                 effects
             }
         }
