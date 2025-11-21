@@ -74,6 +74,8 @@ pub enum TorrentCommand {
     BlockSent { peer_id: String, bytes: u64 },
 
     ValidationProgress(u32),
+
+    FatalStorageError(String),
 }
 
 pub struct TorrentCommandSummary<'a>(pub &'a TorrentCommand);

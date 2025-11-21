@@ -560,6 +560,7 @@ impl TorrentManager {
                     Err(_) => return,
                 };
 
+
                 let multi_file_info = match self.multi_file_info.as_ref() {
                     Some(m) => m.clone(),
                     None => {
@@ -592,8 +593,10 @@ impl TorrentManager {
                         piece_index: block_info.piece_index, offset: global_offset, length: block_info.length as usize
                     };
 
+                    let _ = event_tx.try_send(ManagerEvent::DiskReadStarted { info_hash: info_hash.to_vec(), op });
+
                     let result = Self::read_block_with_retry(
-                        &multi_file_info, &resource_manager, &mut shutdown_rx, &event_tx, &info_hash, op
+                        &multi_file_info, &resource_manager, &mut shutdown_rx, &event_tx, op
                     ).await;
 
                     if let Ok(data) = result {
@@ -731,7 +734,7 @@ impl TorrentManager {
 
                 tokio::spawn(async move {
                     let res = Self::perform_validation(
-                        mfi, torrent, rm, shutdown_rx, manager_tx.clone(), event_tx, info_hash, is_validated
+                        mfi, torrent, rm, shutdown_rx, manager_tx.clone(), event_tx,  is_validated
                     ).await;
                     
                     if let Ok(pieces) = res {
@@ -892,7 +895,6 @@ impl TorrentManager {
                 });
             }
 
-
         }
     }
 
@@ -903,7 +905,6 @@ impl TorrentManager {
         mut shutdown_rx: broadcast::Receiver<()>,
         manager_tx: Sender<TorrentCommand>,
         event_tx: Sender<ManagerEvent>,
-        info_hash: Vec<u8>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
 
@@ -1051,11 +1052,15 @@ impl TorrentManager {
                             let _ = event_tx.try_send(ManagerEvent::DiskWriteFinished);
                             return Ok(());
                         }
-                        Err(_) => { /* Fallthrough to retry */ }
+                        Err(e) => { 
+                             event!(Level::WARN, piece = op.piece_index, error = ?e, "Disk write failed (IO Error).");
+                        }
                     }
                 }
                 Err(ResourceManagerError::ManagerShutdown) => return Err(StorageError::Io(std::io::Error::other("Manager Shutdown"))),
-                Err(ResourceManagerError::QueueFull) => { /* Fallthrough to retry */ }
+                Err(ResourceManagerError::QueueFull) => { 
+                     event!(Level::WARN, piece = op.piece_index, "Disk write queue full (Permit Starvation).");
+                }
             }
 
             attempt += 1;
@@ -1066,7 +1071,15 @@ impl TorrentManager {
 
             let backoff = BASE_BACKOFF_MS.saturating_mul(2u64.pow(attempt));
             let jitter = rand::rng().random_range(0..=JITTER_MS);
-            
+            let duration = Duration::from_millis(backoff + jitter);
+            event!(
+                Level::WARN, 
+                piece = op.piece_index, 
+                attempt = attempt, 
+                duration_ms = duration.as_millis(), 
+                "Retrying disk write..."
+            );
+
             let _ = event_tx.try_send(ManagerEvent::DiskIoBackoff { duration: Duration::from_millis(backoff + jitter) });
 
             tokio::select! {
@@ -1082,11 +1095,9 @@ impl TorrentManager {
         resource_manager: &ResourceManagerClient,
         shutdown_rx: &mut broadcast::Receiver<()>,
         event_tx: &Sender<ManagerEvent>,
-        info_hash: &[u8],
         op: DiskIoOperation,
     ) -> Result<Vec<u8>, StorageError> {
         let mut attempt = 0;
-        let _ = event_tx.try_send(ManagerEvent::DiskReadStarted { info_hash: info_hash.to_vec(), op });
 
         loop {
             let permit_res = tokio::select! {
@@ -1106,31 +1117,42 @@ impl TorrentManager {
 
                     match res {
                         Ok(data) => {
-                            let _ = event_tx.try_send(ManagerEvent::DiskReadFinished);
                             return Ok(data);
                         }
-                        Err(_) => { /* Fallthrough to retry */ }
+                        Err(e) => { 
+                            event!(Level::WARN, piece = op.piece_index, error = ?e, "Disk read failed (IO Error).");
+                        }
                     }
                 }
                 Err(ResourceManagerError::ManagerShutdown) => return Err(StorageError::Io(std::io::Error::other("Manager Shutdown"))),
-                Err(ResourceManagerError::QueueFull) => { /* Fallthrough to retry */ }
+                Err(ResourceManagerError::QueueFull) => { 
+                    event!(Level::WARN, piece = op.piece_index, "Disk read queue full (Permit Starvation).");
+                }
             }
 
             attempt += 1;
             if attempt > MAX_UPLOAD_REQUEST_ATTEMPTS {
-                let _ = event_tx.try_send(ManagerEvent::DiskReadFinished);
                 return Err(StorageError::Io(std::io::Error::other("Max read attempts exceeded")));
             }
 
             let backoff = BASE_BACKOFF_MS.saturating_mul(2u64.pow(attempt));
             let jitter = rand::rng().random_range(0..=JITTER_MS);
+            let duration = Duration::from_millis(backoff + jitter);
+
+            event!(
+                Level::WARN, 
+                piece = op.piece_index, 
+                attempt = attempt, 
+                duration_ms = duration.as_millis(), 
+                "Retrying disk read..."
+            );
             
-            let _ = event_tx.try_send(ManagerEvent::DiskIoBackoff { duration: Duration::from_millis(backoff + jitter) });
+            let _ = event_tx.try_send(ManagerEvent::DiskIoBackoff { duration });
 
             tokio::select! {
                 biased;
                 _ = shutdown_rx.recv() => { return Err(StorageError::Io(std::io::Error::other("Shutdown"))); }
-                _ = tokio::time::sleep(Duration::from_millis(backoff + jitter)) => {},
+                _ = tokio::time::sleep(duration) => {},
             }
         }
     }
@@ -1352,8 +1374,6 @@ impl TorrentManager {
         let event = self.manager_event_tx.clone();
         let hash = self.state.info_hash.clone();
         let skip = self.state.torrent_validation_status;
-        
-        let manager_tx = self.torrent_manager_tx.clone();
 
         tokio::spawn(async move {
             let result = Self::perform_validation(
@@ -1363,7 +1383,6 @@ impl TorrentManager {
                 shutdown_rx, 
                 manager_tx.clone(), 
                 event, 
-                hash, 
                 skip
             ).await;
             
@@ -1372,7 +1391,9 @@ impl TorrentManager {
                     let _ = manager_tx.send(TorrentCommand::ValidationComplete(pieces)).await;
                 }
                 Err(e) => {
-                    event!(Level::ERROR, "Startup validation failed: {}", e);
+                    let error_msg = e.to_string();
+                    event!(Level::ERROR, "Triggering Fatal Pause due to: {}", error_msg);
+                    let _ = manager_tx.send(TorrentCommand::FatalStorageError(error_msg)).await;
                 }
             }
         });
@@ -1602,50 +1623,6 @@ impl TorrentManager {
                         eprintln!("Error calling validate local file: {}", e);
                     }
                 }
-            }
-        }
-
-        if !self.state.is_paused {
-            event!(
-                Level::DEBUG,
-                "Performing initial 'started' announce to trackers..."
-            );
-            let torrent_size_left = self
-                .multi_file_info
-                .as_ref()
-                .map_or(0, |mfi| mfi.total_size as usize);
-
-            for url in self.state.trackers.keys() {
-                let torrent_manager_tx_clone = self.torrent_manager_tx.clone();
-                let url_clone = url.clone();
-                let info_hash_clone = self.state.info_hash.clone();
-                let client_port_clone = self.settings.client_port;
-
-                let client_id_clone = self.settings.client_id.clone();
-
-                tokio::spawn(async move {
-                    let response = announce_started(
-                        url_clone.clone(),
-                        &info_hash_clone,
-                        client_id_clone,
-                        client_port_clone,
-                        torrent_size_left,
-                    )
-                    .await;
-
-                    match response {
-                        Ok(resp) => {
-                            let _ = torrent_manager_tx_clone
-                                .send(TorrentCommand::AnnounceResponse(url_clone, resp))
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = torrent_manager_tx_clone
-                                .send(TorrentCommand::AnnounceFailed(url_clone, e.to_string()))
-                                .await;
-                        }
-                    }
-                });
             }
         }
 
@@ -2023,6 +2000,10 @@ impl TorrentManager {
                         _ => {
                             println!("UNIMPLEMENTED TORRENT COMMEND {:?}",  command);
                         }
+
+                        TorrentCommand::FatalStorageError(msg) => {
+                            self.apply_action(Action::FatalError { error: msg });
+                        },
                     }
                 }
             }

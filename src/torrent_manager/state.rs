@@ -93,6 +93,8 @@ pub enum Action {
     Delete,
     UpdateListenPort,
     ValidationProgress { count: u32 },
+
+    FatalError { error: String },
 }
 
 #[derive(Debug)]
@@ -724,8 +726,6 @@ impl TorrentState {
                 vec![
                     Effect::InitializeStorage, 
                     Effect::StartValidation,
-                    Effect::SendBitfieldToPeers,
-                    Effect::ConnectToPeersFromTrackers,
                 ]
             }
 
@@ -739,6 +739,10 @@ impl TorrentState {
                 
                 self.torrent_status = TorrentStatus::Standard;
                 
+                if !self.is_paused {
+                    effects.push(Effect::SendBitfieldToPeers);
+                    effects.push(Effect::ConnectToPeersFromTrackers);
+                }
                 effects.extend(self.update(Action::CheckCompletion));
                 
                 for peer_id in self.peers.keys().cloned().collect::<Vec<_>>() {
@@ -830,8 +834,12 @@ impl TorrentState {
             }
 
             Action::Resume => {
-                self.last_activity = TorrentActivity::ConnectingToPeers; // Or Announcing
+                self.last_activity = TorrentActivity::ConnectingToPeers;
                 self.is_paused = false;
+
+                if self.torrent_status == TorrentStatus::Validating {
+                     return vec![Effect::DoNothing]; 
+                }
                 
                 let mut effects = vec![Effect::TriggerDhtSearch];
                 let now = Instant::now();
@@ -876,6 +884,11 @@ impl TorrentState {
             Action::ValidationProgress { count } => {
                 self.validation_pieces_found = count;
                 vec![Effect::DoNothing]
+            }
+
+
+            Action::FatalError { error } => {
+                self.update(Action::Pause)
             }
         }
     }
