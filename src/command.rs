@@ -20,7 +20,6 @@ pub enum TorrentCommand {
     PeerChoke,
 
     Block(String, u32, u32, Vec<u8>),
-    PieceAcquired(u32),
     Have(String, u32),
 
     NotInterested,
@@ -69,6 +68,8 @@ pub enum TorrentCommand {
     },
 
     UnresponsivePeer(String),
+
+    ValidationComplete(Vec<u32>),
 }
 
 pub struct TorrentCommandSummary<'a>(pub &'a TorrentCommand);

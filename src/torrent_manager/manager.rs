@@ -495,51 +495,6 @@ impl TorrentManager {
                 });
             }
 
-            Effect::VerifyPiece { peer_id, piece_index, data } => {
-                let torrent = self.state.torrent.clone().expect("Metadata missing during verify");
-                let start = piece_index as usize * HASH_LENGTH;
-                let end = start + HASH_LENGTH;
-                let expected_hash = torrent.info.pieces.get(start..end).map(|s| s.to_vec());
-                
-                let tx = self.torrent_manager_tx.clone();
-                let peer_id_for_msg = peer_id.clone();
-                let mut shutdown_rx = self.shutdown_tx.subscribe();
-                
-                tokio::spawn(async move {
-                    let verification_task = tokio::task::spawn_blocking(move || {
-                        if let Some(expected) = expected_hash {
-                            let hash = sha1::Sha1::digest(&data);
-                            if hash.as_slice() == expected.as_slice() {
-                                return Ok(data); 
-                            }
-                        }
-                        Err(()) 
-                    });
-
-                    let result = tokio::select! {
-                        biased;
-                        _ = shutdown_rx.recv() => return, 
-                        res = verification_task => res.unwrap_or(Err(())),
-                    };
-
-                    match result {
-                        Ok(verified_data) => {
-                            let _ = tx.send(TorrentCommand::PieceVerified {
-                                piece_index,
-                                peer_id: peer_id_for_msg, 
-                                verification_result: Ok(verified_data) 
-                            }).await;
-                        }
-                        _ => {
-                            let _ = tx.send(TorrentCommand::PieceVerified {
-                                piece_index,
-                                peer_id: peer_id_for_msg, 
-                                verification_result: Err(()) 
-                            }).await;
-                        }
-                    }
-                });
-            }
 
             Effect::WriteToDisk { peer_id, piece_index, data } => {
                 let multi_file_info = self.multi_file_info.as_ref().expect("File info missing").clone();
@@ -665,7 +620,282 @@ impl TorrentManager {
                 self.in_flight_uploads.entry(peer_id).or_default().insert(block_info, handle);
             }
 
+            Effect::ConnectToPeer { ip, port } => {
+                let peer_ip_port = format!("{}:{}", ip, port);
+                
+                if self.state.peers.contains_key(&peer_ip_port) { return; }
+                
+                let manager_tx = self.torrent_manager_tx.clone();
+                let rm = self.resource_manager.clone();
+                let dl_bucket = self.global_dl_bucket.clone();
+                let ul_bucket = self.global_ul_bucket.clone();
+                let info_hash = self.state.info_hash.clone();
+                let meta_len = self.state.torrent_metadata_length;
+                let client_id = self.settings.client_id.clone();
+                let shutdown_tx = self.shutdown_tx.clone();
+                let mut shutdown_rx = self.shutdown_tx.subscribe();
+                
+                let (peer_tx, peer_rx) = mpsc::channel(10);
+                self.state.peers.insert(
+                    peer_ip_port.clone(), 
+                    PeerState::new(peer_ip_port.clone(), peer_tx)
+                );
+                
+                let bitfield = if self.state.torrent.is_some() {
+                    Some(self.generate_bitfield())
+                } else {
+                    None
+                };
+
+                tokio::spawn(async move {
+                    let permit = tokio::select! {
+                        biased;
+                        _ = shutdown_rx.recv() => None,
+                        res = rm.acquire_peer_connection() => res.ok()
+                    };
+
+                    if let Some(p) = permit {
+                        if let Ok(Ok(stream)) = timeout(Duration::from_secs(2), TcpStream::connect(&peer_ip_port)).await {
+                            let _held = p;
+                            let session = PeerSession::new(PeerSessionParameters {
+                                info_hash,
+                                torrent_metadata_length: meta_len,
+                                connection_type: ConnectionType::Outgoing,
+                                torrent_manager_rx: peer_rx,
+                                torrent_manager_tx: manager_tx.clone(),
+                                peer_ip_port: peer_ip_port.clone(),
+                                client_id: client_id.into(),
+                                global_dl_bucket: dl_bucket,
+                                global_ul_bucket: ul_bucket,
+                                shutdown_tx,
+                            });
+                            
+                            let _ = session.run(stream, Vec::new(), bitfield).await;
+                        } else {
+                            let _ = manager_tx.send(TorrentCommand::UnresponsivePeer(peer_ip_port.clone())).await;
+                        }
+                    }
+                    let _ = manager_tx.send(TorrentCommand::Disconnect(peer_ip_port)).await;
+                });
+            }
+
+            Effect::InitializeStorage => {
+                if let Some(torrent) = &self.state.torrent {
+                    let mfi = MultiFileInfo::new(
+                        &self.root_download_path,
+                        &torrent.info.name,
+                        if torrent.info.files.is_empty() { None } else { Some(&torrent.info.files) },
+                        if torrent.info.files.is_empty() { Some(torrent.info.length as u64) } else { None },
+                    ).expect("Failed to init storage from metadata");
+                    
+                    self.multi_file_info = Some(mfi.clone());
+                    
+                    let mut shutdown_rx = self.shutdown_tx.subscribe();
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            biased;
+                            _ = shutdown_rx.recv() => {},
+                            _ = create_and_allocate_files(&mfi) => {}
+                        }
+                    });
+                }
+            }
+
+            Effect::StartValidation => {
+                let mfi = self.multi_file_info.as_ref().expect("Storage not ready").clone();
+                let torrent = self.state.torrent.as_ref().expect("Metadata not ready").clone();
+                let rm = self.resource_manager.clone();
+                let shutdown_rx = self.shutdown_tx.subscribe();
+                let metrics_tx = self.metrics_tx.clone();
+                let event_tx = self.manager_event_tx.clone();
+                let info_hash = self.state.info_hash.clone();
+                let manager_tx = self.torrent_manager_tx.clone();
+
+                tokio::spawn(async move {
+                    let res = Self::perform_validation(
+                        mfi, torrent, rm, shutdown_rx, metrics_tx, event_tx, info_hash
+                    ).await;
+                    
+                    if let Ok(pieces) = res {
+                        let _ = manager_tx.send(TorrentCommand::ValidationComplete(pieces)).await;
+                    }
+                });
+            }
+
+            Effect::SendBitfieldToPeers => {
+                let bitfield = self.generate_bitfield();
+                let meta_len = self.state.torrent_metadata_length;
+
+                for peer in self.state.peers.values() {
+                    let _ = peer.peer_tx.try_send(TorrentCommand::ClientBitfield(
+                        bitfield.clone(),
+                        meta_len
+                    ));
+                }
+            }
+
+            Effect::ConnectToPeersFromTrackers => {
+                let torrent_size_left = self.multi_file_info.as_ref().map_or(0, |mfi| mfi.total_size as usize);
+
+                for url in self.state.trackers.keys() {
+                    let tx = self.torrent_manager_tx.clone();
+                    let url_clone = url.clone();
+                    let info_hash = self.state.info_hash.clone();
+                    let port = self.settings.client_port;
+                    let client_id = self.settings.client_id.clone();
+                    let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+                    tokio::spawn(async move {
+                        let response = tokio::select! {
+                            res = announce_started(
+                                url_clone.clone(),
+                                &info_hash,
+                                client_id,
+                                port,
+                                torrent_size_left,
+                            ) => res,
+                            _ = shutdown_rx.recv() => return
+                        };
+
+                        match response {
+                            Ok(resp) => {
+                                let _ = tx.send(TorrentCommand::AnnounceResponse(url_clone, resp)).await;
+                            }
+                            Err(e) => {
+                                let _ = tx.send(TorrentCommand::AnnounceFailed(url_clone, e.to_string())).await;
+                            }
+                        }
+                    });
+                }
+            }
+            
+            // Stub for AnnounceToTracker (requires moving Tick logic to state)
+            Effect::AnnounceToTracker { .. } => {
+                // TODO: Move the spawn logic from `tick` and `AnnounceResponse` here
+            }
+
         }
+    }
+
+    async fn perform_validation(
+        multi_file_info: MultiFileInfo,
+        torrent: Torrent,
+        resource_manager: ResourceManagerClient,
+        mut shutdown_rx: broadcast::Receiver<()>,
+        metrics_tx: broadcast::Sender<TorrentMetrics>,
+        event_tx: Sender<ManagerEvent>,
+        info_hash: Vec<u8>,
+    ) -> Result<Vec<u32>, StorageError> {
+        let mut completed_pieces = Vec::new();
+
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.recv() => {
+                return Err(StorageError::Io(std::io::Error::other("Shutdown during allocation")));
+            }
+            res = create_and_allocate_files(&multi_file_info) => res?,
+        };
+
+        let piece_length_u64 = torrent.info.piece_length as u64;
+        let num_pieces = torrent.info.pieces.len() / 20;
+        let total_size = multi_file_info.total_size;
+
+        for piece_index in 0..num_pieces {
+            let start_offset = (piece_index as u64) * piece_length_u64;
+            let len_this_piece = std::cmp::min(
+                piece_length_u64,
+                total_size.saturating_sub(start_offset),
+            ) as usize;
+
+            if len_this_piece == 0 { continue; }
+
+            let start_hash_index = piece_index * HASH_LENGTH;
+            let end_hash_index = start_hash_index + HASH_LENGTH;
+            let expected_hash = torrent.info.pieces
+                .get(start_hash_index..end_hash_index)
+                .map(|s| s.to_vec());
+
+            let mut attempt = 0;
+
+            let piece_data = loop {
+                let disk_permit_result = tokio::select! {
+                    biased;
+                    _ = shutdown_rx.recv() => return Ok(completed_pieces),
+                    res = resource_manager.acquire_disk_read() => res
+                };
+
+                match disk_permit_result {
+                    Ok(_permit) => {
+                        let read_result = tokio::select! {
+                            biased;
+                            _ = shutdown_rx.recv() => return Ok(completed_pieces),
+                            res = read_data_from_disk(&multi_file_info, start_offset, len_this_piece) => res
+                        };
+
+                        match read_result {
+                            Ok(data) => break data,
+                            Err(e) => {
+                                event!(Level::WARN, piece = piece_index, error = %e, "Read failed during validation.");
+                            }
+                        }
+                    }
+                    Err(ResourceManagerError::QueueFull) => { /* Retry */ }
+                    Err(ResourceManagerError::ManagerShutdown) => return Ok(completed_pieces),
+                }
+
+                if attempt >= MAX_VALIDATION_ATTEMPTS {
+                    event!(Level::ERROR, piece = piece_index, "Validation read failed after max attempts.");
+                    break Vec::new(); 
+                }
+
+                let backoff = BASE_BACKOFF_MS.saturating_mul(2u64.pow(attempt));
+                let jitter = rand::rng().random_range(0..=JITTER_MS);
+                attempt += 1;
+                
+                let _ = event_tx.try_send(ManagerEvent::DiskIoBackoff { duration: Duration::from_millis(backoff + jitter) });
+
+                if Self::sleep_with_shutdown(Duration::from_millis(backoff + jitter), &mut shutdown_rx).await.is_err() {
+                    return Ok(completed_pieces);
+                }
+            };
+
+            if piece_data.is_empty() { continue; }
+
+            let mut validation_task = tokio::task::spawn_blocking(move || {
+                if let Some(expected) = expected_hash {
+                    sha1::Sha1::digest(&piece_data).as_slice() == expected.as_slice()
+                } else {
+                    false
+                }
+            });
+
+            let is_valid = tokio::select! {
+                biased;
+                _ = shutdown_rx.recv() => {
+                    validation_task.abort();
+                    return Ok(completed_pieces);
+                }
+                res = &mut validation_task => res.unwrap_or(false) 
+            };
+
+            if is_valid {
+                completed_pieces.push(piece_index as u32);
+            }
+
+            if piece_index % 20 == 0 {
+                let metrics = TorrentMetrics {
+                    info_hash: info_hash.clone(),
+                    torrent_name: torrent.info.name.clone(),
+                    number_of_pieces_total: num_pieces as u32,
+                    number_of_pieces_completed: (piece_index + 1) as u32,
+                    activity_message: "Validating...".to_string(),
+                    ..Default::default()
+                };
+                let _ = metrics_tx.send(metrics);
+            }
+        }
+
+        Ok(completed_pieces)
     }
 
     async fn read_block_with_retry(
@@ -1992,6 +2222,11 @@ impl TorrentManager {
                             );
                             self.state.timed_out_peers.insert(peer_ip_port.clone(), (new_failure_count, next_attempt_time));
                         }
+
+                        TorrentCommand::ValidationComplete(pieces) => {
+                            self.apply_action(Action::ValidationComplete { completed_pieces: pieces });
+                        },
+
                         _ => {
                             println!("UNIMPLEMENTED TORRENT COMMEND {:?}",  command);
                         }

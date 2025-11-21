@@ -20,11 +20,15 @@ use crate::torrent_manager::piece_manager::PieceManager;
 use crate::torrent_manager::piece_manager::PieceStatus;
 use std::collections::{HashMap, HashSet};
 
+use crate::tracker::TrackerEvent;
+
 use rand::prelude::IndexedRandom;
 
 const BITS_PER_BYTE: u64 = 8;
 const SMOOTHING_PERIOD_MS: f64 = 5000.0;
 const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 4;
+
+pub type PeerAddr = (String, u16);
 
 #[derive(Debug)]
 pub enum Action {
@@ -75,6 +79,16 @@ pub enum Action {
         block_offset: u32, 
         length: u32 
     },
+    TrackerResponse { 
+        url: String, 
+        peers: Vec<PeerAddr>, 
+        interval: u64, 
+        min_interval: Option<u64> 
+    },
+    TrackerError { url: String, error: String },
+    PeerConnectionFailed { peer_addr: String },
+    MetadataReceived { torrent: Torrent, metadata_length: i64 },
+    ValidationComplete { completed_pieces: Vec<u32> },
 }
 
 #[derive(Debug)]
@@ -95,6 +109,17 @@ pub enum Effect {
     WriteToDisk { peer_id: String, piece_index: u32, data: Vec<u8> },
     ReadFromDisk { peer_id: String, block_info: BlockInfo },
     BroadcastHave { piece_index: u32 },
+
+    ConnectToPeer { ip: String, port: u16 },
+    InitializeStorage,
+    StartValidation,
+    SendBitfieldToPeers, 
+    AnnounceToTracker { 
+        url: String,
+        event: TrackerEvent,
+    },
+
+    ConnectToPeersFromTrackers,
 }
 
 #[derive(Debug)]
@@ -598,6 +623,90 @@ impl TorrentState {
 
             Action::CancelUpload { .. } => {
                 vec![Effect::DoNothing]
+            }
+
+            Action::TrackerResponse { url, peers, interval, min_interval } => {
+                let mut effects = Vec::new();
+                
+                if let Some(tracker) = self.trackers.get_mut(&url) {
+                    let seeding_secs = if interval > 0 { interval + 1 } else { 1800 };
+                    tracker.seeding_interval = Some(Duration::from_secs(seeding_secs));
+                    
+                    let leeching_secs = min_interval.map(|m| m + 1).unwrap_or(60);
+                    tracker.leeching_interval = Some(Duration::from_secs(leeching_secs));
+                    
+                    let next_interval = if self.torrent_status != TorrentStatus::Done {
+                        tracker.leeching_interval.unwrap()
+                    } else {
+                        tracker.seeding_interval.unwrap()
+                    };
+                    tracker.next_announce_time = Instant::now() + next_interval;
+                }
+
+                for (ip, port) in peers {
+                    effects.push(Effect::ConnectToPeer { ip, port });
+                }
+                
+                effects
+            }
+
+            Action::TrackerError { url, error: _ } => {
+                if let Some(tracker) = self.trackers.get_mut(&url) {
+                    let current_interval = if self.torrent_status != TorrentStatus::Done {
+                        tracker.leeching_interval.unwrap_or(Duration::from_secs(60))
+                    } else {
+                        tracker.seeding_interval.unwrap_or(Duration::from_secs(1800))
+                    };
+                    
+                    let backoff = current_interval.mul_f32(2.0).min(Duration::from_secs(3600));
+                    tracker.next_announce_time = Instant::now() + backoff;
+                }
+                vec![Effect::DoNothing]
+            }
+
+            Action::PeerConnectionFailed { peer_addr } => {
+                let now = Instant::now();
+                let (count, _) = self.timed_out_peers.get(&peer_addr).cloned().unwrap_or((0, now));
+                let new_count = (count + 1).min(10);
+                let backoff_secs = (15 * 2u64.pow(new_count - 1)).min(1800);
+                let next_attempt = now + Duration::from_secs(backoff_secs);
+                
+                self.timed_out_peers.insert(peer_addr, (new_count, next_attempt));
+                vec![Effect::DoNothing]
+            }
+
+            Action::MetadataReceived { torrent, metadata_length } => {
+                if self.torrent.is_some() {
+                    return vec![Effect::DoNothing];
+                }
+                
+                self.torrent = Some(torrent.clone());
+                self.torrent_metadata_length = Some(metadata_length);
+                
+                let pieces = torrent.info.pieces.len() / 20;
+                self.piece_manager.set_initial_fields(pieces, self.torrent_validation_status);
+                
+                if let Some(announce) = &torrent.announce {
+                    self.trackers.insert(announce.clone(), TrackerState {
+                        next_announce_time: Instant::now(),
+                        leeching_interval: None,
+                        seeding_interval: None,
+                    });
+                }
+
+                vec![
+                    Effect::InitializeStorage, 
+                    Effect::StartValidation,
+                    Effect::SendBitfieldToPeers,
+                    Effect::ConnectToPeersFromTrackers,
+                ]
+            }
+
+            Action::ValidationComplete { completed_pieces } => {
+                for piece_index in completed_pieces {
+                    self.piece_manager.mark_as_complete(piece_index);
+                }
+                self.update(Action::CheckCompletion)
             }
 
             _ => vec![Effect::DoNothing],
