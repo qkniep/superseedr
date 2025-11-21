@@ -471,10 +471,10 @@ impl TorrentState {
                     if self.number_of_successfully_connected_peers > 0 {
                         self.number_of_successfully_connected_peers -= 1;
                     }
+                    effects.push(Effect::DisconnectPeer{ peer_id: peer_id.clone() });
                     effects.push(Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { info_hash: self.info_hash.clone() }));
                 }
 
-                effects.push(Effect::DisconnectPeer{ peer_id: peer_id.clone() });
                 effects
             }
 
@@ -662,9 +662,15 @@ impl TorrentState {
                 }
 
                 for (ip, port) in peers {
+                    let peer_addr = format!("{}:{}", ip, port);
+                    if let Some((_, next_attempt)) = self.timed_out_peers.get(&peer_addr) {
+                        if Instant::now() < *next_attempt {
+                             continue;
+                        }
+                    }
                     effects.push(Effect::ConnectToPeer { ip, port });
                 }
-                
+
                 effects
             }
 
@@ -726,6 +732,7 @@ impl TorrentState {
                 self.torrent_status = TorrentStatus::Validating;
 
                 vec![
+                    Effect::InitializeStorage,
                     Effect::StartValidation,
                 ]
             }

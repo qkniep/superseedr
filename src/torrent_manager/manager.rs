@@ -596,7 +596,7 @@ impl TorrentManager {
                     let _ = event_tx.try_send(ManagerEvent::DiskReadStarted { info_hash: info_hash.to_vec(), op });
 
                     let result = Self::read_block_with_retry(
-                        &multi_file_info, &resource_manager, &mut shutdown_rx, &event_tx, op
+                        &multi_file_info, &resource_manager, &mut shutdown_rx, &event_tx, op, &peer_tx
                     ).await;
 
                     if let Ok(data) = result {
@@ -604,16 +604,18 @@ impl TorrentManager {
                             block_info.piece_index, block_info.offset, data
                         ));
                         
+                        let _ = tx.try_send(TorrentCommand::UploadTaskCompleted { 
+                            peer_id: peer_id_clone.clone(), block_info: block_info_clone 
+                        });
+
                         let _ = tx.send(TorrentCommand::BlockSent { 
                             peer_id: peer_id_clone.clone(), 
                             bytes: block_info.length as u64 
                         }).await;
+
                     }
 
                     let _ = event_tx.try_send(ManagerEvent::DiskReadFinished);
-                    let _ = tx.try_send(TorrentCommand::UploadTaskCompleted { 
-                        peer_id: peer_id_clone, block_info: block_info_clone 
-                    });
                 });
 
                 self.in_flight_uploads.entry(peer_id).or_default().insert(block_info, handle);
@@ -695,15 +697,6 @@ impl TorrentManager {
                     };
                     
                     self.multi_file_info = Some(mfi.clone());
-                    
-                    let mut shutdown_rx = self.shutdown_tx.subscribe();
-                    tokio::spawn(async move {
-                        tokio::select! {
-                            biased;
-                            _ = shutdown_rx.recv() => {},
-                            _ = create_and_allocate_files(&mfi) => {}
-                        }
-                    });
                 }
             }
 
@@ -1096,10 +1089,15 @@ impl TorrentManager {
         shutdown_rx: &mut broadcast::Receiver<()>,
         event_tx: &Sender<ManagerEvent>,
         op: DiskIoOperation,
+        peer_tx: &Sender<TorrentCommand>
     ) -> Result<Vec<u8>, StorageError> {
         let mut attempt = 0;
 
         loop {
+            if peer_tx.is_closed() {
+                return Err(StorageError::Io(std::io::Error::other("Peer Disconnected")))
+            }
+
             let permit_res = tokio::select! {
                 biased;
                 _ = shutdown_rx.recv() => { return Err(StorageError::Io(std::io::Error::other("Shutdown"))); }
