@@ -473,6 +473,8 @@ impl TorrentState {
                     }
                     effects.push(Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { info_hash: self.info_hash.clone() }));
                 }
+
+                effects.push(Effect::DisconnectPeer{ peer_id: peer_id.clone() });
                 effects
             }
 
@@ -724,7 +726,6 @@ impl TorrentState {
                 self.torrent_status = TorrentStatus::Validating;
 
                 vec![
-                    Effect::InitializeStorage, 
                     Effect::StartValidation,
                 ]
             }

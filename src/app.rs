@@ -1677,7 +1677,6 @@ impl App {
     }
 
     fn update_torrent_state(&mut self, result: Result<TorrentMetrics, broadcast::error::RecvError>) {
-
         match result {
             Ok(message) => {
                 self.app_state.session_total_downloaded += message.bytes_downloaded_this_tick;
