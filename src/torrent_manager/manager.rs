@@ -446,7 +446,14 @@ impl TorrentManager {
             }
 
             Effect::VerifyPiece { peer_id, piece_index, data } => {
-                let torrent = self.state.torrent.clone().expect("Metadata missing during verify");
+                let torrent = match self.state.torrent.clone() {
+                    Some(t) => t,
+                    None => {
+                        debug_assert!(self.state.torrent.is_some(), "Metadata missing during verify");
+                        event!(Level::ERROR, "Metadata missing during piece verification, cannot proceed.");
+                        return;
+                    }
+                };
                 let start = piece_index as usize * HASH_LENGTH;
                 let end = start + HASH_LENGTH;
                 let expected_hash = torrent.info.pieces.get(start..end).map(|s| s.to_vec());
@@ -670,12 +677,19 @@ impl TorrentManager {
 
             Effect::InitializeStorage => {
                 if let Some(torrent) = &self.state.torrent {
-                    let mfi = MultiFileInfo::new(
+                    let mfi = match MultiFileInfo::new(
                         &self.root_download_path,
                         &torrent.info.name,
                         if torrent.info.files.is_empty() { None } else { Some(&torrent.info.files) },
                         if torrent.info.files.is_empty() { Some(torrent.info.length as u64) } else { None },
-                    ).expect("Failed to init storage from metadata");
+                    ) {
+                        Ok(mfi) => mfi,
+                        Err(e) => {
+                            debug_assert!(false, "Failed to init storage from metadata: {}", e);
+                            event!(Level::ERROR, "Failed to initialize storage from metadata: {}. Aborting storage initialization.", e);
+                            return;
+                        }
+                    };
                     
                     self.multi_file_info = Some(mfi.clone());
                     
@@ -691,8 +705,22 @@ impl TorrentManager {
             }
 
             Effect::StartValidation => {
-                let mfi = self.multi_file_info.as_ref().expect("Storage not ready").clone();
-                let torrent = self.state.torrent.as_ref().expect("Metadata not ready").clone();
+                let mfi = match self.multi_file_info.as_ref() {
+                    Some(m) => m.clone(),
+                    None => {
+                        debug_assert!(self.multi_file_info.is_some(), "Storage not ready for validation");
+                        event!(Level::ERROR, "Cannot start validation: Storage not initialized.");
+                        return;
+                    }
+                };
+                let torrent = match self.state.torrent.as_ref() {
+                    Some(t) => t.clone(),
+                    None => {
+                        debug_assert!(self.state.torrent.is_some(), "Metadata not ready for validation");
+                        event!(Level::ERROR, "Cannot start validation: Metadata not available.");
+                        return;
+                    }
+                };
                 let rm = self.resource_manager.clone();
                 let shutdown_rx = self.shutdown_tx.subscribe();
                 let metrics_tx = self.metrics_tx.clone();
@@ -1317,7 +1345,14 @@ impl TorrentManager {
         
         // We can safely expect metadata here because this is called on startup 
         // for existing torrents, which must have metadata to exist.
-        let torrent = self.state.torrent.clone().expect("Metadata missing during startup validation");
+        let torrent = match self.state.torrent.clone() {
+            Some(t) => t,
+            None => {
+                debug_assert!(self.state.torrent.is_some(), "Metadata missing during startup validation");
+                event!(Level::ERROR, "Cannot validate local file: Metadata not available.");
+                return Err(StorageError::Io(std::io::Error::other("Metadata missing during startup validation")));
+            }
+        };
         
         let rm = self.resource_manager.clone();
         let shutdown_rx = self.shutdown_tx.subscribe();
@@ -1354,8 +1389,22 @@ impl TorrentManager {
     }
 
     fn get_piece_size(&self, piece_index: u32) -> usize {
-        let torrent = self.state.torrent.clone().expect("Torrent metadata not ready.");
-        let multi_file_info = self.multi_file_info.as_ref().expect("File info not ready.");
+        let torrent = match self.state.torrent.clone() {
+            Some(t) => t,
+            None => {
+                debug_assert!(self.state.torrent.is_some(), "Torrent metadata not ready.");
+                event!(Level::ERROR, "Cannot get piece size: Torrent metadata not available.");
+                return 0;
+            }
+        };
+        let multi_file_info = match self.multi_file_info.as_ref() {
+            Some(mfi) => mfi,
+            None => {
+                debug_assert!(self.multi_file_info.is_some(), "File info not ready.");
+                event!(Level::ERROR, "Cannot get piece size: File info not available.");
+                return 0;
+            }
+        };
 
         let total_length_u64 = multi_file_info.total_size;
         let piece_length_u64 = torrent.info.piece_length as u64;
@@ -1408,7 +1457,14 @@ impl TorrentManager {
 
     fn send_metrics(&mut self, _actual_ms_since_last_tick: u64, bytes_dl: u64, bytes_ul: u64) {
         if let Some(ref torrent) = self.state.torrent {
-            let multi_file_info = self.multi_file_info.as_ref().expect("File info not ready.");
+            let multi_file_info = match self.multi_file_info.as_ref() {
+                Some(mfi) => mfi,
+                None => {
+                    debug_assert!(self.multi_file_info.is_some(), "File info not ready for metrics.");
+                    event!(Level::WARN, "Cannot send metrics: File info not available.");
+                    return;
+                }
+            };
 
             let next_announce_in = self
                 .state.trackers
