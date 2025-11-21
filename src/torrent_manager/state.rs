@@ -92,6 +92,7 @@ pub enum Action {
     Resume,
     Delete,
     UpdateListenPort,
+    ValidationProgress { count: u32 },
 }
 
 #[derive(Debug)]
@@ -153,6 +154,7 @@ pub enum TorrentActivity {
 #[derive(PartialEq, Debug, Default)]
 pub enum TorrentStatus {
     #[default]
+    Validating,
     Standard,
     Endgame,
     Done,
@@ -187,6 +189,7 @@ pub struct TorrentState {
     pub timed_out_peers: HashMap<String, (u32, Instant)>,
     pub last_known_peers: HashSet<String>,
     pub optimistic_unchoke_timer: Option<Instant>,
+    pub validation_pieces_found: u32,
 }
 
 impl TorrentState {
@@ -376,6 +379,10 @@ impl TorrentState {
             // --- Work Assignment ---
 
             Action::AssignWork { peer_id } => {
+                if self.torrent_status == TorrentStatus::Validating {
+                    return vec![Effect::DoNothing];
+                }
+
                 if self.piece_manager.need_queue.is_empty() && self.piece_manager.pending_queue.is_empty() {
                     return vec![Effect::DoNothing];
                 }
@@ -686,6 +693,7 @@ impl TorrentState {
                 if self.torrent.is_some() {
                     return vec![Effect::DoNothing];
                 }
+
                 
                 self.torrent = Some(torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
@@ -710,6 +718,9 @@ impl TorrentState {
                     });
                 }
 
+                self.validation_pieces_found = 0;
+                self.torrent_status = TorrentStatus::Validating;
+
                 vec![
                     Effect::InitializeStorage, 
                     Effect::StartValidation,
@@ -719,10 +730,22 @@ impl TorrentState {
             }
 
             Action::ValidationComplete { completed_pieces } => {
+
+                let mut effects = Vec::new();
+
                 for piece_index in completed_pieces {
                     self.piece_manager.mark_as_complete(piece_index);
                 }
-                self.update(Action::CheckCompletion)
+                
+                self.torrent_status = TorrentStatus::Standard;
+                
+                effects.extend(self.update(Action::CheckCompletion));
+                
+                for peer_id in self.peers.keys().cloned().collect::<Vec<_>>() {
+                    effects.extend(self.update(Action::AssignWork { peer_id }));
+                }
+
+                effects
             }
 
             Action::CancelUpload { peer_id, piece_index, block_offset, length } => {
@@ -848,6 +871,11 @@ impl TorrentState {
                 }
                 
                 effects
+            }
+
+            Action::ValidationProgress { count } => {
+                self.validation_pieces_found = count;
+                vec![Effect::DoNothing]
             }
         }
     }

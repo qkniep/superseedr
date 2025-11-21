@@ -723,7 +723,6 @@ impl TorrentManager {
                 };
                 let rm = self.resource_manager.clone();
                 let shutdown_rx = self.shutdown_tx.subscribe();
-                let metrics_tx = self.metrics_tx.clone();
                 let event_tx = self.manager_event_tx.clone();
                 let info_hash = self.state.info_hash.clone();
                 let manager_tx = self.torrent_manager_tx.clone();
@@ -732,7 +731,7 @@ impl TorrentManager {
 
                 tokio::spawn(async move {
                     let res = Self::perform_validation(
-                        mfi, torrent, rm, shutdown_rx, metrics_tx, event_tx, info_hash, is_validated
+                        mfi, torrent, rm, shutdown_rx, manager_tx.clone(), event_tx, info_hash, is_validated
                     ).await;
                     
                     if let Ok(pieces) = res {
@@ -902,7 +901,7 @@ impl TorrentManager {
         torrent: Torrent,
         resource_manager: ResourceManagerClient,
         mut shutdown_rx: broadcast::Receiver<()>,
-        metrics_tx: broadcast::Sender<TorrentMetrics>,
+        manager_tx: Sender<TorrentCommand>,
         event_tx: Sender<ManagerEvent>,
         info_hash: Vec<u8>,
         skip_hashing: bool,
@@ -1011,18 +1010,11 @@ impl TorrentManager {
             }
 
             if piece_index % 20 == 0 {
-                let metrics = TorrentMetrics {
-                    info_hash: info_hash.clone(),
-                    torrent_name: torrent.info.name.clone(),
-                    number_of_pieces_total: num_pieces as u32,
-                    number_of_pieces_completed: (piece_index + 1) as u32,
-                    activity_message: "Validating...".to_string(),
-                    ..Default::default()
-                };
-                let _ = metrics_tx.send(metrics);
+                let _ = manager_tx.send(TorrentCommand::ValidationProgress(piece_index as u32)).await;
             }
         }
 
+        let _ = manager_tx.send(TorrentCommand::ValidationProgress(num_pieces as u32)).await;
         Ok(completed_pieces)
     }
 
@@ -1356,7 +1348,7 @@ impl TorrentManager {
         
         let rm = self.resource_manager.clone();
         let shutdown_rx = self.shutdown_tx.subscribe();
-        let metrics = self.metrics_tx.clone();
+        let manager_tx = self.torrent_manager_tx.clone();
         let event = self.manager_event_tx.clone();
         let hash = self.state.info_hash.clone();
         let skip = self.state.torrent_validation_status;
@@ -1369,7 +1361,7 @@ impl TorrentManager {
                 torrent, 
                 rm, 
                 shutdown_rx, 
-                metrics, 
+                manager_tx.clone(), 
                 event, 
                 hash, 
                 skip
@@ -1414,10 +1406,14 @@ impl TorrentManager {
 
         std::cmp::min(piece_length_u64, bytes_remaining) as usize
     }
-    /// Generates a human-readable status message for the UI based on the torrent's current state.
+
     fn generate_activity_message(&self, dl_speed: u64, ul_speed: u64) -> String {
         if self.state.is_paused {
             return "Paused".to_string();
+        }
+
+        if self.state.torrent_status == TorrentStatus::Validating {
+            return "Validating...".to_string();
         }
 
         if self.state.torrent_status == TorrentStatus::Done {
@@ -1489,8 +1485,12 @@ impl TorrentManager {
             let info_hash_clone = self.state.info_hash.clone();
             let torrent_name_clone = torrent.info.name.clone();
             let number_of_pieces_total = (torrent.info.pieces.len() / 20) as u32;
-            let number_of_pieces_completed =
-                number_of_pieces_total - self.state.piece_manager.pieces_remaining as u32;
+            let number_of_pieces_completed = if self.state.torrent_status == TorrentStatus::Validating {
+                self.state.validation_pieces_found
+            } else {
+                number_of_pieces_total - self.state.piece_manager.pieces_remaining as u32
+            };
+
             let number_of_successfully_connected_peers = self.state.peers.len();
 
             let eta = if self.state.piece_manager.pieces_remaining == 0 {
@@ -1722,7 +1722,10 @@ impl TorrentManager {
                     match manager_command {
                         ManagerCommand::Pause => self.apply_action(Action::Pause),
                         ManagerCommand::Resume => self.apply_action(Action::Resume),
-                        ManagerCommand::DeleteFile => self.apply_action(Action::Delete),
+                        ManagerCommand::DeleteFile => {
+                            self.apply_action(Action::Delete);
+                            break Ok(()); 
+                        },
                         ManagerCommand::UpdateListenPort(new_port) => {
                             let mut settings = (*self.settings).clone();
                             if settings.client_port != new_port {
@@ -1730,6 +1733,7 @@ impl TorrentManager {
                                 self.settings = Arc::new(settings);
                                 self.apply_action(Action::UpdateListenPort);
                             }
+
                         },
                         ManagerCommand::SetDataRate(new_rate_ms) => {
                             data_rate_ms = new_rate_ms;
@@ -2013,7 +2017,9 @@ impl TorrentManager {
                                 byte_count: bytes 
                             });
                         },
-
+                        TorrentCommand::ValidationProgress(count) => {
+                            self.apply_action(Action::ValidationProgress { count });
+                        },
                         _ => {
                             println!("UNIMPLEMENTED TORRENT COMMEND {:?}",  command);
                         }
