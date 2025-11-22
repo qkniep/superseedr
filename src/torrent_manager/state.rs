@@ -1750,6 +1750,140 @@ mod tests {
         // Double check global status is actually done (to ensure test validity)
         assert_eq!(state.piece_manager.bitfield[0], PieceStatus::Done);
     }
+
+    #[test]
+    fn regression_delete_clears_piece_manager_state() {
+        // BUG CONTEXT: Previously, Action::Delete cleared queues but left 'partial blocks' 
+        // inside PieceManager. When a new peer connected and sent data for that piece, 
+        // PieceManager panicked with "subtract with overflow" because it compared 
+        // new offsets against old, stale buffer state.
+        
+        let mut state = create_empty_state();
+        let torrent = create_dummy_torrent(5);
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(5, false);
+        state.torrent_status = TorrentStatus::Standard;
+        state.piece_manager.need_queue = vec![0];
+
+        // 1. Connect Peer A and start downloading Piece 0
+        add_peer(&mut state, "peer_A");
+        let _ = state.update(Action::PeerUnchoked { peer_id: "peer_A".into() });
+        let _ = state.update(Action::PeerHavePiece { peer_id: "peer_A".into(), piece_index: 0 });
+        let _ = state.update(Action::AssignWork { peer_id: "peer_A".into() });
+
+        // 2. Simulate partial download (polluting PieceManager internal buffer)
+        let data = vec![1; 100];
+        let _ = state.update(Action::IncomingBlock { 
+            peer_id: "peer_A".into(), 
+            piece_index: 0, 
+            block_offset: 0, 
+            data: data.clone() 
+        });
+
+        // 3. DELETE! (This must wipe PieceManager clean)
+        let _ = state.update(Action::Delete);
+
+        // 4. Connect Peer B and try downloading Piece 0 again
+        // If state wasn't wiped, this causes "subtract with overflow" or "ghost queue" panic
+        add_peer(&mut state, "peer_B");
+        
+        // We must reset status to Standard manually as Delete sets it to Validating
+        state.torrent_status = TorrentStatus::Standard; 
+        state.piece_manager.need_queue = vec![0];
+
+        let _ = state.update(Action::PeerUnchoked { peer_id: "peer_B".into() });
+        let _ = state.update(Action::PeerHavePiece { peer_id: "peer_B".into(), piece_index: 0 });
+        
+        // CRITICAL STEP: Sending data for the same piece index as before.
+        // If the old partial buffer exists, this crashes.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut s = state; // Move state in
+            s.update(Action::IncomingBlock { 
+                peer_id: "peer_B".into(), 
+                piece_index: 0, 
+                block_offset: 0, 
+                data: data 
+            });
+        }));
+
+        assert!(result.is_ok(), "Regression: Action::Delete failed to wipe PieceManager state!");
+    }
+
+    #[test]
+    fn regression_redundant_disk_write_completion() {
+        // BUG CONTEXT: The fuzzer found that if 'PieceWrittenToDisk' fires twice 
+        // (race condition), the PieceManager would panic trying to mark a 'Done' piece as done.
+        
+        let mut state = create_empty_state();
+        state.piece_manager.set_initial_fields(1, false);
+        add_peer(&mut state, "peer_A");
+        state.peers.get_mut("peer_A").unwrap().pending_requests.insert(0);
+
+        // 1. First Write Confirmation (Valid)
+        state.update(Action::PieceWrittenToDisk { 
+            peer_id: "peer_A".into(), 
+            piece_index: 0 
+        });
+        
+        assert_eq!(state.piece_manager.bitfield[0], PieceStatus::Done);
+
+        // 2. Second Write Confirmation (The Bug Trigger)
+        // Should be ignored gracefully, not panic.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut s = state;
+            s.update(Action::PieceWrittenToDisk { 
+                peer_id: "peer_A".into(), 
+                piece_index: 0 
+            });
+        }));
+
+        assert!(result.is_ok(), "Regression: Double PieceWrittenToDisk caused a panic!");
+    }
+
+    #[test]
+    fn regression_metric_integer_overflow() {
+        // BUG CONTEXT: Sending huge byte counts caused u64 overflow panics.
+        let mut state = create_empty_state();
+        add_peer(&mut state, "peer_A");
+
+        let huge_val = u64::MAX - 100;
+        
+        // 1. Add huge value (should be fine)
+        state.update(Action::BlockSentToPeer { 
+            peer_id: "peer_A".into(), 
+            byte_count: huge_val 
+        });
+
+        // 2. Add more (should saturate, not panic)
+        state.update(Action::BlockSentToPeer { 
+            peer_id: "peer_A".into(), 
+            byte_count: 200 
+        });
+
+        assert_eq!(state.session_total_uploaded, u64::MAX);
+        assert_eq!(state.peers["peer_A"].total_bytes_uploaded, u64::MAX);
+    }
+
+    #[test]
+    fn regression_peer_count_sync() {
+        // BUG CONTEXT: Connecting the same peer twice incremented the counter twice,
+        // but the map only held 1 entry. Disconnecting then left the counter at 1.
+        
+        let mut state = create_empty_state();
+        
+        // 1. Connect Peer A
+        state.update(Action::PeerSuccessfullyConnected { peer_id: "peer_A".into() });
+        add_peer(&mut state, "peer_A"); // Inject the peer object as the runner would
+        assert_eq!(state.number_of_successfully_connected_peers, 1);
+
+        // 2. Connect Peer A AGAIN (Duplicate event)
+        state.update(Action::PeerSuccessfullyConnected { peer_id: "peer_A".into() });
+        assert_eq!(state.number_of_successfully_connected_peers, 1, "Counter should not increment on duplicate");
+
+        // 3. Disconnect Peer A
+        state.update(Action::PeerDisconnected { peer_id: "peer_A".into() });
+        assert_eq!(state.number_of_successfully_connected_peers, 0, "Counter should be zero");
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -2211,7 +2345,7 @@ mod prop_tests {
             // failed and Proptest is attempting to shrink the input.
             let shrinking_count = iteration - TOTAL_CASES;
             eprintln!(
-                "🔥 **Shrinking**: Test failed! Analyzing minimal input (Executions: {})",
+                "🔥 **Regressions/Shrinking**: Running old saved seeds and new found errors (Executions: {})",
                 shrinking_count
             );
         }
