@@ -358,6 +358,10 @@ impl TorrentState {
                     bytes_ul: ul_tick,
                 }];
 
+                if self.torrent_status == TorrentStatus::Validating || self.is_paused {
+                    return effects;
+                }
+
                 let now = Instant::now();
                 for (url, tracker) in self.trackers.iter_mut() {
                     if now >= tracker.next_announce_time {
