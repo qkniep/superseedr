@@ -395,7 +395,7 @@ impl TorrentManager {
 
             Effect::SendToPeer { peer_id, cmd } => {
                 if let Some(peer) = self.state.peers.get(&peer_id) {
-                    let _ = peer.peer_tx.try_send(cmd);
+                    let _ = peer.peer_tx.try_send(*cmd);
                 }
             }
 
@@ -1091,7 +1091,7 @@ impl TorrentManager {
                         piece = piece_index,
                         "Validation read failed after max attempts."
                     );
-                    break Vec::new();
+                    return Ok(completed_pieces);
                 }
 
                 let backoff = BASE_BACKOFF_MS.saturating_mul(2u64.pow(attempt));
@@ -2114,7 +2114,7 @@ impl TorrentManager {
                             }
 
                             self.apply_action(Action::MetadataReceived {
-                                torrent, metadata_length
+                                torrent: Box::new(torrent), metadata_length
                             });
                         },
 

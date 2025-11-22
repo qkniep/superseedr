@@ -106,7 +106,7 @@ pub enum Action {
         peer_addr: String,
     },
     MetadataReceived {
-        torrent: Torrent,
+        torrent: Box<Torrent>,
         metadata_length: i64,
     },
     ValidationComplete {
@@ -148,7 +148,7 @@ pub enum Effect {
     EmitManagerEvent(ManagerEvent),
     SendToPeer {
         peer_id: String,
-        cmd: TorrentCommand,
+        cmd: Box<TorrentCommand>,
     },
     DisconnectPeer {
         peer_id: String,
@@ -418,14 +418,14 @@ impl TorrentState {
                             peer.am_choking = ChokeStatus::Unchoke;
                             effects.push(Effect::SendToPeer {
                                 peer_id: peer.ip_port.clone(),
-                                cmd: TorrentCommand::PeerUnchoke,
+                                cmd: Box::new(TorrentCommand::PeerUnchoke),
                             });
                         }
                     } else if peer.am_choking == ChokeStatus::Unchoke {
                         peer.am_choking = ChokeStatus::Choke;
                         effects.push(Effect::SendToPeer {
                             peer_id: peer.ip_port.clone(),
-                            cmd: TorrentCommand::PeerChoke,
+                            cmd: Box::new(TorrentCommand::PeerChoke),
                         });
                     }
 
@@ -461,7 +461,7 @@ impl TorrentState {
                             peer.am_interested = false;
                             effects.push(Effect::SendToPeer {
                                 peer_id: peer.ip_port.clone(),
-                                cmd: TorrentCommand::NotInterested,
+                                cmd: Box::new(TorrentCommand::NotInterested),
                             });
                         }
                     }
@@ -509,7 +509,7 @@ impl TorrentState {
                             peer.am_interested = true;
                             effects.push(Effect::SendToPeer {
                                 peer_id: peer_id.clone(),
-                                cmd: TorrentCommand::ClientInterested,
+                                cmd: Box::new(TorrentCommand::ClientInterested),
                             });
                         }
                         return effects;
@@ -534,11 +534,11 @@ impl TorrentState {
 
                         effects.push(Effect::SendToPeer {
                             peer_id: peer_id.clone(),
-                            cmd: TorrentCommand::RequestDownload(
+                            cmd: Box::new(TorrentCommand::RequestDownload(
                                 piece_index,
                                 torrent.info.piece_length,
                                 total_size,
-                            ),
+                            )),
                         });
                     }
                 }
@@ -734,7 +734,7 @@ impl TorrentState {
                             peer.pending_requests.remove(&piece_index);
                             effects.push(Effect::SendToPeer {
                                 peer_id: other_peer.clone(),
-                                cmd: TorrentCommand::Cancel(piece_index),
+                                cmd: Box::new(TorrentCommand::Cancel(piece_index)),
                             });
                         }
                         effects.extend(self.update(Action::AssignWork {
@@ -870,7 +870,7 @@ impl TorrentState {
                     return vec![Effect::DoNothing];
                 }
 
-                self.torrent = Some(torrent.clone());
+                self.torrent = Some(*torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
 
                 let num_pieces = torrent.info.pieces.len() / 20;
