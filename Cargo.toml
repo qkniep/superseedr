@@ -47,6 +47,7 @@ console = ["dep:console-subscriber"]
 
 [dev-dependencies]
 tempfile = "3.23.0"
+proptest = "1.4"
 
 [dependencies]
 reqwest = "0.12.24"
