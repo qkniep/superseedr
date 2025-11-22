@@ -2186,13 +2186,14 @@ impl TorrentManager {
                         TorrentCommand::ValidationProgress(count) => {
                             self.apply_action(Action::ValidationProgress { count });
                         },
-                        _ => {
-                            println!("UNIMPLEMENTED TORRENT COMMEND {:?}",  command);
-                        }
 
                         TorrentCommand::FatalStorageError(msg) => {
                             self.apply_action(Action::FatalError { error: msg });
                         },
+
+                        _ => {
+                            println!("UNIMPLEMENTED TORRENT COMMEND {:?}",  command);
+                        }
                     }
                 }
             }

@@ -401,7 +401,7 @@ impl TorrentState {
 
                 if self
                     .optimistic_unchoke_timer
-                    .map_or(false, |t| t.elapsed() > Duration::from_secs(30))
+                    .is_some_and(|t| t.elapsed() > Duration::from_secs(30))
                 {
                     let optimistic_candidates: Vec<&mut PeerState> = interested_peers
                         .into_iter()
@@ -424,14 +424,12 @@ impl TorrentState {
                                 cmd: TorrentCommand::PeerUnchoke,
                             });
                         }
-                    } else {
-                        if peer.am_choking == ChokeStatus::Unchoke {
-                            peer.am_choking = ChokeStatus::Choke;
-                            effects.push(Effect::SendToPeer {
-                                peer_id: peer.ip_port.clone(),
-                                cmd: TorrentCommand::PeerChoke,
-                            });
-                        }
+                    } else if peer.am_choking == ChokeStatus::Unchoke {
+                        peer.am_choking = ChokeStatus::Choke;
+                        effects.push(Effect::SendToPeer {
+                            peer_id: peer.ip_port.clone(),
+                            cmd: TorrentCommand::PeerChoke,
+                        });
                     }
 
                     peer.bytes_downloaded_from_peer = 0;
