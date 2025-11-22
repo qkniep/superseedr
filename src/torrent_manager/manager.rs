@@ -94,9 +94,6 @@ use std::sync::Arc;
 use crate::torrent_manager::TorrentParameters;
 
 const HASH_LENGTH: usize = 20;
-const MAX_BLOCK_SIZE: u32 = 131_072;
-
-const MAX_TIMEOUT_COUNT: u32 = 10;
 
 const MAX_UPLOAD_REQUEST_ATTEMPTS: u32 = 7;
 const MAX_PIECE_WRITE_ATTEMPTS: u32 = 12;
@@ -806,7 +803,6 @@ impl TorrentManager {
                 let rm = self.resource_manager.clone();
                 let shutdown_rx = self.shutdown_tx.subscribe();
                 let event_tx = self.manager_event_tx.clone();
-                let info_hash = self.state.info_hash.clone();
                 let manager_tx = self.torrent_manager_tx.clone();
 
                 let is_validated = self.state.torrent_validation_status;
@@ -1577,39 +1573,6 @@ impl TorrentManager {
         Ok(())
     }
 
-    fn get_piece_size(&self, piece_index: u32) -> usize {
-        let torrent = match self.state.torrent.clone() {
-            Some(t) => t,
-            None => {
-                debug_assert!(self.state.torrent.is_some(), "Torrent metadata not ready.");
-                event!(
-                    Level::ERROR,
-                    "Cannot get piece size: Torrent metadata not available."
-                );
-                return 0;
-            }
-        };
-        let multi_file_info = match self.multi_file_info.as_ref() {
-            Some(mfi) => mfi,
-            None => {
-                debug_assert!(self.multi_file_info.is_some(), "File info not ready.");
-                event!(
-                    Level::ERROR,
-                    "Cannot get piece size: File info not available."
-                );
-                return 0;
-            }
-        };
-
-        let total_length_u64 = multi_file_info.total_size;
-        let piece_length_u64 = torrent.info.piece_length as u64;
-        let piece_index_u64 = piece_index as u64;
-        let start_offset = piece_index_u64 * piece_length_u64;
-        let bytes_remaining = total_length_u64.saturating_sub(start_offset);
-
-        std::cmp::min(piece_length_u64, bytes_remaining) as usize
-    }
-
     fn generate_activity_message(&self, dl_speed: u64, ul_speed: u64) -> String {
         if self.state.is_paused {
             return "Paused".to_string();
@@ -2165,7 +2128,8 @@ impl TorrentManager {
                         },
 
                         TorrentCommand::AnnounceFailed(url, error) => {
-                            self.apply_action(Action::TrackerError { url, error });
+                            event!(Level::DEBUG, "Error from tracker announced failed {}", error);
+                            self.apply_action(Action::TrackerError { url });
                         },
 
                         TorrentCommand::UnresponsivePeer(peer_ip_port) => {
@@ -2187,10 +2151,12 @@ impl TorrentManager {
                         },
 
                         TorrentCommand::FatalStorageError(msg) => {
-                            self.apply_action(Action::FatalError { error: msg });
+                            event!(Level::DEBUG, ?msg, "Fatal Storage error");
+                            self.apply_action(Action::FatalError);
                         },
 
                         _ => {
+
                             println!("UNIMPLEMENTED TORRENT COMMEND {:?}",  command);
                         }
                     }

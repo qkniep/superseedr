@@ -101,7 +101,6 @@ pub enum Action {
     },
     TrackerError {
         url: String,
-        error: String,
     },
     PeerConnectionFailed {
         peer_addr: String,
@@ -135,9 +134,7 @@ pub enum Action {
         count: u32,
     },
 
-    FatalError {
-        error: String,
-    },
+    FatalError,
 }
 
 #[derive(Debug)]
@@ -833,7 +830,7 @@ impl TorrentState {
                 effects
             }
 
-            Action::TrackerError { url, error: _ } => {
+            Action::TrackerError { url } => {
                 if let Some(tracker) = self.trackers.get_mut(&url) {
                     let current_interval = if self.torrent_status != TorrentStatus::Done {
                         tracker.leeching_interval.unwrap_or(Duration::from_secs(60))
@@ -1082,7 +1079,7 @@ impl TorrentState {
                 vec![Effect::DoNothing]
             }
 
-            Action::FatalError { error } => self.update(Action::Pause),
+            Action::FatalError => self.update(Action::Pause),
         }
     }
 }
