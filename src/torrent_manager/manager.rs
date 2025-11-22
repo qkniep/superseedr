@@ -696,7 +696,7 @@ impl TorrentManager {
                 let (peer_tx, peer_rx) = mpsc::channel(10);
                 self.state.peers.insert(
                     peer_ip_port.clone(),
-                    PeerState::new(peer_ip_port.clone(), peer_tx),
+                    PeerState::new(peer_ip_port.clone(), peer_tx, Instant::now()),
                 );
 
                 let bitfield = if self.state.torrent.is_some() {
@@ -1430,7 +1430,7 @@ impl TorrentManager {
         let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(10);
         self.state.peers.insert(
             peer_ip_port.clone(),
-            PeerState::new(peer_ip_port.clone(), peer_session_tx),
+            PeerState::new(peer_ip_port.clone(), peer_session_tx, Instant::now()),
         );
 
         let bitfield = match self.state.torrent {
@@ -1824,7 +1824,8 @@ impl TorrentManager {
                     }
 
                     self.apply_action(Action::RecalculateChokes {
-                        upload_slots: self.settings.upload_slots
+                        upload_slots: self.settings.upload_slots,
+                        random_seed: rand::rng().random() 
                     });
                 }
 
@@ -1980,7 +1981,7 @@ impl TorrentManager {
 
                         self.state.peers.insert(
                             peer_ip_port.clone(),
-                            PeerState::new(peer_ip_port.clone(), peer_session_tx),
+                            PeerState::new(peer_ip_port.clone(), peer_session_tx, Instant::now()),
                         );
 
                         let bitfield = match self.state.torrent {

@@ -36,6 +36,7 @@ pub enum Action {
     },
     RecalculateChokes {
         upload_slots: usize,
+        random_seed: u64,
     },
     CheckCompletion,
     AssignWork {
@@ -236,7 +237,7 @@ pub enum ChokeStatus {
     Unchoke,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TorrentState {
     pub info_hash: Vec<u8>,
     pub torrent: Option<Torrent>,
@@ -260,6 +261,36 @@ pub struct TorrentState {
     pub last_known_peers: HashSet<String>,
     pub optimistic_unchoke_timer: Option<Instant>,
     pub validation_pieces_found: u32,
+    pub now: Instant,
+}
+impl Default for TorrentState {
+    fn default() -> Self {
+        Self {
+            info_hash: Vec::new(),
+            torrent: None,
+            torrent_metadata_length: None,
+            is_paused: false,
+            torrent_status: TorrentStatus::default(),
+            torrent_validation_status: false,
+            last_activity: TorrentActivity::default(),
+            has_made_first_connection: false,
+            session_total_uploaded: 0,
+            session_total_downloaded: 0,
+            bytes_downloaded_in_interval: 0,
+            bytes_uploaded_in_interval: 0,
+            total_dl_prev_avg_ema: 0.0,
+            total_ul_prev_avg_ema: 0.0,
+            number_of_successfully_connected_peers: 0,
+            peers: HashMap::new(),
+            piece_manager: PieceManager::new(), 
+            trackers: HashMap::new(),
+            timed_out_peers: HashMap::new(),
+            last_known_peers: HashSet::new(),
+            optimistic_unchoke_timer: None,
+            validation_pieces_found: 0,
+            now: Instant::now(), // This is what fixes the error
+        }
+    }
 }
 
 impl TorrentState {
@@ -283,6 +314,7 @@ impl TorrentState {
                     .checked_sub(Duration::from_secs(31))
                     .unwrap_or(Instant::now()),
             ),
+            now: Instant::now(),
             ..Default::default()
         }
     }
@@ -308,36 +340,44 @@ impl TorrentState {
     pub fn update(&mut self, action: Action) -> Vec<Effect> {
         match action {
             Action::Tick { dt_ms } => {
+                self.now += Duration::from_millis(dt_ms);
                 let scaling_factor = if dt_ms > 0 {
                     1000.0 / dt_ms as f64
                 } else {
                     1.0
                 };
                 let dt = dt_ms as f64;
+                // Calculate Alpha for Exponential Moving Average
                 let alpha = 1.0 - (-dt / SMOOTHING_PERIOD_MS).exp();
 
+                // --- GLOBAL SPEED CALCULATION ---
                 let inst_total_dl_speed =
-                    (self.bytes_downloaded_in_interval * BITS_PER_BYTE) as f64 * scaling_factor;
+                    (self.bytes_downloaded_in_interval as f64 * 8.0) * scaling_factor;
                 let inst_total_ul_speed =
-                    (self.bytes_uploaded_in_interval * BITS_PER_BYTE) as f64 * scaling_factor;
+                    (self.bytes_uploaded_in_interval as f64 * 8.0) * scaling_factor;
 
+                // Capture values for the EmitMetrics event
                 let dl_tick = self.bytes_downloaded_in_interval;
                 let ul_tick = self.bytes_uploaded_in_interval;
 
+                // Reset interval counters
                 self.bytes_downloaded_in_interval = 0;
                 self.bytes_uploaded_in_interval = 0;
 
+                // Update Global EMAs
                 self.total_dl_prev_avg_ema =
                     (inst_total_dl_speed * alpha) + (self.total_dl_prev_avg_ema * (1.0 - alpha));
                 self.total_ul_prev_avg_ema =
                     (inst_total_ul_speed * alpha) + (self.total_ul_prev_avg_ema * (1.0 - alpha));
 
+                // --- PEER SPEED CALCULATION ---
                 for peer in self.peers.values_mut() {
                     let inst_dl_speed =
-                        (peer.bytes_downloaded_in_tick * BITS_PER_BYTE) as f64 * scaling_factor;
+                        (peer.bytes_downloaded_in_tick as f64 * 8.0) * scaling_factor;
                     let inst_ul_speed =
-                        (peer.bytes_uploaded_in_tick * BITS_PER_BYTE) as f64 * scaling_factor;
+                        (peer.bytes_uploaded_in_tick as f64 * 8.0) * scaling_factor;
 
+                    // Update Peer EMAs
                     peer.prev_avg_dl_ema =
                         (inst_dl_speed * alpha) + (peer.prev_avg_dl_ema * (1.0 - alpha));
                     peer.download_speed_bps = peer.prev_avg_dl_ema as u64;
@@ -346,6 +386,7 @@ impl TorrentState {
                         (inst_ul_speed * alpha) + (peer.prev_avg_ul_ema * (1.0 - alpha));
                     peer.upload_speed_bps = peer.prev_avg_ul_ema as u64;
 
+                    // Reset Peer tick counters
                     peer.bytes_downloaded_in_tick = 0;
                     peer.bytes_uploaded_in_tick = 0;
                 }
@@ -359,11 +400,11 @@ impl TorrentState {
                     return effects;
                 }
 
-                let now = Instant::now();
+                // Tracker Announce Logic
                 for (url, tracker) in self.trackers.iter_mut() {
-                    if now >= tracker.next_announce_time {
+                    if self.now >= tracker.next_announce_time {
                         self.last_activity = TorrentActivity::AnnouncingToTracker;
-                        tracker.next_announce_time = now + Duration::from_secs(60);
+                        tracker.next_announce_time = self.now + Duration::from_secs(60);
                         effects.push(Effect::AnnounceToTracker { url: url.clone() });
                     }
                 }
@@ -371,7 +412,7 @@ impl TorrentState {
                 effects
             }
 
-            Action::RecalculateChokes { upload_slots } => {
+            Action::RecalculateChokes { upload_slots, random_seed } => {
                 let mut effects = Vec::new();
 
                 let mut interested_peers: Vec<&mut PeerState> = self
@@ -398,18 +439,20 @@ impl TorrentState {
 
                 if self
                     .optimistic_unchoke_timer
-                    .is_some_and(|t| t.elapsed() > Duration::from_secs(30))
+                    .is_some_and(|t| self.now.saturating_duration_since(t) > Duration::from_secs(30))
                 {
                     let optimistic_candidates: Vec<&mut PeerState> = interested_peers
                         .into_iter()
                         .filter(|p| !unchoke_candidates.contains(&p.ip_port))
                         .collect();
 
-                    if let Some(optimistic_peer) = optimistic_candidates.choose(&mut rand::rng()) {
-                        unchoke_candidates.insert(optimistic_peer.ip_port.clone());
+                    if !optimistic_candidates.is_empty() {
+                        let idx = (random_seed as usize) % optimistic_candidates.len();
+                        let chosen_id = optimistic_candidates[idx].ip_port.clone();
+                        unchoke_candidates.insert(chosen_id);
                     }
 
-                    self.optimistic_unchoke_timer = Some(Instant::now());
+                    self.optimistic_unchoke_timer = Some(self.now);
                 }
 
                 for peer in self.peers.values_mut() {
@@ -452,7 +495,7 @@ impl TorrentState {
                     self.torrent_status = TorrentStatus::Done;
 
                     for (url, tracker) in self.trackers.iter_mut() {
-                        tracker.next_announce_time = Instant::now();
+                        tracker.next_announce_time = self.now;
                         effects.push(Effect::AnnounceCompleted { url: url.clone() });
                     }
 
@@ -548,7 +591,8 @@ impl TorrentState {
             // --- Peer Lifecycle Actions ---
             Action::PeerSuccessfullyConnected { peer_id } => {
                 self.timed_out_peers.remove(&peer_id);
-                self.number_of_successfully_connected_peers += 1;
+
+                self.number_of_successfully_connected_peers = self.peers.len();
 
                 if !self.has_made_first_connection {
                     self.has_made_first_connection = true;
@@ -562,6 +606,8 @@ impl TorrentState {
             Action::PeerDisconnected { peer_id } => {
                 let mut effects = Vec::new();
                 if let Some(removed_peer) = self.peers.remove(&peer_id) {
+                    self.number_of_successfully_connected_peers = self.peers.len();
+
                     for piece_index in removed_peer.pending_requests {
                         if self.piece_manager.bitfield.get(piece_index as usize)
                             != Some(&PieceStatus::Done)
@@ -570,9 +616,6 @@ impl TorrentState {
                         }
                     }
 
-                    if self.number_of_successfully_connected_peers > 0 {
-                        self.number_of_successfully_connected_peers -= 1;
-                    }
                     effects.push(Effect::DisconnectPeer {
                         peer_id: peer_id.clone(),
                     });
@@ -647,11 +690,20 @@ impl TorrentState {
                 data,
             } => {
                 let mut effects = Vec::new();
+
+                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
+                    return effects; 
+                }
+
+                if self.torrent_status == TorrentStatus::Validating {
+                    return effects;
+                }
+
                 self.last_activity = TorrentActivity::DownloadingPiece(piece_index);
 
                 let len = data.len() as u64;
-                self.bytes_downloaded_in_interval += len;
-                self.session_total_downloaded += len;
+                self.bytes_downloaded_in_interval = self.bytes_downloaded_in_interval.saturating_add(len);
+                self.session_total_downloaded = self.session_total_downloaded.saturating_add(len);
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.bytes_downloaded_from_peer += len;
@@ -718,6 +770,15 @@ impl TorrentState {
                 piece_index,
             } => {
                 let mut effects = Vec::new();
+
+                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
+                    if let Some(peer) = self.peers.get_mut(&peer_id) {
+                        peer.pending_requests.remove(&piece_index);
+                    }
+                    effects.extend(self.update(Action::AssignWork { peer_id }));
+                    return effects;
+                }
+
                 let peers_to_cancel = self.piece_manager.mark_as_complete(piece_index);
 
                 effects.push(Effect::EmitManagerEvent(ManagerEvent::DiskWriteFinished));
@@ -816,13 +877,13 @@ impl TorrentState {
                     } else {
                         tracker.seeding_interval.unwrap()
                     };
-                    tracker.next_announce_time = Instant::now() + next_interval;
+                    tracker.next_announce_time = self.now + next_interval;
                 }
 
                 for (ip, port) in peers {
                     let peer_addr = format!("{}:{}", ip, port);
                     if let Some((_, next_attempt)) = self.timed_out_peers.get(&peer_addr) {
-                        if Instant::now() < *next_attempt {
+                        if self.now < *next_attempt {
                             continue;
                         }
                     }
@@ -843,21 +904,20 @@ impl TorrentState {
                     };
 
                     let backoff = current_interval.mul_f32(2.0).min(Duration::from_secs(3600));
-                    tracker.next_announce_time = Instant::now() + backoff;
+                    tracker.next_announce_time = self.now + backoff;
                 }
                 vec![Effect::DoNothing]
             }
 
             Action::PeerConnectionFailed { peer_addr } => {
-                let now = Instant::now();
                 let (count, _) = self
                     .timed_out_peers
                     .get(&peer_addr)
                     .cloned()
-                    .unwrap_or((0, now));
+                    .unwrap_or((0, self.now));
                 let new_count = (count + 1).min(10);
                 let backoff_secs = (15 * 2u64.pow(new_count - 1)).min(1800);
-                let next_attempt = now + Duration::from_secs(backoff_secs);
+                let next_attempt = self.now + Duration::from_secs(backoff_secs);
 
                 self.timed_out_peers
                     .insert(peer_addr, (new_count, next_attempt));
@@ -892,7 +952,7 @@ impl TorrentState {
                     self.trackers.insert(
                         announce.clone(),
                         TrackerState {
-                            next_announce_time: Instant::now(),
+                            next_announce_time: self.now,
                             leeching_interval: None,
                             seeding_interval: None,
                         },
@@ -909,7 +969,19 @@ impl TorrentState {
                 let mut effects = Vec::new();
 
                 for piece_index in completed_pieces {
-                    self.piece_manager.mark_as_complete(piece_index);
+                    let peers_to_cancel = self.piece_manager.mark_as_complete(piece_index);
+                    
+                    for peer_id in peers_to_cancel {
+                        if let Some(peer) = self.peers.get_mut(&peer_id) {
+                            if peer.pending_requests.remove(&piece_index) {
+                                effects.push(Effect::SendToPeer {
+                                    peer_id: peer_id.clone(),
+                                    cmd: Box::new(TorrentCommand::Cancel(piece_index)),
+                                });
+                            }
+                        }
+                        effects.extend(self.update(Action::AssignWork { peer_id }));
+                    }
                 }
 
                 self.torrent_status = TorrentStatus::Standard;
@@ -947,8 +1019,8 @@ impl TorrentState {
                 peer_id,
                 byte_count,
             } => {
-                self.session_total_uploaded += byte_count;
-                self.bytes_uploaded_in_interval += byte_count;
+                self.session_total_uploaded = self.session_total_uploaded.saturating_add(byte_count);
+                self.bytes_uploaded_in_interval = self.bytes_uploaded_in_interval.saturating_add(byte_count);
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.bytes_uploaded_to_peer += byte_count;
@@ -963,7 +1035,6 @@ impl TorrentState {
 
             Action::Cleanup => {
                 let mut effects = Vec::new();
-                let now = Instant::now();
 
                 self.timed_out_peers
                     .retain(|_, (retry_count, _)| *retry_count < MAX_TIMEOUT_COUNT);
@@ -971,11 +1042,12 @@ impl TorrentState {
                 let mut stuck_peers = Vec::new();
                 for (id, peer) in &self.peers {
                     if peer.peer_id.is_empty()
-                        && now.duration_since(peer.created_at) > Duration::from_secs(5)
+                        && self.now.saturating_duration_since(peer.created_at) > Duration::from_secs(5)
                     {
                         stuck_peers.push(id.clone());
                     }
                 }
+
                 for peer_id in stuck_peers {
                     effects.push(Effect::DisconnectPeer { peer_id });
                 }
@@ -1013,12 +1085,24 @@ impl TorrentState {
                 self.is_paused = true;
 
                 self.last_known_peers = self.peers.keys().cloned().collect();
+                
+                for (piece_index, _) in self.piece_manager.pending_queue.drain() {
+                    self.piece_manager.need_queue.push(piece_index);
+                }
+
+
                 self.peers.clear();
+                
+                self.number_of_successfully_connected_peers = 0;
 
                 self.bytes_downloaded_in_interval = 0;
                 self.bytes_uploaded_in_interval = 0;
 
                 vec![
+                    Effect::EmitMetrics {
+                        bytes_dl: self.bytes_downloaded_in_interval,
+                        bytes_ul: self.bytes_uploaded_in_interval,
+                    },
                     Effect::ClearAllUploads,
                     Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
                         info_hash: self.info_hash.clone(),
@@ -1035,10 +1119,9 @@ impl TorrentState {
                 }
 
                 let mut effects = vec![Effect::TriggerDhtSearch];
-                let now = Instant::now();
 
                 for (url, tracker) in self.trackers.iter_mut() {
-                    tracker.next_announce_time = now + Duration::from_secs(60);
+                    tracker.next_announce_time = self.now + Duration::from_secs(60);
                     effects.push(Effect::AnnounceToTracker { url: url.clone() });
                 }
 
@@ -1064,6 +1147,11 @@ impl TorrentState {
                 self.last_known_peers.clear();
                 self.timed_out_peers.clear();
 
+                let num_pieces = self.piece_manager.bitfield.len();
+                self.piece_manager = PieceManager::new();
+                if num_pieces > 0 {
+                    self.piece_manager.set_initial_fields(num_pieces, false);
+                }
                 self.piece_manager.pending_queue.clear();
                 self.piece_manager.need_queue.clear();
                 
@@ -1072,22 +1160,27 @@ impl TorrentState {
                 }
 
                 self.number_of_successfully_connected_peers = 0;
+                
                 self.session_total_downloaded = 0;
                 self.session_total_uploaded = 0;
-                
+
+                // These must be cleared, otherwise they remain > 0 while total is 0
+                self.bytes_downloaded_in_interval = 0;
+                self.bytes_uploaded_in_interval = 0;
+                // -----------------------------------------------
+
                 self.is_paused = true;
                 self.torrent_status = TorrentStatus::Validating;
-                self.last_activity = TorrentActivity::Paused;
+                self.last_activity = TorrentActivity::Initializing;
 
                 vec![Effect::DeleteFiles]
             }
 
             Action::UpdateListenPort => {
                 let mut effects = Vec::new();
-                let now = Instant::now();
 
                 for (url, tracker) in self.trackers.iter_mut() {
-                    tracker.next_announce_time = now + Duration::from_secs(60);
+                    tracker.next_announce_time = self.now + Duration::from_secs(60);
                     effects.push(Effect::AnnounceToTracker { url: url.clone() });
                 }
 
@@ -1132,7 +1225,7 @@ pub struct PeerState {
 }
 
 impl PeerState {
-    pub fn new(ip_port: String, peer_tx: Sender<TorrentCommand>) -> Self {
+    pub fn new(ip_port: String, peer_tx: Sender<TorrentCommand>, created_at: Instant) -> Self {
         Self {
             ip_port,
             peer_id: Vec::new(),
@@ -1156,7 +1249,7 @@ impl PeerState {
             upload_slots_semaphore: Arc::new(Semaphore::new(PEER_UPLOAD_IN_FLIGHT_LIMIT)),
             last_action: TorrentCommand::SuccessfullyConnected(String::new()),
             action_counts: HashMap::new(),
-            created_at: Instant::now(),
+            created_at,
         }
     }
 }
@@ -1207,7 +1300,7 @@ mod tests {
 
     fn add_peer(state: &mut TorrentState, id: &str) {
         let (tx, _) = mpsc::channel(1);
-        let mut peer = PeerState::new(id.to_string(), tx);
+        let mut peer = PeerState::new(id.to_string(), tx, state.now);
         // Assume peer has handshake
         peer.peer_id = id.as_bytes().to_vec();
         state.peers.insert(id.to_string(), peer);
@@ -1260,7 +1353,7 @@ mod tests {
         slow_peer.am_choking = ChokeStatus::Unchoke;
 
         // WHEN: We recalculate chokes with only 1 upload slot
-        let effects = state.update(Action::RecalculateChokes { upload_slots: 1 });
+        let effects = state.update(Action::RecalculateChokes { upload_slots: 1, random_seed: 0 });
 
         // THEN: Fast peer is Unchoked, Slow peer is Choked
         let fast_peer_state = state.peers.get("fast_peer").unwrap();
@@ -1304,7 +1397,7 @@ mod tests {
         p2.bytes_uploaded_to_peer = 1_000; // We sent them 1KB
 
         // WHEN: Recalculate with 1 slot
-        state.update(Action::RecalculateChokes { upload_slots: 1 });
+        state.update(Action::RecalculateChokes { upload_slots: 1, random_seed: 0 });
 
         // THEN: The peer we uploaded MORE to (higher throughput) gets the slot
         // Note: This assumes the logic sorts by bytes_uploaded_to_peer descending for Done status
@@ -1536,7 +1629,7 @@ mod tests {
         state.optimistic_unchoke_timer = Some(Instant::now() - Duration::from_secs(31));
 
         // WHEN: Recalculate
-        let effects = state.update(Action::RecalculateChokes { upload_slots: 1 });
+        let effects = state.update(Action::RecalculateChokes { upload_slots: 1, random_seed: 0 });
 
         // THEN:
         // 1. Fast A should be unchoked (Regular slot)
@@ -1775,7 +1868,10 @@ mod prop_tests {
             Just(Action::Resume),
             Just(Action::Delete),
             Just(Action::FatalError),
-            (0..50usize).prop_map(|s| Action::RecalculateChokes { upload_slots: s }),
+            (0..50usize, any::<u64>()).prop_map(|(s, seed)| Action::RecalculateChokes { 
+                upload_slots: s, 
+                random_seed: seed 
+            }),
             
             // Metadata Reset / Late Magnet Link Resolution
             ((1..20usize).prop_map(super::tests::create_dummy_torrent), any::<i64>())
@@ -2088,13 +2184,38 @@ mod prop_tests {
     // 4. THE RUNNER
     // =========================================================================
 
+    const TOTAL_CASES: usize = 256;
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(256))]
+        #![proptest_config(ProptestConfig::with_cases(TOTAL_CASES as u32))]
 
         #[test]
         fn test_stateful_robustness(
             story_batches in proptest::collection::vec(mixed_behavior_strategy(), 1..30)
         ) {
+
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // This is where we track the current iteration number across all runs
+        static COUNTER: AtomicUsize = AtomicUsize::new(1);
+        
+        let iteration = COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        if iteration <= TOTAL_CASES {
+            let percentage = (iteration as f64 / TOTAL_CASES as f64) * 100.0;
+
+            eprintln!(
+                "🧪 **Progress**: {:.2}% complete ({}/{})",
+                percentage, iteration - 1, TOTAL_CASES
+            );
+        } else {
+            // Once the iteration count exceeds TOTAL_CASES, we assume the test has 
+            // failed and Proptest is attempting to shrink the input.
+            let shrinking_count = iteration - TOTAL_CASES;
+            eprintln!(
+                "🔥 **Shrinking**: Test failed! Analyzing minimal input (Executions: {})",
+                shrinking_count
+            );
+        }
+        // ------------------------------------------
             let mut state = super::tests::create_empty_state();
             
             // 1. Setup Torrent
@@ -2121,15 +2242,12 @@ mod prop_tests {
                     if let Action::PeerSuccessfullyConnected { peer_id } = &action {
                         if !state.peers.contains_key(peer_id) {
                             let (tx, _) = tokio::sync::mpsc::channel(1);
-                            let mut peer = PeerState::new(peer_id.clone(), tx);
+                            let mut peer = PeerState::new(peer_id.clone(), tx, state.now);
                             peer.peer_id = peer_id.as_bytes().to_vec(); 
                             state.peers.insert(peer_id.clone(), peer);
                         }
                     }
 
-                    // No cheats here. 
-                    // Upload tests rely on Action::PieceWrittenToDisk being 
-                    // in the story sequence to legitimately set the bitfield.
 
                     let _ = state.update(action);
                     check_invariants(&state);
