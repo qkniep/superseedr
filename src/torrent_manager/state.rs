@@ -1044,13 +1044,11 @@ impl TorrentState {
                     .into_iter()
                     .collect();
                 for peer_addr in peers_to_connect {
-                    if let Ok(addr) = peer_addr.parse::<std::net::SocketAddr>() {
-                        if let std::net::SocketAddr::V4(v4) = addr {
+                    if let Ok(std::net::SocketAddr::V4(v4)) = peer_addr.parse::<std::net::SocketAddr>() {
                             effects.push(Effect::ConnectToPeer {
                                 ip: v4.ip().to_string(),
                                 port: v4.port(),
                             });
-                        }
                     }
                 }
 
