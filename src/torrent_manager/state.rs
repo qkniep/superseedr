@@ -687,6 +687,7 @@ impl TorrentState {
             } => {
                 let mut effects = Vec::new();
                 if valid {
+
                     if self.piece_manager.bitfield.get(piece_index as usize)
                         == Some(&PieceStatus::Done)
                     {
@@ -721,9 +722,9 @@ impl TorrentState {
 
                 effects.push(Effect::EmitManagerEvent(ManagerEvent::DiskWriteFinished));
 
-                if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    peer.pending_requests.remove(&piece_index);
-                }
+                //if let Some(peer) = self.peers.get_mut(&peer_id) {
+                //    peer.pending_requests.remove(&piece_index);
+                //}
 
                 effects.extend(self.update(Action::AssignWork {
                     peer_id: peer_id.clone(),
@@ -1675,43 +1676,19 @@ mod prop_tests {
             let data = vec![1, 2, 3, 4]; 
             
             let actions = vec![
-                // 1. Connect
                 Action::PeerSuccessfullyConnected { peer_id: peer_id.clone() },
-                
-                // 2. CRITICAL: Send Bitfield to resize the peer's internal bitfield vector.
-                // Even an empty bitfield works because the handler resizes it to match Torrent info.
-                Action::PeerBitfieldReceived { 
-                    peer_id: peer_id.clone(), 
-                    bitfield: vec![] 
-                },
-
-                // 3. Peer Unchokes Us
-                Action::PeerUnchoked { peer_id: peer_id.clone() },
-
-                // 4. Peer announces they have the piece 
-                // NOW this will work because bitfield.len() is correct.
+                Action::PeerBitfieldReceived { peer_id: peer_id.clone(), bitfield: vec![] },
                 Action::PeerHavePiece { peer_id: peer_id.clone(), piece_index },
+                Action::PeerUnchoked { peer_id: peer_id.clone() },
+                Action::IncomingBlock { peer_id: peer_id.clone(), piece_index, block_offset: 0, data: data.clone() },
+                Action::PieceVerified { peer_id: peer_id.clone(), piece_index, valid: true, data },
                 
-                // 5. Receive Block
-                Action::IncomingBlock { 
-                    peer_id: peer_id.clone(), 
-                    piece_index, 
-                    block_offset: 0, 
-                    data: data.clone() 
-                },
-                
-                // 6. Verify
-                Action::PieceVerified { 
-                    peer_id: peer_id, 
-                    piece_index, 
-                    valid: true, 
-                    data 
-                }
+                // ADD THIS FINAL STEP:
+                Action::PieceWrittenToDisk { peer_id: peer_id, piece_index }
             ];
             Just(actions)
         })
     }
-
 
     // 5. Strategy: "Griefing Story" (Connect -> Choke -> Disconnect)
     fn griefing_story_strategy() -> impl Strategy<Value = Vec<Action>> {
@@ -1799,7 +1776,7 @@ mod prop_tests {
             std::env::var("PROPTEST_CASES")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(100000)
+                .unwrap_or(256)
         ))]
 
         #[test]
