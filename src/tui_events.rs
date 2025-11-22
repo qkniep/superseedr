@@ -798,41 +798,39 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::*; // Import handle_navigation from parent
-
-    // --- Corrected Imports ---
-    // We import the specific structs our AppState actually stores
-    use crate::app::{AppState, PeerInfo, SelectedHeader, TorrentDisplayState, TorrentState};
+    use super::*;
+    use crate::app::{AppState, PeerInfo, SelectedHeader, TorrentDisplayState, TorrentMetrics};
     use crate::config::TorrentSortColumn;
     use ratatui::crossterm::event::KeyCode;
 
-    /// Creates a mock TorrentState with a specific number of peers
-    fn create_mock_state(peer_count: usize) -> TorrentState {
-        let mut state = TorrentState::default(); // Assumes TorrentState implements Default
+    /// Creates a mock TorrentMetrics with a specific number of peers.
+    fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
+        let mut metrics = TorrentMetrics::default();
         let mut peers = Vec::new();
-        for _ in 0..peer_count {
-            peers.push(PeerInfo::default()); // Assumes PeerInfo implements Default
+        for i in 0..peer_count {
+            peers.push(PeerInfo {
+                address: format!("127.0.0.1:{}", 6881 + i),
+                ..Default::default()
+            });
         }
-        state.peers = peers;
-        state
+        metrics.peers = peers;
+        metrics
     }
 
-    /// Creates a mock TorrentDisplayState for testing
+    /// Creates a mock TorrentDisplayState for testing.
     fn create_mock_display_state(peer_count: usize) -> TorrentDisplayState {
-        let mut display_state = TorrentDisplayState::default(); // Assumes TorrentDisplayState implements Default
-        display_state.latest_state = create_mock_state(peer_count);
+        let mut display_state = TorrentDisplayState::default();
+        display_state.latest_state = create_mock_metrics(peer_count);
         display_state
     }
 
-    /// Creates a mock AppState for testing navigation
+    /// Creates a mock AppState for testing navigation.
     fn create_test_app_state() -> AppState {
-        let mut app_state = AppState::default(); // AppState is Default
+        let mut app_state = AppState::default();
 
-        // Create two mock display states
         let torrent_a = create_mock_display_state(2); // Has 2 peers
         let torrent_b = create_mock_display_state(0); // Has 0 peers
 
-        // Insert them into the app state
         app_state
             .torrents
             .insert("hash_a".as_bytes().to_vec(), torrent_a);
@@ -847,7 +845,6 @@ mod tests {
     }
 
     // --- NAVIGATION TESTS ---
-    // (These tests are unchanged, but will now work)
 
     #[test]
     fn test_nav_down_torrents() {
@@ -905,7 +902,6 @@ mod tests {
 
         handle_navigation(&mut app_state, KeyCode::Right);
 
-        // This is the important bug fix test
         assert_eq!(
             app_state.selected_header,
             SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1)

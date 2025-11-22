@@ -549,4 +549,45 @@ mod tests {
             assert!(join_res.unwrap().is_ok(), "Task {} acquire failed", i);
         }
     }
+
+    #[tokio::test]
+    async fn test_dropped_waiter_does_not_leak_permit() {
+        // Limit 1, Queue 2
+        let limits = create_limits((1, 2), (0, 0), (0, 0));
+        let (client, _handle) = setup_manager(limits);
+
+        // 1. Acquire the only permit
+        let guard1 = client.acquire_peer_connection().await.unwrap();
+
+        // 2. Spawn a task that waits, then times out/drops
+        let client_clone = client.clone();
+        let waiting_task = tokio::spawn(async move {
+            // This will block indefinitely
+            client_clone.acquire_peer_connection().await
+        });
+
+        // Let it get into the queue
+        sleep(Duration::from_millis(20)).await;
+
+        // 3. ABORT the waiting task. This simulates a timeout or cancellation.
+        waiting_task.abort();
+        // Wait a moment for the abort to register
+        sleep(Duration::from_millis(20)).await;
+
+        // 4. Release the original guard.
+        // The manager will try to give the permit to the aborted task.
+        // It should detect the channel is closed, reclaim the permit, and be ready for the next request.
+        drop(guard1);
+        sleep(Duration::from_millis(20)).await;
+
+        // 5. Acquire again.
+        // If the permit leaked, this will block/fail (in_use would be 1 but should be 0).
+        let result = timeout(Duration::from_millis(100), client.acquire_peer_connection()).await;
+
+        assert!(
+            result.is_ok(),
+            "Permit leaked! The aborted waiter consumed a slot."
+        );
+        assert!(result.unwrap().is_ok());
+    }
 }
