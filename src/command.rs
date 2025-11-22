@@ -71,7 +71,10 @@ pub enum TorrentCommand {
 
     ValidationComplete(Vec<u32>),
 
-    BlockSent { peer_id: String, bytes: u64 },
+    BlockSent {
+        peer_id: String,
+        bytes: u64,
+    },
 
     ValidationProgress(u32),
 

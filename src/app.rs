@@ -647,7 +647,6 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-
         self.process_pending_commands().await;
 
         self.startup_crossterm_event_listener();
@@ -752,7 +751,6 @@ impl App {
     }
 
     async fn shutdown_sequence(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
-
         let _ = self.shutdown_tx.send(());
         let total_managers_to_shut_down = self.torrent_manager_command_txs.len();
         let mut managers_shut_down = 0;
@@ -1263,7 +1261,11 @@ impl App {
                         let now = Instant::now();
                         if let Some(last_time) = self.app_state.recently_processed_files.get(path) {
                             if now.duration_since(*last_time) < DEBOUNCE_DURATION {
-                                tracing_event!(Level::DEBUG, "Skipping file {:?} due to debounce.", path);
+                                tracing_event!(
+                                    Level::DEBUG,
+                                    "Skipping file {:?} due to debounce.",
+                                    path
+                                );
                                 continue;
                             }
                         }
@@ -1327,7 +1329,6 @@ impl App {
                 tracing_event!(Level::ERROR, "File watcher error: {:?}", error);
             }
         }
-
     }
 
     async fn handle_port_change(&mut self, path: PathBuf) {
@@ -1676,7 +1677,10 @@ impl App {
         self.app_state.tuning_countdown = self.app_state.tuning_countdown.saturating_sub(1);
     }
 
-    fn update_torrent_state(&mut self, result: Result<TorrentMetrics, broadcast::error::RecvError>) {
+    fn update_torrent_state(
+        &mut self,
+        result: Result<TorrentMetrics, broadcast::error::RecvError>,
+    ) {
         match result {
             Ok(message) => {
                 self.app_state.session_total_downloaded += message.bytes_downloaded_this_tick;
@@ -1693,7 +1697,8 @@ impl App {
                     .number_of_successfully_connected_peers =
                     message.number_of_successfully_connected_peers;
                 display_state.latest_state.number_of_pieces_total = message.number_of_pieces_total;
-                display_state.latest_state.number_of_pieces_completed = message.number_of_pieces_completed;
+                display_state.latest_state.number_of_pieces_completed =
+                    message.number_of_pieces_completed;
                 display_state.latest_state.download_speed_bps = message.download_speed_bps;
                 display_state.latest_state.upload_speed_bps = message.upload_speed_bps;
                 display_state.latest_state.eta = message.eta;
@@ -1723,8 +1728,10 @@ impl App {
                     self.app_state.total_upload_history.remove(0);
                 }
 
-                display_state.smoothed_download_speed_bps = display_state.latest_state.download_speed_bps;
-                display_state.smoothed_upload_speed_bps = display_state.latest_state.upload_speed_bps;
+                display_state.smoothed_download_speed_bps =
+                    display_state.latest_state.download_speed_bps;
+                display_state.smoothed_upload_speed_bps =
+                    display_state.latest_state.upload_speed_bps;
                 display_state.latest_state.peers = message.peers;
 
                 display_state.latest_state.activity_message = message.activity_message;
@@ -1733,7 +1740,9 @@ impl App {
                     &display_state.latest_state.peers,
                     display_state.latest_state.number_of_pieces_total as usize,
                 );
-                if !display_state.latest_state.peers.is_empty() && !current_swarm_availability.is_empty() {
+                if !display_state.latest_state.peers.is_empty()
+                    && !current_swarm_availability.is_empty()
+                {
                     display_state
                         .swarm_availability_history
                         .push(current_swarm_availability);
@@ -1748,10 +1757,8 @@ impl App {
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 tracing_event!(Level::DEBUG, "TUI metrics lagged, skipped {} updates", n);
             }
-            Err(broadcast::error::RecvError::Closed) => {
-            }
+            Err(broadcast::error::RecvError::Closed) => {}
         }
-
     }
 
     async fn tuning_resource_limits(&mut self) {

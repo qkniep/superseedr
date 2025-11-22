@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::command::TorrentCommand;
-use crate::torrent_manager::ManagerEvent;
 use crate::networking::BlockInfo;
+use crate::torrent_manager::ManagerEvent;
 
 use std::time::Duration;
 use std::time::Instant;
@@ -19,7 +19,6 @@ use crate::torrent_manager::piece_manager::PieceManager;
 use crate::torrent_manager::piece_manager::PieceStatus;
 use std::collections::{HashMap, HashSet};
 
-
 use rand::prelude::IndexedRandom;
 
 const MAX_TIMEOUT_COUNT: u32 = 10;
@@ -32,59 +31,99 @@ pub type PeerAddr = (String, u16);
 
 #[derive(Debug)]
 pub enum Action {
-    Tick { dt_ms: u64 },
-    RecalculateChokes { upload_slots: usize },
+    Tick {
+        dt_ms: u64,
+    },
+    RecalculateChokes {
+        upload_slots: usize,
+    },
     CheckCompletion,
-    AssignWork { peer_id: String },
-    PeerSuccessfullyConnected { peer_id: String },
-    PeerDisconnected { peer_id: String },
-    UpdatePeerId { peer_addr: String, new_id: Vec<u8> },
-    PeerBitfieldReceived { peer_id: String, bitfield: Vec<u8> },
-    PeerChoked { peer_id: String },
-    PeerUnchoked { peer_id: String },
-    PeerInterested { peer_id: String },
-    PeerHavePiece { peer_id: String, piece_index: u32 },
-    IncomingBlock { 
-        peer_id: String, 
-        piece_index: u32, 
-        block_offset: u32, 
-        data: Vec<u8> 
+    AssignWork {
+        peer_id: String,
     },
-    PieceVerified { 
-        peer_id: String, 
-        piece_index: u32, 
+    PeerSuccessfullyConnected {
+        peer_id: String,
+    },
+    PeerDisconnected {
+        peer_id: String,
+    },
+    UpdatePeerId {
+        peer_addr: String,
+        new_id: Vec<u8>,
+    },
+    PeerBitfieldReceived {
+        peer_id: String,
+        bitfield: Vec<u8>,
+    },
+    PeerChoked {
+        peer_id: String,
+    },
+    PeerUnchoked {
+        peer_id: String,
+    },
+    PeerInterested {
+        peer_id: String,
+    },
+    PeerHavePiece {
+        peer_id: String,
+        piece_index: u32,
+    },
+    IncomingBlock {
+        peer_id: String,
+        piece_index: u32,
+        block_offset: u32,
+        data: Vec<u8>,
+    },
+    PieceVerified {
+        peer_id: String,
+        piece_index: u32,
         valid: bool,
-        data: Vec<u8>
+        data: Vec<u8>,
     },
-    PieceWrittenToDisk { 
-        peer_id: String, 
-        piece_index: u32 
+    PieceWrittenToDisk {
+        peer_id: String,
+        piece_index: u32,
     },
-    PieceWriteFailed { piece_index: u32 },
-    RequestUpload { 
-        peer_id: String, 
-        piece_index: u32, 
-        block_offset: u32, 
-        length: u32 
+    PieceWriteFailed {
+        piece_index: u32,
     },
-    TrackerResponse { 
-        url: String, 
-        peers: Vec<PeerAddr>, 
-        interval: u64, 
-        min_interval: Option<u64> 
+    RequestUpload {
+        peer_id: String,
+        piece_index: u32,
+        block_offset: u32,
+        length: u32,
     },
-    TrackerError { url: String, error: String },
-    PeerConnectionFailed { peer_addr: String },
-    MetadataReceived { torrent: Torrent, metadata_length: i64 },
-    ValidationComplete { completed_pieces: Vec<u32> },
+    TrackerResponse {
+        url: String,
+        peers: Vec<PeerAddr>,
+        interval: u64,
+        min_interval: Option<u64>,
+    },
+    TrackerError {
+        url: String,
+        error: String,
+    },
+    PeerConnectionFailed {
+        peer_addr: String,
+    },
+    MetadataReceived {
+        torrent: Torrent,
+        metadata_length: i64,
+    },
+    ValidationComplete {
+        completed_pieces: Vec<u32>,
+    },
 
-    BlockSentToPeer { peer_id: String, byte_count: u64 },
+    BlockSentToPeer {
+        peer_id: String,
+        byte_count: u64,
+    },
 
-    CancelUpload { 
-        peer_id: String, 
-        piece_index: u32, 
-        block_offset: u32, 
-        length: u32 
+    CancelUpload {
+        peer_id: String,
+        piece_index: u32,
+        block_offset: u32,
+        length: u32,
     },
 
     Cleanup,
@@ -92,9 +131,13 @@ pub enum Action {
     Resume,
     Delete,
     UpdateListenPort,
-    ValidationProgress { count: u32 },
+    ValidationProgress {
+        count: u32,
+    },
 
-    FatalError { error: String },
+    FatalError {
+        error: String,
+    },
 }
 
 #[derive(Debug)]
@@ -106,25 +149,53 @@ pub enum Effect {
         bytes_ul: u64,
     },
     EmitManagerEvent(ManagerEvent),
-    SendToPeer { peer_id: String, cmd: TorrentCommand },
-    DisconnectPeer { peer_id: String },
-    AnnounceCompleted { url: String },
-    
-    // --- New I/O & Work Effects ---
-    VerifyPiece { peer_id: String, piece_index: u32, data: Vec<u8> },
-    WriteToDisk { peer_id: String, piece_index: u32, data: Vec<u8> },
-    ReadFromDisk { peer_id: String, block_info: BlockInfo },
-    BroadcastHave { piece_index: u32 },
+    SendToPeer {
+        peer_id: String,
+        cmd: TorrentCommand,
+    },
+    DisconnectPeer {
+        peer_id: String,
+    },
+    AnnounceCompleted {
+        url: String,
+    },
 
-    ConnectToPeer { ip: String, port: u16 },
+    // --- New I/O & Work Effects ---
+    VerifyPiece {
+        peer_id: String,
+        piece_index: u32,
+        data: Vec<u8>,
+    },
+    WriteToDisk {
+        peer_id: String,
+        piece_index: u32,
+        data: Vec<u8>,
+    },
+    ReadFromDisk {
+        peer_id: String,
+        block_info: BlockInfo,
+    },
+    BroadcastHave {
+        piece_index: u32,
+    },
+
+    ConnectToPeer {
+        ip: String,
+        port: u16,
+    },
     InitializeStorage,
     StartValidation,
-    SendBitfieldToPeers, 
-    AnnounceToTracker { url: String },
+    SendBitfieldToPeers,
+    AnnounceToTracker {
+        url: String,
+    },
 
     ConnectToPeersFromTrackers,
 
-    AbortUpload { peer_id: String, block_info: BlockInfo },
+    AbortUpload {
+        peer_id: String,
+        block_info: BlockInfo,
+    },
 
     ClearAllUploads,
     DeleteFiles,
@@ -210,7 +281,11 @@ impl TorrentState {
             piece_manager,
             trackers,
             torrent_validation_status,
-            optimistic_unchoke_timer: Some(Instant::now().checked_sub(Duration::from_secs(31)).unwrap_or(Instant::now())),
+            optimistic_unchoke_timer: Some(
+                Instant::now()
+                    .checked_sub(Duration::from_secs(31))
+                    .unwrap_or(Instant::now()),
+            ),
             ..Default::default()
         }
     }
@@ -224,7 +299,7 @@ impl TorrentState {
             } else {
                 torrent.info.length as u64
             };
-            
+
             let offset = piece_index as u64 * piece_len;
             let remaining = total_len.saturating_sub(offset);
             std::cmp::min(piece_len, remaining) as usize
@@ -244,26 +319,34 @@ impl TorrentState {
                 let dt = dt_ms as f64;
                 let alpha = 1.0 - (-dt / SMOOTHING_PERIOD_MS).exp();
 
-                let inst_total_dl_speed = (self.bytes_downloaded_in_interval * BITS_PER_BYTE) as f64 * scaling_factor;
-                let inst_total_ul_speed = (self.bytes_uploaded_in_interval * BITS_PER_BYTE) as f64 * scaling_factor;
-                
+                let inst_total_dl_speed =
+                    (self.bytes_downloaded_in_interval * BITS_PER_BYTE) as f64 * scaling_factor;
+                let inst_total_ul_speed =
+                    (self.bytes_uploaded_in_interval * BITS_PER_BYTE) as f64 * scaling_factor;
+
                 let dl_tick = self.bytes_downloaded_in_interval;
                 let ul_tick = self.bytes_uploaded_in_interval;
 
                 self.bytes_downloaded_in_interval = 0;
                 self.bytes_uploaded_in_interval = 0;
 
-                self.total_dl_prev_avg_ema = (inst_total_dl_speed * alpha) + (self.total_dl_prev_avg_ema * (1.0 - alpha));
-                self.total_ul_prev_avg_ema = (inst_total_ul_speed * alpha) + (self.total_ul_prev_avg_ema * (1.0 - alpha));
+                self.total_dl_prev_avg_ema =
+                    (inst_total_dl_speed * alpha) + (self.total_dl_prev_avg_ema * (1.0 - alpha));
+                self.total_ul_prev_avg_ema =
+                    (inst_total_ul_speed * alpha) + (self.total_ul_prev_avg_ema * (1.0 - alpha));
 
                 for peer in self.peers.values_mut() {
-                    let inst_dl_speed = (peer.bytes_downloaded_in_tick * BITS_PER_BYTE) as f64 * scaling_factor;
-                    let inst_ul_speed = (peer.bytes_uploaded_in_tick * BITS_PER_BYTE) as f64 * scaling_factor;
+                    let inst_dl_speed =
+                        (peer.bytes_downloaded_in_tick * BITS_PER_BYTE) as f64 * scaling_factor;
+                    let inst_ul_speed =
+                        (peer.bytes_uploaded_in_tick * BITS_PER_BYTE) as f64 * scaling_factor;
 
-                    peer.prev_avg_dl_ema = (inst_dl_speed * alpha) + (peer.prev_avg_dl_ema * (1.0 - alpha));
+                    peer.prev_avg_dl_ema =
+                        (inst_dl_speed * alpha) + (peer.prev_avg_dl_ema * (1.0 - alpha));
                     peer.download_speed_bps = peer.prev_avg_dl_ema as u64;
 
-                    peer.prev_avg_ul_ema = (inst_ul_speed * alpha) + (peer.prev_avg_ul_ema * (1.0 - alpha));
+                    peer.prev_avg_ul_ema =
+                        (inst_ul_speed * alpha) + (peer.prev_avg_ul_ema * (1.0 - alpha));
                     peer.upload_speed_bps = peer.prev_avg_ul_ema as u64;
 
                     peer.bytes_downloaded_in_tick = 0;
@@ -279,7 +362,7 @@ impl TorrentState {
                 for (url, tracker) in self.trackers.iter_mut() {
                     if now >= tracker.next_announce_time {
                         self.last_activity = TorrentActivity::AnnouncingToTracker;
-                        tracker.next_announce_time = now + Duration::from_secs(60); 
+                        tracker.next_announce_time = now + Duration::from_secs(60);
                         effects.push(Effect::AnnounceToTracker { url: url.clone() });
                     }
                 }
@@ -297,9 +380,13 @@ impl TorrentState {
                     .collect();
 
                 if self.torrent_status == TorrentStatus::Done {
-                    interested_peers.sort_by(|a, b| b.bytes_uploaded_to_peer.cmp(&a.bytes_uploaded_to_peer));
+                    interested_peers
+                        .sort_by(|a, b| b.bytes_uploaded_to_peer.cmp(&a.bytes_uploaded_to_peer));
                 } else {
-                    interested_peers.sort_by(|a, b| b.bytes_downloaded_from_peer.cmp(&a.bytes_downloaded_from_peer));
+                    interested_peers.sort_by(|a, b| {
+                        b.bytes_downloaded_from_peer
+                            .cmp(&a.bytes_downloaded_from_peer)
+                    });
                 }
 
                 let mut unchoke_candidates: HashSet<String> = interested_peers
@@ -308,7 +395,10 @@ impl TorrentState {
                     .map(|p| p.ip_port.clone())
                     .collect();
 
-                if self.optimistic_unchoke_timer.map_or(false, |t| t.elapsed() > Duration::from_secs(30)) {
+                if self
+                    .optimistic_unchoke_timer
+                    .map_or(false, |t| t.elapsed() > Duration::from_secs(30))
+                {
                     let optimistic_candidates: Vec<&mut PeerState> = interested_peers
                         .into_iter()
                         .filter(|p| !unchoke_candidates.contains(&p.ip_port))
@@ -317,7 +407,7 @@ impl TorrentState {
                     if let Some(optimistic_peer) = optimistic_candidates.choose(&mut rand::rng()) {
                         unchoke_candidates.insert(optimistic_peer.ip_port.clone());
                     }
-                    
+
                     self.optimistic_unchoke_timer = Some(Instant::now());
                 }
 
@@ -327,7 +417,7 @@ impl TorrentState {
                             peer.am_choking = ChokeStatus::Unchoke;
                             effects.push(Effect::SendToPeer {
                                 peer_id: peer.ip_port.clone(),
-                                cmd: TorrentCommand::PeerUnchoke
+                                cmd: TorrentCommand::PeerUnchoke,
                             });
                         }
                     } else {
@@ -335,11 +425,11 @@ impl TorrentState {
                             peer.am_choking = ChokeStatus::Choke;
                             effects.push(Effect::SendToPeer {
                                 peer_id: peer.ip_port.clone(),
-                                cmd: TorrentCommand::PeerChoke
+                                cmd: TorrentCommand::PeerChoke,
                             });
                         }
                     }
-                    
+
                     peer.bytes_downloaded_from_peer = 0;
                     peer.bytes_uploaded_to_peer = 0;
                 }
@@ -349,11 +439,15 @@ impl TorrentState {
 
             Action::CheckCompletion => {
                 if self.torrent_status == TorrentStatus::Done {
-                    return vec![Effect::DoNothing]; 
+                    return vec![Effect::DoNothing];
                 }
 
-                let all_done = self.piece_manager.bitfield.iter().all(|s| *s == PieceStatus::Done);
-                
+                let all_done = self
+                    .piece_manager
+                    .bitfield
+                    .iter()
+                    .all(|s| *s == PieceStatus::Done);
+
                 if all_done {
                     let mut effects = Vec::new();
                     self.torrent_status = TorrentStatus::Done;
@@ -368,7 +462,7 @@ impl TorrentState {
                             peer.am_interested = false;
                             effects.push(Effect::SendToPeer {
                                 peer_id: peer.ip_port.clone(),
-                                cmd: TorrentCommand::NotInterested
+                                cmd: TorrentCommand::NotInterested,
                             });
                         }
                     }
@@ -379,16 +473,17 @@ impl TorrentState {
             }
 
             // --- Work Assignment ---
-
             Action::AssignWork { peer_id } => {
                 if self.torrent_status == TorrentStatus::Validating {
                     return vec![Effect::DoNothing];
                 }
 
-                if self.piece_manager.need_queue.is_empty() && self.piece_manager.pending_queue.is_empty() {
+                if self.piece_manager.need_queue.is_empty()
+                    && self.piece_manager.pending_queue.is_empty()
+                {
                     return vec![Effect::DoNothing];
                 }
-                
+
                 let torrent = match &self.torrent {
                     Some(t) => t,
                     None => return vec![Effect::DoNothing],
@@ -404,14 +499,18 @@ impl TorrentState {
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     if peer.bitfield.is_empty() || peer.peer_choking == ChokeStatus::Choke {
-                        if peer.peer_choking == ChokeStatus::Choke 
-                            && !peer.am_interested 
-                            && self.piece_manager.need_queue.iter().any(|&p| peer.bitfield.get(p as usize) == Some(&true)) 
+                        if peer.peer_choking == ChokeStatus::Choke
+                            && !peer.am_interested
+                            && self
+                                .piece_manager
+                                .need_queue
+                                .iter()
+                                .any(|&p| peer.bitfield.get(p as usize) == Some(&true))
                         {
                             peer.am_interested = true;
                             effects.push(Effect::SendToPeer {
                                 peer_id: peer_id.clone(),
-                                cmd: TorrentCommand::ClientInterested
+                                cmd: TorrentCommand::ClientInterested,
                             });
                         }
                         return effects;
@@ -425,9 +524,12 @@ impl TorrentState {
 
                     if let Some(piece_index) = piece_to_assign {
                         peer.pending_requests.insert(piece_index);
-                        self.piece_manager.mark_as_pending(piece_index, peer_id.clone());
+                        self.piece_manager
+                            .mark_as_pending(piece_index, peer_id.clone());
 
-                        if self.piece_manager.need_queue.is_empty() && self.torrent_status != TorrentStatus::Endgame {
+                        if self.piece_manager.need_queue.is_empty()
+                            && self.torrent_status != TorrentStatus::Endgame
+                        {
                             self.torrent_status = TorrentStatus::Endgame;
                         }
 
@@ -436,8 +538,8 @@ impl TorrentState {
                             cmd: TorrentCommand::RequestDownload(
                                 piece_index,
                                 torrent.info.piece_length,
-                                total_size
-                            )
+                                total_size,
+                            ),
                         });
                     }
                 }
@@ -445,7 +547,6 @@ impl TorrentState {
             }
 
             // --- Peer Lifecycle Actions ---
-
             Action::PeerSuccessfullyConnected { peer_id } => {
                 self.timed_out_peers.remove(&peer_id);
                 self.number_of_successfully_connected_peers += 1;
@@ -453,17 +554,19 @@ impl TorrentState {
                 if !self.has_made_first_connection {
                     self.has_made_first_connection = true;
                 }
-                
-                vec![
-                    Effect::EmitManagerEvent(ManagerEvent::PeerConnected { info_hash: self.info_hash.clone() }),
-                ]
+
+                vec![Effect::EmitManagerEvent(ManagerEvent::PeerConnected {
+                    info_hash: self.info_hash.clone(),
+                })]
             }
 
             Action::PeerDisconnected { peer_id } => {
                 let mut effects = Vec::new();
                 if let Some(removed_peer) = self.peers.remove(&peer_id) {
                     for piece_index in removed_peer.pending_requests {
-                        if self.piece_manager.bitfield.get(piece_index as usize) != Some(&PieceStatus::Done) {
+                        if self.piece_manager.bitfield.get(piece_index as usize)
+                            != Some(&PieceStatus::Done)
+                        {
                             self.piece_manager.requeue_pending_to_need(piece_index);
                         }
                     }
@@ -471,8 +574,12 @@ impl TorrentState {
                     if self.number_of_successfully_connected_peers > 0 {
                         self.number_of_successfully_connected_peers -= 1;
                     }
-                    effects.push(Effect::DisconnectPeer{ peer_id: peer_id.clone() });
-                    effects.push(Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { info_hash: self.info_hash.clone() }));
+                    effects.push(Effect::DisconnectPeer {
+                        peer_id: peer_id.clone(),
+                    });
+                    effects.push(Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
+                        info_hash: self.info_hash.clone(),
+                    }));
                 }
 
                 effects
@@ -487,7 +594,8 @@ impl TorrentState {
 
             Action::PeerBitfieldReceived { peer_id, bitfield } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    peer.bitfield = bitfield.iter()
+                    peer.bitfield = bitfield
+                        .iter()
                         .flat_map(|&byte| (0..8).map(move |i| (byte >> (7 - i)) & 1 == 1))
                         .collect();
 
@@ -520,7 +628,10 @@ impl TorrentState {
                 vec![Effect::DoNothing]
             }
 
-            Action::PeerHavePiece { peer_id, piece_index } => {
+            Action::PeerHavePiece {
+                peer_id,
+                piece_index,
+            } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     if (piece_index as usize) < peer.bitfield.len() {
                         peer.bitfield[piece_index as usize] = true;
@@ -530,8 +641,12 @@ impl TorrentState {
             }
 
             // --- Data Flow (The Core Logic) ---
-
-            Action::IncomingBlock { peer_id, piece_index, block_offset, data } => {
+            Action::IncomingBlock {
+                peer_id,
+                piece_index,
+                block_offset,
+                data,
+            } => {
                 let mut effects = Vec::new();
                 self.last_activity = TorrentActivity::DownloadingPiece(piece_index);
 
@@ -545,21 +660,37 @@ impl TorrentState {
                     peer.total_bytes_downloaded += len;
                 }
 
-                effects.push(Effect::EmitManagerEvent(ManagerEvent::BlockReceived { info_hash: self.info_hash.clone() }));
+                effects.push(Effect::EmitManagerEvent(ManagerEvent::BlockReceived {
+                    info_hash: self.info_hash.clone(),
+                }));
 
                 let piece_size = self.get_piece_size(piece_index);
-                if let Some(complete_data) = self.piece_manager.handle_block(piece_index, block_offset, &data, piece_size) {
+                if let Some(complete_data) =
+                    self.piece_manager
+                        .handle_block(piece_index, block_offset, &data, piece_size)
+                {
                     self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
-                    effects.push(Effect::VerifyPiece { peer_id: peer_id.clone(), piece_index, data: complete_data });
+                    effects.push(Effect::VerifyPiece {
+                        peer_id: peer_id.clone(),
+                        piece_index,
+                        data: complete_data,
+                    });
                 }
 
                 effects
             }
 
-            Action::PieceVerified { peer_id, piece_index, valid, data } => {
+            Action::PieceVerified {
+                peer_id,
+                piece_index,
+                valid,
+                data,
+            } => {
                 let mut effects = Vec::new();
                 if valid {
-                    if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
+                    if self.piece_manager.bitfield.get(piece_index as usize)
+                        == Some(&PieceStatus::Done)
+                    {
                         if let Some(peer) = self.peers.get_mut(&peer_id) {
                             peer.pending_requests.remove(&piece_index);
                         }
@@ -568,7 +699,11 @@ impl TorrentState {
                     } else {
                         // Valid and needed piece. Request write to disk.
                         // The data payload is now properly passed from the Action.
-                        effects.push(Effect::WriteToDisk { peer_id: peer_id.clone(), piece_index, data });
+                        effects.push(Effect::WriteToDisk {
+                            peer_id: peer_id.clone(),
+                            piece_index,
+                            data,
+                        });
                     }
                 } else {
                     self.piece_manager.reset_piece_assembly(piece_index);
@@ -577,17 +712,22 @@ impl TorrentState {
                 effects
             }
 
-            Action::PieceWrittenToDisk { peer_id, piece_index } => {
+            Action::PieceWrittenToDisk {
+                peer_id,
+                piece_index,
+            } => {
                 let mut effects = Vec::new();
                 let peers_to_cancel = self.piece_manager.mark_as_complete(piece_index);
-                
+
                 effects.push(Effect::EmitManagerEvent(ManagerEvent::DiskWriteFinished));
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.pending_requests.remove(&piece_index);
                 }
 
-                effects.extend(self.update(Action::AssignWork { peer_id: peer_id.clone() }));
+                effects.extend(self.update(Action::AssignWork {
+                    peer_id: peer_id.clone(),
+                }));
 
                 for other_peer in peers_to_cancel {
                     if other_peer != peer_id {
@@ -595,15 +735,17 @@ impl TorrentState {
                             peer.pending_requests.remove(&piece_index);
                             effects.push(Effect::SendToPeer {
                                 peer_id: other_peer.clone(),
-                                cmd: TorrentCommand::Cancel(piece_index)
+                                cmd: TorrentCommand::Cancel(piece_index),
                             });
                         }
-                        effects.extend(self.update(Action::AssignWork { peer_id: other_peer }));
+                        effects.extend(self.update(Action::AssignWork {
+                            peer_id: other_peer,
+                        }));
                     }
                 }
-                
+
                 effects.push(Effect::BroadcastHave { piece_index });
-                
+
                 effects.extend(self.update(Action::CheckCompletion));
 
                 effects
@@ -613,8 +755,12 @@ impl TorrentState {
                 vec![Effect::EmitManagerEvent(ManagerEvent::DiskWriteFinished)]
             }
 
-
-            Action::RequestUpload { peer_id, piece_index, block_offset, length } => {
+            Action::RequestUpload {
+                peer_id,
+                piece_index,
+                block_offset,
+                length,
+            } => {
                 if self.torrent.is_none() {
                     return vec![Effect::DoNothing];
                 }
@@ -627,32 +773,43 @@ impl TorrentState {
 
                 let mut allowed = false;
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    if peer.am_choking == ChokeStatus::Unchoke 
-                       && self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
+                    if peer.am_choking == ChokeStatus::Unchoke
+                        && self.piece_manager.bitfield.get(piece_index as usize)
+                            == Some(&PieceStatus::Done)
+                    {
                         allowed = true;
                     }
                 }
 
                 if allowed {
-                    vec![Effect::ReadFromDisk { 
-                        peer_id, 
-                        block_info: BlockInfo { piece_index, offset: block_offset, length } 
+                    vec![Effect::ReadFromDisk {
+                        peer_id,
+                        block_info: BlockInfo {
+                            piece_index,
+                            offset: block_offset,
+                            length,
+                        },
                     }]
                 } else {
                     vec![Effect::DoNothing]
                 }
             }
 
-            Action::TrackerResponse { url, peers, interval, min_interval } => {
+            Action::TrackerResponse {
+                url,
+                peers,
+                interval,
+                min_interval,
+            } => {
                 let mut effects = Vec::new();
-                
+
                 if let Some(tracker) = self.trackers.get_mut(&url) {
                     let seeding_secs = if interval > 0 { interval + 1 } else { 1800 };
                     tracker.seeding_interval = Some(Duration::from_secs(seeding_secs));
-                    
+
                     let leeching_secs = min_interval.map(|m| m + 1).unwrap_or(60);
                     tracker.leeching_interval = Some(Duration::from_secs(leeching_secs));
-                    
+
                     let next_interval = if self.torrent_status != TorrentStatus::Done {
                         tracker.leeching_interval.unwrap()
                     } else {
@@ -665,7 +822,7 @@ impl TorrentState {
                     let peer_addr = format!("{}:{}", ip, port);
                     if let Some((_, next_attempt)) = self.timed_out_peers.get(&peer_addr) {
                         if Instant::now() < *next_attempt {
-                             continue;
+                            continue;
                         }
                     }
                     effects.push(Effect::ConnectToPeer { ip, port });
@@ -679,9 +836,11 @@ impl TorrentState {
                     let current_interval = if self.torrent_status != TorrentStatus::Done {
                         tracker.leeching_interval.unwrap_or(Duration::from_secs(60))
                     } else {
-                        tracker.seeding_interval.unwrap_or(Duration::from_secs(1800))
+                        tracker
+                            .seeding_interval
+                            .unwrap_or(Duration::from_secs(1800))
                     };
-                    
+
                     let backoff = current_interval.mul_f32(2.0).min(Duration::from_secs(3600));
                     tracker.next_announce_time = Instant::now() + backoff;
                 }
@@ -690,26 +849,34 @@ impl TorrentState {
 
             Action::PeerConnectionFailed { peer_addr } => {
                 let now = Instant::now();
-                let (count, _) = self.timed_out_peers.get(&peer_addr).cloned().unwrap_or((0, now));
+                let (count, _) = self
+                    .timed_out_peers
+                    .get(&peer_addr)
+                    .cloned()
+                    .unwrap_or((0, now));
                 let new_count = (count + 1).min(10);
                 let backoff_secs = (15 * 2u64.pow(new_count - 1)).min(1800);
                 let next_attempt = now + Duration::from_secs(backoff_secs);
-                
-                self.timed_out_peers.insert(peer_addr, (new_count, next_attempt));
+
+                self.timed_out_peers
+                    .insert(peer_addr, (new_count, next_attempt));
                 vec![Effect::DoNothing]
             }
 
-            Action::MetadataReceived { torrent, metadata_length } => {
+            Action::MetadataReceived {
+                torrent,
+                metadata_length,
+            } => {
                 if self.torrent.is_some() {
                     return vec![Effect::DoNothing];
                 }
 
-                
                 self.torrent = Some(torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
-                
+
                 let num_pieces = torrent.info.pieces.len() / 20;
-                self.piece_manager.set_initial_fields(num_pieces, self.torrent_validation_status);
+                self.piece_manager
+                    .set_initial_fields(num_pieces, self.torrent_validation_status);
 
                 // Retroactive bitfield resize for non-compliant clients
                 for peer in self.peers.values_mut() {
@@ -719,40 +886,39 @@ impl TorrentState {
                         peer.bitfield.resize(num_pieces, false);
                     }
                 }
-                
+
                 if let Some(announce) = &torrent.announce {
-                    self.trackers.insert(announce.clone(), TrackerState {
-                        next_announce_time: Instant::now(),
-                        leeching_interval: None,
-                        seeding_interval: None,
-                    });
+                    self.trackers.insert(
+                        announce.clone(),
+                        TrackerState {
+                            next_announce_time: Instant::now(),
+                            leeching_interval: None,
+                            seeding_interval: None,
+                        },
+                    );
                 }
 
                 self.validation_pieces_found = 0;
                 self.torrent_status = TorrentStatus::Validating;
 
-                vec![
-                    Effect::InitializeStorage,
-                    Effect::StartValidation,
-                ]
+                vec![Effect::InitializeStorage, Effect::StartValidation]
             }
 
             Action::ValidationComplete { completed_pieces } => {
-
                 let mut effects = Vec::new();
 
                 for piece_index in completed_pieces {
                     self.piece_manager.mark_as_complete(piece_index);
                 }
-                
+
                 self.torrent_status = TorrentStatus::Standard;
-                
+
                 if !self.is_paused {
                     effects.push(Effect::SendBitfieldToPeers);
                     effects.push(Effect::ConnectToPeersFromTrackers);
                 }
                 effects.extend(self.update(Action::CheckCompletion));
-                
+
                 for peer_id in self.peers.keys().cloned().collect::<Vec<_>>() {
                     effects.extend(self.update(Action::AssignWork { peer_id }));
                 }
@@ -760,29 +926,37 @@ impl TorrentState {
                 effects
             }
 
-            Action::CancelUpload { peer_id, piece_index, block_offset, length } => {
-                vec![Effect::AbortUpload { 
-                    peer_id, 
-                    block_info: BlockInfo { 
-                        piece_index, 
-                        offset: block_offset, 
-                        length 
-                    } 
+            Action::CancelUpload {
+                peer_id,
+                piece_index,
+                block_offset,
+                length,
+            } => {
+                vec![Effect::AbortUpload {
+                    peer_id,
+                    block_info: BlockInfo {
+                        piece_index,
+                        offset: block_offset,
+                        length,
+                    },
                 }]
             }
 
-            Action::BlockSentToPeer { peer_id, byte_count } => {
+            Action::BlockSentToPeer {
+                peer_id,
+                byte_count,
+            } => {
                 self.session_total_uploaded += byte_count;
                 self.bytes_uploaded_in_interval += byte_count;
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    peer.bytes_uploaded_to_peer += byte_count; 
+                    peer.bytes_uploaded_to_peer += byte_count;
                     peer.total_bytes_uploaded += byte_count;
                     peer.bytes_uploaded_in_tick += byte_count;
                 }
-                
-                vec![Effect::EmitManagerEvent(ManagerEvent::BlockSent { 
-                    info_hash: self.info_hash.clone() 
+
+                vec![Effect::EmitManagerEvent(ManagerEvent::BlockSent {
+                    info_hash: self.info_hash.clone(),
                 })]
             }
 
@@ -790,11 +964,14 @@ impl TorrentState {
                 let mut effects = Vec::new();
                 let now = Instant::now();
 
-                self.timed_out_peers.retain(|_, (retry_count, _)| *retry_count < MAX_TIMEOUT_COUNT);
+                self.timed_out_peers
+                    .retain(|_, (retry_count, _)| *retry_count < MAX_TIMEOUT_COUNT);
 
                 let mut stuck_peers = Vec::new();
                 for (id, peer) in &self.peers {
-                    if peer.peer_id.is_empty() && now.duration_since(peer.created_at) > Duration::from_secs(5) {
+                    if peer.peer_id.is_empty()
+                        && now.duration_since(peer.created_at) > Duration::from_secs(5)
+                    {
                         stuck_peers.push(id.clone());
                     }
                 }
@@ -802,8 +979,12 @@ impl TorrentState {
                     effects.push(Effect::DisconnectPeer { peer_id });
                 }
 
-                let am_seeding = !self.piece_manager.bitfield.is_empty() 
-                    && self.piece_manager.bitfield.iter().all(|&s| s == PieceStatus::Done);
+                let am_seeding = !self.piece_manager.bitfield.is_empty()
+                    && self
+                        .piece_manager
+                        .bitfield
+                        .iter()
+                        .all(|&s| s == PieceStatus::Done);
 
                 if am_seeding && self.torrent_status != TorrentStatus::Done {
                     self.torrent_status = TorrentStatus::Done;
@@ -813,7 +994,8 @@ impl TorrentState {
                 if am_seeding {
                     let mut peers_to_disconnect = Vec::new();
                     for (peer_id, peer) in &self.peers {
-                        let peer_is_seed = !peer.bitfield.is_empty() && peer.bitfield.iter().all(|&has_piece| has_piece);
+                        let peer_is_seed = !peer.bitfield.is_empty()
+                            && peer.bitfield.iter().all(|&has_piece| has_piece);
                         if peer_is_seed {
                             peers_to_disconnect.push(peer_id.clone());
                         }
@@ -824,20 +1006,22 @@ impl TorrentState {
                 }
                 effects
             }
-        
+
             Action::Pause => {
                 self.last_activity = TorrentActivity::Paused;
                 self.is_paused = true;
-                
+
                 self.last_known_peers = self.peers.keys().cloned().collect();
                 self.peers.clear();
-                
+
                 self.bytes_downloaded_in_interval = 0;
                 self.bytes_uploaded_in_interval = 0;
 
                 vec![
                     Effect::ClearAllUploads,
-                    Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { info_hash: self.info_hash.clone() }) 
+                    Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
+                        info_hash: self.info_hash.clone(),
+                    }),
                 ]
             }
 
@@ -846,9 +1030,9 @@ impl TorrentState {
                 self.is_paused = false;
 
                 if self.torrent_status == TorrentStatus::Validating {
-                     return vec![Effect::DoNothing]; 
+                    return vec![Effect::DoNothing];
                 }
-                
+
                 let mut effects = vec![Effect::TriggerDhtSearch];
                 let now = Instant::now();
 
@@ -857,18 +1041,20 @@ impl TorrentState {
                     effects.push(Effect::AnnounceToTracker { url: url.clone() });
                 }
 
-                let peers_to_connect: Vec<String> = std::mem::take(&mut self.last_known_peers).into_iter().collect();
+                let peers_to_connect: Vec<String> = std::mem::take(&mut self.last_known_peers)
+                    .into_iter()
+                    .collect();
                 for peer_addr in peers_to_connect {
                     if let Ok(addr) = peer_addr.parse::<std::net::SocketAddr>() {
                         if let std::net::SocketAddr::V4(v4) = addr {
-                            effects.push(Effect::ConnectToPeer { 
-                                ip: v4.ip().to_string(), 
-                                port: v4.port() 
+                            effects.push(Effect::ConnectToPeer {
+                                ip: v4.ip().to_string(),
+                                port: v4.port(),
                             });
                         }
                     }
                 }
-                
+
                 effects
             }
 
@@ -885,7 +1071,7 @@ impl TorrentState {
                     tracker.next_announce_time = now + Duration::from_secs(60);
                     effects.push(Effect::AnnounceToTracker { url: url.clone() });
                 }
-                
+
                 effects
             }
 
@@ -894,10 +1080,7 @@ impl TorrentState {
                 vec![Effect::DoNothing]
             }
 
-
-            Action::FatalError { error } => {
-                self.update(Action::Pause)
-            }
+            Action::FatalError { error } => self.update(Action::Pause),
         }
     }
 }
