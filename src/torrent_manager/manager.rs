@@ -1825,7 +1825,7 @@ impl TorrentManager {
 
                     self.apply_action(Action::RecalculateChokes {
                         upload_slots: self.settings.upload_slots,
-                        random_seed: rand::rng().random() 
+                        random_seed: rand::rng().random()
                     });
                 }
 
