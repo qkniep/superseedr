@@ -1544,7 +1544,6 @@ impl TorrentManager {
         let shutdown_rx = self.shutdown_tx.subscribe();
         let manager_tx = self.torrent_manager_tx.clone();
         let event = self.manager_event_tx.clone();
-        let hash = self.state.info_hash.clone();
         let skip = self.state.torrent_validation_status;
 
         tokio::spawn(async move {
