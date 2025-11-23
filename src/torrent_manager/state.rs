@@ -19,10 +19,7 @@ use crate::torrent_manager::piece_manager::PieceManager;
 use crate::torrent_manager::piece_manager::PieceStatus;
 use std::collections::{HashMap, HashSet};
 
-use rand::prelude::IndexedRandom;
-
 const MAX_TIMEOUT_COUNT: u32 = 10;
-const BITS_PER_BYTE: u64 = 8;
 const SMOOTHING_PERIOD_MS: f64 = 5000.0;
 const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 4;
 const MAX_BLOCK_SIZE: u32 = 131_072;
@@ -526,18 +523,9 @@ impl TorrentState {
                     return vec![Effect::DoNothing];
                 }
 
-                // 2. Unwrap Torrent Metadata
-                let torrent = match &self.torrent {
-                    Some(t) => t,
-                    None => return vec![Effect::DoNothing],
-                };
-
-                // 3. Calculate Total Size (for metadata purposes only)
-                let total_size: i64 = if !torrent.info.files.is_empty() {
-                    torrent.info.files.iter().map(|f| f.length).sum()
-                } else {
-                    torrent.info.length
-                };
+                if self.torrent.is_none() {
+                    return vec![Effect::DoNothing];
+                }
 
                 let mut effects = Vec::new();
 
@@ -3234,10 +3222,10 @@ mod prop_tests {
     // =========================================================================
     mod state_machine {
         use super::*;
+        use crate::torrent_manager::state::tests::create_dummy_torrent;
         use proptest::prelude::*;
         use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
-        use crate::torrent_manager::state::tests::create_dummy_torrent;
-        use std::collections::{HashSet, HashMap};
+        use std::collections::{HashMap, HashSet};
 
         // --- 1. THE MODEL ---
         #[derive(Clone, Debug)]
@@ -3285,86 +3273,147 @@ mod prop_tests {
 
                 // --- B. Tracker Actions ---
                 // Randomly announce responses or errors
-                strategies.push((any::<String>(), any::<u64>()).prop_map(|(url, interval)| {
-                    Action::TrackerResponse {
-                        url,
-                        peers: vec![], // Simplifying: Empty peer list in response
-                        interval,
-                        min_interval: Some(60),
-                    }
-                }).boxed());
-                strategies.push(any::<String>().prop_map(|url| Action::TrackerError { url }).boxed());
-
+                strategies.push(
+                    (any::<String>(), any::<u64>())
+                        .prop_map(|(url, interval)| {
+                            Action::TrackerResponse {
+                                url,
+                                peers: vec![], // Simplifying: Empty peer list in response
+                                interval,
+                                min_interval: Some(60),
+                            }
+                        })
+                        .boxed(),
+                );
+                strategies.push(
+                    any::<String>()
+                        .prop_map(|url| Action::TrackerError { url })
+                        .boxed(),
+                );
 
                 // --- C. Connection Actions (Always Valid) ---
                 // We can always attempt to connect or fail a connection
-                strategies.push(any::<String>().prop_map(|id| 
-                    Action::PeerSuccessfullyConnected { peer_id: id }
-                ).boxed());
-                
-                strategies.push(any::<String>().prop_map(|addr| 
-                    Action::PeerConnectionFailed { peer_addr: addr }
-                ).boxed());
+                strategies.push(
+                    any::<String>()
+                        .prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id })
+                        .boxed(),
+                );
 
+                strategies.push(
+                    any::<String>()
+                        .prop_map(|addr| Action::PeerConnectionFailed { peer_addr: addr })
+                        .boxed(),
+                );
 
                 // --- D. Peer Interaction (Requires Connected Peers) ---
                 if !state.connected_peers.is_empty() {
                     // Pick a random *existing* peer to interact with
-                    let peer_strategy = prop::sample::select(Vec::from_iter(state.connected_peers.clone()));
+                    let peer_strategy =
+                        prop::sample::select(Vec::from_iter(state.connected_peers.clone()));
                     let piece_strategy = 0..state.total_pieces;
 
                     // 1. Disconnect
-                    strategies.push(peer_strategy.clone().prop_map(|id| 
-                        Action::PeerDisconnected { peer_id: id }
-                    ).boxed());
+                    strategies.push(
+                        peer_strategy
+                            .clone()
+                            .prop_map(|id| Action::PeerDisconnected { peer_id: id })
+                            .boxed(),
+                    );
 
                     // 2. Peer State Updates (Choke, Interest, Bitfield)
-                    strategies.push(peer_strategy.clone().prop_map(|id| Action::PeerChoked { peer_id: id }).boxed());
-                    strategies.push(peer_strategy.clone().prop_map(|id| Action::PeerUnchoked { peer_id: id }).boxed());
-                    strategies.push(peer_strategy.clone().prop_map(|id| Action::PeerInterested { peer_id: id }).boxed());
-                    
-                    strategies.push((peer_strategy.clone(), any::<Vec<u8>>()).prop_map(|(id, bf)| 
-                        Action::PeerBitfieldReceived { peer_id: id, bitfield: bf }
-                    ).boxed());
+                    strategies.push(
+                        peer_strategy
+                            .clone()
+                            .prop_map(|id| Action::PeerChoked { peer_id: id })
+                            .boxed(),
+                    );
+                    strategies.push(
+                        peer_strategy
+                            .clone()
+                            .prop_map(|id| Action::PeerUnchoked { peer_id: id })
+                            .boxed(),
+                    );
+                    strategies.push(
+                        peer_strategy
+                            .clone()
+                            .prop_map(|id| Action::PeerInterested { peer_id: id })
+                            .boxed(),
+                    );
+
+                    strategies.push(
+                        (peer_strategy.clone(), any::<Vec<u8>>())
+                            .prop_map(|(id, bf)| Action::PeerBitfieldReceived {
+                                peer_id: id,
+                                bitfield: bf,
+                            })
+                            .boxed(),
+                    );
 
                     // 3. Data Flow (Have, Block, Verify, Write)
-                    strategies.push((peer_strategy.clone(), piece_strategy.clone()).prop_map(|(id, idx)| 
-                        Action::PeerHavePiece { peer_id: id, piece_index: idx }
-                    ).boxed());
+                    strategies.push(
+                        (peer_strategy.clone(), piece_strategy.clone())
+                            .prop_map(|(id, idx)| Action::PeerHavePiece {
+                                peer_id: id,
+                                piece_index: idx,
+                            })
+                            .boxed(),
+                    );
 
-                    strategies.push(peer_strategy.clone().prop_map(|id| 
-                        Action::AssignWork { peer_id: id }
-                    ).boxed());
+                    strategies.push(
+                        peer_strategy
+                            .clone()
+                            .prop_map(|id| Action::AssignWork { peer_id: id })
+                            .boxed(),
+                    );
 
                     // Incoming Block: generate random small data
-                    strategies.push((
-                        peer_strategy.clone(), 
-                        piece_strategy.clone(), 
-                        any::<u32>(), 
-                        prop::collection::vec(any::<u8>(), 1..1024)
-                    ).prop_map(|(id, idx, offset, data)| {
-                        Action::IncomingBlock { 
-                            peer_id: id, 
-                            piece_index: idx, 
-                            block_offset: offset, 
-                            data 
-                        }
-                    }).boxed());
-                    
+                    strategies.push(
+                        (
+                            peer_strategy.clone(),
+                            piece_strategy.clone(),
+                            any::<u32>(),
+                            prop::collection::vec(any::<u8>(), 1..1024),
+                        )
+                            .prop_map(|(id, idx, offset, data)| Action::IncomingBlock {
+                                peer_id: id,
+                                piece_index: idx,
+                                block_offset: offset,
+                                data,
+                            })
+                            .boxed(),
+                    );
+
                     // Sending Block (Upload)
-                    strategies.push((peer_strategy.clone(), any::<u64>()).prop_map(|(id, bytes)| 
-                         Action::BlockSentToPeer { peer_id: id, byte_count: bytes }
-                    ).boxed());
+                    strategies.push(
+                        (peer_strategy.clone(), any::<u64>())
+                            .prop_map(|(id, bytes)| Action::BlockSentToPeer {
+                                peer_id: id,
+                                byte_count: bytes,
+                            })
+                            .boxed(),
+                    );
 
                     // 4. Verification & Disk I/O (Simulated)
                     // These normally happen internally, but we inject them to fuzz the handling logic
-                    strategies.push((peer_strategy.clone(), piece_strategy.clone(), any::<bool>()).prop_map(|(id, idx, valid)| 
-                        Action::PieceVerified { peer_id: id, piece_index: idx, valid, data: vec![] }
-                    ).boxed());
+                    strategies.push(
+                        (peer_strategy.clone(), piece_strategy.clone(), any::<bool>())
+                            .prop_map(|(id, idx, valid)| Action::PieceVerified {
+                                peer_id: id,
+                                piece_index: idx,
+                                valid,
+                                data: vec![],
+                            })
+                            .boxed(),
+                    );
 
-                    strategies.push((peer_strategy.clone(), piece_strategy.clone()).prop_map(|(id, idx)| 
-                        Action::PieceWrittenToDisk { peer_id: id, piece_index: idx }
-                    ).boxed());
+                    strategies.push(
+                        (peer_strategy.clone(), piece_strategy.clone())
+                            .prop_map(|(id, idx)| Action::PieceWrittenToDisk {
+                                peer_id: id,
+                                piece_index: idx,
+                            })
+                            .boxed(),
+                    );
                 }
 
                 prop::strategy::Union::new(strategies).boxed()
@@ -3380,7 +3429,7 @@ mod prop_tests {
                     }
                     Action::Pause | Action::FatalError => {
                         state.paused = true;
-                        state.connected_peers.clear(); 
+                        state.connected_peers.clear();
                     }
                     Action::Resume => {
                         state.paused = false;
@@ -3404,26 +3453,27 @@ mod prop_tests {
                 let mut state = TorrentState::default();
                 let torrent = create_dummy_torrent(ref_state.total_pieces as usize);
                 state.torrent = Some(torrent);
-                state.piece_manager.set_initial_fields(ref_state.total_pieces as usize, false);
+                state
+                    .piece_manager
+                    .set_initial_fields(ref_state.total_pieces as usize, false);
                 state.torrent_status = TorrentStatus::Standard;
-                
+
                 // IMPORTANT: Sync SUT with Model
                 state.is_paused = ref_state.paused;
-                // Note: We don't need to manually insert peers here because 
+                // Note: We don't need to manually insert peers here because
                 // init_state starts empty, so ref_state.connected_peers is empty.
-                
+
                 state
             }
 
             fn apply(
-                mut sut: Self::SystemUnderTest, 
-                ref_state: &TorrentModel, 
-                transition: Action
+                mut sut: Self::SystemUnderTest,
+                ref_state: &TorrentModel,
+                transition: Action,
             ) -> Self::SystemUnderTest {
-                
                 // 1. Pre-Condition Helper:
                 // If the transition is "PeerSuccessfullyConnected", we must manually insert
-                // the peer into the SUT *before* the update, because in real life 
+                // the peer into the SUT *before* the update, because in real life
                 // the Network Adapter does this before sending the event.
                 if let Action::PeerSuccessfullyConnected { peer_id } = &transition {
                     if !sut.peers.contains_key(peer_id) {
@@ -3440,14 +3490,20 @@ mod prop_tests {
 
                 // 3. CHECK INVARIANTS
                 // Peer Count Sync
-                assert_eq!(sut.peers.len(), ref_state.connected_peers.len(), 
-                    "Model/SUT Peer Mismatch! \nModel: {:?}\nSUT: {:?}", 
-                    ref_state.connected_peers, sut.peers.keys());
-                
+                assert_eq!(
+                    sut.peers.len(),
+                    ref_state.connected_peers.len(),
+                    "Model/SUT Peer Mismatch! \nModel: {:?}\nSUT: {:?}",
+                    ref_state.connected_peers,
+                    sut.peers.keys()
+                );
+
                 // Paused Sync
-                assert_eq!(sut.is_paused, ref_state.paused, 
-                    "Paused state mismatch! Model says {}, SUT says {}", 
-                    ref_state.paused, sut.is_paused);
+                assert_eq!(
+                    sut.is_paused, ref_state.paused,
+                    "Paused state mismatch! Model says {}, SUT says {}",
+                    ref_state.paused, sut.is_paused
+                );
 
                 sut
             }
@@ -3462,9 +3518,9 @@ mod prop_tests {
                 (initial_state, transitions, tracker) in TorrentModel::sequential_strategy(20)
             ) {
                 TorrentModel::test_sequential(
-                    proptest::test_runner::Config::default(), 
-                    initial_state, 
-                    transitions, 
+                    proptest::test_runner::Config::default(),
+                    initial_state,
+                    transitions,
                     tracker
                 );
             }
