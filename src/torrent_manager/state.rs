@@ -1639,7 +1639,7 @@ mod tests {
         peer.pending_requests.insert(5); // We asked for piece 5
 
         // WHEN: Peer A chokes us
-        let effects = state.update(Action::PeerChoked {
+        let _ = state.update(Action::PeerChoked {
             peer_id: "peer_A".into(),
         });
 
@@ -1671,7 +1671,7 @@ mod tests {
         state.optimistic_unchoke_timer = Some(Instant::now() - Duration::from_secs(31));
 
         // WHEN: Recalculate
-        let effects = state.update(Action::RecalculateChokes {
+        let _ = state.update(Action::RecalculateChokes {
             upload_slots: 1,
             random_seed: 0,
         });
@@ -2711,30 +2711,26 @@ mod prop_tests {
         let peer_id_strat = any::<String>();
         prop_oneof![
             peer_id_strat
-                .clone()
                 .prop_map(|id| Action::PeerChoked { peer_id: id }),
             peer_id_strat
-                .clone()
                 .prop_map(|id| Action::PeerUnchoked { peer_id: id }),
             peer_id_strat
-                .clone()
                 .prop_map(|id| Action::PeerInterested { peer_id: id }),
             (
-                peer_id_strat.clone(),
+                peer_id_strat,
                 proptest::collection::vec(any::<u8>(), 1..10)
             )
                 .prop_map(|(id, bf)| Action::PeerBitfieldReceived {
                     peer_id: id,
                     bitfield: bf
                 }),
-            (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
+            (peer_id_strat, 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 Action::PeerHavePiece {
                     peer_id: id,
                     piece_index: idx,
                 }
             }),
             peer_id_strat
-                .clone()
                 .prop_map(|id| Action::AssignWork { peer_id: id }),
         ]
     }
@@ -2746,7 +2742,7 @@ mod prop_tests {
 
         prop_oneof![
             // 1. Exact Boundary Hits (Finish a piece exactly)
-            (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
+            (peer_id_strat, 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 // Offset is piece_len - 1024, data is 1024. Sum = piece_len.
                 let data = vec![1u8; 1024];
                 Action::IncomingBlock {
@@ -2757,7 +2753,7 @@ mod prop_tests {
                 }
             }),
             // 2. Tiny Overflows (Security/Panic check)
-            (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
+            (peer_id_strat, 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 // Offset is piece_len - 5. Data is 10 bytes. Result > Piece Length.
                 let data = vec![0u8; 10];
                 Action::IncomingBlock {
@@ -2768,7 +2764,7 @@ mod prop_tests {
                 }
             }),
             // 3. Massive Length Requests (DoS protection check)
-            (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
+            (peer_id_strat, 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 Action::RequestUpload {
                     peer_id: id,
                     piece_index: idx,
@@ -2988,6 +2984,7 @@ mod prop_tests {
             4 => chaos_strategy().prop_map(|a| vec![a]),
             2 => successful_download_story(),
             1 => protocol_violation_strategy(),
+            1 => lifecycle_transition_strategy(),
         ]
     }
 
@@ -3351,7 +3348,6 @@ mod prop_tests {
     mod state_machine {
         use super::*;
         use crate::torrent_manager::state::tests::create_dummy_torrent;
-        use proptest::prelude::*;
         use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
         use std::collections::HashSet;
 

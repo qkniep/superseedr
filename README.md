@@ -163,7 +163,9 @@ The engine is subjected to a continuous fuzzing pipeline that simulates years of
 ### Why This Matters
 By decoupling **Core Logic** (State Transitions) from **Side Effects** (I/O), we ensure that logic bugs—such as deadlocks, integer overflows in speed calculations, or peer map desyncs—are caught by the fuzzer, not by users. 
 
-Every failure found by our test suite prints a **cryptographic seed**, allowing us to replay the exact sequence of network packets and user actions that caused the crash, making "heisenbugs" a thing of the past.
+Failures are found by our test suite prints a **cryptographic seed**, allowing us to replay the exact sequence of network packets and user actions that caused the crash, making "heisenbugs" a thing of the past.
+
+Every release is verified against a massive 1-million-case fuzzing suite, subjecting the engine to over 10 minutes (m1 mac) of continuous, deterministic network chaos to prove the absence of logic bugs.
 
 <details>
 <summary>Click to expand: How the testing actually works (flowchart)</summary>
@@ -239,6 +241,7 @@ These features will not be included in the final build of the private versions o
 - **UPnP / NAT-PMP:** Automatically configure port forwarding on compatible routers to improve connectability.
 - **Tracker Scraping:** Implement the ability to query trackers for seeder/leecher counts without doing a full announce (useful for displaying stats).
 - **Network History:** Persisting network history to disk.
+- **Crash Dump Ring Buffer:** Fully replayable crash dump of torrent state actions.
 
 ### Torrent & File Management
 - **Selective File Downloading:** Allow users to choose which specific files inside a multi-file torrent they want to download.
