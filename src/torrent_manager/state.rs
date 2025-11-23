@@ -2175,7 +2175,6 @@ fn check_invariants(state: &TorrentState) {
 mod prop_tests {
 
     use super::*;
-    use crate::torrent_file::Torrent;
     use proptest::prelude::*;
     use tokio::sync::mpsc;
 
@@ -2183,6 +2182,76 @@ mod prop_tests {
     const PIECE_LEN: u32 = 16384;
     const NUM_PIECES: usize = 20;
     const MAX_BLOCK: u32 = 131_072;
+
+    #[derive(Clone, Debug)]
+        enum NetworkFault {
+            None,
+            Drop,
+            Duplicate,
+            Delay(u64),
+            Corrupt,
+        }
+
+        // Transforms a clean history of actions into a faulty network stream
+        // deterministically based on a vector of random "fault seeds"
+        fn inject_network_faults(actions: Vec<Action>, fault_entropy: Vec<u8>) -> Vec<Action> {
+            let mut final_actions = Vec::new();
+            // Cycle through entropy so we don't run out if actions > entropy length
+            let mut entropy_iter = fault_entropy.iter().cycle(); 
+
+            for action in actions {
+                let seed = *entropy_iter.next().unwrap();
+                
+                // Map the random byte (0-255) to a Fault Type
+                let fault = match seed {
+                    0..=4 => NetworkFault::Drop,            // ~2% chance
+                    5..=9 => NetworkFault::Duplicate,       // ~2% chance
+                    10..=20 => NetworkFault::Delay(seed as u64 * 50), // ~4% chance (500ms-1000ms)
+                    21..=25 => NetworkFault::Corrupt,       // ~2% chance
+                    _ => NetworkFault::None,                // ~90% Clean
+                };
+
+                match fault {
+                    NetworkFault::Drop => {
+                        // Packet lost in the ether
+                        continue; 
+                    }
+                    NetworkFault::Duplicate => {
+                        final_actions.push(action.clone());
+                        final_actions.push(action);
+                    }
+                    NetworkFault::Delay(ms) => {
+                        // Simulate delay by ticking the clock before delivery
+                        final_actions.push(Action::Tick { dt_ms: ms });
+                        final_actions.push(action);
+                    }
+                    NetworkFault::Corrupt => {
+                        // Flip bits if it involves data
+                        match action {
+                            Action::IncomingBlock { peer_id, piece_index, block_offset, mut data } => {
+                                if !data.is_empty() {
+                                    // Corrupt the last byte
+                                    let len = data.len();
+                                    data[len - 1] = !data[len - 1]; 
+                                }
+                                final_actions.push(Action::IncomingBlock { peer_id, piece_index, block_offset, data });
+                            },
+                            // For control packets, corruption usually means they fail parsing 
+                            // and are effectively dropped or cause a disconnect. 
+                            // We simulate "parsing error" by turning it into a connection failure or drop.
+                            _ => {
+                                // Simulate packet garbling leading to drop
+                                continue; 
+                            }
+                        }
+                    }
+                    NetworkFault::None => {
+                        final_actions.push(action);
+                    }
+                }
+            }
+            final_actions
+        }
 
     // =========================================================================
     // 1. STRATEGIES: Atomic Actions
@@ -2650,7 +2719,7 @@ mod prop_tests {
                 }
             }),
             // 4. Zero Length Request (Division by zero check)
-            (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
+            (peer_id_strat, 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 Action::RequestUpload {
                     peer_id: id,
                     piece_index: idx,
@@ -2660,7 +2729,7 @@ mod prop_tests {
             }),
             // 5. Standard random data (Filling the gap)
             (
-                peer_id_strat.clone(),
+                peer_id_strat,
                 0..NUM_PIECES as u32,
                 any::<u32>(),
                 proptest::collection::vec(any::<u8>(), 1..1024)
@@ -3215,6 +3284,7 @@ mod prop_tests {
                 prop_assert!(!sent_request, "Race Condition Fail: Requested data while Choked!");
             }
 
+
         }
 
     // =========================================================================
@@ -3225,7 +3295,7 @@ mod prop_tests {
         use crate::torrent_manager::state::tests::create_dummy_torrent;
         use proptest::prelude::*;
         use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
-        use std::collections::{HashMap, HashSet};
+        use std::collections::{HashSet};
 
         // --- 1. THE MODEL ---
         #[derive(Clone, Debug)]
@@ -3524,6 +3594,30 @@ mod prop_tests {
                     tracker
                 );
             }
+
+            // ---  Network Fault Simulation ---
+            #[test]
+            fn test_state_machine_network_faults(
+                (initial_state, clean_actions, tracker) in TorrentModel::sequential_strategy(20),
+                // Generate a parallel vector of random bytes to determine faults
+                fault_entropy in proptest::collection::vec(any::<u8>(), 50) 
+            ) {
+                // 1. Inject Faults (Deterministic transformation)
+                let faulty_actions = inject_network_faults(clean_actions, fault_entropy);
+
+                // 2. Run the Test
+                // Note: We use the *same* initial state and tracker, but the
+                // actions applied to the SUT are now delayed/dropped/corrupted.
+                // The Reference Model in `apply` will still track the *logical* state,
+                // while the SUT must handle the mess without crashing.
+                TorrentModel::test_sequential(
+                    proptest::test_runner::Config::default(), 
+                    initial_state, 
+                    faulty_actions, 
+                    tracker
+                );
+            }
+
         }
     }
 }
