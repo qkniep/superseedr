@@ -2192,8 +2192,6 @@ mod prop_tests {
     // 3. NEW: Populated State Strategy (State Primer)
     // =========================================================================
     
-    // Generates a TorrentState that is already deep in activity.
-    // This bypasses the "startup" phase and tests the core logic immediately.
     fn populated_state_strategy() -> impl Strategy<Value = TorrentState> {
         let peers_strat = proptest::collection::hash_map(
             any::<String>(), 
@@ -2218,7 +2216,7 @@ mod prop_tests {
                 // Make them active players
                 peer.am_interested = true;
                 peer.peer_is_interested_in_us = true; 
-                peer.peer_choking = crate::state::ChokeStatus::Unchoke;
+                peer.peer_choking = crate::torrent_manager::state::ChokeStatus::Unchoke;
                 
                 // Pre-load stats to influence Choke/Unchoke logic
                 peer.bytes_downloaded_in_tick = dl % 100_000;
@@ -2233,6 +2231,10 @@ mod prop_tests {
                 state.peers.insert(id, peer);
             }
 
+            // --- FIX START: Sync the metric count with the inserted peers ---
+            state.number_of_successfully_connected_peers = state.peers.len();
+            // --- FIX END ---
+
             // IMPORTANT: Ensure Need Queue is populated so AssignWork actually does something
             state.piece_manager.need_queue.clear();
             for i in 0..NUM_PIECES as u32 {
@@ -2242,6 +2244,7 @@ mod prop_tests {
             state
         })
     }
+
 
     // =========================================================================
     // 4. Invariants & Runner
