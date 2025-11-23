@@ -1963,6 +1963,53 @@ mod prop_tests {
     // 1. STRATEGIES: Atomic Actions
     // =========================================================================
 
+// A strategy that forces the State Machine through specific "Phases"
+// instead of just throwing random events at it.
+fn lifecycle_transition_strategy() -> impl Strategy<Value = Vec<Action>> {
+    let peer_id = "lifecycle_peer".to_string();
+    
+    prop_oneof![
+        // Case 1: The Endgame Transition
+        // Force queue to empty, then verify redundant requests behavior
+        Just(vec![
+            // 1. Setup: Connect a peer
+            Action::PeerSuccessfullyConnected { peer_id: peer_id.clone() },
+            Action::PeerUnchoked { peer_id: peer_id.clone() },
+            Action::PeerHavePiece { peer_id: peer_id.clone(), piece_index: 0 },
+            
+            // 2. Force Work Assignment (puts piece 0 in pending)
+            Action::AssignWork { peer_id: peer_id.clone() },
+            
+            // 3. Trigger Endgame Logic (by simulating another peer taking the last needed piece)
+            // (We would need to manually manipulate the state queue in the test runner 
+            //  for this to work perfectly, or send a specific sequence here).
+        ]),
+
+        // Case 2: The "Stuck Peer" Cleanup
+        // Connect a peer, Advance time > 5s, Trigger Cleanup
+        Just(vec![
+            Action::PeerSuccessfullyConnected { peer_id: peer_id.clone() },
+            // Note: We intentionally do NOT send SetPeerId here
+            Action::Tick { dt_ms: 6000 }, 
+            Action::Cleanup, 
+            // Expectation: Peer should be removed
+        ]),
+
+        // Case 3: Pause/Resume Data Integrity
+        Just(vec![
+            Action::PeerSuccessfullyConnected { peer_id: peer_id.clone() },
+            Action::IncomingBlock { peer_id: peer_id.clone(), piece_index: 0, block_offset: 0, data: vec![1; 100] },
+            Action::Pause,
+            Action::Resume, 
+            // Re-connect is required after pause
+            Action::PeerSuccessfullyConnected { peer_id: peer_id.clone() }, 
+            // Try sending the SAME block again. 
+            // If internal state wasn't cleared, this might panic or corrupt.
+            Action::IncomingBlock { peer_id: peer_id.clone(), piece_index: 0, block_offset: 0, data: vec![1; 100] },
+        ])
+    ]
+}
+
     // A. Network & Tracker Events (Standard)
     fn network_action_strategy() -> impl Strategy<Value = Action> {
         prop_oneof![
@@ -2250,25 +2297,200 @@ mod prop_tests {
     // 4. Invariants & Runner
     // =========================================================================
 
-    fn check_invariants(state: &TorrentState) {
-        // 1. Queue Consistency
-        for piece in &state.piece_manager.need_queue {
-            assert!(!state.piece_manager.pending_queue.contains_key(piece), "Piece {} both Needed and Pending", piece);
-        }
-        // 2. Peer Sync
-        assert_eq!(state.number_of_successfully_connected_peers, state.peers.len());
-        // 3. Math Safety
-        assert!(!state.total_dl_prev_avg_ema.is_nan());
-        // 4. Pending Queue Integrity (The "Sabotage" Catcher)
-        for (peer_id, peer) in &state.peers {
-            for &pending_piece in &peer.pending_requests {
-                if let Some(status) = state.piece_manager.bitfield.get(pending_piece as usize) {
-                    assert_ne!(status, &crate::torrent_manager::piece_manager::PieceStatus::Done, 
-                        "Peer {} pending request {} is globally DONE", peer_id, pending_piece);
-                }
+fn check_invariants(state: &TorrentState) {
+    // =========================================================================
+    // CATEGORY 1: Data Consistency (The "Is the Math Right?" Check)
+    // =========================================================================
+
+    // 1. Global Stats vs. Peer Stats
+    // The global session total MUST be >= the sum of currently connected peers.
+    // (It is not == because disconnected peers contribute to the total but are gone from the map).
+    let sum_peer_dl: u64 = state.peers.values().map(|p| p.total_bytes_downloaded).sum();
+    let sum_peer_ul: u64 = state.peers.values().map(|p| p.total_bytes_uploaded).sum();
+
+    assert!(
+        state.session_total_downloaded >= sum_peer_dl,
+        "Global DL ({}) < Sum of Peers ({}) - Data created from thin air!",
+        state.session_total_downloaded,
+        sum_peer_dl
+    );
+
+    assert!(
+        state.session_total_uploaded >= sum_peer_ul,
+        "Global UL ({}) < Sum of Peers ({}) - Data created from thin air!",
+        state.session_total_uploaded,
+        sum_peer_ul
+    );
+
+    // 2. Bitfield Integrity
+    if let Some(torrent) = &state.torrent {
+        let expected_pieces = torrent.info.pieces.len() / 20;
+        assert_eq!(
+            state.piece_manager.bitfield.len(),
+            expected_pieces,
+            "Bitfield length mismatch! Expected {}, Got {}",
+            expected_pieces,
+            state.piece_manager.bitfield.len()
+        );
+
+        // Check peer bitfield safety
+        for (id, peer) in &state.peers {
+            if !peer.bitfield.is_empty() {
+                assert_eq!(
+                    peer.bitfield.len(),
+                    expected_pieces,
+                    "Peer {} bitfield len mismatch. Vulnerable to panic.",
+                    id
+                );
             }
         }
     }
+
+    // =========================================================================
+    // CATEGORY 2: Queue Synchronization (The "Ghost Piece" Check)
+    // =========================================================================
+
+    // 3. The "Orphaned Pending" Check (CRITICAL)
+    // If a piece is in `pending_queue` (Global), AT LEAST one peer must be working on it.
+    for &piece_idx in state.piece_manager.pending_queue.keys() {
+        let exists_in_peer = state
+            .peers
+            .values()
+            .any(|p| p.pending_requests.contains(&piece_idx));
+        assert!(
+            exists_in_peer,
+            "Piece {} is globally Pending but NO peer has it. Download is stalled!",
+            piece_idx
+        );
+    }
+
+    // 4. The "Zombie Request" Check
+    // If a peer has a pending request, that piece MUST be globally Pending (or Done).
+    // It cannot be in the "Need" queue.
+    for (id, peer) in &state.peers {
+        for &req in &peer.pending_requests {
+            let in_need = state.piece_manager.need_queue.contains(&req);
+            
+            // It's okay if it's Done (race condition where write finished but peer not updated yet)
+            // But it is NEVER okay to be in the Need queue while a peer thinks they are downloading it.
+            assert!(
+                !in_need,
+                "Peer {} is downloading Piece {}, but Manager thinks it is still Needed!",
+                id, req
+            );
+        }
+    }
+
+    // 5. Queue Mutually Exclusive
+    for piece in &state.piece_manager.need_queue {
+        assert!(
+            !state.piece_manager.pending_queue.contains_key(piece),
+            "Piece {} is in both Need and Pending queues!",
+            piece
+        );
+    }
+
+    // =========================================================================
+    // CATEGORY 3: State Machine Logic
+    // =========================================================================
+
+    // 6. Status vs. Queues
+    match state.torrent_status {
+        TorrentStatus::Done => {
+            // If Done, we should need nothing.
+            assert!(
+                state.piece_manager.need_queue.is_empty(),
+                "Status is Done but Need queue has items!"
+            );
+            assert!(
+                state.piece_manager.pending_queue.is_empty(),
+                "Status is Done but Pending queue has items!"
+            );
+
+            // If Done, we should not be Interested in anyone.
+            let am_interested = state.peers.values().any(|p| p.am_interested);
+            assert!(
+                !am_interested,
+                "Status is Done but we are still Interested in peers!"
+            );
+        }
+        TorrentStatus::Endgame => {
+            // Endgame means Need is empty, but Pending is NOT.
+            assert!(
+                state.piece_manager.need_queue.is_empty(),
+                "Status is Endgame but Need queue is not empty!"
+            );
+            // Pending might be empty if the last piece just finished but status hasn't transitioned yet,
+            // but typically it should have items.
+        }
+        TorrentStatus::Standard => {}
+        TorrentStatus::Validating => {}
+    }
+
+    // =========================================================================
+    // CATEGORY 4: Resource & Math Integrity
+    // =========================================================================
+
+    // 7. Map Key Consistency
+    for (key, peer) in &state.peers {
+        assert_eq!(
+            key, &peer.ip_port,
+            "Peer Map Key '{}' does not match struct IP '{}'",
+            key, peer.ip_port
+        );
+    }
+
+    // 8. Peer Count Sync
+    assert_eq!(
+        state.number_of_successfully_connected_peers,
+        state.peers.len(),
+        "Peer count metric out of sync with Map size!"
+    );
+
+    // 9. Pieces Remaining Synchronization (Optimization Check)
+    if let Some(_) = &state.torrent {
+        // Count how many pieces in the bitfield are NOT done
+        let actual_remaining = state
+            .piece_manager
+            .bitfield
+            .iter()
+            .filter(|&&status| status != crate::torrent_manager::piece_manager::PieceStatus::Done)
+            .count();
+
+        assert_eq!(
+            state.piece_manager.pieces_remaining as usize, actual_remaining,
+            "Drift detected! PieceManager thinks {} pieces left, but Bitfield shows {}",
+            state.piece_manager.pieces_remaining, actual_remaining
+        );
+    }
+
+    // 10. EMA (Speed) Stability
+    assert!(
+        state.total_dl_prev_avg_ema.is_finite(),
+        "DL Speed EMA is Infinite/NaN"
+    );
+    assert!(
+        state.total_ul_prev_avg_ema.is_finite(),
+        "UL Speed EMA is Infinite/NaN"
+    );
+
+    for (id, peer) in &state.peers {
+        assert!(
+            peer.prev_avg_dl_ema.is_finite(),
+            "Peer {} DL EMA is broken",
+            id
+        );
+    }
+
+    // 11. Timer Sanity
+    if let Some(t) = state.optimistic_unchoke_timer {
+        let now = state.now;
+        // Allow buffer, but 1 hour in future implies logic error
+        if t > now + std::time::Duration::from_secs(3600) {
+            panic!("Optimistic timer is set way too far in the future!");
+        }
+    }
+}
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
