@@ -17,11 +17,20 @@ pub enum PieceStatus {
     Done,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub struct PieceAssembler {
-    buffer: Vec<u8>,
-    received_blocks: HashSet<u32>,
-    total_blocks: usize,
+    pub buffer: Vec<u8>,
+    pub received_blocks: HashSet<u32>,
+    pub total_blocks: usize,
+}
+impl std::fmt::Debug for PieceAssembler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PieceAssembler")
+         .field("received_blocks", &self.received_blocks)
+         .field("total_blocks", &self.total_blocks)
+         .field("buffer_len", &self.buffer.len())
+         .finish()
+    }
 }
 
 #[derive(Default, Debug)]
