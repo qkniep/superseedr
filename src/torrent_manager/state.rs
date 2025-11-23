@@ -19,9 +19,6 @@ use crate::torrent_manager::piece_manager::PieceManager;
 use crate::torrent_manager::piece_manager::PieceStatus;
 use std::collections::{HashMap, HashSet};
 
-use tracing::event;
-use tracing::Level;
-
 const MAX_TIMEOUT_COUNT: u32 = 10;
 const SMOOTHING_PERIOD_MS: f64 = 5000.0;
 const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 4;
@@ -515,73 +512,68 @@ impl TorrentState {
                 vec![Effect::DoNothing]
             }
 
-
             Action::AssignWork { peer_id } => {
-                event!(Level::TRACE, peer = %peer_id, "Executing AssignWork.");
-                
                 // Guard 1: Status Check
                 if self.torrent_status == TorrentStatus::Validating {
-                    event!(Level::WARN, peer = %peer_id, status = "Validating", "AssignWork exiting: Torrent is currently validating.");
                     return vec![Effect::DoNothing];
                 }
 
                 if self.piece_manager.bitfield.is_empty() {
-                    event!(Level::WARN, peer = %peer_id, status = "Uninitialized", "AssignWork exiting: Piece structure is unknown (bitfield empty).");
                     return vec![Effect::DoNothing];
                 }
-                
+
                 // Guard 2: Global Work Check
                 if self.piece_manager.need_queue.is_empty()
                     && self.piece_manager.pending_queue.is_empty()
                 {
-                    event!(Level::WARN, peer = %peer_id, status = "Stalled", "AssignWork exiting: Need and Pending queues are empty.");
                     return vec![Effect::DoNothing];
                 }
 
                 if self.torrent.is_none() {
-                    event!(Level::ERROR, "AssignWork exiting: Metadata missing (torrent is None).");
                     return vec![Effect::DoNothing];
                 }
 
                 let mut effects = Vec::new();
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    
                     // --- Interest Logic (Always runs first) ---
-                    let is_interesting = !peer.bitfield.is_empty() && self
-                        .piece_manager
-                        .need_queue
-                        .iter()
-                        .any(|&p| peer.bitfield.get(p as usize) == Some(&true));
+                    let is_interesting = !peer.bitfield.is_empty()
+                        && self
+                            .piece_manager
+                            .need_queue
+                            .iter()
+                            .any(|&p| peer.bitfield.get(p as usize) == Some(&true));
 
                     if is_interesting && !peer.am_interested {
-                        event!(Level::INFO, peer = %peer_id, "Sending INTERESTED message.");
                         peer.am_interested = true;
-                        effects.push(Effect::SendToPeer { peer_id: peer_id.clone(), cmd: Box::new(TorrentCommand::ClientInterested), });
+                        effects.push(Effect::SendToPeer {
+                            peer_id: peer_id.clone(),
+                            cmd: Box::new(TorrentCommand::ClientInterested),
+                        });
                     } else if !is_interesting && peer.am_interested {
-                        event!(Level::INFO, peer = %peer_id, "Sending NOT INTERESTED message.");
                         peer.am_interested = false;
-                        effects.push(Effect::SendToPeer { peer_id: peer_id.clone(), cmd: Box::new(TorrentCommand::NotInterested), });
+                        effects.push(Effect::SendToPeer {
+                            peer_id: peer_id.clone(),
+                            cmd: Box::new(TorrentCommand::NotInterested),
+                        });
                     }
 
                     // Guard 3: Choke Check (Exits if choked OR peer bitfield is empty)
                     if peer.peer_choking == ChokeStatus::Choke {
-                        event!(Level::WARN, peer = %peer_id, "AssignWork exiting: Peer is CHOKED.");
                         return effects;
                     }
                     if peer.bitfield.is_empty() {
-                        event!(Level::WARN, peer = %peer_id, "AssignWork exiting: Peer bitfield is empty.");
                         return effects;
                     }
 
                     // Guard 4 (Check Pipeline/Existing Work)
-                    // If the peer is already waiting for a piece, we don't assign a new one 
+                    // If the peer is already waiting for a piece, we don't assign a new one
                     // until the session reports completion.
-                    if peer.pending_requests.len() > 0 && self.torrent_status == TorrentStatus::Standard {
-                        event!(Level::DEBUG, peer = %peer_id, piece_count = peer.pending_requests.len(), "AssignWork exiting: Peer already has piece(s) in flight.");
-                        return effects; 
+                    if !peer.pending_requests.is_empty()
+                        && self.torrent_status == TorrentStatus::Standard
+                    {
+                        return effects;
                     }
-
 
                     // --- Piece Assignment ---
                     let piece_to_assign = self.piece_manager.choose_piece_for_peer(
@@ -591,18 +583,19 @@ impl TorrentState {
                     );
 
                     if let Some(piece_index) = piece_to_assign {
-
                         peer.pending_requests.insert(piece_index);
-                        self.piece_manager.mark_as_pending(piece_index, peer_id.clone());
+                        self.piece_manager
+                            .mark_as_pending(piece_index, peer_id.clone());
 
                         // ... (Endgame check unchanged) ...
-                        if self.piece_manager.need_queue.is_empty() && self.torrent_status != TorrentStatus::Endgame {
+                        if self.piece_manager.need_queue.is_empty()
+                            && self.torrent_status != TorrentStatus::Endgame
+                        {
                             self.torrent_status = TorrentStatus::Endgame;
                         }
 
                         // Request the entire piece length, delegating block splitting to session.rs
-                        let piece_length = self.get_piece_size(piece_index) as u32; 
-
+                        let piece_length = self.get_piece_size(piece_index) as u32;
 
                         let torrent = match &self.torrent {
                             Some(t) => t,
@@ -624,13 +617,11 @@ impl TorrentState {
                                 cmd: Box::new(TorrentCommand::RequestDownload(
                                     piece_index,
                                     piece_length as i64, // Length of the piece
-                                    torrent_size, // Total torrent size
+                                    torrent_size,        // Total torrent size
                                 )),
                             });
                         }
-                    } else {
-                        event!(Level::WARN, peer = %peer_id, "AssignWork exiting: Could not find any unassigned, needed piece that the peer has.");
-                    }
+                    } 
                 }
                 effects
             }
@@ -705,7 +696,22 @@ impl TorrentState {
             Action::PeerChoked { peer_id } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.peer_choking = ChokeStatus::Choke;
+
+                    let pieces_to_requeue = std::mem::take(&mut peer.pending_requests);
+                    for piece_index in pieces_to_requeue {
+                        // TODO: ARCHITECTURAL DEBT: This fix does not address block-level resumption for partial pieces.
+                        // When this reclaimed piece is re-requested, the Manager currently instructs the Session
+                        // to start downloading the piece from offset 0, potentially re-requesting already downloaded
+                        // blocks (up to 16KB per piece). This must be refactored by having the Manager pass the
+                        // correct begin_offset (from PieceAssembler) to the Session's RequestDownload command.
+                        if self.piece_manager.bitfield.get(piece_index as usize)
+                            != Some(&PieceStatus::Done)
+                        {
+                            self.piece_manager.requeue_pending_to_need(piece_index);
+                        }
+                    }
                 }
+
                 vec![Effect::DoNothing]
             }
 
@@ -738,11 +744,16 @@ impl TorrentState {
             }
 
             // --- Data Flow (The Core Logic) ---
-            Action::IncomingBlock { peer_id, piece_index, block_offset, data } => {
-                event!(Level::TRACE, peer = %peer_id, "Data recieved.");
+            Action::IncomingBlock {
+                peer_id,
+                piece_index,
+                block_offset,
+                data,
+            } => {
                 let mut effects = Vec::new();
 
-                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
+                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done)
+                {
                     return effects;
                 }
                 if self.torrent_status == TorrentStatus::Validating {
@@ -752,7 +763,8 @@ impl TorrentState {
                 self.last_activity = TorrentActivity::DownloadingPiece(piece_index);
 
                 let len = data.len() as u64;
-                self.bytes_downloaded_in_interval = self.bytes_downloaded_in_interval.saturating_add(len);
+                self.bytes_downloaded_in_interval =
+                    self.bytes_downloaded_in_interval.saturating_add(len);
                 self.session_total_downloaded = self.session_total_downloaded.saturating_add(len);
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
@@ -766,15 +778,18 @@ impl TorrentState {
                 }));
 
                 let piece_size = self.get_piece_size(piece_index);
-                if let Some(complete_data) = self.piece_manager.handle_block(piece_index, block_offset, &data, piece_size) {
+                if let Some(complete_data) =
+                    self.piece_manager
+                        .handle_block(piece_index, block_offset, &data, piece_size)
+                {
                     self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                     effects.push(Effect::VerifyPiece {
                         peer_id: peer_id.clone(),
                         piece_index,
                         data: complete_data,
                     });
-                } 
-                
+                }
+
                 effects
             }
 
@@ -1025,10 +1040,10 @@ impl TorrentState {
                 for peer in self.peers.values_mut() {
                     peer.pending_requests.clear();
                 }
-                self.piece_manager.piece_assemblers.clear(); 
-                
+                self.piece_manager.piece_assemblers.clear();
+
                 // === FIX START: Ensure all pieces that are not Done are explicitly marked as Need ===
-                // This prevents 'Pending' or other transient states in the bitfield from being 
+                // This prevents 'Pending' or other transient states in the bitfield from being
                 // incorrectly skipped during the subsequent 'need_queue' rebuild.
                 for status in self.piece_manager.bitfield.iter_mut() {
                     if *status != PieceStatus::Done {
@@ -1059,12 +1074,8 @@ impl TorrentState {
                     effects.extend(self.update(Action::AssignWork { peer_id }));
                 }
 
-
-                event!(Level::WARN, "VALIDATION DONE {:?}", self.piece_manager);
-
                 effects
             }
-
 
             Action::CancelUpload {
                 peer_id,
@@ -2017,31 +2028,31 @@ mod tests {
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(2, false); // <--- Changed to 2
         state.torrent_status = TorrentStatus::Validating;
-        
+
         // We need piece 0 and 1
-        state.piece_manager.need_queue = vec![0, 1]; 
+        state.piece_manager.need_queue = vec![0, 1];
 
         // 1. Peer connects WHILE validating
         add_peer(&mut state, "seeder");
-        
+
         // 2. Peer sends Bitfield saying they have Piece 0
         // 0x80 is binary 10000000 -> 1st bit set -> Piece 0 available
         state.update(Action::PeerBitfieldReceived {
             peer_id: "seeder".into(),
-            bitfield: vec![0x80], 
+            bitfield: vec![0x80],
         });
 
         // 3. Peer Unchokes us
         state.update(Action::PeerUnchoked {
-            peer_id: "seeder".into()
+            peer_id: "seeder".into(),
         });
 
         // Pre-check
         assert!(state.peers["seeder"].pending_requests.is_empty());
 
         // WHEN: Validation completes
-        let effects = state.update(Action::ValidationComplete { 
-            completed_pieces: vec![] 
+        let effects = state.update(Action::ValidationComplete {
+            completed_pieces: vec![],
         });
 
         // THEN:
@@ -2050,12 +2061,15 @@ mod tests {
 
         // 2. We MUST see a RequestDownload effect immediately
         let request_sent = effects.iter().any(|e| {
-            matches!(e, Effect::SendToPeer { cmd, .. } 
+            matches!(e, Effect::SendToPeer { cmd, .. }
             if matches!(**cmd, TorrentCommand::RequestDownload(0, _, _)))
         });
 
-        assert!(request_sent, "Regression: Validation finished but download did not trigger!");
-        
+        assert!(
+            request_sent,
+            "Regression: Validation finished but download did not trigger!"
+        );
+
         // 3. Peer state must reflect the pending request
         assert!(state.peers["seeder"].pending_requests.contains(&0));
     }
@@ -2068,50 +2082,140 @@ mod tests {
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
         state.torrent_status = TorrentStatus::Standard;
-        
+
         // We explicitly need Piece 0
-        state.piece_manager.need_queue = vec![0]; 
+        state.piece_manager.need_queue = vec![0];
 
         // GIVEN: A connected peer ("generous_seeder")
         add_peer(&mut state, "generous_seeder");
         let peer = state.peers.get_mut("generous_seeder").unwrap();
-        
+
         // CRITICAL SETUP FOR BUG REPRODUCTION:
         // 1. Peer has the piece we need
-        peer.bitfield = vec![true]; 
+        peer.bitfield = vec![true];
         // 2. Peer has ALREADY unchoked us (e.g. optimistic unchoke or previous state)
         peer.peer_choking = ChokeStatus::Unchoke;
         // 3. We have NOT yet told them we are interested (e.g. just finished validation)
         peer.am_interested = false;
 
         // WHEN: We assign work
-        let effects = state.update(Action::AssignWork { 
-            peer_id: "generous_seeder".to_string() 
+        let effects = state.update(Action::AssignWork {
+            peer_id: "generous_seeder".to_string(),
         });
 
         // THEN: We MUST send 'ClientInterested' BEFORE requesting data.
-        
+
         // Check for Interested message
         let sent_interested = effects.iter().any(|e| {
-            matches!(e, Effect::SendToPeer { cmd, .. } 
+            matches!(e, Effect::SendToPeer { cmd, .. }
             if matches!(**cmd, TorrentCommand::ClientInterested))
         });
 
         // Check for Request message
         let sent_request = effects.iter().any(|e| {
-            matches!(e, Effect::SendToPeer { cmd, .. } 
+            matches!(e, Effect::SendToPeer { cmd, .. }
             if matches!(**cmd, TorrentCommand::RequestDownload(0, _, _)))
         });
 
         // ASSERTIONS
         // If the bug is present, `sent_interested` will be false, but `sent_request` will be true.
         assert!(sent_interested, "PROTOCOL VIOLATION: Failed to send 'Interested' message because peer was already unchoked.");
-        assert!(sent_request, "Should immediately request blocks because peer is unchoked.");
-        
+        assert!(
+            sent_request,
+            "Should immediately request blocks because peer is unchoked."
+        );
+
         // Verify internal state update
-        assert!(state.peers["generous_seeder"].am_interested, "Internal state 'am_interested' was not updated to true.");
+        assert!(
+            state.peers["generous_seeder"].am_interested,
+            "Internal state 'am_interested' was not updated to true."
+        );
     }
 
+    #[test]
+    fn test_partial_piece_request() {
+        // GIVEN: A state primed with a partial piece (Piece 0 has 1st block)
+        let mut state = create_empty_state();
+
+        // Set piece length to 32768 (32 KB), creating a 2-block piece (16384 * 2)
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 32768;
+        torrent.info.length = (32768 * 2) as i64;
+        torrent.info.pieces = vec![0u8; 20 * 2];
+        state.torrent = Some(torrent);
+
+        state.piece_manager.set_initial_fields(2, false);
+        state.torrent_status = TorrentStatus::Standard;
+        state.piece_manager.need_queue = vec![0, 1]; // Need both pieces
+
+        // 1. Target Peer (Unchoked, has BOTH pieces)
+        add_peer(&mut state, "target_peer");
+        let target = state.peers.get_mut("target_peer").unwrap();
+        target.peer_choking = ChokeStatus::Unchoke;
+        target.bitfield = vec![true, true];
+        target.am_interested = true;
+
+        // 2. Background Peers (Make Piece 1 common)
+        for i in 0..5 {
+            let id = format!("bg_peer_{}", i);
+            add_peer(&mut state, &id);
+            state.peers.get_mut(&id).unwrap().bitfield = vec![false, true];
+        }
+
+        // 3. Simulate receiving FIRST BLOCK of Piece 0 (offset 0, length 16384)
+        // This is the action that makes the piece 'partial'.
+        const BLOCK_SIZE: usize = 16384;
+        let piece_len = 32768;
+        let data = vec![0u8; BLOCK_SIZE];
+
+        state
+            .piece_manager
+            .handle_block(0, 0, &data, piece_len as usize);
+
+        // 4. Update rarity (Piece 0 is still the rarest and partial)
+        state
+            .piece_manager
+            .update_rarity(state.peers.values().map(|p| &p.bitfield));
+
+        // WHEN: We assign work to the unchoked target peer
+        let effects = state.update(Action::AssignWork {
+            peer_id: "target_peer".into(),
+        });
+
+        // THEN: The request must target the entire piece length (32768), signaling
+        // the Session layer to handle the internal block resumption starting from offset 0.
+        let requested_params = effects.iter().find_map(|e| {
+            if let Effect::SendToPeer { cmd, .. } = e {
+                // Unpack using the 3-field structure: (index, piece_length, torrent_size)
+                // Note: The assertion relies on piece_length being passed as the offset (2nd arg)
+                if let TorrentCommand::RequestDownload(idx, offset_arg, length_arg) = **cmd {
+                    return Some((idx, offset_arg, length_arg));
+                }
+            }
+            None
+        });
+
+        if let Some((idx, offset_arg, length_arg)) = requested_params {
+            // Assertion 1: Must pick the rarest piece (Piece 0)
+            assert_eq!(idx, 0, "Failed to prioritize the rarest piece (0).");
+
+            // Assertion 2 (Offset): The offset argument MUST be piece_length (32768)
+            // as per the piece-per-request design where the length argument is passed here.
+            assert_eq!(offset_arg, 32768, "The offset argument (2nd field) must carry the piece length (32768) as per the current RequestDownload definition.");
+
+            // Assertion 3 (Length): The length argument must be the torrent size.
+            // The torrent size is 32768 * 2 = 65536.
+            assert_eq!(
+                length_arg, 65536,
+                "The length argument (3rd field) must carry the torrent size (65536)."
+            );
+
+            // Assertion 4: Piece 0 should be marked as pending
+            assert!(state.peers["target_peer"].pending_requests.contains(&0));
+        } else {
+            panic!("Partial piece resumption failed: No RequestDownload command was sent.");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2667,52 +2771,6 @@ mod prop_tests {
         })
     }
 
-    // --- STRATEGY 7: Partial Rarest Strategy (Fixed) ---
-    fn partial_rarest_strategy() -> impl Strategy<Value = TorrentState> {
-        Just(()).prop_map(|_| {
-            let mut state = super::tests::create_empty_state();
-            let mut torrent = super::tests::create_dummy_torrent(2);
-            torrent.info.piece_length = 32768;
-            torrent.info.length = 32768 * 2;
-
-            state.torrent = Some(torrent);
-            state.piece_manager.set_initial_fields(2, false);
-            state.torrent_status = TorrentStatus::Standard;
-            state.piece_manager.need_queue = vec![0, 1];
-
-            // 1. Target Peer
-            let target_id = "target_peer".to_string();
-            let (tx, _) = mpsc::channel(1);
-            let mut target = PeerState::new(target_id.clone(), tx, state.now);
-            target.peer_id = target_id.as_bytes().to_vec();
-            target.peer_choking = super::ChokeStatus::Unchoke;
-            target.am_interested = true;
-            target.bitfield = vec![true, true];
-            state.peers.insert(target_id, target);
-
-            // 2. Background Peers
-            for i in 0..5 {
-                let id = format!("bg_peer_{}", i);
-                let (tx, _) = mpsc::channel(1);
-                let mut p = PeerState::new(id.clone(), tx, state.now);
-                p.peer_id = id.as_bytes().to_vec();
-                p.bitfield = vec![false, true];
-                state.peers.insert(id, p);
-            }
-            state.number_of_successfully_connected_peers = state.peers.len();
-
-            // 3. Simulate receiving FIRST BLOCK of Piece 0 (0-16384)
-            let data = vec![0u8; 16384];
-            state.piece_manager.handle_block(0, 0, &data, 32768);
-
-            // 4. Sync
-            state
-                .piece_manager
-                .update_rarity(state.peers.values().map(|p| &p.bitfield));
-            state
-        })
-    }
-
     // --- STRATEGY 8: Huge Swarm Strategy (Scale Test) ---
     // Scenario: 1000 Peers. Piece 0 is on 1 peer. Piece 1 is on 999 peers.
     // Goal: Ensure O(n) rarity calculation doesn't crash or timeout.
@@ -2852,28 +2910,22 @@ mod prop_tests {
     fn protocol_action_strategy() -> impl Strategy<Value = Action> {
         let peer_id_strat = any::<String>();
         prop_oneof![
-            peer_id_strat
-                .prop_map(|id| Action::PeerChoked { peer_id: id }),
-            peer_id_strat
-                .prop_map(|id| Action::PeerUnchoked { peer_id: id }),
-            peer_id_strat
-                .prop_map(|id| Action::PeerInterested { peer_id: id }),
-            (
-                peer_id_strat,
-                proptest::collection::vec(any::<u8>(), 1..10)
-            )
-                .prop_map(|(id, bf)| Action::PeerBitfieldReceived {
+            peer_id_strat.prop_map(|id| Action::PeerChoked { peer_id: id }),
+            peer_id_strat.prop_map(|id| Action::PeerUnchoked { peer_id: id }),
+            peer_id_strat.prop_map(|id| Action::PeerInterested { peer_id: id }),
+            (peer_id_strat, proptest::collection::vec(any::<u8>(), 1..10)).prop_map(|(id, bf)| {
+                Action::PeerBitfieldReceived {
                     peer_id: id,
-                    bitfield: bf
-                }),
+                    bitfield: bf,
+                }
+            }),
             (peer_id_strat, 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 Action::PeerHavePiece {
                     peer_id: id,
                     piece_index: idx,
                 }
             }),
-            peer_id_strat
-                .prop_map(|id| Action::AssignWork { peer_id: id }),
+            peer_id_strat.prop_map(|id| Action::AssignWork { peer_id: id }),
         ]
     }
 
@@ -3414,32 +3466,6 @@ mod prop_tests {
                     "Exploit! The Free-Rider (zero contributor) stole the upload slot.");
             }
 
-            // --- TEST 7: Partial Rarest Priority ---
-            #[test]
-            fn test_partial_rarest_pickup(mut state in partial_rarest_strategy()) {
-                // 1. Assign Work
-                let effects = state.update(Action::AssignWork { peer_id: "target_peer".into() });
-
-                // 2. Check Pick
-                let requested_block_offset = effects.iter().find_map(|e| {
-                    if let Effect::SendToPeer { cmd, .. } = e {
-                        // Dereference twice to get to the inner enum
-                        if let TorrentCommand::RequestDownload(idx, offset, _) = **cmd {
-                            return Some((idx, offset));
-                        }
-                    }
-                    None
-                });
-
-                // 3. Assert
-                if let Some((idx, offset)) = requested_block_offset {
-                    prop_assert_eq!(idx, 0, "Failed to prioritize the Rare+Partial piece!");
-
-                    prop_assert_eq!(offset, 16384, "Requesting wrong offset for partial piece!");
-                } else {
-                    prop_assert!(false, "Partial piece was stalled! No request sent.");
-                }
-            }
 
             // --- TEST 8: Scale & Complexity ---
             #[test]
