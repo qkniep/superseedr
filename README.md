@@ -163,7 +163,7 @@ The engine is subjected to a continuous fuzzing pipeline that simulates years of
 ### Why This Matters
 By decoupling **Core Logic** (State Transitions) from **Side Effects** (I/O), we ensure that logic bugs—such as deadlocks, integer overflows in speed calculations, or peer map desyncs—are caught by the fuzzer, not by users. 
 
-Failures are found by our test suite prints a **cryptographic seed**, allowing us to replay the exact sequence of network packets and user actions that caused the crash, making "heisenbugs" a thing of the past.
+Failures found by our test suite prints a **cryptographic seed**, allowing us to replay the exact sequence of network packets and user actions that caused the crash, making "heisenbugs" a thing of the past.
 
 Every release is verified against a massive 1-million-case fuzzing suite, subjecting the engine to over 10 minutes (m1 mac) of continuous, deterministic network chaos to prove the absence of logic bugs.
 
