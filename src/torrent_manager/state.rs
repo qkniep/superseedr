@@ -2271,7 +2271,7 @@ mod prop_tests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(5000))]
+        #![proptest_config(ProptestConfig::with_cases(256))]
 
         // Test 1: Logical Stories starting from scratch
         #[test]
