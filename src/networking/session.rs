@@ -452,14 +452,6 @@ impl PeerSession {
                 Some(command) = self.torrent_manager_rx.recv() => {
                     event!(Level::TRACE, ?command);
                     match command {
-                        TorrentCommand::ClientBitfield(bitfield, torrent_metadata_length) => {
-                            self.peer_session_established = true;
-                            self.torrent_metadata_length = torrent_metadata_length;
-
-                                let _ = self.writer_tx.try_send(Message::Bitfield(bitfield));
-                                let _ = self.torrent_manager_tx
-                                    .try_send(TorrentCommand::SuccessfullyConnected(self.peer_ip_port.clone()));
-                        }
                         #[cfg(feature = "pex")]
                         TorrentCommand::SendPexPeers(peers_list) => {
                             if let Some(pex_id) = self.peer_extended_id_mappings.get(ClientExtendedId::UtPex.as_str()).copied() {

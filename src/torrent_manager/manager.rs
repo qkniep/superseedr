@@ -835,17 +835,6 @@ impl TorrentManager {
                 });
             }
 
-            Effect::SendBitfieldToPeers => {
-                let bitfield = self.generate_bitfield();
-                let meta_len = self.state.torrent_metadata_length;
-
-                for peer in self.state.peers.values() {
-                    let _ = peer
-                        .peer_tx
-                        .try_send(TorrentCommand::ClientBitfield(bitfield.clone(), meta_len));
-                }
-            }
-
             Effect::ConnectToPeersFromTrackers => {
                 let torrent_size_left = self
                     .multi_file_info
@@ -1773,7 +1762,8 @@ impl TorrentManager {
     }
 
     pub async fn run(mut self, is_paused: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.state.is_paused = is_paused;
+
+        self.apply_action(Action::TorrentManagerInit{ is_paused });
 
         if self.state.torrent.is_some() {
             if let Err(error) = self.validate_local_file().await {
@@ -1832,7 +1822,6 @@ impl TorrentManager {
                     }
 
                     self.apply_action(Action::RecalculateChokes {
-                        upload_slots: self.settings.upload_slots,
                         random_seed: rand::rng().random()
                     });
                 }

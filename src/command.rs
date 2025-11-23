@@ -27,7 +27,6 @@ pub enum TorrentCommand {
     ClientInterested,
     PeerInterested(String),
 
-    ClientBitfield(Vec<u8>, Option<i64>),
     PeerBitfield(String, Vec<u8>),
 
     RequestDownload(u32, i64, i64),
@@ -92,14 +91,6 @@ impl fmt::Debug for TorrentCommandSummary<'_> {
                     index,
                     begin,
                     data.len()
-                )
-            }
-            TorrentCommand::ClientBitfield(bitfield, torrent_metadata_length) => {
-                write!(
-                    f,
-                    "CLIENT_BITFIELD(bitfield: {}, len: {:?})",
-                    bitfield.len(),
-                    torrent_metadata_length
                 )
             }
             TorrentCommand::PeerBitfield(peer_id, bitfield) => {

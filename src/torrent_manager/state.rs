@@ -23,16 +23,19 @@ const MAX_TIMEOUT_COUNT: u32 = 10;
 const SMOOTHING_PERIOD_MS: f64 = 5000.0;
 const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 4;
 const MAX_BLOCK_SIZE: u32 = 131_072;
+const UPLOAD_SLOTS_DEFAULT: usize = 4;
 
 pub type PeerAddr = (String, u16);
 
 #[derive(Debug, Clone)]
 pub enum Action {
+    TorrentManagerInit{
+        is_paused: bool
+    },
     Tick {
         dt_ms: u64,
     },
     RecalculateChokes {
-        upload_slots: usize,
         random_seed: u64,
     },
     CheckCompletion,
@@ -180,7 +183,6 @@ pub enum Effect {
     },
     InitializeStorage,
     StartValidation,
-    SendBitfieldToPeers,
     AnnounceToTracker {
         url: String,
     },
@@ -336,6 +338,21 @@ impl TorrentState {
 
     pub fn update(&mut self, action: Action) -> Vec<Effect> {
         match action {
+            Action::TorrentManagerInit { is_paused } => {
+                let mut effects = Vec::new();
+
+                self.is_paused = is_paused;
+                if self.is_paused {
+                    return effects;
+                }
+
+                // Announce to all known trackers immediately (event=started)
+                for url in self.trackers.keys() {
+                    effects.push(Effect::AnnounceToTracker { url: url.clone() });
+                }
+                
+                effects
+            }
             Action::Tick { dt_ms } => {
                 self.now += Duration::from_millis(dt_ms);
                 let scaling_factor = if dt_ms > 0 {
@@ -409,7 +426,6 @@ impl TorrentState {
             }
 
             Action::RecalculateChokes {
-                upload_slots,
                 random_seed,
             } => {
                 let mut effects = Vec::new();
@@ -432,7 +448,7 @@ impl TorrentState {
 
                 let mut unchoke_candidates: HashSet<String> = interested_peers
                     .iter()
-                    .take(upload_slots)
+                    .take(UPLOAD_SLOTS_DEFAULT)
                     .map(|p| p.ip_port.clone())
                     .collect();
 
@@ -1030,8 +1046,8 @@ impl TorrentState {
             Action::ValidationComplete { completed_pieces } => {
                 let mut effects = Vec::new();
 
-                for piece_index in completed_pieces {
-                    let _ = self.piece_manager.mark_as_complete(piece_index);
+                for piece_index in &completed_pieces {
+                    let _ = self.piece_manager.mark_as_complete(*piece_index);
                 }
 
                 self.torrent_status = TorrentStatus::Standard;
@@ -1042,15 +1058,11 @@ impl TorrentState {
                 }
                 self.piece_manager.piece_assemblers.clear();
 
-                // === FIX START: Ensure all pieces that are not Done are explicitly marked as Need ===
-                // This prevents 'Pending' or other transient states in the bitfield from being
-                // incorrectly skipped during the subsequent 'need_queue' rebuild.
                 for status in self.piece_manager.bitfield.iter_mut() {
                     if *status != PieceStatus::Done {
                         *status = PieceStatus::Need;
                     }
                 }
-                // === FIX END ===
 
                 // Rebuild Need Queue (now using all available pieces)
                 self.piece_manager.need_queue.clear();
@@ -1065,10 +1077,18 @@ impl TorrentState {
                     .update_rarity(self.peers.values().map(|p| &p.bitfield));
 
                 if !self.is_paused {
-                    effects.push(Effect::SendBitfieldToPeers);
                     effects.push(Effect::ConnectToPeersFromTrackers);
                 }
+
+                for piece_index in &completed_pieces {
+                    effects.push(Effect::BroadcastHave { piece_index: *piece_index });
+                }
+
                 effects.extend(self.update(Action::CheckCompletion));
+                effects.extend(self.update(Action::RecalculateChokes {
+                    random_seed: self.now.elapsed().as_nanos() as u64,
+                }));
+
 
                 for peer_id in self.peers.keys().cloned().collect::<Vec<_>>() {
                     effects.extend(self.update(Action::AssignWork { peer_id }));
@@ -1417,84 +1437,115 @@ mod tests {
 
     // --- SCENARIO 2: Choking Logic (Leeching) ---
 
-    #[test]
-    fn test_recalculate_chokes_unchokes_fastest_downloader() {
-        // GIVEN: A state with 2 interested peers
-        let mut state = create_empty_state();
-        state.torrent_status = TorrentStatus::Standard; // Leeching
 
-        add_peer(&mut state, "fast_peer");
-        add_peer(&mut state, "slow_peer");
+#[test]
+fn test_recalculate_chokes_unchokes_fastest_downloader() {
+    // GIVEN: A state in Leeching mode (Standard) with 5 interested peers competing for 4 slots.
+    let mut state = create_empty_state();
+    state.torrent_status = TorrentStatus::Standard; // Leeching
 
-        // Setup Fast Peer: High download rate, interested in us
-        let fast_peer = state.peers.get_mut("fast_peer").unwrap();
-        fast_peer.peer_is_interested_in_us = true;
-        fast_peer.bytes_downloaded_from_peer = 10_000; // 10KB
+    // Peers will be ranked by bytes_downloaded_from_peer (contribution).
+    
+    // 1. Setup the Slow Peer (Must be Choked)
+    add_peer(&mut state, "slow_peer");
+    let slow_peer = state.peers.get_mut("slow_peer").unwrap();
+    slow_peer.peer_is_interested_in_us = true;
+    slow_peer.bytes_downloaded_from_peer = 10; // Low contribution (Must lose)
+    slow_peer.am_choking = ChokeStatus::Unchoke; // Start unchoked to test transition
 
-        // Setup Slow Peer: Low download rate, interested in us
-        let slow_peer = state.peers.get_mut("slow_peer").unwrap();
-        slow_peer.peer_is_interested_in_us = true;
-        slow_peer.bytes_downloaded_from_peer = 100; // 100 bytes
-        slow_peer.am_choking = ChokeStatus::Unchoke;
+    // 2. Setup the Fast Peer (Must be Unchoked)
+    add_peer(&mut state, "fast_peer");
+    let fast_peer = state.peers.get_mut("fast_peer").unwrap();
+    fast_peer.peer_is_interested_in_us = true;
+    fast_peer.bytes_downloaded_from_peer = 10_000; // High contribution (Must win)
 
-        // WHEN: We recalculate chokes with only 1 upload slot
-        let effects = state.update(Action::RecalculateChokes {
-            upload_slots: 1,
-            random_seed: 0,
-        });
-
-        // THEN: Fast peer is Unchoked, Slow peer is Choked
-        let fast_peer_state = state.peers.get("fast_peer").unwrap();
-        let slow_peer_state = state.peers.get("slow_peer").unwrap();
-
-        assert_eq!(fast_peer_state.am_choking, ChokeStatus::Unchoke);
-        assert_eq!(slow_peer_state.am_choking, ChokeStatus::Choke);
-
-        // Check emitted effects contain the commands
-        let sent_unchoke = effects.iter().any(|e| {
-            matches!(e, Effect::SendToPeer { peer_id, cmd }
-            if peer_id == "fast_peer" && matches!(**cmd, TorrentCommand::PeerUnchoke))
-        });
-
-        let sent_choke = effects.iter().any(|e| {
-            matches!(e, Effect::SendToPeer { peer_id, cmd }
-            if peer_id == "slow_peer" && matches!(**cmd, TorrentCommand::PeerChoke))
-        });
-
-        assert!(sent_unchoke, "Should send Unchoke to fast peer");
-        assert!(sent_choke, "Should send Choke to slow peer");
+    // 3. Setup 3 Intermediate Peers (To consume the remaining 3 slots)
+    // Their contribution must be between the Fast Peer (10,000) and the Slow Peer (10).
+    for i in 1..=3 {
+        let id = format!("med_peer_{}", i);
+        add_peer(&mut state, &id);
+        let peer = state.peers.get_mut(&id).unwrap();
+        peer.peer_is_interested_in_us = true;
+        peer.bytes_downloaded_from_peer = 100; // Intermediate contribution
     }
+
+
+    // WHEN: We recalculate chokes. The top 4 (Fast + 3 Med) should be unchoked.
+    let effects = state.update(Action::RecalculateChokes {
+        random_seed: 0,
+    });
+
+    // THEN: Fast peer is Unchoked, Slow peer is Choked (due to competition)
+    let fast_peer_state = state.peers.get("fast_peer").unwrap();
+    let slow_peer_state = state.peers.get("slow_peer").unwrap();
+
+    // Assertion 1: The fastest peer must be Unchoked.
+    assert_eq!(fast_peer_state.am_choking, ChokeStatus::Unchoke);
+    
+    // Assertion 2: The slowest peer must be Choked. (This satisfies the original test intent.)
+    assert_eq!(slow_peer_state.am_choking, ChokeStatus::Choke); 
+
+    // Assertion 3: Check effects for the slow peer's transition (optional, but good practice)
+    let sent_choke = effects.iter().any(|e| {
+        matches!(e, Effect::SendToPeer { peer_id, cmd }
+        if peer_id == "slow_peer" && matches!(**cmd, TorrentCommand::PeerChoke))
+    });
+    assert!(sent_choke, "Should send Choke to slow peer");
+
+    // Assertion 4: Verify the total number of unchoked peers is 4 (UPLOAD_SLOTS_DEFAULT).
+    let unchoked_count = state.peers.values().filter(|p| p.am_choking == ChokeStatus::Unchoke).count();
+    assert_eq!(unchoked_count, super::UPLOAD_SLOTS_DEFAULT, "Total unchoked count should be exactly 4.");
+}
 
     // --- SCENARIO 3: Choking Logic (Seeding) ---
 
-    #[test]
-    fn test_recalculate_chokes_unchokes_fastest_uploader_when_seeding() {
-        // GIVEN: A state that is DONE (Seeding)
-        let mut state = create_empty_state();
-        state.torrent_status = TorrentStatus::Done;
 
-        add_peer(&mut state, "leecher_A"); // Fast uptake
-        add_peer(&mut state, "leecher_B"); // Slow uptake
+#[test]
+fn test_recalculate_chokes_unchokes_fastest_uploader_when_seeding() {
+    // GIVEN: A state that is DONE (Seeding) with 5 interested peers competing for 4 slots.
+    let mut state = create_empty_state();
+    state.torrent_status = TorrentStatus::Done;
 
-        let p1 = state.peers.get_mut("leecher_A").unwrap();
-        p1.peer_is_interested_in_us = true;
-        p1.bytes_uploaded_to_peer = 50_000; // We sent them 50KB
+    // 1. Setup the Slow Uploader (Must be Choked)
+    add_peer(&mut state, "slow_leecher");
+    let slow_leecher = state.peers.get_mut("slow_leecher").unwrap();
+    slow_leecher.peer_is_interested_in_us = true;
+    slow_leecher.bytes_uploaded_to_peer = 1_000; // Low upload volume (Must lose)
+    slow_leecher.am_choking = ChokeStatus::Unchoke; // Start unchoked to test transition
 
-        let p2 = state.peers.get_mut("leecher_B").unwrap();
-        p2.peer_is_interested_in_us = true;
-        p2.bytes_uploaded_to_peer = 1_000; // We sent them 1KB
+    // 2. Setup the Fast Uploader (Must be Unchoked)
+    add_peer(&mut state, "fast_leecher");
+    let fast_leecher = state.peers.get_mut("fast_leecher").unwrap();
+    fast_leecher.peer_is_interested_in_us = true;
+    fast_leecher.bytes_uploaded_to_peer = 50_000; // High upload volume (Must win)
 
-        // WHEN: Recalculate with 1 slot
-        state.update(Action::RecalculateChokes {
-            upload_slots: 1,
-            random_seed: 0,
-        });
-
-        // THEN: The peer we uploaded MORE to (higher throughput) gets the slot
-        // Note: This assumes the logic sorts by bytes_uploaded_to_peer descending for Done status
-        assert_eq!(state.peers["leecher_A"].am_choking, ChokeStatus::Unchoke);
-        assert_eq!(state.peers["leecher_B"].am_choking, ChokeStatus::Choke);
+    // 3. Setup 3 Intermediate Peers (To consume the remaining 3 slots)
+    // Their uploaded bytes must be between the Fast Peer (50,000) and the Slow Peer (1,000).
+    for i in 1..=3 {
+        let id = format!("med_leecher_{}", i);
+        add_peer(&mut state, &id);
+        let peer = state.peers.get_mut(&id).unwrap();
+        peer.peer_is_interested_in_us = true;
+        peer.bytes_uploaded_to_peer = 10_000; // Intermediate volume
+        peer.am_choking = ChokeStatus::Choke;
     }
+
+    // WHEN: Recalculate chokes. The top 4 (Fast + 3 Med) should be unchoked.
+    let _ = state.update(Action::RecalculateChokes {
+        random_seed: 0,
+    });
+
+    // THEN:
+    // Assertion 1: The fastest uploader must be Unchoked.
+    assert_eq!(state.peers["fast_leecher"].am_choking, ChokeStatus::Unchoke);
+
+    // Assertion 2: The slowest peer must be Choked. (This satisfies the test intent.)
+    assert_eq!(state.peers["slow_leecher"].am_choking, ChokeStatus::Choke);
+
+    // Assertion 3: Verify the total number of unchoked peers is 4 (UPLOAD_SLOTS_DEFAULT).
+    let unchoked_count = state.peers.values().filter(|p| p.am_choking == ChokeStatus::Unchoke).count();
+    assert_eq!(unchoked_count, super::UPLOAD_SLOTS_DEFAULT, "Total unchoked count should be exactly 4.");
+}
 
     // --- SCENARIO 4: Work Assignment ---
 
@@ -1699,49 +1750,62 @@ mod tests {
         // (Strict clients cancel immediately; lenient ones wait. Verify YOUR logic here.)
     }
 
-    #[test]
-    fn test_optimistic_unchoke_rotates() {
-        // GIVEN: 3 peers, 1 slot. Peer A is fast (regular unchoke). B & C are slow.
-        let mut state = create_empty_state();
-        add_peer(&mut state, "fast_A");
-        add_peer(&mut state, "slow_B");
-        add_peer(&mut state, "slow_C");
-
-        for p in state.peers.values_mut() {
-            p.peer_is_interested_in_us = true;
-        }
-        state
-            .peers
-            .get_mut("fast_A")
-            .unwrap()
-            .bytes_downloaded_from_peer = 1000;
-
-        // Force timer expiration
-        state.optimistic_unchoke_timer = Some(Instant::now() - Duration::from_secs(31));
-
-        // WHEN: Recalculate
-        let _ = state.update(Action::RecalculateChokes {
-            upload_slots: 1,
-            random_seed: 0,
-        });
-
-        // THEN:
-        // 1. Fast A should be unchoked (Regular slot)
-        // 2. EITHER B or C should be unchoked (Optimistic slot)
-        // 3. Total unchoked count should be 2
-        let unchoked_count = state
-            .peers
-            .values()
-            .filter(|p| p.am_choking == ChokeStatus::Unchoke)
-            .count();
-        assert_eq!(unchoked_count, 2);
-
-        assert_eq!(state.peers["fast_A"].am_choking, ChokeStatus::Unchoke);
-        assert!(
-            state.peers["slow_B"].am_choking == ChokeStatus::Unchoke
-                || state.peers["slow_C"].am_choking == ChokeStatus::Unchoke
-        );
+#[test]
+fn test_optimistic_unchoke_rotates() {
+    // GIVEN: 6 peers competing for 4 slots (UPLOAD_SLOTS_DEFAULT = 4).
+    let mut state = create_empty_state();
+    
+    // 1. Setup 4 Fast Peers (Deterministic Winners, > 1000 speed)
+    for i in 1..=4 {
+        let id = format!("fast_A{}", i);
+        add_peer(&mut state, &id);
+        let p = state.peers.get_mut(&id).unwrap();
+        p.peer_is_interested_in_us = true;
+        p.bytes_downloaded_from_peer = 1000; 
     }
+    
+    // 2. Setup 1 Medium Peer (Optimistic Candidate, Speed 100)
+    add_peer(&mut state, "optimistic_B");
+    let opt_peer = state.peers.get_mut("optimistic_B").unwrap();
+    opt_peer.peer_is_interested_in_us = true;
+    opt_peer.bytes_downloaded_from_peer = 100;
+    
+    // 3. Setup 1 Slow Peer (Loser, Speed 10)
+    add_peer(&mut state, "slow_C");
+    let slow_peer = state.peers.get_mut("slow_C").unwrap();
+    slow_peer.peer_is_interested_in_us = true;
+    slow_peer.bytes_downloaded_from_peer = 10;
+    
+    // Force timer expiration and set fixed seed for deterministic rotation
+    state.optimistic_unchoke_timer = Some(state.now.checked_sub(Duration::from_secs(31)).unwrap());
+    
+    // WHEN: Recalculate Chokes
+    let _ = state.update(Action::RecalculateChokes {
+        // Use a fixed seed (0) to ensure the rotation selects the same peer (optimistic_B)
+        // from the pool of losers (B and C).
+        random_seed: 0, 
+    });
+
+    // THEN:
+    // 1. Total unchoked count should be 5 (4 deterministic + 1 optimistic)
+    let unchoked_count = state
+        .peers
+        .values()
+        .filter(|p| p.am_choking == ChokeStatus::Unchoke)
+        .count();
+    
+    let expected_count = super::UPLOAD_SLOTS_DEFAULT + 1;
+    assert_eq!(unchoked_count, expected_count, "Total unchoked count mismatch. Expected 5 (4+1).");
+
+    // 2. Verify Deterministic Winners (Fast A1-A4) are unchoked
+    assert_eq!(state.peers["fast_A1"].am_choking, ChokeStatus::Unchoke);
+    
+    // 3. Verify Optimistic Winner (B) is unchoked
+    assert_eq!(state.peers["optimistic_B"].am_choking, ChokeStatus::Unchoke);
+    
+    // 4. Verify Loser (C) is choked
+    assert_eq!(state.peers["slow_C"].am_choking, ChokeStatus::Choke);
+}
 
     #[test]
     fn test_peer_have_updates_bitfield_and_triggers_work() {
@@ -2216,6 +2280,88 @@ mod tests {
             panic!("Partial piece resumption failed: No RequestDownload command was sent.");
         }
     }
+
+#[test]
+fn test_upload_starts_immediately_after_validation() {
+    // GIVEN: A state set up to require upload activity after validation.
+    let mut state = create_empty_state();
+    
+    // Setup a 2-piece torrent.
+    let torrent = create_dummy_torrent(2); 
+    state.torrent = Some(torrent);
+    state.piece_manager.set_initial_fields(2, false);
+    state.torrent_status = TorrentStatus::Validating; // Initial state
+
+    // 1. Peer connects WHILE validating, is CHOKED by us, but IS INTERESTED in our pieces.
+    add_peer(&mut state, "leecher");
+    let leecher = state.peers.get_mut("leecher").unwrap();
+    // Manager is initially choking the peer (am_choking == Choke)
+    leecher.peer_is_interested_in_us = true;
+    
+    // We update the piece manager to simulate pieces 0 and 1 being present on disk.
+    // The bitfield status should still be in the initial state here.
+
+    // WHEN: Validation completes, finding pieces 0 and 1 on disk.
+    let effects = state.update(Action::ValidationComplete { 
+        completed_pieces: vec![0, 1] 
+    });
+
+    // THEN:
+    // 1. Status must transition to DONE (since all 2 pieces were found).
+    assert_eq!(state.torrent_status, TorrentStatus::Done, "Torrent status should be DONE after finding all pieces.");
+
+    // 2. We MUST see an Unchoke effect sent to the interested peer.
+    let unchoke_sent = effects.iter().any(|e| {
+        matches!(e, Effect::SendToPeer { peer_id, cmd } 
+        if peer_id == "leecher" && matches!(**cmd, TorrentCommand::PeerUnchoke))
+    });
+
+    assert!(unchoke_sent, "Validation completion failed to trigger Unchoke for interested peer.");
+    
+    // 3. Our internal state must reflect that we are Unchoking the peer.
+    assert_eq!(state.peers["leecher"].am_choking, ChokeStatus::Unchoke);
+    
+    // 4. We must also broadcast a HAVE message for piece 0 (and 1) to announce availability.
+    let have_broadcasted = effects.iter().any(|e| matches!(e, Effect::BroadcastHave { piece_index: 0 }));
+    assert!(have_broadcasted, "Validation completion failed to trigger BroadcastHave.");
+}
+
+
+#[test]
+fn test_tracker_spam_during_validation() {
+    // GIVEN: A torrent that has metadata and is currently validating.
+    let mut state = create_empty_state();
+    let torrent = create_dummy_torrent(100); // Simulate a large torrent that takes time
+    state.torrent = Some(torrent);
+    state.torrent_status = TorrentStatus::Validating; // CRITICAL: Status is Validating
+    
+    // Setup a tracker state where the initial announce time has passed (time = now).
+    let tracker_url = "http://tracker.test".to_string();
+    state.trackers.insert(
+        tracker_url.clone(),
+        TrackerState {
+            next_announce_time: state.now, // Ready to announce immediately
+            leeching_interval: Some(Duration::from_secs(60)),
+            seeding_interval: None,
+        },
+    );
+
+    // CRITICAL ACTION: Advance time by 1ms (ensures the timer check is hit).
+    let _ = state.update(Action::Tick { dt_ms: 1 });
+    
+    // Reset next_announce_time to ensure it's still available (not strictly necessary but defensive)
+    state.trackers.get_mut(&tracker_url).unwrap().next_announce_time = state.now; 
+
+    // WHEN: Action::Tick is executed again while still validating.
+    let effects = state.update(Action::Tick { dt_ms: 1 });
+
+    // THEN: The torrent should have generated NO tracker announce effects because validation blocks periodic activity.
+    let announce_sent = effects
+        .iter()
+        .any(|e| matches!(e, Effect::AnnounceToTracker { .. }));
+
+    assert!(!announce_sent, "FAILURE: Tracker announce was sent during the validation phase, indicating the system is inefficiently spamming the tracker while busy.");
+}
 }
 
 #[cfg(test)]
@@ -2562,8 +2708,7 @@ mod prop_tests {
     // =========================================================================
 
     // --- NEW STRATEGY 1: Tit-for-Tat Generator ---
-    fn tit_for_tat_strategy() -> impl Strategy<Value = (TorrentState, usize)> {
-        let upload_slots = 3usize;
+    fn tit_for_tat_strategy() -> impl Strategy<Value = TorrentState> {
         let num_peers = 10usize;
         let speeds_strat = proptest::collection::vec(0..100_000u64, num_peers);
 
@@ -2586,7 +2731,7 @@ mod prop_tests {
             }
             state.number_of_successfully_connected_peers = state.peers.len();
 
-            (state, upload_slots)
+            state
         })
     }
 
@@ -2633,8 +2778,7 @@ mod prop_tests {
 
     // Creates a swarm where EVERYONE is slow.
     // Tests if the client correctly handles mutual choking (snubbing).
-    fn tit_for_tat_snubbed_strategy() -> impl Strategy<Value = (TorrentState, usize)> {
-        let upload_slots = 4usize;
+    fn tit_for_tat_snubbed_strategy() -> impl Strategy<Value = TorrentState> {
         // 10 peers, all with 0 or 1 byte downloaded (Snubbed)
         let speeds_strat = proptest::collection::vec(0..=1u64, 10);
 
@@ -2654,7 +2798,7 @@ mod prop_tests {
                 state.peers.insert(id, peer);
             }
             state.number_of_successfully_connected_peers = state.peers.len();
-            (state, upload_slots)
+            state
         })
     }
 
@@ -2692,8 +2836,7 @@ mod prop_tests {
 
     // --- STRATEGY 5: Integrated Algo Strategy ---
     // Mixes speeds and bitfields to test the interaction between Choking and Picking.
-    fn combined_algo_strategy() -> impl Strategy<Value = (TorrentState, usize)> {
-        let slots = 2usize;
+    fn combined_algo_strategy() -> impl Strategy<Value = TorrentState> {
         // Peer A: Fast but has Common piece
         // Peer B: Slow but has Rare piece
         // Peer C: Medium speed, has Both
@@ -2730,46 +2873,66 @@ mod prop_tests {
                 .piece_manager
                 .update_rarity(state.peers.values().map(|p| &p.bitfield));
 
-            (state, slots)
+            state
         })
     }
 
-    // --- STRATEGY 6: The Free-Rider (Parasite) Scenario ---
-    // Creates a scenario with:
-    // 1. One "Hero" peer (High upload to us)
-    // 2. One "Parasite" peer (Zero upload to us)
-    // Both want our data. Logic MUST favor the Hero.
-    fn free_rider_strategy() -> impl Strategy<Value = (TorrentState, usize)> {
-        let upload_slots = 1usize; // Strict testing: Only 1 slot available!
+// --- STRATEGY 6: The Free-Rider (Parasite) Scenario ---
+// Creates a scenario with:
+// 1. One "Hero" peer (High upload to us)
+// 2. One "Parasite" peer (Zero upload to us)
+// Both want our data. Logic MUST favor the Hero.
+fn free_rider_strategy() -> impl Strategy<Value = TorrentState> {
 
-        Just(()).prop_map(move |_| {
-            let mut state = super::tests::create_empty_state();
-            state.torrent_status = TorrentStatus::Standard; // Leeching mode
+    Just(()).prop_map(move |_| {
+        let mut state = super::tests::create_empty_state();
+        state.torrent_status = TorrentStatus::Standard; // Leeching mode
+        
+        // Use the fixed constant defined in state.rs (which is 4)
+        const UPLOAD_SLOTS: usize = super::UPLOAD_SLOTS_DEFAULT; 
 
-            // 1. The HERO: Uploads 1MB/s to us
-            let hero_id = "hero_peer".to_string();
-            let (tx1, _) = mpsc::channel(1);
-            let mut hero = PeerState::new(hero_id.clone(), tx1, state.now);
-            hero.peer_id = hero_id.as_bytes().to_vec();
-            hero.peer_is_interested_in_us = true;
-            hero.am_choking = super::ChokeStatus::Choke;
-            hero.bytes_downloaded_from_peer = 1_000_000; // High contribution
-            state.peers.insert(hero_id, hero);
+        // 1. The HERO: Uploads 1MB/s to us (Ensured Unchoked)
+        let hero_id = "hero_peer".to_string();
+        let (tx1, _) = mpsc::channel(1);
+        let mut hero = PeerState::new(hero_id.clone(), tx1, state.now);
+        hero.peer_id = hero_id.as_bytes().to_vec();
+        hero.peer_is_interested_in_us = true;
+        hero.am_choking = super::ChokeStatus::Choke;
+        hero.bytes_downloaded_from_peer = 1_000_000; // High contribution
+        state.peers.insert(hero_id, hero);
 
-            // 2. The PARASITE: Uploads 0 to us (but wants data)
-            let leech_id = "parasite_peer".to_string();
-            let (tx2, _) = mpsc::channel(1);
-            let mut leech = PeerState::new(leech_id.clone(), tx2, state.now);
-            leech.peer_id = leech_id.as_bytes().to_vec();
-            leech.peer_is_interested_in_us = true;
-            leech.am_choking = super::ChokeStatus::Choke;
-            leech.bytes_downloaded_from_peer = 0; // No contribution
-            state.peers.insert(leech_id, leech);
+        // 2. NEW: Add 3 Intermediate Peers (med_peer_1 to med_peer_3)
+        // These peers, plus the Hero, will consume the 4 upload slots.
+        // The loop runs from 1 to UPLOAD_SLOTS_DEFAULT (4).
+        for i in 1..=UPLOAD_SLOTS {
+            let id = format!("med_peer_{}", i);
+            let (tx, _) = mpsc::channel(1);
+            let mut p = PeerState::new(id.clone(), tx, state.now);
+            p.peer_id = id.as_bytes().to_vec();
+            p.peer_is_interested_in_us = true;
+            p.am_choking = super::ChokeStatus::Choke;
+            p.bytes_downloaded_from_peer = 100; // Better than 0
+            state.peers.insert(id, p);
+        }
 
-            state.number_of_successfully_connected_peers = state.peers.len();
-            (state, upload_slots)
-        })
-    }
+        // 3. The PARASITE: Uploads 0 to us (Must be Choked)
+        let leech_id = "parasite_peer".to_string();
+        let (tx2, _) = mpsc::channel(1);
+        let mut leech = PeerState::new(leech_id.clone(), tx2, state.now);
+        leech.peer_id = leech_id.as_bytes().to_vec();
+        leech.peer_is_interested_in_us = true;
+        leech.am_choking = super::ChokeStatus::Choke;
+        leech.bytes_downloaded_from_peer = 0; // No contribution
+        state.peers.insert(leech_id, leech);
+
+        // Total peers: Hero (1) + Med Peers (4) + Parasite (1) = 6
+        // Total slots: 4 (Deterministic)
+        // Since there are 5 peers contributing more than 0, the parasite (0) loses.
+
+        state.number_of_successfully_connected_peers = state.peers.len();
+        state
+    })
+}
 
     // --- STRATEGY 8: Huge Swarm Strategy (Scale Test) ---
     // Scenario: 1000 Peers. Piece 0 is on 1 peer. Piece 1 is on 999 peers.
@@ -3026,8 +3189,7 @@ mod prop_tests {
             Just(Action::Cleanup),
             Just(Action::Pause),
             Just(Action::Resume),
-            (0..50usize, any::<u64>()).prop_map(|(s, seed)| Action::RecalculateChokes {
-                upload_slots: s,
+            (0..50u64).prop_map(|seed| Action::RecalculateChokes {
                 random_seed: seed
             }),
         ]
@@ -3315,20 +3477,19 @@ mod prop_tests {
 
             // --- NEW TEST 1: Verify Choking Algorithm Fairness ---
             #[test]
-            fn test_tit_for_tat_fairness((mut state, slots) in tit_for_tat_strategy()) {
+            fn test_tit_for_tat_fairness(mut state  in tit_for_tat_strategy()) {
                 let mut peers: Vec<_> = state.peers.values().collect();
 
                 // Sort Descending by speed
                 peers.sort_by(|a, b| b.bytes_downloaded_from_peer.cmp(&a.bytes_downloaded_from_peer));
 
                 let top_peers: Vec<String> = peers.iter()
-                    .take(slots)
+                    .take(UPLOAD_SLOTS_DEFAULT)
                     .map(|p| p.ip_port.clone())
                     .collect();
 
                 // Run Algorithm
                 let _ = state.update(Action::RecalculateChokes {
-                    upload_slots: slots,
                     random_seed: 12345
                 });
 
@@ -3366,12 +3527,11 @@ mod prop_tests {
                 }
             }
 
-    // --- TEST 3: Tit-for-Tat Snubbed Invariant ---
+            // --- TEST 3: Tit-for-Tat Snubbed Invariant ---
             #[test]
-            fn test_tit_for_tat_snubbed((mut state, slots) in tit_for_tat_snubbed_strategy()) {
+            fn test_tit_for_tat_snubbed(mut state in tit_for_tat_snubbed_strategy()) {
                 // 1. Run Recalc logic
                 let _ = state.update(Action::RecalculateChokes {
-                    upload_slots: slots,
                     random_seed: 999
                 });
 
@@ -3384,8 +3544,8 @@ mod prop_tests {
                 // Even if everyone is slow, we MUST NOT unchoke more than slots + 1 (optimistic).
                 // In a strict implementation, if everyone is 0, we might unchoke NO ONE (except optimistic),
                 // or we might unchoke randoms. But we must never exceed the limit.
-                prop_assert!(unchoked_count <= slots + 1,
-                    "Too many peers unchoked in a snubbed swarm! Count: {}, Limit: {}", unchoked_count, slots + 1);
+                prop_assert!(unchoked_count <= UPLOAD_SLOTS_DEFAULT + 1,
+                    "Too many peers unchoked in a snubbed swarm! Count: {}, Limit: {}", unchoked_count, UPLOAD_SLOTS_DEFAULT + 1);
             }
 
             // --- TEST 4: Rarest First Tiebreaker Invariant ---
@@ -3418,9 +3578,9 @@ mod prop_tests {
 
             // --- TEST 5: Integrated Logic (The "Choke Check") ---
             #[test]
-            fn test_choke_during_pick((mut state, slots) in combined_algo_strategy()) {
+            fn test_choke_during_pick(mut state in combined_algo_strategy()) {
                 // 1. Recalculate Chokes (Decide who WE upload to)
-                let _ = state.update(Action::RecalculateChokes { upload_slots: slots, random_seed: 42 });
+                let _ = state.update(Action::RecalculateChokes {  random_seed: 42 });
 
                 // 2. Assign Work (Decide what WE download from "medium_both")
                 let effects = state.update(Action::AssignWork { peer_id: "medium_both".into() });
@@ -3441,14 +3601,13 @@ mod prop_tests {
 
             // --- TEST 6: Tit-for-Tat Justice (Hero vs Parasite) ---
             #[test]
-            fn test_free_rider_justice((mut state, slots) in free_rider_strategy()) {
+            fn test_free_rider_justice(mut state in free_rider_strategy()) {
                 // 1. Run Recalc
                 // We set a fixed seed to control Optimistic Unchoke.
                 // In a real scenario, the Parasite might get the Optimistic slot occasionally,
                 // but the Regular slots MUST go to the Hero.
                 // Since we only have 1 slot total in this strat, logic dictates Hero gets it.
                 let _ = state.update(Action::RecalculateChokes {
-                    upload_slots: slots,
                     random_seed: 42
                 });
 
@@ -3487,7 +3646,7 @@ mod prop_tests {
 
             // --- TEST 9: Choke Race Condition (The "Stop" Check) ---
             #[test]
-            fn test_choke_race_condition((mut state, _) in combined_algo_strategy()) {
+            fn test_choke_race_condition(mut state in combined_algo_strategy()) {
                 // 1. Peer Unchokes us (Setup state)
                 state.update(Action::PeerUnchoked { peer_id: "medium_both".into() });
 
