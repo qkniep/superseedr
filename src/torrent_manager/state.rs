@@ -1143,6 +1143,8 @@ impl TorrentState {
 
                 self.bytes_downloaded_in_interval = 0;
                 self.bytes_uploaded_in_interval = 0;
+                self.total_dl_prev_avg_ema = 0.0;
+                self.total_ul_prev_avg_ema = 0.0;
 
                 vec![
                     Effect::EmitMetrics {
