@@ -202,6 +202,9 @@ flowchart TD
 ```
 </details>
 
+
+---
+
 ### Private Tracker Builds
 This installation is intended for private trackers, as it disables peer-discovery features (DHT & PEX).
 These features will not be included in the final build of the private versions of superseedr.
