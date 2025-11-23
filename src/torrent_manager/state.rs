@@ -2183,75 +2183,133 @@ mod prop_tests {
     const NUM_PIECES: usize = 20;
     const MAX_BLOCK: u32 = 131_072;
 
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
     #[derive(Clone, Debug)]
-        enum NetworkFault {
-            None,
-            Drop,
-            Duplicate,
-            Delay(u64),
-            Corrupt,
+    enum NetworkFault {
+        None,
+        Drop,
+        Duplicate,
+        Delay(u64),
+        Corrupt,
+    }
+
+    fn inject_reordering_faults(actions: Vec<Action>, seed: u64) -> Vec<Action> {
+        // 1. Setup Deterministic RNG
+        // We use a fixed seed from Proptest so failures are reproducible
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        let mut pending = Vec::new();
+        let mut result = Vec::new();
+
+        for action in actions {
+            // 2% Packet Loss
+            if rng.random_bool(0.02) {
+                continue;
+            }
+
+            // 1% Duplication (Clone creates the "Ghost Packet")
+            if rng.random_bool(0.01) {
+                let delay = rng.random_range(10..400);
+                pending.push((delay, action.clone()));
+            }
+
+            // Normal Delivery (random delay 10ms - 400ms)
+            let delay = rng.random_range(10..400);
+            pending.push((delay, action));
         }
 
-        // Transforms a clean history of actions into a faulty network stream
-        // deterministically based on a vector of random "fault seeds"
-        fn inject_network_faults(actions: Vec<Action>, fault_entropy: Vec<u8>) -> Vec<Action> {
-            let mut final_actions = Vec::new();
-            // Cycle through entropy so we don't run out if actions > entropy length
-            let mut entropy_iter = fault_entropy.iter().cycle(); 
+        // 2. THE MAGIC: Reordering
+        // Sort events by who arrives first. This shuffles the timeline.
+        pending.sort_by_key(|(delay, _)| *delay);
 
-            for action in actions {
-                let seed = *entropy_iter.next().unwrap();
-                
-                // Map the random byte (0-255) to a Fault Type
-                let fault = match seed {
-                    0..=4 => NetworkFault::Drop,            // ~2% chance
-                    5..=9 => NetworkFault::Duplicate,       // ~2% chance
-                    10..=20 => NetworkFault::Delay(seed as u64 * 50), // ~4% chance (500ms-1000ms)
-                    21..=25 => NetworkFault::Corrupt,       // ~2% chance
-                    _ => NetworkFault::None,                // ~90% Clean
-                };
+        // 3. Reconstruct Timeline with Ticks
+        // We must insert 'Tick' actions to account for the time gaps between events.
+        let mut current_time = 0;
+        for (arrival_time, action) in pending {
+            if arrival_time > current_time {
+                result.push(Action::Tick {
+                    dt_ms: arrival_time - current_time,
+                });
+                current_time = arrival_time;
+            }
+            result.push(action);
+        }
 
-                match fault {
-                    NetworkFault::Drop => {
-                        // Packet lost in the ether
-                        continue; 
-                    }
-                    NetworkFault::Duplicate => {
-                        final_actions.push(action.clone());
-                        final_actions.push(action);
-                    }
-                    NetworkFault::Delay(ms) => {
-                        // Simulate delay by ticking the clock before delivery
-                        final_actions.push(Action::Tick { dt_ms: ms });
-                        final_actions.push(action);
-                    }
-                    NetworkFault::Corrupt => {
-                        // Flip bits if it involves data
-                        match action {
-                            Action::IncomingBlock { peer_id, piece_index, block_offset, mut data } => {
-                                if !data.is_empty() {
-                                    // Corrupt the last byte
-                                    let len = data.len();
-                                    data[len - 1] = !data[len - 1]; 
-                                }
-                                final_actions.push(Action::IncomingBlock { peer_id, piece_index, block_offset, data });
-                            },
-                            // For control packets, corruption usually means they fail parsing 
-                            // and are effectively dropped or cause a disconnect. 
-                            // We simulate "parsing error" by turning it into a connection failure or drop.
-                            _ => {
-                                // Simulate packet garbling leading to drop
-                                continue; 
+        result
+    }
+
+    // Transforms a clean history of actions into a faulty network stream
+    // deterministically based on a vector of random "fault seeds"
+    fn inject_network_faults(actions: Vec<Action>, fault_entropy: Vec<u8>) -> Vec<Action> {
+        let mut final_actions = Vec::new();
+        // Cycle through entropy so we don't run out if actions > entropy length
+        let mut entropy_iter = fault_entropy.iter().cycle();
+
+        for action in actions {
+            let seed = *entropy_iter.next().unwrap();
+
+            // Map the random byte (0-255) to a Fault Type
+            let fault = match seed {
+                0..=4 => NetworkFault::Drop,                      // ~2% chance
+                5..=9 => NetworkFault::Duplicate,                 // ~2% chance
+                10..=20 => NetworkFault::Delay(seed as u64 * 50), // ~4% chance (500ms-1000ms)
+                21..=25 => NetworkFault::Corrupt,                 // ~2% chance
+                _ => NetworkFault::None,                          // ~90% Clean
+            };
+
+            match fault {
+                NetworkFault::Drop => {
+                    // Packet lost in the ether
+                    continue;
+                }
+                NetworkFault::Duplicate => {
+                    final_actions.push(action.clone());
+                    final_actions.push(action);
+                }
+                NetworkFault::Delay(ms) => {
+                    // Simulate delay by ticking the clock before delivery
+                    final_actions.push(Action::Tick { dt_ms: ms });
+                    final_actions.push(action);
+                }
+                NetworkFault::Corrupt => {
+                    // Flip bits if it involves data
+                    match action {
+                        Action::IncomingBlock {
+                            peer_id,
+                            piece_index,
+                            block_offset,
+                            mut data,
+                        } => {
+                            if !data.is_empty() {
+                                // Corrupt the last byte
+                                let len = data.len();
+                                data[len - 1] = !data[len - 1];
                             }
+                            final_actions.push(Action::IncomingBlock {
+                                peer_id,
+                                piece_index,
+                                block_offset,
+                                data,
+                            });
+                        }
+                        // For control packets, corruption usually means they fail parsing
+                        // and are effectively dropped or cause a disconnect.
+                        // We simulate "parsing error" by turning it into a connection failure or drop.
+                        _ => {
+                            // Simulate packet garbling leading to drop
+                            continue;
                         }
                     }
-                    NetworkFault::None => {
-                        final_actions.push(action);
-                    }
+                }
+                NetworkFault::None => {
+                    final_actions.push(action);
                 }
             }
-            final_actions
         }
+        final_actions
+    }
 
     // =========================================================================
     // 1. STRATEGIES: Atomic Actions
@@ -3295,7 +3353,7 @@ mod prop_tests {
         use crate::torrent_manager::state::tests::create_dummy_torrent;
         use proptest::prelude::*;
         use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
-        use std::collections::{HashSet};
+        use std::collections::HashSet;
 
         // --- 1. THE MODEL ---
         #[derive(Clone, Debug)]
@@ -3600,7 +3658,7 @@ mod prop_tests {
             fn test_state_machine_network_faults(
                 (initial_state, clean_actions, tracker) in TorrentModel::sequential_strategy(20),
                 // Generate a parallel vector of random bytes to determine faults
-                fault_entropy in proptest::collection::vec(any::<u8>(), 50) 
+                fault_entropy in proptest::collection::vec(any::<u8>(), 50)
             ) {
                 // 1. Inject Faults (Deterministic transformation)
                 let faulty_actions = inject_network_faults(clean_actions, fault_entropy);
@@ -3611,12 +3669,31 @@ mod prop_tests {
                 // The Reference Model in `apply` will still track the *logical* state,
                 // while the SUT must handle the mess without crashing.
                 TorrentModel::test_sequential(
-                    proptest::test_runner::Config::default(), 
-                    initial_state, 
-                    faulty_actions, 
+                    proptest::test_runner::Config::default(),
+                    initial_state,
+                    faulty_actions,
                     tracker
                 );
             }
+
+
+            #[test]
+            fn test_state_machine_network_reordering(
+                (initial_state, clean_actions, tracker) in TorrentModel::sequential_strategy(20),
+                seed in any::<u64>() // <--- Much simpler entropy
+            ) {
+                // 1. Mess up the timeline
+                let chaotic_actions = inject_reordering_faults(clean_actions, seed);
+
+                // 2. Run the test
+                TorrentModel::test_sequential(
+                    proptest::test_runner::Config::default(),
+                    initial_state,
+                    chaotic_actions,
+                    tracker
+                );
+            }
+
 
         }
     }
