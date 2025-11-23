@@ -26,10 +26,10 @@ pub struct PieceAssembler {
 impl std::fmt::Debug for PieceAssembler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PieceAssembler")
-         .field("received_blocks", &self.received_blocks)
-         .field("total_blocks", &self.total_blocks)
-         .field("buffer_len", &self.buffer.len())
-         .finish()
+            .field("received_blocks", &self.received_blocks)
+            .field("total_blocks", &self.total_blocks)
+            .field("buffer_len", &self.buffer.len())
+            .finish()
     }
 }
 

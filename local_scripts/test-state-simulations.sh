@@ -1,1 +1,1 @@
-cargo test state::prop_tests -- --nocapture
+PROPTEST_CASES=1000000 cargo test state --release
