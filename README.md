@@ -146,10 +146,6 @@ docker compose -f docker-compose.standalone.yml up -d && docker compose attach s
 
 ---
 
-### Private Tracker Builds
-This installation is intended for private trackers, as it disables peer-discovery features (DHT & PEX).
-These features will not be included in the final build of the private versions of superseedr.
-
 ## Reliability & Correctness
 
 `superseedr` is built on a foundation of **Model-Based Testing (MBT)** and **Deterministic Simulation**. Unlike traditional clients that rely primarily on integration tests, our core protocol engine is verified against an abstract reference model to ensure logical consistency under chaos.
@@ -171,6 +167,7 @@ Every failure found by our test suite prints a **cryptographic seed**, allowing 
 
 <details>
 <summary>Click to expand: How the testing actually works (flowchart)</summary>
+
 ```mermaid
 flowchart TD
     subgraph Test_Runner [Proptest Runner]
@@ -203,6 +200,11 @@ flowchart TD
     style Panic fill:#ffcdd2,stroke:#b71c1c
     style Seed fill:#fff9c4,stroke:#fbc02d
 ```
+</details>
+
+### Private Tracker Builds
+This installation is intended for private trackers, as it disables peer-discovery features (DHT & PEX).
+These features will not be included in the final build of the private versions of superseedr.
 
 ### Core Protocol & Peer Discovery
 - **Real Time Performance Tuning:** Periodic resource optimizations (file handles) to maximize speeds and disk stability.
