@@ -150,6 +150,60 @@ docker compose -f docker-compose.standalone.yml up -d && docker compose attach s
 This installation is intended for private trackers, as it disables peer-discovery features (DHT & PEX).
 These features will not be included in the final build of the private versions of superseedr.
 
+## Reliability & Correctness
+
+`superseedr` is built on a foundation of **Model-Based Testing (MBT)** and **Deterministic Simulation**. Unlike traditional clients that rely primarily on integration tests, our core protocol engine is verified against an abstract reference model to ensure logical consistency under chaos.
+
+### The Testing Pipeline
+The engine is subjected to a continuous fuzzing pipeline that simulates years of edge-case runtime in minutes.
+
+* **Property-Based State Machine:** We define an abstract "Oracle" (Reference Model) that predicts exactly how the client should behave. The real implementation is continuously fuzzed against this model to detect state desynchronization.
+* **Deterministic Network Simulation:** A custom network shim sits between the test runner and the client. It deterministically injects **packet loss (0.5%)**, **duplication (1%)**, **reordering**, and **variable latency (10ms–300ms)**.
+* **Adversarial Protocol Coverage:** The fuzzer aggressively targets complex logic paths, including:
+    * **Endgame Mode:** Race conditions when requesting the final blocks from multiple peers.
+    * **Tit-for-Tat Evasion:** Malicious peers that snub us or send garbage data.
+    * **Lifecycle Races:** Simultaneous Pause, Resume, and Delete commands while disk I/O is pending.
+
+### Why This Matters
+By decoupling **Core Logic** (State Transitions) from **Side Effects** (I/O), we ensure that logic bugs—such as deadlocks, integer overflows in speed calculations, or peer map desyncs—are caught by the fuzzer, not by users. 
+
+Every failure found by our test suite prints a **cryptographic seed**, allowing us to replay the exact sequence of network packets and user actions that caused the crash, making "heisenbugs" a thing of the past.
+
+<details>
+<summary>Click to expand: How the testing actually works (flowchart)</summary>
+```mermaid
+flowchart TD
+    subgraph Test_Runner [Proptest Runner]
+        Seed[Random Seed] --> Gen[Action Generator]
+        Gen -->|Raw Action| Model_Apply
+        Gen -->|Raw Action| Net_Shim
+    end
+    subgraph Network_Simulation [Deterministic Chaos]
+        Net_Shim{Network Shim}
+        Net_Shim -->|Pass| SUT_Apply
+        Net_Shim -->|Drop| Trash[Dropped]
+        Net_Shim -->|Duplicate| SUT_Apply
+        Net_Shim -.->|Delay| Clock[Tick + Action]
+       
+        Clock --> SUT_Apply
+    end
+    subgraph The_Oracle [Abstract Reference Model]
+        Model_Apply[Model::apply] --> ExpState[Expected State]
+        style ExpState fill:#e1f5fe,stroke:#01579b
+    end
+    subgraph The_Engine [System Under Test]
+        SUT_Apply[TorrentState::update] --> ActualState[Actual State]
+        style ActualState fill:#e8f5e9,stroke:#2e7d32
+    end
+    ExpState <-->|Assert Invariants| ActualState
+   
+    ActualState -->|Pass| Next[Next Iteration]
+    ActualState -->|Fail| Panic[Panic & Print Seed]
+   
+    style Panic fill:#ffcdd2,stroke:#b71c1c
+    style Seed fill:#fff9c4,stroke:#fbc02d
+```
+
 ### Core Protocol & Peer Discovery
 - **Real Time Performance Tuning:** Periodic resource optimizations (file handles) to maximize speeds and disk stability.
 - **Peer Discovery:** Full support for Trackers, DHT, PEX, and Magnet Links (including metadata download).
