@@ -1762,8 +1762,7 @@ impl TorrentManager {
     }
 
     pub async fn run(mut self, is_paused: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
-
-        self.apply_action(Action::TorrentManagerInit{ is_paused });
+        self.apply_action(Action::TorrentManagerInit { is_paused });
 
         if self.state.torrent.is_some() {
             if let Err(error) = self.validate_local_file().await {
