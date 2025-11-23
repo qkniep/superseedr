@@ -129,6 +129,7 @@ pub struct TorrentManager {
     manager_command_rx: Receiver<ManagerCommand>,
 
     in_flight_uploads: HashMap<String, HashMap<BlockInfo, JoinHandle<()>>>,
+    in_flight_writes: HashMap<u32, Vec<JoinHandle<()>>>,
 
     #[cfg(feature = "dht")]
     dht_trigger_tx: watch::Sender<()>,
@@ -252,6 +253,7 @@ impl TorrentManager {
             manager_command_rx,
             manager_event_tx,
             in_flight_uploads: HashMap::new(),
+            in_flight_writes: HashMap::new(),
             dht_trigger_tx,
             settings,
             resource_manager,
@@ -364,6 +366,7 @@ impl TorrentManager {
             manager_command_rx,
             manager_event_tx,
             in_flight_uploads: HashMap::new(),
+            in_flight_writes: HashMap::new(),
             dht_trigger_tx,
             settings,
             resource_manager,
@@ -536,7 +539,7 @@ impl TorrentManager {
                 let mut shutdown_rx = self.shutdown_tx.subscribe();
                 let peer_id_clone = peer_id.clone();
 
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     let op = DiskIoOperation {
                         piece_index,
                         offset: global_offset,
@@ -576,6 +579,11 @@ impl TorrentManager {
                         }
                     }
                 });
+
+                self.in_flight_writes
+                    .entry(piece_index)
+                    .or_default()
+                    .push(handle);
             }
 
             Effect::ReadFromDisk {
@@ -1885,6 +1893,14 @@ impl TorrentManager {
                             self.in_flight_uploads.clear();
                             event!(Level::DEBUG, "All upload tasks aborted.");
 
+                            event!(Level::DEBUG, "Aborting all in-flight write tasks...");
+                            for (_, handles) in self.in_flight_writes.drain() {
+                                for handle in handles {
+                                    handle.abort();
+                                }
+                            }
+                            self.in_flight_writes.clear();
+
                             if let (Some(torrent), Some(multi_file_info)) = (&self.state.torrent, &self.multi_file_info) {
                                 let total_size_bytes = multi_file_info.total_size;
                                 let bytes_completed = (torrent.info.piece_length as u64).saturating_mul(
@@ -2085,8 +2101,22 @@ impl TorrentManager {
                             }
                         },
 
-                        TorrentCommand::PieceWrittenToDisk { peer_id, piece_index } => self.apply_action(Action::PieceWrittenToDisk { peer_id, piece_index }),
-                        TorrentCommand::PieceWriteFailed { piece_index } => self.apply_action(Action::PieceWriteFailed { piece_index }),
+                        TorrentCommand::PieceWrittenToDisk { peer_id, piece_index } => {
+                            if let Some(handles) = self.in_flight_writes.remove(&piece_index) {
+                                for handle in handles {
+                                    handle.abort();
+                                }
+                            }
+                            self.apply_action(Action::PieceWrittenToDisk { peer_id, piece_index });
+                        },
+                        TorrentCommand::PieceWriteFailed { piece_index } => {
+                            if let Some(handles) = self.in_flight_writes.remove(&piece_index) {
+                                for handle in handles {
+                                    handle.abort();
+                                }
+                            }
+                            self.apply_action(Action::PieceWriteFailed { piece_index });
+                        },
                         TorrentCommand::RequestUpload(peer_id, piece_index, block_offset, block_length) => self.apply_action(Action::RequestUpload { peer_id, piece_index, block_offset, length: block_length }),
                         TorrentCommand::CancelUpload(peer_id, piece_index, block_offset, block_length) => {
                             self.apply_action(Action::CancelUpload {

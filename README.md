@@ -32,6 +32,7 @@ Download the latest release for your platform:
 ## Usage
 Open up a terminal and run:
 ```bash
+# ulimit -u 65536
 superseedr
 ```
 > [!NOTE]  
