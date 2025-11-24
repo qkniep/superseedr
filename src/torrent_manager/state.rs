@@ -885,58 +885,41 @@ impl TorrentState {
                 effects
             }
 
-            Action::PieceWrittenToDisk {
-                peer_id,
-                piece_index,
-            } => {
-                let mut effects = Vec::new();
-
+                Action::PieceWrittenToDisk { peer_id, piece_index } => {
+                // GUARD: Protect against reordered events (e.g. arriving before Metadata)
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
                 }
 
-                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done)
-                {
-                    if let Some(peer) = self.peers.get_mut(&peer_id) {
-                        peer.pending_requests.remove(&piece_index);
-                    }
+                // Any stray write completions (e.g. from before a restart) should be dropped.
+                if self.torrent_status == TorrentStatus::Validating || self.torrent_status == TorrentStatus::AwaitingMetadata {
+                    return vec![Effect::DoNothing];
+                }
+
+                let mut effects = Vec::new();
+                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
+                    if let Some(peer) = self.peers.get_mut(&peer_id) { peer.pending_requests.remove(&piece_index); }
                     effects.extend(self.update(Action::AssignWork { peer_id }));
                     return effects;
                 }
-
                 let peers_to_cancel = self.piece_manager.mark_as_complete(piece_index);
-
                 effects.push(Effect::EmitManagerEvent(ManagerEvent::DiskWriteFinished));
-
-                if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    peer.pending_requests.remove(&piece_index);
-                }
-
-                effects.extend(self.update(Action::AssignWork {
-                    peer_id: peer_id.clone(),
-                }));
-
+                if let Some(peer) = self.peers.get_mut(&peer_id) { peer.pending_requests.remove(&piece_index); }
+                effects.extend(self.update(Action::AssignWork { peer_id: peer_id.clone() }));
                 for other_peer in peers_to_cancel {
                     if other_peer != peer_id {
                         if let Some(peer) = self.peers.get_mut(&other_peer) {
                             peer.pending_requests.remove(&piece_index);
-                            effects.push(Effect::SendToPeer {
-                                peer_id: other_peer.clone(),
-                                cmd: Box::new(TorrentCommand::Cancel(piece_index)),
-                            });
+                            effects.push(Effect::SendToPeer { peer_id: other_peer.clone(), cmd: Box::new(TorrentCommand::Cancel(piece_index)) });
                         }
-                        effects.extend(self.update(Action::AssignWork {
-                            peer_id: other_peer,
-                        }));
+                        effects.extend(self.update(Action::AssignWork { peer_id: other_peer }));
                     }
                 }
-
                 effects.push(Effect::BroadcastHave { piece_index });
-
                 effects.extend(self.update(Action::CheckCompletion));
-
                 effects
             }
+
             Action::PieceWriteFailed { piece_index } => {
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
@@ -1064,6 +1047,7 @@ impl TorrentState {
                 self.torrent_metadata_length = Some(metadata_length);
 
                 let num_pieces = torrent.info.pieces.len() / 20;
+                self.piece_manager = PieceManager::new();
                 self.piece_manager
                     .set_initial_fields(num_pieces, self.torrent_validation_status);
 
@@ -2110,6 +2094,11 @@ mod tests {
         // (race condition), the PieceManager would panic trying to mark a 'Done' piece as done.
 
         let mut state = create_empty_state();
+        
+        // FIX: Explicitly set status to Standard.
+        // Otherwise, the new safety guard in PieceWrittenToDisk ignores the action.
+        state.torrent_status = TorrentStatus::Standard;
+
         state.piece_manager.set_initial_fields(1, false);
         add_peer(&mut state, "peer_A");
         state
@@ -3875,8 +3864,7 @@ mod prop_tests {
     mod state_machine {
         use super::*;
         use crate::torrent_manager::state::tests::create_dummy_torrent;
-        // We import the helper functions from the parent module
-        use super::{inject_network_faults, inject_reordering_faults};
+        use super::{inject_network_faults, inject_reordering_faults}; 
         use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
         use std::collections::HashSet;
 
@@ -3886,13 +3874,12 @@ mod prop_tests {
             pub connected_peers: HashSet<String>,
             pub total_pieces: u32,
             pub paused: bool,
-            // NEW: Track lifecycle state to match SUT
             pub status: TorrentStatus,
             pub has_metadata: bool,
+            pub downloaded_pieces: HashSet<u32>, 
         }
 
         impl TorrentModel {
-            // Initialize as a standard .torrent file (Validating)
             fn new_file(pieces: u32) -> Self {
                 Self {
                     connected_peers: HashSet::new(),
@@ -3900,17 +3887,18 @@ mod prop_tests {
                     paused: false,
                     status: TorrentStatus::Validating,
                     has_metadata: true,
+                    downloaded_pieces: HashSet::new(),
                 }
             }
 
-            // Initialize as a Magnet link (AwaitingMetadata)
             fn new_magnet(pieces: u32) -> Self {
                 Self {
                     connected_peers: HashSet::new(),
-                    total_pieces: pieces, // Model knows size, SUT doesn't yet
+                    total_pieces: pieces,
                     paused: false,
                     status: TorrentStatus::AwaitingMetadata,
                     has_metadata: false,
+                    downloaded_pieces: HashSet::new(),
                 }
             }
         }
@@ -3921,144 +3909,80 @@ mod prop_tests {
             type Transition = Action;
 
             fn init_state() -> BoxedStrategy<Self::State> {
-                // Randomly start as either a File (Standard) or Magnet (Bootstrap)
                 prop_oneof![
                     Just(TorrentModel::new_file(5)),
                     Just(TorrentModel::new_magnet(5))
-                ]
-                .boxed()
+                ].boxed()
             }
 
             fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
                 let mut strategies = Vec::new();
 
-                // --- A. Global Lifecycle Actions ---
+                // Global Actions
                 strategies.push(Just(Action::Tick { dt_ms: 1000 }).boxed());
                 strategies.push(Just(Action::Cleanup).boxed());
                 strategies.push(Just(Action::FatalError).boxed());
-
-                // Lifecycle Triggers (Shutdown/Delete)
                 strategies.push(Just(Action::Shutdown).boxed());
                 strategies.push(Just(Action::Delete).boxed());
 
-                // Re-Initialization (Simulate app restart or config change)
-                strategies.push(
-                    any::<bool>()
-                        .prop_map(|paused| Action::TorrentManagerInit {
-                            is_paused: paused,
-                            announce_immediately: !paused,
-                        })
-                        .boxed(),
-                );
+                // Re-Init
+                strategies.push(any::<bool>().prop_map(|paused| 
+                    Action::TorrentManagerInit { is_paused: paused, announce_immediately: !paused }
+                ).boxed());
 
-                // Toggle Pause/Resume
+                // Pause/Resume
                 if state.paused {
                     strategies.push(Just(Action::Resume).boxed());
                 } else {
                     strategies.push(Just(Action::Pause).boxed());
                 }
 
-                // --- B. Phase Transitions ---
-
-                // 1. If Awaiting Metadata -> Receive Metadata
+                // Phase Transitions
                 if state.status == TorrentStatus::AwaitingMetadata {
-                    strategies.push(
-                        Just(Action::MetadataReceived {
-                            torrent: Box::new(create_dummy_torrent(state.total_pieces as usize)),
-                            metadata_length: (state.total_pieces * 16384) as i64,
-                        })
-                        .boxed(),
-                    );
+                    strategies.push(Just(Action::MetadataReceived { 
+                        torrent: Box::new(create_dummy_torrent(state.total_pieces as usize)),
+                        metadata_length: (state.total_pieces * 16384) as i64
+                    }).boxed());
                 }
 
-                // 2. If Validating -> Complete Validation
                 if state.status == TorrentStatus::Validating {
-                    strategies.push(
-                        Just(Action::ValidationComplete {
-                            completed_pieces: vec![],
-                        })
-                        .boxed(),
-                    );
+                    // Fuzzing: Simulate finding 0 to all pieces
+                    let max_pieces = state.total_pieces;
+                    strategies.push(proptest::collection::vec(0..max_pieces, 0..max_pieces as usize)
+                        .prop_map(|pieces| Action::ValidationComplete { 
+                            completed_pieces: pieces 
+                        }).boxed());
                 }
 
-                // 3. If Standard -> Check Completion
-                if state.status == TorrentStatus::Standard || state.status == TorrentStatus::Endgame
-                {
+                if state.status == TorrentStatus::Standard || state.status == TorrentStatus::Endgame {
                     strategies.push(Just(Action::CheckCompletion).boxed());
                 }
 
-                // --- C. Connection Actions ---
+                // Connection Actions
                 strategies.push(
-                    any::<String>()
-                        .prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id })
-                        .boxed(),
+                    any::<String>().prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id }).boxed()
                 );
 
-                // --- D. Peer Interaction ---
-                // We CANNOT interact with data/pieces if we don't have metadata yet.
+                // Peer Interaction
                 if !state.connected_peers.is_empty() && state.has_metadata {
-                    let peer_strategy =
-                        prop::sample::select(Vec::from_iter(state.connected_peers.clone()));
+                    let peer_strategy = prop::sample::select(Vec::from_iter(state.connected_peers.clone()));
                     let piece_strategy = 0..state.total_pieces;
 
-                    // 1. Disconnect / Control
-                    strategies.push(
-                        peer_strategy
-                            .clone()
-                            .prop_map(|id| Action::PeerDisconnected { peer_id: id })
-                            .boxed(),
-                    );
-                    strategies.push(
-                        peer_strategy
-                            .clone()
-                            .prop_map(|id| Action::PeerUnchoked { peer_id: id })
-                            .boxed(),
-                    );
+                    strategies.push(peer_strategy.clone().prop_map(|id| Action::PeerDisconnected { peer_id: id }).boxed());
+                    strategies.push(peer_strategy.clone().prop_map(|id| Action::PeerUnchoked { peer_id: id }).boxed());
 
-                    // 2. Data Flow (Only valid if not Validating/Awaiting)
-                    if state.status != TorrentStatus::Validating
-                        && state.status != TorrentStatus::AwaitingMetadata
-                    {
-                        strategies.push(
-                            (peer_strategy.clone(), piece_strategy.clone())
-                                .prop_map(|(id, idx)| Action::PeerHavePiece {
-                                    peer_id: id,
-                                    piece_index: idx,
-                                })
-                                .boxed(),
-                        );
+                    if state.status != TorrentStatus::Validating && state.status != TorrentStatus::AwaitingMetadata {
+                        strategies.push((peer_strategy.clone(), piece_strategy.clone())
+                            .prop_map(|(id, idx)| Action::PeerHavePiece { peer_id: id, piece_index: idx }).boxed());
+                        
+                        strategies.push(peer_strategy.clone().prop_map(|id| Action::AssignWork { peer_id: id }).boxed());
 
-                        strategies.push(
-                            peer_strategy
-                                .clone()
-                                .prop_map(|id| Action::AssignWork { peer_id: id })
-                                .boxed(),
-                        );
-
-                        strategies.push(
-                            (
-                                peer_strategy.clone(),
-                                piece_strategy.clone(),
-                                any::<u32>(),
-                                prop::collection::vec(any::<u8>(), 1..1024),
-                            )
-                                .prop_map(|(id, idx, offset, data)| Action::IncomingBlock {
-                                    peer_id: id,
-                                    piece_index: idx,
-                                    block_offset: offset,
-                                    data,
-                                })
-                                .boxed(),
-                        );
-
-                        strategies.push(
-                            (peer_strategy.clone(), piece_strategy.clone())
-                                .prop_map(|(id, idx)| Action::PieceWrittenToDisk {
-                                    peer_id: id,
-                                    piece_index: idx,
-                                })
-                                .boxed(),
-                        );
+                        strategies.push((
+                            peer_strategy.clone(), piece_strategy.clone(), any::<u32>(), prop::collection::vec(any::<u8>(), 1..1024)
+                        ).prop_map(|(id, idx, offset, data)| Action::IncomingBlock { peer_id: id, piece_index: idx, block_offset: offset, data }).boxed());
+                        
+                        strategies.push((peer_strategy.clone(), piece_strategy.clone())
+                            .prop_map(|(id, idx)| Action::PieceWrittenToDisk { peer_id: id, piece_index: idx }).boxed());
                     }
                 }
 
@@ -4083,8 +4007,6 @@ mod prop_tests {
                     Action::TorrentManagerInit { is_paused, .. } => {
                         state.paused = *is_paused;
                     }
-
-                    // Lifecycle Handling
                     Action::Shutdown => {
                         state.paused = true;
                         state.connected_peers.clear();
@@ -4092,24 +4014,42 @@ mod prop_tests {
                     Action::Delete => {
                         state.paused = true;
                         state.connected_peers.clear();
-                        // Model Reset Logic:
+                        state.downloaded_pieces.clear(); // Clear model tracking
                         if state.has_metadata {
                             state.status = TorrentStatus::Validating;
                         } else {
                             state.status = TorrentStatus::AwaitingMetadata;
                         }
                     }
-
-                    // Phase Handling
                     Action::MetadataReceived { .. } => {
                         state.has_metadata = true;
                         state.status = TorrentStatus::Validating;
+                        state.downloaded_pieces.clear(); // Fresh start
                     }
-                    Action::ValidationComplete { .. } => {
+                    
+                    Action::ValidationComplete { completed_pieces } => {
                         if state.status == TorrentStatus::Validating {
                             state.status = TorrentStatus::Standard;
+                            for p in completed_pieces {
+                                state.downloaded_pieces.insert(*p);
+                            }
+                            // Check for immediate completion
+                            if state.downloaded_pieces.len() as u32 == state.total_pieces {
+                                state.status = TorrentStatus::Done;
+                            }
                         }
                     }
+
+                    Action::PieceWrittenToDisk { piece_index, .. } => {
+                        // FIX: Model now mimics SUT's completion logic
+                        if state.status == TorrentStatus::Standard || state.status == TorrentStatus::Endgame {
+                            state.downloaded_pieces.insert(*piece_index);
+                            if state.downloaded_pieces.len() as u32 == state.total_pieces {
+                                state.status = TorrentStatus::Done;
+                            }
+                        }
+                    }
+
                     _ => {}
                 }
                 state
@@ -4122,30 +4062,23 @@ mod prop_tests {
             type Reference = TorrentModel;
 
             fn init_test(ref_state: &TorrentModel) -> Self::SystemUnderTest {
-                // Initialize SUT based on Model's start state (Magnet vs File)
                 let (torrent, status) = if ref_state.has_metadata {
-                    (
-                        Some(create_dummy_torrent(ref_state.total_pieces as usize)),
-                        TorrentStatus::Validating,
-                    )
+                    (Some(create_dummy_torrent(ref_state.total_pieces as usize)), TorrentStatus::Validating)
                 } else {
                     (None, TorrentStatus::AwaitingMetadata)
                 };
 
                 let mut state = TorrentState::default();
                 state.torrent = torrent;
-
+                
                 if ref_state.has_metadata {
-                    state
-                        .piece_manager
-                        .set_initial_fields(ref_state.total_pieces as usize, false);
+                    state.piece_manager.set_initial_fields(ref_state.total_pieces as usize, false);
                 } else {
                     state.piece_manager = PieceManager::new();
                 }
-
+                
                 state.torrent_status = status;
                 state.is_paused = ref_state.paused;
-
                 state
             }
 
@@ -4154,7 +4087,6 @@ mod prop_tests {
                 ref_state: &TorrentModel,
                 transition: Action,
             ) -> Self::SystemUnderTest {
-                // 1. Pre-Condition Helper (Peer Injection)
                 if let Action::PeerSuccessfullyConnected { peer_id } = &transition {
                     if !sut.peers.contains_key(peer_id) {
                         let (tx, _) = tokio::sync::mpsc::channel(1);
@@ -4165,44 +4097,28 @@ mod prop_tests {
                     }
                 }
 
-                // 2. EXECUTE SUT
                 let _ = sut.update(transition.clone());
 
-                // 3. CALCULATE EXPECTED POST-STATE
-                // We must advance the model to match the SUT's new timeline
-                let expected_state =
-                    <TorrentModel as ReferenceStateMachine>::apply(ref_state.clone(), &transition);
-
-                // 4. CHECK INVARIANTS (Comparing Post-SUT vs Post-Model)
+                // Advance Model to Post-State for comparison
+                let expected_state = <TorrentModel as ReferenceStateMachine>::apply(ref_state.clone(), &transition);
 
                 // Metadata Integrity
-                assert_eq!(
-                    sut.torrent.is_some(),
-                    expected_state.has_metadata,
-                    "SUT Metadata existence mismatch! SUT: {}, Model: {}",
-                    sut.torrent.is_some(),
-                    expected_state.has_metadata
-                );
+                assert_eq!(sut.torrent.is_some(), expected_state.has_metadata, 
+                    "SUT Metadata existence mismatch!");
 
                 // Status Sync
-                // We allow Standard/Endgame divergence as Model is simplified
                 if expected_state.status == TorrentStatus::Endgame {
-                    assert!(
-                        sut.torrent_status == TorrentStatus::Endgame
-                            || sut.torrent_status == TorrentStatus::Standard
-                    );
+                     assert!(sut.torrent_status == TorrentStatus::Endgame || sut.torrent_status == TorrentStatus::Standard);
                 } else {
-                    assert_eq!(
-                        sut.torrent_status, expected_state.status,
-                        "Status Mismatch! SUT: {:?}, Model: {:?}, Action: {:?}",
-                        sut.torrent_status, expected_state.status, transition
-                    );
+                     assert_eq!(sut.torrent_status, expected_state.status, 
+                        "Status Mismatch! SUT: {:?}, Model: {:?}, Action: {:?}", 
+                        sut.torrent_status, expected_state.status, transition);
                 }
 
                 // Peer Count Sync
                 assert_eq!(
                     sut.peers.len(),
-                    expected_state.connected_peers.len(), // Check against expected_state, not ref_state
+                    expected_state.connected_peers.len(),
                     "Model/SUT Peer Mismatch!"
                 );
 
@@ -4226,17 +4142,12 @@ mod prop_tests {
                 );
             }
 
-            // --- Network Fault Simulation (Fixed: Disambiguated Calls) ---
-
             #[test]
             fn test_state_machine_network_faults(
                 (initial_state, clean_actions, _) in TorrentModel::sequential_strategy(20),
                 fault_entropy in proptest::collection::vec(any::<u8>(), 50)
             ) {
-                // 1. Inject Faults
                 let faulty_actions = inject_network_faults(clean_actions, fault_entropy);
-
-                // 2. Manual Execution Loop
                 let mut ref_state = initial_state.clone();
                 let mut sut = TorrentModel::init_test(&ref_state);
 
@@ -4244,15 +4155,12 @@ mod prop_tests {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         <TorrentModel as StateMachineTest>::apply(sut, &ref_state, action.clone())
                     }));
-
                     match result {
                         Ok(new_sut) => {
                             sut = new_sut;
                             ref_state = <TorrentModel as ReferenceStateMachine>::apply(ref_state, &action);
                         }
-                        Err(_) => {
-                            panic!("SUT Panicked during Network Fault Injection!\nAction: {:?}", action);
-                        }
+                        Err(_) => { panic!("SUT Panicked during Network Fault Injection!\nAction: {:?}", action); }
                     }
                 }
             }
@@ -4260,12 +4168,9 @@ mod prop_tests {
             #[test]
             fn test_state_machine_network_reordering(
                 (initial_state, clean_actions, _) in TorrentModel::sequential_strategy(20),
-                seed in any::<u64>()
+                seed in any::<u64>() 
             ) {
-                // 1. Inject Jitter/Reordering
                 let chaotic_actions = inject_reordering_faults(clean_actions, seed);
-
-                // 2. Manual Execution Loop
                 let mut ref_state = initial_state.clone();
                 let mut sut = TorrentModel::init_test(&ref_state);
 
@@ -4273,19 +4178,15 @@ mod prop_tests {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         <TorrentModel as StateMachineTest>::apply(sut, &ref_state, action.clone())
                     }));
-
                     match result {
                         Ok(new_sut) => {
                             sut = new_sut;
                             ref_state = <TorrentModel as ReferenceStateMachine>::apply(ref_state, &action);
                         }
-                        Err(_) => {
-                            panic!("SUT Panicked during Network Reordering!\nAction: {:?}", action);
-                        }
+                        Err(_) => { panic!("SUT Panicked during Network Reordering!\nAction: {:?}", action); }
                     }
                 }
             }
-
         }
     }
 }
