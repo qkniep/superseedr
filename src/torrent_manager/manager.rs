@@ -1490,17 +1490,13 @@ impl TorrentManager {
         let client_id_clone = self.settings.client_id.clone();
         tokio::spawn(async move {
             let session_permit = tokio::select! {
-                permit_result = resource_manager_clone.acquire_peer_connection() => {
+                permit_result = timeout(Duration::from_secs(10), resource_manager_clone.acquire_peer_connection()) => {
                     match permit_result {
-                        Ok(permit) => Some(permit),
-                        Err(_) => {
-                            event!(Level::DEBUG, "Failed to acquire permit. Manager shut down?");
-                            None
-                        }
+                        Ok(Ok(permit)) => Some(permit), // Acquired
+                        _ => None, // Timeout or Manager Shutdown
                     }
                 }
                 _ = shutdown_rx_permit.recv() => {
-                    event!(Level::DEBUG, "PEER SESSION {}: Shutting down before permit acquired.", &peer_ip_port_clone);
                     None
                 }
             };

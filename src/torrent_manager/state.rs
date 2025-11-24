@@ -1199,8 +1199,21 @@ impl TorrentState {
                 }
 
                 for peer_id in stuck_peers {
-                    effects.push(Effect::DisconnectPeer { peer_id });
+                    if let Some(removed_peer) = self.peers.remove(&peer_id) {
+                        for piece_index in removed_peer.pending_requests {
+                            if self.piece_manager.bitfield.get(piece_index as usize) != Some(&PieceStatus::Done) {
+                                self.piece_manager.requeue_pending_to_need(piece_index);
+                            }
+                        }
+                        
+                        effects.push(Effect::DisconnectPeer { peer_id: peer_id.clone() });
+                        effects.push(Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
+                            info_hash: self.info_hash.clone(),
+                        }));
+                    }
                 }
+                
+                self.number_of_successfully_connected_peers = self.peers.len();
 
                 let am_seeding = !self.piece_manager.bitfield.is_empty()
                     && self
