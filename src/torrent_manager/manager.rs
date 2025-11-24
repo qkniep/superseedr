@@ -393,7 +393,7 @@ impl TorrentManager {
             }
 
             Effect::EmitMetrics { bytes_dl, bytes_ul } => {
-                self.send_metrics(0, bytes_dl, bytes_ul);
+                self.send_metrics(bytes_dl, bytes_ul);
             }
 
             Effect::SendToPeer { peer_id, cmd } => {
@@ -1002,6 +1002,58 @@ impl TorrentManager {
                         .await;
                 });
             }
+
+            Effect::PrepareShutdown {
+                tracker_urls,
+                left,
+                uploaded,
+                downloaded,
+            } => {
+                let _ = self.shutdown_tx.send(());
+
+                event!(Level::DEBUG, "Aborting in-flight upload/write tasks...");
+                for (_, handles) in self.in_flight_uploads.drain() {
+                    for (_, handle) in handles {
+                        handle.abort();
+                    }
+                }
+                for (_, handles) in self.in_flight_writes.drain() {
+                    for handle in handles {
+                        handle.abort();
+                    }
+                }
+
+                let mut announce_set = JoinSet::new();
+                for url in tracker_urls {
+                    let info_hash = self.state.info_hash.clone();
+                    let port = self.settings.client_port;
+                    let client_id = self.settings.client_id.clone();
+
+                    announce_set.spawn(async move {
+                        announce_stopped(
+                            url, &info_hash, client_id, port, uploaded, downloaded, left,
+                        )
+                        .await;
+                    });
+                }
+
+                let tx = self.manager_event_tx.clone();
+                let info_hash = self.state.info_hash.clone();
+
+                tokio::spawn(async move {
+                    if (timeout(Duration::from_secs(4), async {
+                        while announce_set.join_next().await.is_some() {}
+                    })
+                    .await)
+                        .is_err()
+                    {
+                        event!(Level::WARN, "Tracker stop announce timed out.");
+                    }
+                    let _ = tx
+                        .send(ManagerEvent::DeletionComplete(info_hash, Ok(())))
+                        .await;
+                });
+            }
         }
     }
 
@@ -1575,6 +1627,10 @@ impl TorrentManager {
             return "Paused".to_string();
         }
 
+        if self.state.torrent_status == TorrentStatus::AwaitingMetadata {
+            return "Retrieving Metadata...".to_string();
+        }
+
         if self.state.torrent_status == TorrentStatus::Validating {
             return "Validating...".to_string();
         }
@@ -1614,7 +1670,7 @@ impl TorrentManager {
         }
     }
 
-    fn send_metrics(&mut self, _actual_ms_since_last_tick: u64, bytes_dl: u64, bytes_ul: u64) {
+    fn send_metrics(&mut self, bytes_dl: u64, bytes_ul: u64) {
         if let Some(ref torrent) = self.state.torrent {
             let multi_file_info = match self.multi_file_info.as_ref() {
                 Some(mfi) => mfi,
@@ -1762,7 +1818,16 @@ impl TorrentManager {
     }
 
     pub async fn run(mut self, is_paused: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.apply_action(Action::TorrentManagerInit { is_paused });
+        // 1. Magnet (No Metadata): announce_immediately = true.
+        //    We MUST find peers to get metadata.
+        // 2. File (Has Metadata): announce_immediately = false.
+        //    We wait for validation to finish so we report accurate "Left" stats
+        //    to the tracker (preventing bans on private trackers).
+        let announce_immediately = self.state.torrent.is_none();
+        self.apply_action(Action::TorrentManagerInit {
+            is_paused,
+            announce_immediately,
+        });
 
         if self.state.torrent.is_some() {
             if let Err(error) = self.validate_local_file().await {
@@ -1867,73 +1932,7 @@ impl TorrentManager {
                             last_tick_time = Instant::now();
                         },
                         ManagerCommand::Shutdown => {
-                            event!(Level::INFO, info_hash = %BASE32.encode(&self.state.info_hash), "Torrent shutting down.");
-                            self.state.is_paused = true;
-                            let _ = self.shutdown_tx.send(());
-
-                            event!(Level::DEBUG, "Aborting all in-flight upload tasks...");
-                            for (_peer_id, handles_map) in self.in_flight_uploads.iter() {
-                                for (block_info, handle) in handles_map.iter() {
-                                    event!(Level::TRACE, ?block_info, "Aborting task");
-                                    handle.abort();
-                                }
-                            }
-                            self.in_flight_uploads.clear();
-                            event!(Level::DEBUG, "All upload tasks aborted.");
-
-                            event!(Level::DEBUG, "Aborting all in-flight write tasks...");
-                            for (_, handles) in self.in_flight_writes.drain() {
-                                for handle in handles {
-                                    handle.abort();
-                                }
-                            }
-                            self.in_flight_writes.clear();
-
-                            if let (Some(torrent), Some(multi_file_info)) = (&self.state.torrent, &self.multi_file_info) {
-                                let total_size_bytes = multi_file_info.total_size;
-                                let bytes_completed = (torrent.info.piece_length as u64).saturating_mul(
-                                    self.state.piece_manager
-                                        .bitfield
-                                        .iter()
-                                        .filter(|&s| *s == PieceStatus::Done)
-                                        .count() as u64,
-                                );
-                                let bytes_left = total_size_bytes.saturating_sub(bytes_completed);
-                                let mut announce_set = JoinSet::new();
-                                for url in self.state.trackers.keys() {
-                                    let url_clone = url.clone();
-                                    let info_hash_clone = self.state.info_hash.clone();
-                                    let client_port_clone = self.settings.client_port;
-                                    let client_id_clone = self.settings.client_id.clone();
-                                    let session_total_uploaded_clone = self.state.session_total_uploaded as usize;
-                                    let session_total_downloaded_clone = self.state.session_total_downloaded as usize;
-                                    announce_set.spawn(async move {
-                                        announce_stopped(
-                                            url_clone,
-                                            &info_hash_clone,
-                                            client_id_clone,
-                                            client_port_clone,
-                                            session_total_uploaded_clone,
-                                            session_total_downloaded_clone,
-                                            bytes_left as usize,
-                                        )
-                                        .await;
-                                    });
-                                }
-                                event!(Level::DEBUG, "Sending 'stopped' to {} trackers...", announce_set.len());
-                                if (tokio::time::timeout(Duration::from_secs(4), async {
-                                    while (announce_set.join_next().await).is_some() {
-                                    }
-                                }).await).is_err() {
-                                    event!(Level::WARN, "Tracker announce tasks timed out. Aborting remaining.");
-                                    announce_set.abort_all();
-                                } else {
-                                    event!(Level::DEBUG, "Tracker announces finished.");
-                                }
-                            }
-
-                            self.state.peers.clear();
-                            let _ = self.manager_event_tx.try_send(ManagerEvent::DeletionComplete(self.state.info_hash.clone(), Ok(())));
+                            self.apply_action(Action::Shutdown);
                             break Ok(());
                         },
                         #[cfg(feature = "dht")]

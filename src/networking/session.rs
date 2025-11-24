@@ -215,6 +215,7 @@ impl PeerSession {
             if let Some(torrent_metadata_length) = self.torrent_metadata_length {
                 torrent_metadata_len = Some(torrent_metadata_length);
             }
+            // TODO: Send len back into session manager
             let _ = self
                 .writer_tx
                 .try_send(Message::ExtendedHandshake(torrent_metadata_len));
