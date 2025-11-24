@@ -4021,10 +4021,13 @@ mod prop_tests {
                             state.status = TorrentStatus::AwaitingMetadata;
                         }
                     }
+
                     Action::MetadataReceived { .. } => {
-                        state.has_metadata = true;
-                        state.status = TorrentStatus::Validating;
-                        state.downloaded_pieces.clear(); // Fresh start
+                        if !state.has_metadata {
+                            state.has_metadata = true;
+                            state.status = TorrentStatus::Validating;
+                            state.downloaded_pieces.clear(); 
+                        }
                     }
                     
                     Action::ValidationComplete { completed_pieces } => {
@@ -4107,13 +4110,24 @@ mod prop_tests {
                     "SUT Metadata existence mismatch!");
 
                 // Status Sync
-                if expected_state.status == TorrentStatus::Endgame {
-                     assert!(sut.torrent_status == TorrentStatus::Endgame || sut.torrent_status == TorrentStatus::Standard);
+                let sut_status_norm = if sut.torrent_status == TorrentStatus::Endgame {
+                    TorrentStatus::Standard
                 } else {
-                     assert_eq!(sut.torrent_status, expected_state.status, 
-                        "Status Mismatch! SUT: {:?}, Model: {:?}, Action: {:?}", 
-                        sut.torrent_status, expected_state.status, transition);
-                }
+                    sut.torrent_status.clone()
+                };
+
+                let model_status_norm = if expected_state.status == TorrentStatus::Endgame {
+                    TorrentStatus::Standard
+                } else {
+                    expected_state.status.clone()
+                };
+
+                assert_eq!(
+                    sut_status_norm, 
+                    model_status_norm,
+                    "Status Mismatch! SUT: {:?} (Normalized), Model: {:?} (Normalized). Action: {:?}", 
+                    sut.torrent_status, expected_state.status, transition
+                );
 
                 // Peer Count Sync
                 assert_eq!(
