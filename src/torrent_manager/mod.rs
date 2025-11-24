@@ -9,7 +9,7 @@ use crate::Settings;
 
 use crate::token_bucket::TokenBucket;
 
-use crate::app::TorrentState;
+use crate::app::TorrentMetrics;
 
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::Duration;
@@ -32,7 +32,7 @@ use crate::resource_manager::ResourceManagerClient;
 pub struct TorrentParameters {
     pub dht_handle: AsyncDht,
     pub incoming_peer_rx: Receiver<(TcpStream, Vec<u8>)>,
-    pub metrics_tx: broadcast::Sender<TorrentState>,
+    pub metrics_tx: broadcast::Sender<TorrentMetrics>,
     pub torrent_validation_status: bool,
     pub download_dir: PathBuf,
     pub manager_command_rx: Receiver<ManagerCommand>,

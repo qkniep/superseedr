@@ -32,6 +32,7 @@ Download the latest release for your platform:
 ## Usage
 Open up a terminal and run:
 ```bash
+# ulimit -u 65536
 superseedr
 ```
 > [!NOTE]  
@@ -146,6 +147,67 @@ docker compose -f docker-compose.standalone.yml up -d && docker compose attach s
 
 ---
 
+## Reliability & Correctness
+
+`superseedr` is built on a foundation of **Model-Based Testing (MBT)** and **Deterministic Simulation**. Unlike traditional clients that rely primarily on integration tests, our core protocol engine is verified against an abstract reference model to ensure logical consistency under chaos.
+
+### The Testing Pipeline
+The engine is subjected to a continuous fuzzing pipeline that simulates years of edge-case runtime in minutes.
+
+* **Property-Based State Machine:** We define an abstract "Oracle" (Reference Model) that predicts exactly how the client should behave. The real implementation is continuously fuzzed against this model to detect state desynchronization.
+* **Deterministic Network Simulation:** A custom network shim sits between the test runner and the client. It deterministically injects **packet loss (0.5%)**, **duplication (1%)**, **reordering**, and **variable latency (10ms–300ms)**.
+* **Adversarial Protocol Coverage:** The fuzzer aggressively targets complex logic paths, including:
+    * **Endgame Mode:** Race conditions when requesting the final blocks from multiple peers.
+    * **Tit-for-Tat Evasion:** Malicious peers that snub us or send garbage data.
+    * **Lifecycle Races:** Simultaneous Pause, Resume, and Delete commands while disk I/O is pending.
+
+### Why This Matters
+By decoupling **Core Logic** (State Transitions) from **Side Effects** (I/O), we ensure that logic bugs—such as deadlocks, integer overflows in speed calculations, or peer map desyncs—are caught by the fuzzer, not by users. 
+
+Failures found by our test suite prints a **cryptographic seed**, allowing us to replay the exact sequence of network packets and user actions that caused the crash, making "heisenbugs" a thing of the past.
+
+Every release is verified against a massive 1-million-case fuzzing suite, subjecting the engine to over 10 minutes (m1 mac) of continuous, deterministic network chaos to prove the absence of logic bugs.
+
+<details>
+<summary>Click to expand: How the testing actually works (flowchart)</summary>
+
+```mermaid
+flowchart TD
+    subgraph Test_Runner [Proptest Runner]
+        Seed[Random Seed] --> Gen[Action Generator]
+        Gen -->|Raw Action| Model_Apply
+        Gen -->|Raw Action| Net_Shim
+    end
+    subgraph Network_Simulation [Deterministic Chaos]
+        Net_Shim{Network Shim}
+        Net_Shim -->|Pass| SUT_Apply
+        Net_Shim -->|Drop| Trash[Dropped]
+        Net_Shim -->|Duplicate| SUT_Apply
+        Net_Shim -.->|Delay| Clock[Tick + Action]
+       
+        Clock --> SUT_Apply
+    end
+    subgraph The_Oracle [Abstract Reference Model]
+        Model_Apply[Model::apply] --> ExpState[Expected State]
+        style ExpState fill:#e1f5fe,stroke:#01579b
+    end
+    subgraph The_Engine [System Under Test]
+        SUT_Apply[TorrentState::update] --> ActualState[Actual State]
+        style ActualState fill:#e8f5e9,stroke:#2e7d32
+    end
+    ExpState <-->|Assert Invariants| ActualState
+   
+    ActualState -->|Pass| Next[Next Iteration]
+    ActualState -->|Fail| Panic[Panic & Print Seed]
+   
+    style Panic fill:#ffcdd2,stroke:#b71c1c
+    style Seed fill:#fff9c4,stroke:#fbc02d
+```
+</details>
+
+
+---
+
 ### Private Tracker Builds
 This installation is intended for private trackers, as it disables peer-discovery features (DHT & PEX).
 These features will not be included in the final build of the private versions of superseedr.
@@ -180,6 +242,7 @@ These features will not be included in the final build of the private versions o
 - **UPnP / NAT-PMP:** Automatically configure port forwarding on compatible routers to improve connectability.
 - **Tracker Scraping:** Implement the ability to query trackers for seeder/leecher counts without doing a full announce (useful for displaying stats).
 - **Network History:** Persisting network history to disk.
+- **Crash Dump Ring Buffer:** Fully replayable crash dump of torrent state actions.
 
 ### Torrent & File Management
 - **Selective File Downloading:** Allow users to choose which specific files inside a multi-file torrent they want to download.

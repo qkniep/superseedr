@@ -333,7 +333,7 @@ pub struct PeerInfo {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct TorrentState {
+pub struct TorrentMetrics {
     pub torrent_control_state: TorrentControlState,
     pub info_hash: Vec<u8>,
     pub torrent_or_magnet: String,
@@ -361,7 +361,7 @@ pub struct TorrentState {
 
 #[derive(Default, Debug)]
 pub struct TorrentDisplayState {
-    pub latest_state: TorrentState,
+    pub latest_state: TorrentMetrics,
     pub download_history: Vec<u64>,
     pub upload_history: Vec<u64>,
 
@@ -491,8 +491,8 @@ pub struct App {
     pub global_dl_bucket: Arc<Mutex<TokenBucket>>,
     pub global_ul_bucket: Arc<Mutex<TokenBucket>>,
 
-    pub torrent_tx: broadcast::Sender<TorrentState>,
-    pub torrent_rx: broadcast::Receiver<TorrentState>,
+    pub torrent_tx: broadcast::Sender<TorrentMetrics>,
+    pub torrent_rx: broadcast::Receiver<TorrentMetrics>,
     pub manager_event_tx: mpsc::Sender<ManagerEvent>,
     pub manager_event_rx: mpsc::Receiver<ManagerEvent>,
     pub app_command_tx: mpsc::Sender<AppCommand>,
@@ -510,7 +510,7 @@ impl App {
         let (manager_event_tx, manager_event_rx) = mpsc::channel::<ManagerEvent>(100);
         let (app_command_tx, app_command_rx) = mpsc::channel::<AppCommand>(10);
         let (tui_event_tx, tui_event_rx) = mpsc::channel::<CrosstermEvent>(100);
-        let (torrent_tx, torrent_rx) = broadcast::channel::<TorrentState>(100);
+        let (torrent_tx, torrent_rx) = broadcast::channel::<TorrentMetrics>(100);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let (limits, system_warning) = calculate_adaptive_limits(&client_configs);
@@ -647,7 +647,6 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-
         self.process_pending_commands().await;
 
         self.startup_crossterm_event_listener();
@@ -752,7 +751,6 @@ impl App {
     }
 
     async fn shutdown_sequence(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
-
         let _ = self.shutdown_tx.send(());
         let total_managers_to_shut_down = self.torrent_manager_command_txs.len();
         let mut managers_shut_down = 0;
@@ -1263,7 +1261,11 @@ impl App {
                         let now = Instant::now();
                         if let Some(last_time) = self.app_state.recently_processed_files.get(path) {
                             if now.duration_since(*last_time) < DEBOUNCE_DURATION {
-                                tracing_event!(Level::DEBUG, "Skipping file {:?} due to debounce.", path);
+                                tracing_event!(
+                                    Level::DEBUG,
+                                    "Skipping file {:?} due to debounce.",
+                                    path
+                                );
                                 continue;
                             }
                         }
@@ -1327,7 +1329,6 @@ impl App {
                 tracing_event!(Level::ERROR, "File watcher error: {:?}", error);
             }
         }
-
     }
 
     async fn handle_port_change(&mut self, path: PathBuf) {
@@ -1676,8 +1677,10 @@ impl App {
         self.app_state.tuning_countdown = self.app_state.tuning_countdown.saturating_sub(1);
     }
 
-    fn update_torrent_state(&mut self, result: Result<TorrentState, broadcast::error::RecvError>) {
-
+    fn update_torrent_state(
+        &mut self,
+        result: Result<TorrentMetrics, broadcast::error::RecvError>,
+    ) {
         match result {
             Ok(message) => {
                 self.app_state.session_total_downloaded += message.bytes_downloaded_this_tick;
@@ -1694,7 +1697,8 @@ impl App {
                     .number_of_successfully_connected_peers =
                     message.number_of_successfully_connected_peers;
                 display_state.latest_state.number_of_pieces_total = message.number_of_pieces_total;
-                display_state.latest_state.number_of_pieces_completed = message.number_of_pieces_completed;
+                display_state.latest_state.number_of_pieces_completed =
+                    message.number_of_pieces_completed;
                 display_state.latest_state.download_speed_bps = message.download_speed_bps;
                 display_state.latest_state.upload_speed_bps = message.upload_speed_bps;
                 display_state.latest_state.eta = message.eta;
@@ -1724,8 +1728,10 @@ impl App {
                     self.app_state.total_upload_history.remove(0);
                 }
 
-                display_state.smoothed_download_speed_bps = display_state.latest_state.download_speed_bps;
-                display_state.smoothed_upload_speed_bps = display_state.latest_state.upload_speed_bps;
+                display_state.smoothed_download_speed_bps =
+                    display_state.latest_state.download_speed_bps;
+                display_state.smoothed_upload_speed_bps =
+                    display_state.latest_state.upload_speed_bps;
                 display_state.latest_state.peers = message.peers;
 
                 display_state.latest_state.activity_message = message.activity_message;
@@ -1734,7 +1740,9 @@ impl App {
                     &display_state.latest_state.peers,
                     display_state.latest_state.number_of_pieces_total as usize,
                 );
-                if !display_state.latest_state.peers.is_empty() && !current_swarm_availability.is_empty() {
+                if !display_state.latest_state.peers.is_empty()
+                    && !current_swarm_availability.is_empty()
+                {
                     display_state
                         .swarm_availability_history
                         .push(current_swarm_availability);
@@ -1743,15 +1751,14 @@ impl App {
                     display_state.swarm_availability_history.remove(0);
                 }
 
+                self.sort_and_filter_torrent_list();
                 self.app_state.ui_needs_redraw = true;
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 tracing_event!(Level::DEBUG, "TUI metrics lagged, skipped {} updates", n);
             }
-            Err(broadcast::error::RecvError::Closed) => {
-            }
+            Err(broadcast::error::RecvError::Closed) => {}
         }
-
     }
 
     async fn tuning_resource_limits(&mut self) {
@@ -2065,7 +2072,7 @@ impl App {
         }
 
         let placeholder_state = TorrentDisplayState {
-            latest_state: TorrentState {
+            latest_state: TorrentMetrics {
                 torrent_control_state: torrent_control_state.clone(),
                 info_hash: info_hash.clone(),
                 torrent_or_magnet: permanent_torrent_path.to_string_lossy().to_string(),
@@ -2173,7 +2180,7 @@ impl App {
         }
 
         let placeholder_state = TorrentDisplayState {
-            latest_state: TorrentState {
+            latest_state: TorrentMetrics {
                 torrent_control_state: torrent_control_state.clone(),
                 info_hash: info_hash.clone(),
                 torrent_or_magnet: magnet_link.clone(),

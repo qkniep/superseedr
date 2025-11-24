@@ -20,7 +20,6 @@ pub enum TorrentCommand {
     PeerChoke,
 
     Block(String, u32, u32, Vec<u8>),
-    PieceAcquired(u32),
     Have(String, u32),
 
     NotInterested,
@@ -28,7 +27,6 @@ pub enum TorrentCommand {
     ClientInterested,
     PeerInterested(String),
 
-    ClientBitfield(Vec<u8>, Option<i64>),
     PeerBitfield(String, Vec<u8>),
 
     RequestDownload(u32, i64, i64),
@@ -69,6 +67,17 @@ pub enum TorrentCommand {
     },
 
     UnresponsivePeer(String),
+
+    ValidationComplete(Vec<u32>),
+
+    BlockSent {
+        peer_id: String,
+        bytes: u64,
+    },
+
+    ValidationProgress(u32),
+
+    FatalStorageError(String),
 }
 
 pub struct TorrentCommandSummary<'a>(pub &'a TorrentCommand);
@@ -82,14 +91,6 @@ impl fmt::Debug for TorrentCommandSummary<'_> {
                     index,
                     begin,
                     data.len()
-                )
-            }
-            TorrentCommand::ClientBitfield(bitfield, torrent_metadata_length) => {
-                write!(
-                    f,
-                    "CLIENT_BITFIELD(bitfield: {}, len: {:?})",
-                    bitfield.len(),
-                    torrent_metadata_length
                 )
             }
             TorrentCommand::PeerBitfield(peer_id, bitfield) => {
