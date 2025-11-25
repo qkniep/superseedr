@@ -17,6 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60 # Safety net to prevent hanging jobs costing $$
     
+    permissions:
+      contents: write       # Required to push the new branch with seeds
+      pull-requests: write  # Required to create the Pull Request
+
     steps:
     - uses: actions/checkout@v4
 
