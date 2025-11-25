@@ -1528,6 +1528,7 @@ mod tests {
         Torrent {
             announce: Some("http://tracker.test".to_string()),
             announce_list: None,
+            url_list: None,
             info: Info {
                 name: "test_torrent".to_string(),
                 piece_length: 16384,                 // 16KB
