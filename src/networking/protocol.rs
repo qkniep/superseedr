@@ -665,7 +665,7 @@ mod tests {
             let payload: ExtendedHandshakePayload =
                 serde_bencode::from_bytes(&payload_bytes).unwrap();
 
-            assert_eq!(payload.metadata_size, Some(metadata_size as i64));
+            assert_eq!(payload.metadata_size, Some(metadata_size));
             assert!(payload.m.contains_key("ut_pex"));
             assert!(payload.m.contains_key("ut_metadata"));
         } else {

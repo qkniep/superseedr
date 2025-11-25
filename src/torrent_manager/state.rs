@@ -2112,7 +2112,7 @@ mod tests {
                 peer_id: "peer_B".into(),
                 piece_index: 0,
                 block_offset: 0,
-                data: data,
+                data,
             });
         }));
 
@@ -2741,7 +2741,7 @@ fn check_invariants(state: &TorrentState) {
     );
 
     // 9. Pieces Remaining Synchronization (Optimization Check)
-    if let Some(_) = &state.torrent {
+    if state.torrent.is_some() {
         // Count how many pieces in the bitfield are NOT done
         let actual_remaining = state
             .piece_manager
@@ -2751,7 +2751,7 @@ fn check_invariants(state: &TorrentState) {
             .count();
 
         assert_eq!(
-            state.piece_manager.pieces_remaining as usize, actual_remaining,
+            state.piece_manager.pieces_remaining, actual_remaining,
             "Drift detected! PieceManager thinks {} pieces left, but Bitfield shows {}",
             state.piece_manager.pieces_remaining, actual_remaining
         );
@@ -3687,7 +3687,7 @@ mod prop_tests {
                     let _ = initial_state.update(action.clone());
                 }));
 
-                if let Err(_) = result {
+                if result.is_err() {
                      // If we panicked, the test fails here.
                      // Proptest will output the `initial_state` and the `actions` vector.
                      panic!("Deep State Fuzzing Triggered Panic!");
@@ -3951,14 +3951,14 @@ mod prop_tests {
             }
 
             fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
-                let mut strategies = Vec::new();
-
-                // Global Actions
-                strategies.push(Just(Action::Tick { dt_ms: 1000 }).boxed());
-                strategies.push(Just(Action::Cleanup).boxed());
-                strategies.push(Just(Action::FatalError).boxed());
-                strategies.push(Just(Action::Shutdown).boxed());
-                strategies.push(Just(Action::Delete).boxed());
+                let mut strategies = vec![
+                    // Global Actions
+                    Just(Action::Tick { dt_ms: 1000 }).boxed(),
+                    Just(Action::Cleanup).boxed(),
+                    Just(Action::FatalError).boxed(),
+                    Just(Action::Shutdown).boxed(),
+                    Just(Action::Delete).boxed(),
+                ];
 
                 // Re-Init
                 strategies.push(
@@ -4167,20 +4167,21 @@ mod prop_tests {
                     (None, TorrentStatus::AwaitingMetadata)
                 };
 
-                let mut state = TorrentState::default();
-                state.torrent = torrent;
-
-                if ref_state.has_metadata {
-                    state
-                        .piece_manager
-                        .set_initial_fields(ref_state.total_pieces as usize, false);
+                let piece_manager = if ref_state.has_metadata {
+                    let mut pm = PieceManager::new();
+                    pm.set_initial_fields(ref_state.total_pieces as usize, false);
+                    pm
                 } else {
-                    state.piece_manager = PieceManager::new();
-                }
+                    PieceManager::new()
+                };
 
-                state.torrent_status = status;
-                state.is_paused = ref_state.paused;
-                state
+                TorrentState {
+                    torrent,
+                    torrent_status: status,
+                    is_paused: ref_state.paused,
+                    piece_manager,
+                    ..Default::default()
+                }
             }
 
             fn apply(

@@ -343,7 +343,7 @@ mod tests {
 
         let peer1_bitfield = vec![true, true, false, true]; // Has 0, 1, 3
         let peer2_bitfield = vec![true, false, true, true]; // Has 0, 2, 3
-        let peer_bitfields = vec![peer1_bitfield, peer2_bitfield];
+        let peer_bitfields = [peer1_bitfield, peer2_bitfield];
 
         pm.update_rarity(peer_bitfields.iter());
 
