@@ -28,8 +28,8 @@ pub async fn web_seed_worker(
         return;
     }
 
-    let num_pieces = (total_size + piece_length - 1) / piece_length;
-    let bitfield_len = (num_pieces + 7) / 8;
+    let num_pieces = total_size.div_ceil(piece_length);
+    let bitfield_len = num_pieces.div_ceil(8);
     let full_bitfield = vec![255u8; bitfield_len as usize];
 
     if manager_tx
