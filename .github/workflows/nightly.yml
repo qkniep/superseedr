@@ -39,3 +39,19 @@ jobs:
     - name: Run Deep Tests
       # If this fails, check the logs for "seed: <number>" to reproduce locally
       run: cargo test --verbose --release
+
+    - name: Create Regression PR
+      # This runs ONLY if the previous "cargo test" step failed
+      if: failure() 
+      uses: peter-evans/create-pull-request@v7
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        commit-message: "test: add fuzzing regression seeds"
+        title: "🐛 Fuzzing Failure: New Regression Cases Found"
+        body: |
+          ## 💥 Fuzzing Failure Detected
+          The nightly fuzzing suite detected a crash or logic error. 
+          
+          The cryptographic seeds for these failures have been automatically appended to the regression file. Merging this PR will ensure these specific edge cases are permanently added to the test suite and re-run on every build to prevent regression.
+        branch: fuzzing-failures
+        delete-branch: true
