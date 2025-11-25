@@ -1,12 +1,8 @@
 # superseedr - A Rust BitTorrent Client in your Terminal
 
-![Coverage](https://img.shields.io/badge/Logic_Verification-Model--Based_Fuzzing-blueviolet?style=flat-square)
-![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr)
-![crates.io](https://img.shields.io/crates/v/superseedr)
-![License](https://img.shields.io/github/license/Jagalite/superseedr)
-[![Rust](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml)
-[![Nightly Fuzzing](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml)
-[![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/)
+[![Rust](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml) [![Nightly Fuzzing](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml) ![Verification](https://img.shields.io/badge/Logic_Verification-Model--Based_Fuzzing-blueviolet?style=flat-square)
+
+![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr) ![crates.io](https://img.shields.io/crates/v/superseedr) ![License](https://img.shields.io/github/license/Jagalite/superseedr) [![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/)
 
 superseedr is a modern Rust BitTorrent client featuring a high-performance terminal UI, real-time swarm observability, secure VPN-aware Docker setups, and zero manual network configuration. It is fast, privacy-oriented, and built for both desktop users and homelab/server workflows.
 
@@ -35,11 +31,11 @@ Download the latest release for your platform:
 ## Usage
 Open up a terminal and run:
 ```bash
-# Optimal performance: ulimit -u 65536
 superseedr
 ```
 > [!NOTE]  
 > Add torrents by clicking magnet links in your browser or opening .torrent files.
+> Optimal performance by increasing file descriptor limits: ulimit -n 65536
 
 ## ⚡ Quick Start
 ```bash
