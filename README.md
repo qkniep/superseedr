@@ -1,9 +1,8 @@
 # superseedr - A Rust BitTorrent Client in your Terminal
 
-![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr)
-![crates.io](https://img.shields.io/crates/v/superseedr)
-![License](https://img.shields.io/github/license/Jagalite/superseedr)
-[![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/)
+[![Rust](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml) [![Nightly Fuzzing](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml) ![Verification](https://img.shields.io/badge/Logic_Verification-Model--Based_Fuzzing-blueviolet?style=flat-square)
+
+![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr) ![crates.io](https://img.shields.io/crates/v/superseedr) ![License](https://img.shields.io/github/license/Jagalite/superseedr) [![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/)
 
 superseedr is a modern Rust BitTorrent client featuring a high-performance terminal UI, real-time swarm observability, secure VPN-aware Docker setups, and zero manual network configuration. It is fast, privacy-oriented, and built for both desktop users and homelab/server workflows.
 
@@ -32,11 +31,11 @@ Download the latest release for your platform:
 ## Usage
 Open up a terminal and run:
 ```bash
-# ulimit -u 65536
 superseedr
 ```
 > [!NOTE]  
 > Add torrents by clicking magnet links in your browser or opening .torrent files.
+> Optimal performance by increasing file descriptor limits: ulimit -n 65536
 
 ## ⚡ Quick Start
 ```bash
@@ -147,29 +146,35 @@ docker compose -f docker-compose.standalone.yml up -d && docker compose attach s
 
 ---
 
-## Reliability & Correctness
+## 🛡️ Reliability & Correctness
 
-`superseedr` is built on a foundation of **Model-Based Testing (MBT)** and **Deterministic Simulation**. Unlike traditional clients that rely primarily on integration tests, our core protocol engine is verified against an abstract reference model to ensure logical consistency under chaos.
+`superseedr` is built on a foundation of **Model-Based Testing (MBT)** and **Deterministic Simulation**. Unlike legacy clients that rely on "testing in production," our core protocol engine is mathematically verified against an abstract reference model.
 
-### The Testing Pipeline
-The engine is subjected to a continuous fuzzing pipeline that simulates years of edge-case runtime in minutes.
+### The "Oracle" Pipeline
+Every release is verified against a massive fuzzing suite that simulates **millions of state transitions** in minutes. This pipeline subjects the engine to deterministic network chaos to prove the absence of logic bugs before you ever run the app.
 
-* **Property-Based State Machine:** We define an abstract "Oracle" (Reference Model) that predicts exactly how the client should behave. The real implementation is continuously fuzzed against this model to detect state desynchronization.
-* **Deterministic Network Simulation:** A custom network shim sits between the test runner and the client. It deterministically injects **packet loss (0.5%)**, **duplication (1%)**, **reordering**, and **variable latency (10ms–300ms)**.
-* **Adversarial Protocol Coverage:** The fuzzer aggressively targets complex logic paths, including:
-    * **Endgame Mode:** Race conditions when requesting the final blocks from multiple peers.
-    * **Tit-for-Tat Evasion:** Malicious peers that snub us or send garbage data.
+* **Property-Based Fuzzing:** We define an abstract "Oracle" that predicts exactly how the client *should* behave. The real engine is continuously fuzzed against this model to detect even the slightest state desynchronization.
+* **Deterministic Chaos:** A custom network shim injects **packet loss**, **duplication**, and **reordering** (TCP/uTP simulation). If a crash occurs, the test suite prints a cryptographic seed, allowing us to replay the exact sequence of events instantly.
+* **Adversarial Protocol Coverage:** We aggressively test hostile scenarios:
+    * **Endgame Mode:** Verified deduplication when requesting the final blocks from multiple peers.
+    * **Tit-for-Tat Evasion:** Handling malicious peers that "snub" us or send garbage data.
     * **Lifecycle Races:** Simultaneous Pause, Resume, and Delete commands while disk I/O is pending.
 
 ### Why This Matters
-By decoupling **Core Logic** (State Transitions) from **Side Effects** (I/O), we ensure that logic bugs—such as deadlocks, integer overflows in speed calculations, or peer map desyncs—are caught by the fuzzer, not by users. 
+`superseedr` uses its fuzzing engine to proactively hunt down "impossible" bugs before release.
+Every release is verified against a massive fuzzing suite, subjecting the engine to millions of deterministic state transitions under simulated network chaos (nightly fuzzing).
 
-Failures found by our test suite prints a **cryptographic seed**, allowing us to replay the exact sequence of network packets and user actions that caused the crash, making "heisenbugs" a thing of the past.
+**Real-world bugs caught and fixed by our fuzzer include:**
+* **Endgame Races:** Detected subtle data corruption when multiple peers sent the final missing piece simultaneously.
+* **Lifecycle Deadlocks:** Fixed rare hangs that occurred when a user paused a torrent exactly while a disk write was flushing.
+* **Arithmetic Overflows:** Identified edge cases in speed calculations that only occurred after days of continuous uptime.
+* **Peer State Desync:** Prevented "ghost peers" where the client and the remote peer disagreed on which pieces were unchoked.
 
-Every release is verified against a massive 1-million-case fuzzing suite, subjecting the engine to over 10 minutes (m1 mac) of continuous, deterministic network chaos to prove the absence of logic bugs.
+**Permanent Regression Testing**
+When a failure is found, the **cryptographic seed is automatically saved to a regression file** checked into the repository. This guarantees that the exact random sequence that caused the crash is re-run on every future `cargo test`, ensuring the bug can never return.
 
 <details>
-<summary>Click to expand: How the testing actually works (flowchart)</summary>
+<summary><strong>Deep Dive: The Testing Architecture (Mermaid)</strong></summary>
 
 ```mermaid
 flowchart TD
@@ -208,9 +213,8 @@ flowchart TD
 
 ---
 
-### Private Tracker Builds
-This installation is intended for private trackers, as it disables peer-discovery features (DHT & PEX).
-These features will not be included in the final build of the private versions of superseedr.
+### Private Tracker Support 
+`superseedr` fully supports private trackers. We offer specific builds (releases page) that strictly disable DHT and PEX to comply with private tracker rules while maintaining high-performance peering.
 
 ### Core Protocol & Peer Discovery
 - **Real Time Performance Tuning:** Periodic resource optimizations (file handles) to maximize speeds and disk stability.

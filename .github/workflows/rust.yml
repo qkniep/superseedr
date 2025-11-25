@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
+    
     - name: Cache cargo
       uses: actions/cache@v4
       with:
@@ -38,11 +39,16 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo apt-get update
+        rustup component add rustfmt clippy
 
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+    - name: Check Formatting
+      run: cargo fmt --all --check
+
+    - name: Lint with Clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+
+    - name: Run Tests
+      run: cargo test --all-targets --all-features
 
   package_linux:
     name: Build Linux Artifacts (${{ matrix.suffix }})

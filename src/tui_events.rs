@@ -819,9 +819,10 @@ mod tests {
 
     /// Creates a mock TorrentDisplayState for testing.
     fn create_mock_display_state(peer_count: usize) -> TorrentDisplayState {
-        let mut display_state = TorrentDisplayState::default();
-        display_state.latest_state = create_mock_metrics(peer_count);
-        display_state
+        TorrentDisplayState {
+            latest_state: create_mock_metrics(peer_count),
+            ..Default::default()
+        }
     }
 
     /// Creates a mock AppState for testing navigation.

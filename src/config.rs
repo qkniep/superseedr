@@ -274,7 +274,7 @@ mod tests {
         // Assert torrents
         assert_eq!(settings.torrents.len(), 2);
         assert_eq!(settings.torrents[0].name, "My Test Torrent");
-        assert_eq!(settings.torrents[0].validation_status, true);
+        assert!(settings.torrents[0].validation_status);
         assert_eq!(
             settings.torrents[0].download_path,
             PathBuf::from("/downloads/my_test_torrent")
@@ -330,7 +330,7 @@ mod tests {
             PathBuf::from("/partial/path")
         );
         assert_eq!(settings.torrents[0].torrent_or_magnet, ""); // Default for String
-        assert_eq!(settings.torrents[0].validation_status, false); // Default for bool
+        assert!(!settings.torrents[0].validation_status); // Default for bool
         assert_eq!(
             settings.torrents[0].torrent_control_state,
             TorrentControlState::default()
