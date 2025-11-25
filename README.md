@@ -1,5 +1,6 @@
 # superseedr - A Rust BitTorrent Client in your Terminal
 
+![Coverage](https://img.shields.io/badge/Logic_Verification-Model--Based_Fuzzing-blueviolet?style=flat-square)
 ![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr)
 ![crates.io](https://img.shields.io/crates/v/superseedr)
 ![License](https://img.shields.io/github/license/Jagalite/superseedr)
@@ -34,7 +35,7 @@ Download the latest release for your platform:
 ## Usage
 Open up a terminal and run:
 ```bash
-# ulimit -u 65536
+# Optimal performance: ulimit -u 65536
 superseedr
 ```
 > [!NOTE]  
@@ -149,18 +150,18 @@ docker compose -f docker-compose.standalone.yml up -d && docker compose attach s
 
 ---
 
-## Reliability & Correctness
+## 🛡️ Reliability & Correctness
 
-`superseedr` is built on a foundation of **Model-Based Testing (MBT)** and **Deterministic Simulation**. Unlike traditional clients that rely primarily on integration tests, our core protocol engine is verified against an abstract reference model to ensure logical consistency under chaos.
+`superseedr` is built on a foundation of **Model-Based Testing (MBT)** and **Deterministic Simulation**. Unlike legacy clients that rely on "testing in production," our core protocol engine is mathematically verified against an abstract reference model.
 
-### The Testing Pipeline
-The engine is subjected to a continuous fuzzing pipeline that simulates years of edge-case runtime in minutes.
+### The "Oracle" Pipeline
+Every release is verified against a massive fuzzing suite that simulates **millions of state transitions** in minutes. This pipeline subjects the engine to deterministic network chaos to prove the absence of logic bugs before you ever run the app.
 
-* **Property-Based State Machine:** We define an abstract "Oracle" (Reference Model) that predicts exactly how the client should behave. The real implementation is continuously fuzzed against this model to detect state desynchronization.
-* **Deterministic Network Simulation:** A custom network shim sits between the test runner and the client. It deterministically injects **packet loss (0.5%)**, **duplication (1%)**, **reordering**, and **variable latency (10ms–300ms)**.
-* **Adversarial Protocol Coverage:** The fuzzer aggressively targets complex logic paths, including:
-    * **Endgame Mode:** Race conditions when requesting the final blocks from multiple peers.
-    * **Tit-for-Tat Evasion:** Malicious peers that snub us or send garbage data.
+* **Property-Based Fuzzing:** We define an abstract "Oracle" that predicts exactly how the client *should* behave. The real engine is continuously fuzzed against this model to detect even the slightest state desynchronization.
+* **Deterministic Chaos:** A custom network shim injects **packet loss**, **duplication**, and **reordering** (TCP/uTP simulation). If a crash occurs, the test suite prints a cryptographic seed, allowing us to replay the exact sequence of events instantly.
+* **Adversarial Protocol Coverage:** We aggressively test hostile scenarios:
+    * **Endgame Mode:** Verified deduplication when requesting the final blocks from multiple peers.
+    * **Tit-for-Tat Evasion:** Handling malicious peers that "snub" us or send garbage data.
     * **Lifecycle Races:** Simultaneous Pause, Resume, and Delete commands while disk I/O is pending.
 
 ### Why This Matters
@@ -168,10 +169,10 @@ By decoupling **Core Logic** (State Transitions) from **Side Effects** (I/O), we
 
 Failures found by our test suite prints a **cryptographic seed**, allowing us to replay the exact sequence of network packets and user actions that caused the crash, making "heisenbugs" a thing of the past.
 
-Every release is verified against a massive 1-million-case fuzzing suite, subjecting the engine to over 10 minutes (m1 mac) of continuous, deterministic network chaos to prove the absence of logic bugs.
+Every release is verified against a massive fuzzing suite, subjecting the engine to millions of deterministic state transitions under simulated network chaos (nightly fuzzing).
 
 <details>
-<summary>Click to expand: How the testing actually works (flowchart)</summary>
+<summary><strong>Deep Dive: The Testing Architecture (Mermaid)</strong></summary>
 
 ```mermaid
 flowchart TD
@@ -210,9 +211,8 @@ flowchart TD
 
 ---
 
-### Private Tracker Builds
-This installation is intended for private trackers, as it disables peer-discovery features (DHT & PEX).
-These features will not be included in the final build of the private versions of superseedr.
+### Private Tracker Support 
+`superseedr` fully supports private trackers. We offer specific builds (releases page) that strictly disable DHT and PEX to comply with private tracker rules while maintaining high-performance peering.
 
 ### Core Protocol & Peer Discovery
 - **Real Time Performance Tuning:** Periodic resource optimizations (file handles) to maximize speeds and disk stability.
