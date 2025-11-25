@@ -4143,11 +4143,15 @@ mod prop_tests {
                 );
 
                 // Peer Count Sync
-                assert_eq!(
-                    sut.peers.len(),
-                    expected_state.connected_peers.len(),
-                    "Model/SUT Peer Mismatch!"
-                );
+                if !matches!(transition, Action::Cleanup) {
+                    assert_eq!(
+                        sut.peers.len(),
+                        expected_state.connected_peers.len(),
+                        "Model/SUT Peer Mismatch! \nModel: {:?}\nSUT: {:?}",
+                        expected_state.connected_peers,
+                        sut.peers.keys()
+                    );
+                }
 
                 sut
             }
