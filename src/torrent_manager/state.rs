@@ -885,34 +885,51 @@ impl TorrentState {
                 effects
             }
 
-                Action::PieceWrittenToDisk { peer_id, piece_index } => {
+            Action::PieceWrittenToDisk {
+                peer_id,
+                piece_index,
+            } => {
                 // GUARD: Protect against reordered events (e.g. arriving before Metadata)
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
                 }
 
                 // Any stray write completions (e.g. from before a restart) should be dropped.
-                if self.torrent_status == TorrentStatus::Validating || self.torrent_status == TorrentStatus::AwaitingMetadata {
+                if self.torrent_status == TorrentStatus::Validating
+                    || self.torrent_status == TorrentStatus::AwaitingMetadata
+                {
                     return vec![Effect::DoNothing];
                 }
 
                 let mut effects = Vec::new();
-                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
-                    if let Some(peer) = self.peers.get_mut(&peer_id) { peer.pending_requests.remove(&piece_index); }
+                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done)
+                {
+                    if let Some(peer) = self.peers.get_mut(&peer_id) {
+                        peer.pending_requests.remove(&piece_index);
+                    }
                     effects.extend(self.update(Action::AssignWork { peer_id }));
                     return effects;
                 }
                 let peers_to_cancel = self.piece_manager.mark_as_complete(piece_index);
                 effects.push(Effect::EmitManagerEvent(ManagerEvent::DiskWriteFinished));
-                if let Some(peer) = self.peers.get_mut(&peer_id) { peer.pending_requests.remove(&piece_index); }
-                effects.extend(self.update(Action::AssignWork { peer_id: peer_id.clone() }));
+                if let Some(peer) = self.peers.get_mut(&peer_id) {
+                    peer.pending_requests.remove(&piece_index);
+                }
+                effects.extend(self.update(Action::AssignWork {
+                    peer_id: peer_id.clone(),
+                }));
                 for other_peer in peers_to_cancel {
                     if other_peer != peer_id {
                         if let Some(peer) = self.peers.get_mut(&other_peer) {
                             peer.pending_requests.remove(&piece_index);
-                            effects.push(Effect::SendToPeer { peer_id: other_peer.clone(), cmd: Box::new(TorrentCommand::Cancel(piece_index)) });
+                            effects.push(Effect::SendToPeer {
+                                peer_id: other_peer.clone(),
+                                cmd: Box::new(TorrentCommand::Cancel(piece_index)),
+                            });
                         }
-                        effects.extend(self.update(Action::AssignWork { peer_id: other_peer }));
+                        effects.extend(self.update(Action::AssignWork {
+                            peer_id: other_peer,
+                        }));
                     }
                 }
                 effects.push(Effect::BroadcastHave { piece_index });
@@ -1201,18 +1218,22 @@ impl TorrentState {
                 for peer_id in stuck_peers {
                     if let Some(removed_peer) = self.peers.remove(&peer_id) {
                         for piece_index in removed_peer.pending_requests {
-                            if self.piece_manager.bitfield.get(piece_index as usize) != Some(&PieceStatus::Done) {
+                            if self.piece_manager.bitfield.get(piece_index as usize)
+                                != Some(&PieceStatus::Done)
+                            {
                                 self.piece_manager.requeue_pending_to_need(piece_index);
                             }
                         }
-                        
-                        effects.push(Effect::DisconnectPeer { peer_id: peer_id.clone() });
+
+                        effects.push(Effect::DisconnectPeer {
+                            peer_id: peer_id.clone(),
+                        });
                         effects.push(Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
                             info_hash: self.info_hash.clone(),
                         }));
                     }
                 }
-                
+
                 self.number_of_successfully_connected_peers = self.peers.len();
 
                 let am_seeding = !self.piece_manager.bitfield.is_empty()
@@ -2107,7 +2128,7 @@ mod tests {
         // (race condition), the PieceManager would panic trying to mark a 'Done' piece as done.
 
         let mut state = create_empty_state();
-        
+
         // FIX: Explicitly set status to Standard.
         // Otherwise, the new safety guard in PieceWrittenToDisk ignores the action.
         state.torrent_status = TorrentStatus::Standard;
@@ -3876,8 +3897,8 @@ mod prop_tests {
     // =========================================================================
     mod state_machine {
         use super::*;
+        use super::{inject_network_faults, inject_reordering_faults};
         use crate::torrent_manager::state::tests::create_dummy_torrent;
-        use super::{inject_network_faults, inject_reordering_faults}; 
         use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
         use std::collections::HashSet;
 
@@ -3889,7 +3910,7 @@ mod prop_tests {
             pub paused: bool,
             pub status: TorrentStatus,
             pub has_metadata: bool,
-            pub downloaded_pieces: HashSet<u32>, 
+            pub downloaded_pieces: HashSet<u32>,
         }
 
         impl TorrentModel {
@@ -3925,7 +3946,8 @@ mod prop_tests {
                 prop_oneof![
                     Just(TorrentModel::new_file(5)),
                     Just(TorrentModel::new_magnet(5))
-                ].boxed()
+                ]
+                .boxed()
             }
 
             fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
@@ -3939,9 +3961,14 @@ mod prop_tests {
                 strategies.push(Just(Action::Delete).boxed());
 
                 // Re-Init
-                strategies.push(any::<bool>().prop_map(|paused| 
-                    Action::TorrentManagerInit { is_paused: paused, announce_immediately: !paused }
-                ).boxed());
+                strategies.push(
+                    any::<bool>()
+                        .prop_map(|paused| Action::TorrentManagerInit {
+                            is_paused: paused,
+                            announce_immediately: !paused,
+                        })
+                        .boxed(),
+                );
 
                 // Pause/Resume
                 if state.paused {
@@ -3952,50 +3979,101 @@ mod prop_tests {
 
                 // Phase Transitions
                 if state.status == TorrentStatus::AwaitingMetadata {
-                    strategies.push(Just(Action::MetadataReceived { 
-                        torrent: Box::new(create_dummy_torrent(state.total_pieces as usize)),
-                        metadata_length: (state.total_pieces * 16384) as i64
-                    }).boxed());
+                    strategies.push(
+                        Just(Action::MetadataReceived {
+                            torrent: Box::new(create_dummy_torrent(state.total_pieces as usize)),
+                            metadata_length: (state.total_pieces * 16384) as i64,
+                        })
+                        .boxed(),
+                    );
                 }
 
                 if state.status == TorrentStatus::Validating {
                     // Fuzzing: Simulate finding 0 to all pieces
                     let max_pieces = state.total_pieces;
-                    strategies.push(proptest::collection::vec(0..max_pieces, 0..max_pieces as usize)
-                        .prop_map(|pieces| Action::ValidationComplete { 
-                            completed_pieces: pieces 
-                        }).boxed());
+                    strategies.push(
+                        proptest::collection::vec(0..max_pieces, 0..max_pieces as usize)
+                            .prop_map(|pieces| Action::ValidationComplete {
+                                completed_pieces: pieces,
+                            })
+                            .boxed(),
+                    );
                 }
 
-                if state.status == TorrentStatus::Standard || state.status == TorrentStatus::Endgame {
+                if state.status == TorrentStatus::Standard || state.status == TorrentStatus::Endgame
+                {
                     strategies.push(Just(Action::CheckCompletion).boxed());
                 }
 
                 // Connection Actions
                 strategies.push(
-                    any::<String>().prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id }).boxed()
+                    any::<String>()
+                        .prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id })
+                        .boxed(),
                 );
 
                 // Peer Interaction
                 if !state.connected_peers.is_empty() && state.has_metadata {
-                    let peer_strategy = prop::sample::select(Vec::from_iter(state.connected_peers.clone()));
+                    let peer_strategy =
+                        prop::sample::select(Vec::from_iter(state.connected_peers.clone()));
                     let piece_strategy = 0..state.total_pieces;
 
-                    strategies.push(peer_strategy.clone().prop_map(|id| Action::PeerDisconnected { peer_id: id }).boxed());
-                    strategies.push(peer_strategy.clone().prop_map(|id| Action::PeerUnchoked { peer_id: id }).boxed());
+                    strategies.push(
+                        peer_strategy
+                            .clone()
+                            .prop_map(|id| Action::PeerDisconnected { peer_id: id })
+                            .boxed(),
+                    );
+                    strategies.push(
+                        peer_strategy
+                            .clone()
+                            .prop_map(|id| Action::PeerUnchoked { peer_id: id })
+                            .boxed(),
+                    );
 
-                    if state.status != TorrentStatus::Validating && state.status != TorrentStatus::AwaitingMetadata {
-                        strategies.push((peer_strategy.clone(), piece_strategy.clone())
-                            .prop_map(|(id, idx)| Action::PeerHavePiece { peer_id: id, piece_index: idx }).boxed());
-                        
-                        strategies.push(peer_strategy.clone().prop_map(|id| Action::AssignWork { peer_id: id }).boxed());
+                    if state.status != TorrentStatus::Validating
+                        && state.status != TorrentStatus::AwaitingMetadata
+                    {
+                        strategies.push(
+                            (peer_strategy.clone(), piece_strategy.clone())
+                                .prop_map(|(id, idx)| Action::PeerHavePiece {
+                                    peer_id: id,
+                                    piece_index: idx,
+                                })
+                                .boxed(),
+                        );
 
-                        strategies.push((
-                            peer_strategy.clone(), piece_strategy.clone(), any::<u32>(), prop::collection::vec(any::<u8>(), 1..1024)
-                        ).prop_map(|(id, idx, offset, data)| Action::IncomingBlock { peer_id: id, piece_index: idx, block_offset: offset, data }).boxed());
-                        
-                        strategies.push((peer_strategy.clone(), piece_strategy.clone())
-                            .prop_map(|(id, idx)| Action::PieceWrittenToDisk { peer_id: id, piece_index: idx }).boxed());
+                        strategies.push(
+                            peer_strategy
+                                .clone()
+                                .prop_map(|id| Action::AssignWork { peer_id: id })
+                                .boxed(),
+                        );
+
+                        strategies.push(
+                            (
+                                peer_strategy.clone(),
+                                piece_strategy.clone(),
+                                any::<u32>(),
+                                prop::collection::vec(any::<u8>(), 1..1024),
+                            )
+                                .prop_map(|(id, idx, offset, data)| Action::IncomingBlock {
+                                    peer_id: id,
+                                    piece_index: idx,
+                                    block_offset: offset,
+                                    data,
+                                })
+                                .boxed(),
+                        );
+
+                        strategies.push(
+                            (peer_strategy.clone(), piece_strategy.clone())
+                                .prop_map(|(id, idx)| Action::PieceWrittenToDisk {
+                                    peer_id: id,
+                                    piece_index: idx,
+                                })
+                                .boxed(),
+                        );
                     }
                 }
 
@@ -4039,10 +4117,10 @@ mod prop_tests {
                         if !state.has_metadata {
                             state.has_metadata = true;
                             state.status = TorrentStatus::Validating;
-                            state.downloaded_pieces.clear(); 
+                            state.downloaded_pieces.clear();
                         }
                     }
-                    
+
                     Action::ValidationComplete { completed_pieces } => {
                         if state.status == TorrentStatus::Validating {
                             state.status = TorrentStatus::Standard;
@@ -4058,7 +4136,9 @@ mod prop_tests {
 
                     Action::PieceWrittenToDisk { piece_index, .. } => {
                         // FIX: Model now mimics SUT's completion logic
-                        if state.status == TorrentStatus::Standard || state.status == TorrentStatus::Endgame {
+                        if state.status == TorrentStatus::Standard
+                            || state.status == TorrentStatus::Endgame
+                        {
                             state.downloaded_pieces.insert(*piece_index);
                             if state.downloaded_pieces.len() as u32 == state.total_pieces {
                                 state.status = TorrentStatus::Done;
@@ -4079,20 +4159,25 @@ mod prop_tests {
 
             fn init_test(ref_state: &TorrentModel) -> Self::SystemUnderTest {
                 let (torrent, status) = if ref_state.has_metadata {
-                    (Some(create_dummy_torrent(ref_state.total_pieces as usize)), TorrentStatus::Validating)
+                    (
+                        Some(create_dummy_torrent(ref_state.total_pieces as usize)),
+                        TorrentStatus::Validating,
+                    )
                 } else {
                     (None, TorrentStatus::AwaitingMetadata)
                 };
 
                 let mut state = TorrentState::default();
                 state.torrent = torrent;
-                
+
                 if ref_state.has_metadata {
-                    state.piece_manager.set_initial_fields(ref_state.total_pieces as usize, false);
+                    state
+                        .piece_manager
+                        .set_initial_fields(ref_state.total_pieces as usize, false);
                 } else {
                     state.piece_manager = PieceManager::new();
                 }
-                
+
                 state.torrent_status = status;
                 state.is_paused = ref_state.paused;
                 state
@@ -4116,11 +4201,15 @@ mod prop_tests {
                 let _ = sut.update(transition.clone());
 
                 // Advance Model to Post-State for comparison
-                let expected_state = <TorrentModel as ReferenceStateMachine>::apply(ref_state.clone(), &transition);
+                let expected_state =
+                    <TorrentModel as ReferenceStateMachine>::apply(ref_state.clone(), &transition);
 
                 // Metadata Integrity
-                assert_eq!(sut.torrent.is_some(), expected_state.has_metadata, 
-                    "SUT Metadata existence mismatch!");
+                assert_eq!(
+                    sut.torrent.is_some(),
+                    expected_state.has_metadata,
+                    "SUT Metadata existence mismatch!"
+                );
 
                 // Status Sync
                 let sut_status_norm = if sut.torrent_status == TorrentStatus::Endgame {
@@ -4136,7 +4225,7 @@ mod prop_tests {
                 };
 
                 assert_eq!(
-                    sut_status_norm, 
+                    sut_status_norm,
                     model_status_norm,
                     "Status Mismatch! SUT: {:?} (Normalized), Model: {:?} (Normalized). Action: {:?}", 
                     sut.torrent_status, expected_state.status, transition
@@ -4199,7 +4288,7 @@ mod prop_tests {
             #[test]
             fn test_state_machine_network_reordering(
                 (initial_state, clean_actions, _) in TorrentModel::sequential_strategy(20),
-                seed in any::<u64>() 
+                seed in any::<u64>()
             ) {
                 let chaotic_actions = inject_reordering_faults(clean_actions, seed);
                 let mut ref_state = initial_state.clone();
