@@ -161,11 +161,17 @@ Every release is verified against a massive fuzzing suite that simulates **milli
     * **Lifecycle Races:** Simultaneous Pause, Resume, and Delete commands while disk I/O is pending.
 
 ### Why This Matters
-By decoupling **Core Logic** (State Transitions) from **Side Effects** (I/O), we ensure that logic bugs—such as deadlocks, integer overflows in speed calculations, or peer map desyncs—are caught by the fuzzer, not by users. 
-
-Failures found by our test suite prints a **cryptographic seed**, allowing us to replay the exact sequence of network packets and user actions that caused the crash, making "heisenbugs" a thing of the past.
-
+`superseedr` uses its fuzzing engine to proactively hunt down "impossible" bugs before release.
 Every release is verified against a massive fuzzing suite, subjecting the engine to millions of deterministic state transitions under simulated network chaos (nightly fuzzing).
+
+**Real-world bugs caught and fixed by our fuzzer include:**
+* **Endgame Races:** Detected subtle data corruption when multiple peers sent the final missing piece simultaneously.
+* **Lifecycle Deadlocks:** Fixed rare hangs that occurred when a user paused a torrent exactly while a disk write was flushing.
+* **Arithmetic Overflows:** Identified edge cases in speed calculations that only occurred after days of continuous uptime.
+* **Peer State Desync:** Prevented "ghost peers" where the client and the remote peer disagreed on which pieces were unchoked.
+
+**Permanent Regression Testing**
+When a failure is found, the **cryptographic seed is automatically saved to a regression file** checked into the repository. This guarantees that the exact random sequence that caused the crash is re-run on every future `cargo test`, ensuring the bug can never return.
 
 <details>
 <summary><strong>Deep Dive: The Testing Architecture (Mermaid)</strong></summary>
