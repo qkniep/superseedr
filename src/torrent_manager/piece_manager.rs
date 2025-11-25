@@ -17,7 +17,7 @@ pub enum PieceStatus {
     Done,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PieceAssembler {
     pub buffer: Vec<u8>,
     pub received_blocks: HashSet<u32>,
@@ -33,7 +33,7 @@ impl std::fmt::Debug for PieceAssembler {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct PieceManager {
     pub bitfield: Vec<PieceStatus>,
     pub need_queue: Vec<u32>,
