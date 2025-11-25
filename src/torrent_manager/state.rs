@@ -44,6 +44,10 @@ pub enum Action {
     AssignWork {
         peer_id: String,
     },
+    RegisterPeer {
+        peer_id: String,
+        tx: Sender<TorrentCommand>,
+    },
     PeerSuccessfullyConnected {
         peer_id: String,
     },
@@ -178,11 +182,14 @@ pub enum Effect {
     BroadcastHave {
         piece_index: u32,
     },
-
     ConnectToPeer {
         ip: String,
         port: u16,
     },
+    StartWebSeed {
+        url: String,
+    },
+
     InitializeStorage,
     StartValidation,
     AnnounceToTracker {
@@ -638,7 +645,6 @@ impl TorrentState {
                         self.piece_manager
                             .mark_as_pending(piece_index, peer_id.clone());
 
-                        // ... (Endgame check unchanged) ...
                         if self.piece_manager.need_queue.is_empty()
                             && self.torrent_status != TorrentStatus::Endgame
                         {
@@ -675,6 +681,15 @@ impl TorrentState {
                     }
                 }
                 effects
+            }
+
+            Action::RegisterPeer { peer_id, tx } => {
+                if !self.peers.contains_key(&peer_id) {
+                    let mut peer_state = PeerState::new(peer_id.clone(), tx, self.now);
+                    peer_state.peer_id = peer_id.as_bytes().to_vec();
+                    self.peers.insert(peer_id, peer_state);
+                }
+                vec![Effect::DoNothing]
             }
 
             // --- Peer Lifecycle Actions ---
@@ -1091,7 +1106,15 @@ impl TorrentState {
                 self.validation_pieces_found = 0;
                 self.torrent_status = TorrentStatus::Validating;
 
-                vec![Effect::InitializeStorage, Effect::StartValidation]
+                let mut effects = vec![Effect::InitializeStorage, Effect::StartValidation];
+
+                if let Some(urls) = &torrent.url_list {
+                    for url in urls {
+                        effects.push(Effect::StartWebSeed { url: url.clone() });
+                    }
+                }
+
+                effects
             }
 
             Action::ValidationComplete { completed_pieces } => {

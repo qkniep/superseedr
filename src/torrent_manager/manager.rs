@@ -7,6 +7,7 @@ use crate::app::TorrentMetrics;
 use crate::resource_manager::ResourceManagerClient;
 use crate::resource_manager::ResourceManagerError;
 
+use crate::networking::web_seed_worker::web_seed_worker;
 use crate::networking::ConnectionType;
 
 use crate::token_bucket::TokenBucket;
@@ -1054,6 +1055,38 @@ impl TorrentManager {
                         .await;
                 });
             }
+
+            Effect::StartWebSeed { url } => {
+                let torrent_manager_tx = self.torrent_manager_tx.clone();
+                let (peer_tx, peer_rx) = tokio::sync::mpsc::channel(32);
+
+                let peer_id = format!("WEBSEED_{}", url);
+
+                self.apply_action(Action::RegisterPeer {
+                    peer_id: peer_id.clone(),
+                    tx: peer_tx,
+                });
+
+                let shutdown_rx = self.shutdown_tx.subscribe();
+
+                if let Some(torrent) = &self.state.torrent {
+                    let piece_len = torrent.info.piece_length as u64;
+                    let total_len = torrent.info.length as u64;
+
+                    tokio::spawn(async move {
+                        web_seed_worker(
+                            url,
+                            peer_id,
+                            piece_len,
+                            total_len,
+                            peer_rx,
+                            torrent_manager_tx,
+                            shutdown_rx,
+                        )
+                        .await;
+                    });
+                }
+            }
         }
     }
 
@@ -1477,10 +1510,10 @@ impl TorrentManager {
         let shutdown_tx = self.shutdown_tx.clone();
 
         let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(10);
-        self.state.peers.insert(
-            peer_ip_port.clone(),
-            PeerState::new(peer_ip_port.clone(), peer_session_tx, Instant::now()),
-        );
+        self.apply_action(Action::RegisterPeer {
+            peer_id: peer_ip_port.clone(),
+            tx: peer_session_tx,
+        });
 
         let bitfield = match self.state.torrent {
             None => None,
@@ -1978,10 +2011,10 @@ impl TorrentManager {
                             continue;
                         }
 
-                        self.state.peers.insert(
-                            peer_ip_port.clone(),
-                            PeerState::new(peer_ip_port.clone(), peer_session_tx, Instant::now()),
-                        );
+                        self.apply_action(Action::RegisterPeer {
+                            peer_id: peer_ip_port.clone(),
+                            tx: peer_session_tx,
+                        });
 
                         let bitfield = match self.state.torrent {
                             None => None,
