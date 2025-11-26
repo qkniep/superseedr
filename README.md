@@ -1,3 +1,13 @@
+```
+                                              _      
+                                             | |     
+  ___ _   _ _ __   ___ _ __ ___  ___  ___  __| |_ __ 
+ / __| | | | '_ \ / _ \ '__/ __|/ _ \/ _ \/ _` | '__|
+ \__ \ |_| | |_) |  __/ |  \__ \  __/  __/ (_| | |   
+ |___/\__,_| .__/ \___|_|  |___/\___|\___|\__,_|_|   
+           | |                                       
+           |_|                                    
+```
 # superseedr - A Rust BitTorrent Client in your Terminal
 
 [![Rust](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml) [![Nightly Fuzzing](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml) ![Verification](https://img.shields.io/badge/Logic_Verification-Model--Based_Fuzzing-blueviolet?style=flat-square)
