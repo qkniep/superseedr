@@ -2822,6 +2822,120 @@ fn check_invariants(state: &TorrentState) {
             panic!("Optimistic timer is set way too far in the future!");
         }
     }
+    // =========================================================================
+    // CATEGORY 5: LOGICAL INVARIANTS (Protocol & State Logic)
+    // =========================================================================
+
+    // 1. The "Capability" Check (Possession)
+    // We must never ask a peer for a piece they do not possess.
+    for (id, peer) in &state.peers {
+        for &piece_idx in &peer.pending_requests {
+            let has_piece = peer.bitfield.get(piece_idx as usize).copied().unwrap_or(false);
+            assert!(
+                has_piece,
+                "PROTOCOL VIOLATION: We requested Piece {} from Peer {}, but they do not have it!",
+                piece_idx, id
+            );
+        }
+    }
+
+    // 2. The "Interest-Request" Consistency
+    // If we have pending requests sending to a peer, we MUST claim to be interested in them.
+    for (id, peer) in &state.peers {
+        if !peer.pending_requests.is_empty() {
+            assert!(
+                peer.am_interested,
+                "STATE ERROR: Peer {} has pending requests but we told them we are NOT interested!",
+                id
+            );
+        }
+    }
+
+    // 3. The "Choked Compliance" Check
+    // If a peer is choking us, we should not have any active pending requests waiting on them.
+    for (id, peer) in &state.peers {
+        if peer.peer_choking == crate::torrent_manager::state::ChokeStatus::Choke {
+            assert!(
+                peer.pending_requests.is_empty(),
+                "LOGIC ERROR: Peer {} is Choking us, but we still have pending requests assigned to them!",
+                id
+            );
+        }
+    }
+
+    // 4. The "Rational Interest" Check
+    // We should only be interested in a peer if they have a piece we actually need.
+    if state.torrent_status != TorrentStatus::Done {
+        for (id, peer) in &state.peers {
+            if peer.am_interested {
+                let interesting = state.piece_manager.need_queue.iter()
+                    .chain(state.piece_manager.pending_queue.keys())
+                    .any(|&idx| peer.bitfield.get(idx as usize) == Some(&true));
+                    
+                assert!(
+                    interesting,
+                    "INEFFICIENCY: We are 'Interested' in Peer {}, but they have NO pieces we currently Need or are Pending.",
+                    id
+                );
+            }
+        }
+    }
+
+    // 5. The "Seeding" Boundary
+    // If our status is Done, we must strictly have am_interested = false for everyone.
+    if state.torrent_status == TorrentStatus::Done {
+        for (id, peer) in &state.peers {
+            assert!(
+                !peer.am_interested,
+                "STATE ERROR: Torrent is DONE, but we are still marked 'Interested' in Peer {}!",
+                id
+            );
+        }
+    }
+
+    // 6. The "Standard Mode" Efficiency (Duplicate Avoidance)
+    // In Standard mode, a specific piece should strictly be requested from only ONE peer.
+    if state.torrent_status == TorrentStatus::Standard {
+        let mut requested_pieces = std::collections::HashMap::new();
+        for (id, peer) in &state.peers {
+            for &piece in &peer.pending_requests {
+                if let Some(other_peer) = requested_pieces.insert(piece, id.clone()) {
+                    panic!(
+                        "INEFFICIENCY: Piece {} is being requested from BOTH {} and {} in Standard mode!",
+                        piece, other_peer, id
+                    );
+                }
+            }
+        }
+    }
+
+    // 7. The "Endgame" Definition
+    // If we are in Endgame mode, the need_queue MUST be empty.
+    if state.torrent_status == TorrentStatus::Endgame {
+        assert!(
+            state.piece_manager.need_queue.is_empty(),
+            "STATE MISMATCH: Status is ENDGAME, but 'need_queue' still contains items!"
+        );
+        assert!(
+            !state.piece_manager.pending_queue.is_empty(),
+             "STATE MISMATCH: Status is ENDGAME, but 'pending_queue' is empty! (Should be Done)"
+        );
+    }
+
+    // 8. The "Upload Slot" Hard Cap
+    // We must never unchoke more peers than our allowed maximum (plus allowance for optimistic unchoke).
+    let unchoked_count = state.peers.values()
+        .filter(|p| p.am_choking == crate::torrent_manager::state::ChokeStatus::Unchoke)
+        .count();
+
+    const MAX_SLOTS: usize = crate::torrent_manager::state::UPLOAD_SLOTS_DEFAULT + 1; 
+
+    assert!(
+        unchoked_count <= MAX_SLOTS,
+        "RESOURCE LEAK: We unchoked {} peers, exceeding the hard limit of {}!",
+        unchoked_count, MAX_SLOTS
+    );
+
 }
 
 // -----------------------------------------------------------------------------
@@ -3997,6 +4111,7 @@ mod prop_tests {
                     Just(Action::FatalError).boxed(),
                     Just(Action::Shutdown).boxed(),
                     Just(Action::Delete).boxed(),
+                    Just(Action::ConnectToWebSeeds).boxed(),
                 ];
 
                 // Re-Init
