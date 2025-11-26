@@ -5,6 +5,8 @@ use crate::command::TorrentCommand;
 use crate::networking::BlockInfo;
 use crate::torrent_manager::ManagerEvent;
 
+//use tracing::{event, Level};
+
 use std::time::Duration;
 use std::time::Instant;
 
@@ -44,6 +46,7 @@ pub enum Action {
     AssignWork {
         peer_id: String,
     },
+    ConnectToWebSeeds,
     RegisterPeer {
         peer_id: String,
         tx: Sender<TorrentCommand>,
@@ -374,6 +377,8 @@ impl TorrentState {
                     return effects;
                 }
 
+                effects.extend(self.update(Action::ConnectToWebSeeds));
+
                 let should_announce =
                     announce_immediately || self.torrent_status == TorrentStatus::AwaitingMetadata;
                 if should_announce {
@@ -681,6 +686,19 @@ impl TorrentState {
                     }
                 }
                 effects
+            }
+
+
+            Action::ConnectToWebSeeds => {
+                let mut effects = Vec::new();
+                if let Some(torrent) = &self.torrent {
+                    if let Some(urls) = &torrent.url_list {
+                        for url in urls {
+                            effects.push(Effect::StartWebSeed { url: url.clone() });
+                        }
+                    }
+                }
+                return effects;
             }
 
             Action::RegisterPeer { peer_id, tx } => {
@@ -1075,6 +1093,7 @@ impl TorrentState {
                     return vec![Effect::DoNothing];
                 }
 
+
                 self.torrent = Some(*torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
 
@@ -1107,12 +1126,6 @@ impl TorrentState {
                 self.torrent_status = TorrentStatus::Validating;
 
                 let mut effects = vec![Effect::InitializeStorage, Effect::StartValidation];
-
-                if let Some(urls) = &torrent.url_list {
-                    for url in urls {
-                        effects.push(Effect::StartWebSeed { url: url.clone() });
-                    }
-                }
 
                 effects
             }
@@ -1327,6 +1340,8 @@ impl TorrentState {
                 }
 
                 let mut effects = vec![Effect::TriggerDhtSearch];
+
+                effects.extend(self.update(Action::ConnectToWebSeeds));
 
                 for (url, tracker) in self.trackers.iter_mut() {
                     tracker.next_announce_time = self.now + Duration::from_secs(60);

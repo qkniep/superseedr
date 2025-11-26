@@ -3,7 +3,10 @@
 
 pub mod parser;
 
+use serde::de::{self, Visitor}; // Import Visitor
 use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt; // Import fmt
+use serde_bencode::value::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Torrent {
@@ -77,20 +80,31 @@ fn deserialize_url_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, 
 where
     D: Deserializer<'de>,
 {
-    // Define a helper enum to capture both possibilities (Single string or List of strings)
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum UrlListHelper {
-        Single(String),
-        List(Vec<String>),
+    // 1. Attempt to deserialize the field as a generic Bencode Value
+    let v: Value = Deserialize::deserialize(deserializer)?;
+
+    match v {
+        // Case A: It's a single string (BEP 19 allows "url-list" to be a string)
+        Value::Bytes(bytes) => {
+            let s = String::from_utf8(bytes)
+                .map_err(|e| de::Error::custom(format!("Invalid UTF-8 in url-list: {}", e)))?;
+            Ok(Some(vec![s]))
+        }
+        // Case B: It's a list of strings (Standard for multi-webseed)
+        Value::List(list) => {
+            let mut urls = Vec::new();
+            for item in list {
+                if let Value::Bytes(bytes) = item {
+                    let s = String::from_utf8(bytes)
+                        .map_err(|e| de::Error::custom(format!("Invalid UTF-8 in url-list: {}", e)))?;
+                    urls.push(s);
+                }
+                // If we encounter non-string items in the list, we skip them or error.
+                // Here we strictly expect strings as per spec.
+            }
+            Ok(Some(urls))
+        }
+        // Case C: Unexpected type (Int or Dict) - return None or Error
+        _ => Ok(None),
     }
-
-    // Attempt to deserialize into the helper enum
-    let helper: Option<UrlListHelper> = Option::deserialize(deserializer)?;
-
-    // Map the result into a consistent Vec<String> format
-    Ok(helper.map(|h| match h {
-        UrlListHelper::Single(s) => vec![s],
-        UrlListHelper::List(l) => l,
-    }))
 }
