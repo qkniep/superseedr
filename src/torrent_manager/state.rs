@@ -373,7 +373,9 @@ impl TorrentState {
                 let mut effects = Vec::new();
 
                 self.is_paused = is_paused;
-
+                if self.is_paused {
+                    return effects;
+                }
 
                 effects.extend(self.update(Action::ConnectToWebSeeds));
 
@@ -766,7 +768,16 @@ impl TorrentState {
             }
 
             Action::PeerBitfieldReceived { peer_id, bitfield } => {
+                let mut effects = Vec::new();
+
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
+
+                    // Peer is misbehaving (sending 2nd bitfield). Disconnect them.
+                    if !peer.bitfield.is_empty() && peer.bitfield.iter().any(|&b| b) {
+                        effects.push(Effect::DisconnectPeer { peer_id: peer_id.clone() });
+                        return effects;
+                    }
+
                     peer.bitfield = bitfield
                         .iter()
                         .flat_map(|&byte| (0..8).map(move |i| (byte >> (7 - i)) & 1 == 1))
@@ -781,6 +792,7 @@ impl TorrentState {
                 self.piece_manager
                     .update_rarity(self.peers.values().map(|p| &p.bitfield));
                 self.update(Action::AssignWork { peer_id })
+
             }
 
             Action::PeerChoked { peer_id } => {
