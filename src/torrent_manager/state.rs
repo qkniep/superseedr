@@ -600,26 +600,34 @@ impl TorrentState {
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     // --- Interest Logic (Always runs first) ---
-                    let is_interesting = !peer.bitfield.is_empty()
+                    // 1. Do they have something new we need?
+                    let has_needed_pieces = !peer.bitfield.is_empty()
                         && self
                             .piece_manager
                             .need_queue
                             .iter()
                             .any(|&p| peer.bitfield.get(p as usize) == Some(&true));
 
-                    if is_interesting && !peer.am_interested {
+                    // 2. Are we currently downloading from them?
+                    let has_pending_requests = !peer.pending_requests.is_empty();
+
+                    // We are interested if EITHER is true.
+                    let should_be_interested = has_needed_pieces || has_pending_requests;
+
+                    if should_be_interested && !peer.am_interested {
                         peer.am_interested = true;
                         effects.push(Effect::SendToPeer {
                             peer_id: peer_id.clone(),
                             cmd: Box::new(TorrentCommand::ClientInterested),
                         });
-                    } else if !is_interesting && peer.am_interested {
+                    } else if !should_be_interested && peer.am_interested {
                         peer.am_interested = false;
                         effects.push(Effect::SendToPeer {
                             peer_id: peer_id.clone(),
                             cmd: Box::new(TorrentCommand::NotInterested),
                         });
                     }
+
 
                     // Guard 3: Choke Check (Exits if choked OR peer bitfield is empty)
                     if peer.peer_choking == ChokeStatus::Choke {
@@ -967,6 +975,12 @@ impl TorrentState {
                 }
                 effects.push(Effect::BroadcastHave { piece_index });
                 effects.extend(self.update(Action::CheckCompletion));
+
+                let all_peers: Vec<String> = self.peers.keys().cloned().collect();
+                for pid in all_peers {
+                    effects.extend(self.update(Action::AssignWork { peer_id: pid }));
+                }
+
                 effects
             }
 
@@ -3744,8 +3758,18 @@ mod prop_tests {
                 let mut peer = PeerState::new(id.clone(), tx, state.now);
 
                 peer.peer_id = id.as_bytes().to_vec();
-                // Make them active players
-                peer.am_interested = true;
+
+                // 1. Initialize bitfield first (default to all false / correct length)
+                peer.bitfield = vec![false; NUM_PIECES];
+                if has_piece_0 {
+                    peer.bitfield[0] = true;
+                }
+
+                // 2. Set interest based on actual possession
+                // In this strategy we need all pieces, so if they have any, we are interested.
+                peer.am_interested = peer.bitfield.iter().any(|&b| b);
+
+                // 3. Set remaining flags
                 peer.peer_is_interested_in_us = true;
                 peer.peer_choking = crate::torrent_manager::state::ChokeStatus::Unchoke;
 
@@ -3753,11 +3777,6 @@ mod prop_tests {
                 peer.bytes_downloaded_in_tick = dl % 100_000;
                 peer.bytes_uploaded_in_tick = ul % 100_000;
                 peer.download_speed_bps = dl % 100_000;
-
-                if has_piece_0 {
-                    peer.bitfield = vec![false; NUM_PIECES];
-                    peer.bitfield[0] = true;
-                }
 
                 state.peers.insert(id, peer);
             }
