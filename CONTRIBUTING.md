@@ -51,12 +51,16 @@ You can contribute by:
 
 If you’d like to contribute code:
 
-1.  Fork the repository
-2.  Clone your fork locally
-3.  Create a new branch for your change
-4.  Make your changes
-5.  Run `cargo build` and `cargo test`
-6.  Open a Pull Request with a clear description
+1.  **Discuss your changes first:** Before writing extensive code, please open an issue to discuss your proposed changes, especially regarding:
+    *   **Importance/Priority:** Why is this change important now?
+    *   **Protocol/Architecture Compliance:** How does it fit into the existing design and protocols?
+    *   **Security Implications:** Are there any security considerations or impacts?
+2.  Fork the repository
+3.  Clone your fork locally
+4.  Create a new branch for your change
+5.  Make your changes
+6.  Run `cargo build` and `cargo test`
+7.  Open a Pull Request with a clear description
 
 Please follow existing code style and conventions.
 
