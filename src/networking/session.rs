@@ -401,6 +401,7 @@ impl PeerSession {
                                                                         info: dht_info,
                                                                         announce: None,
                                                                         announce_list: None,
+                                                                        url_list: None,
                                                                         creation_date: None,
                                                                         comment: None,
                                                                         created_by: None,

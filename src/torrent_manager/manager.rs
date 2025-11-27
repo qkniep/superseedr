@@ -7,6 +7,7 @@ use crate::app::TorrentMetrics;
 use crate::resource_manager::ResourceManagerClient;
 use crate::resource_manager::ResourceManagerError;
 
+use crate::networking::web_seed_worker::web_seed_worker;
 use crate::networking::ConnectionType;
 
 use crate::token_bucket::TokenBucket;
@@ -167,6 +168,8 @@ impl TorrentManager {
             global_dl_bucket,
             global_ul_bucket,
         } = torrent_parameters;
+
+        event!(Level::INFO, "Added new torrent {:?}", torrent);
 
         let bencoded_data = serde_bencode::to_bytes(&torrent)
             .map_err(|e| format!("Failed to re-encode torrent struct: {}", e))?;
@@ -1054,6 +1057,64 @@ impl TorrentManager {
                         .await;
                 });
             }
+
+            Effect::StartWebSeed { url } => {
+                let (full_url, _filename) = if let Some(torrent) = &self.state.torrent {
+                    if url.ends_with('/') {
+                        (
+                            format!("{}{}", url, torrent.info.name),
+                            torrent.info.name.clone(),
+                        )
+                    } else {
+                        (url.clone(), torrent.info.name.clone())
+                    }
+                } else {
+                    event!(
+                        Level::WARN,
+                        "Triggered StartWebSeed but metadata is missing. Skipping."
+                    );
+                    return;
+                };
+
+                let torrent_manager_tx = self.torrent_manager_tx.clone();
+                let (peer_tx, peer_rx) = tokio::sync::mpsc::channel(32);
+
+                // Use the full URL as the peer_id so the worker and manager agree on the ID
+                let peer_id = full_url.clone();
+
+                self.apply_action(Action::RegisterPeer {
+                    peer_id: peer_id.clone(),
+                    tx: peer_tx,
+                });
+
+                let shutdown_rx = self.shutdown_tx.subscribe();
+
+                if let Some(torrent) = &self.state.torrent {
+                    let piece_len = torrent.info.piece_length as u64;
+
+                    // Calculate total length robustly (handle multi-file vs single-file)
+                    let total_len = if torrent.info.files.is_empty() {
+                        torrent.info.length as u64
+                    } else {
+                        torrent.info.files.iter().map(|f| f.length as u64).sum()
+                    };
+
+                    event!(Level::INFO, "Starting WebSeed Worker: {}", full_url);
+
+                    tokio::spawn(async move {
+                        web_seed_worker(
+                            full_url,
+                            peer_id,
+                            piece_len,
+                            total_len,
+                            peer_rx,
+                            torrent_manager_tx,
+                            shutdown_rx,
+                        )
+                        .await;
+                    });
+                }
+            }
         }
     }
 
@@ -1477,10 +1538,10 @@ impl TorrentManager {
         let shutdown_tx = self.shutdown_tx.clone();
 
         let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(10);
-        self.state.peers.insert(
-            peer_ip_port.clone(),
-            PeerState::new(peer_ip_port.clone(), peer_session_tx, Instant::now()),
-        );
+        self.apply_action(Action::RegisterPeer {
+            peer_id: peer_ip_port.clone(),
+            tx: peer_session_tx,
+        });
 
         let bitfield = match self.state.torrent {
             None => None,
@@ -1978,10 +2039,10 @@ impl TorrentManager {
                             continue;
                         }
 
-                        self.state.peers.insert(
-                            peer_ip_port.clone(),
-                            PeerState::new(peer_ip_port.clone(), peer_session_tx, Instant::now()),
-                        );
+                        self.apply_action(Action::RegisterPeer {
+                            peer_id: peer_ip_port.clone(),
+                            tx: peer_session_tx,
+                        });
 
                         let bitfield = match self.state.torrent {
                             None => None,

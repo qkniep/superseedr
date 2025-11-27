@@ -2245,6 +2245,44 @@ impl App {
     }
 
     async fn process_pending_commands(&mut self) {
+        if let Some(user_watch_path) = &self.client_configs.watch_folder {
+            if let Ok(entries) = fs::read_dir(user_watch_path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    if path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|s| s.starts_with('.'))
+                    {
+                        continue;
+                    }
+
+                    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                        let command = match ext {
+                            "torrent" => Some(AppCommand::AddTorrentFromFile(path.clone())),
+                            "path" => Some(AppCommand::AddTorrentFromPathFile(path.clone())),
+                            "magnet" => Some(AppCommand::AddMagnetFromFile(path.clone())),
+                            _ => None,
+                        };
+
+                        if let Some(cmd) = command {
+                            let _ = self.app_command_tx.send(cmd).await;
+                        }
+                    }
+                }
+            } else {
+                tracing_event!(
+                    Level::WARN,
+                    "Failed to read user watch directory: {:?}",
+                    user_watch_path
+                );
+            }
+        }
+
+        // 2. Check System Watch Path (Existing Logic)
         if let Some((watch_path, _)) = get_watch_path() {
             let Ok(entries) = fs::read_dir(watch_path) else {
                 return;

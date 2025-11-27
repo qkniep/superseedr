@@ -3,8 +3,10 @@
 
 pub mod parser;
 
-use serde::Deserialize;
-use serde::Serialize;
+use serde::de::{self}; // Import Visitor
+use serde::{Deserialize, Deserializer, Serialize};
+
+use serde_bencode::value::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Torrent {
@@ -18,6 +20,13 @@ pub struct Torrent {
 
     #[serde(rename = "announce-list", default)]
     pub announce_list: Option<Vec<Vec<String>>>, // Announce-list is a list of lists of strings
+
+    #[serde(
+        rename = "url-list",
+        default,
+        deserialize_with = "deserialize_url_list"
+    )]
+    pub url_list: Option<Vec<String>>,
 
     #[serde(rename = "creation date", default)]
     pub creation_date: Option<i64>, // Creation date is an integer timestamp
@@ -65,4 +74,38 @@ pub struct InfoFile {
     pub md5sum: Option<String>,
     // The path is actually a list of strings
     pub path: Vec<String>,
+}
+
+fn deserialize_url_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // 1. Attempt to deserialize the field as a generic Bencode Value
+    let v: Value = Deserialize::deserialize(deserializer)?;
+
+    match v {
+        // Case A: It's a single string (BEP 19 allows "url-list" to be a string)
+        Value::Bytes(bytes) => {
+            let s = String::from_utf8(bytes)
+                .map_err(|e| de::Error::custom(format!("Invalid UTF-8 in url-list: {}", e)))?;
+            Ok(Some(vec![s]))
+        }
+        // Case B: It's a list of strings (Standard for multi-webseed)
+        Value::List(list) => {
+            let mut urls = Vec::new();
+            for item in list {
+                if let Value::Bytes(bytes) = item {
+                    let s = String::from_utf8(bytes).map_err(|e| {
+                        de::Error::custom(format!("Invalid UTF-8 in url-list: {}", e))
+                    })?;
+                    urls.push(s);
+                }
+                // If we encounter non-string items in the list, we skip them or error.
+                // Here we strictly expect strings as per spec.
+            }
+            Ok(Some(urls))
+        }
+        // Case C: Unexpected type (Int or Dict) - return None or Error
+        _ => Ok(None),
+    }
 }

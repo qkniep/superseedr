@@ -38,6 +38,8 @@ Download the latest release for your platform:
 
 👉 Available on the [releases page](https://github.com/Jagalite/superseedr/releases).
 
+## [🤝 Contributing](CONTRIBUTING.md)
+
 ## Usage
 Open up a terminal and run:
 ```bash
