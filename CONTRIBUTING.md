@@ -46,6 +46,7 @@ You can contribute by:
 *   Be respectful and constructive
 *   Keep discussions on-topic
 *   Provide as much relevant detail as possible
+*   For existing issues or discussions, you can "bump" them by adding a comment if you have new information, want to express increased urgency, or can provide additional details/context.
 
 ## Optional: Contributing Code (for developers)
 
