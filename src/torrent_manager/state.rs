@@ -628,7 +628,6 @@ impl TorrentState {
                         });
                     }
 
-
                     // Guard 3: Choke Check (Exits if choked OR peer bitfield is empty)
                     if peer.peer_choking == ChokeStatus::Choke {
                         return effects;
@@ -695,7 +694,6 @@ impl TorrentState {
                 }
                 effects
             }
-
 
             Action::ConnectToWebSeeds => {
                 let mut effects = Vec::new();
@@ -771,10 +769,11 @@ impl TorrentState {
                 let mut effects = Vec::new();
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
-
                     // Peer is misbehaving (sending 2nd bitfield). Disconnect them.
                     if !peer.bitfield.is_empty() && peer.bitfield.iter().any(|&b| b) {
-                        effects.push(Effect::DisconnectPeer { peer_id: peer_id.clone() });
+                        effects.push(Effect::DisconnectPeer {
+                            peer_id: peer_id.clone(),
+                        });
                         return effects;
                     }
 
@@ -792,7 +791,6 @@ impl TorrentState {
                 self.piece_manager
                     .update_rarity(self.peers.values().map(|p| &p.bitfield));
                 self.update(Action::AssignWork { peer_id })
-
             }
 
             Action::PeerChoked { peer_id } => {
@@ -1116,7 +1114,6 @@ impl TorrentState {
                 if self.torrent.is_some() {
                     return vec![Effect::DoNothing];
                 }
-
 
                 self.torrent = Some(*torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
@@ -2854,7 +2851,11 @@ fn check_invariants(state: &TorrentState) {
     // We must never ask a peer for a piece they do not possess.
     for (id, peer) in &state.peers {
         for &piece_idx in &peer.pending_requests {
-            let has_piece = peer.bitfield.get(piece_idx as usize).copied().unwrap_or(false);
+            let has_piece = peer
+                .bitfield
+                .get(piece_idx as usize)
+                .copied()
+                .unwrap_or(false);
             assert!(
                 has_piece,
                 "PROTOCOL VIOLATION: We requested Piece {} from Peer {}, but they do not have it!",
@@ -2892,10 +2893,13 @@ fn check_invariants(state: &TorrentState) {
     if state.torrent_status != TorrentStatus::Done {
         for (id, peer) in &state.peers {
             if peer.am_interested {
-                let interesting = state.piece_manager.need_queue.iter()
+                let interesting = state
+                    .piece_manager
+                    .need_queue
+                    .iter()
                     .chain(state.piece_manager.pending_queue.keys())
                     .any(|&idx| peer.bitfield.get(idx as usize) == Some(&true));
-                    
+
                 assert!(
                     interesting,
                     "INEFFICIENCY: We are 'Interested' in Peer {}, but they have NO pieces we currently Need or are Pending.",
@@ -2942,24 +2946,26 @@ fn check_invariants(state: &TorrentState) {
         );
         assert!(
             !state.piece_manager.pending_queue.is_empty(),
-             "STATE MISMATCH: Status is ENDGAME, but 'pending_queue' is empty! (Should be Done)"
+            "STATE MISMATCH: Status is ENDGAME, but 'pending_queue' is empty! (Should be Done)"
         );
     }
 
     // 8. The "Upload Slot" Hard Cap
     // We must never unchoke more peers than our allowed maximum (plus allowance for optimistic unchoke).
-    let unchoked_count = state.peers.values()
+    let unchoked_count = state
+        .peers
+        .values()
         .filter(|p| p.am_choking == crate::torrent_manager::state::ChokeStatus::Unchoke)
         .count();
 
-    const MAX_SLOTS: usize = crate::torrent_manager::state::UPLOAD_SLOTS_DEFAULT + 1; 
+    const MAX_SLOTS: usize = crate::torrent_manager::state::UPLOAD_SLOTS_DEFAULT + 1;
 
     assert!(
         unchoked_count <= MAX_SLOTS,
         "RESOURCE LEAK: We unchoked {} peers, exceeding the hard limit of {}!",
-        unchoked_count, MAX_SLOTS
+        unchoked_count,
+        MAX_SLOTS
     );
-
 }
 
 // -----------------------------------------------------------------------------

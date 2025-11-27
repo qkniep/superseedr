@@ -2252,12 +2252,16 @@ impl App {
                     if !path.is_file() {
                         continue;
                     }
-                    if path.file_name().and_then(|n| n.to_str()).map_or(false, |s| s.starts_with('.')) {
+                    if path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map_or(false, |s| s.starts_with('.'))
+                    {
                         continue;
                     }
 
                     if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                         let command = match ext {
+                        let command = match ext {
                             "torrent" => Some(AppCommand::AddTorrentFromFile(path.clone())),
                             "path" => Some(AppCommand::AddTorrentFromPathFile(path.clone())),
                             "magnet" => Some(AppCommand::AddMagnetFromFile(path.clone())),
@@ -2270,7 +2274,11 @@ impl App {
                     }
                 }
             } else {
-                 tracing_event!(Level::WARN, "Failed to read user watch directory: {:?}", user_watch_path);
+                tracing_event!(
+                    Level::WARN,
+                    "Failed to read user watch directory: {:?}",
+                    user_watch_path
+                );
             }
         }
 
@@ -2304,7 +2312,6 @@ impl App {
             }
         }
     }
-
 }
 
 fn calculate_thrash_score(history_log: &VecDeque<DiskIoOperation>) -> u64 {

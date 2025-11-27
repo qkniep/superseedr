@@ -1061,12 +1061,18 @@ impl TorrentManager {
             Effect::StartWebSeed { url } => {
                 let (full_url, _filename) = if let Some(torrent) = &self.state.torrent {
                     if url.ends_with('/') {
-                        (format!("{}{}", url, torrent.info.name), torrent.info.name.clone())
+                        (
+                            format!("{}{}", url, torrent.info.name),
+                            torrent.info.name.clone(),
+                        )
                     } else {
                         (url.clone(), torrent.info.name.clone())
                     }
                 } else {
-                    event!(Level::WARN, "Triggered StartWebSeed but metadata is missing. Skipping.");
+                    event!(
+                        Level::WARN,
+                        "Triggered StartWebSeed but metadata is missing. Skipping."
+                    );
                     return;
                 };
 
@@ -1085,19 +1091,19 @@ impl TorrentManager {
 
                 if let Some(torrent) = &self.state.torrent {
                     let piece_len = torrent.info.piece_length as u64;
-                    
+
                     // Calculate total length robustly (handle multi-file vs single-file)
                     let total_len = if torrent.info.files.is_empty() {
                         torrent.info.length as u64
                     } else {
-                         torrent.info.files.iter().map(|f| f.length as u64).sum()
+                        torrent.info.files.iter().map(|f| f.length as u64).sum()
                     };
 
                     event!(Level::INFO, "Starting WebSeed Worker: {}", full_url);
 
                     tokio::spawn(async move {
                         web_seed_worker(
-                            full_url, 
+                            full_url,
                             peer_id,
                             piece_len,
                             total_len,

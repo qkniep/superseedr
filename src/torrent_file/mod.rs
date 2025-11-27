@@ -95,8 +95,9 @@ where
             let mut urls = Vec::new();
             for item in list {
                 if let Value::Bytes(bytes) = item {
-                    let s = String::from_utf8(bytes)
-                        .map_err(|e| de::Error::custom(format!("Invalid UTF-8 in url-list: {}", e)))?;
+                    let s = String::from_utf8(bytes).map_err(|e| {
+                        de::Error::custom(format!("Invalid UTF-8 in url-list: {}", e))
+                    })?;
                     urls.push(s);
                 }
                 // If we encounter non-string items in the list, we skip them or error.
