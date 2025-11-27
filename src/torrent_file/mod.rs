@@ -3,9 +3,9 @@
 
 pub mod parser;
 
-use serde::de::{self, Visitor}; // Import Visitor
+use serde::de::{self}; // Import Visitor
 use serde::{Deserialize, Deserializer, Serialize};
-use std::fmt; // Import fmt
+
 use serde_bencode::value::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

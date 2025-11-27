@@ -373,9 +373,7 @@ impl TorrentState {
                 let mut effects = Vec::new();
 
                 self.is_paused = is_paused;
-                if self.is_paused {
-                    return effects;
-                }
+
 
                 effects.extend(self.update(Action::ConnectToWebSeeds));
 
@@ -706,7 +704,7 @@ impl TorrentState {
                         }
                     }
                 }
-                return effects;
+                effects
             }
 
             Action::RegisterPeer { peer_id, tx } => {
@@ -1139,7 +1137,7 @@ impl TorrentState {
                 self.validation_pieces_found = 0;
                 self.torrent_status = TorrentStatus::Validating;
 
-                let mut effects = vec![Effect::InitializeStorage, Effect::StartValidation];
+                let effects = vec![Effect::InitializeStorage, Effect::StartValidation];
 
                 effects
             }

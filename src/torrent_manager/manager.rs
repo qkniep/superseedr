@@ -1059,7 +1059,7 @@ impl TorrentManager {
             }
 
             Effect::StartWebSeed { url } => {
-                let (full_url, filename) = if let Some(torrent) = &self.state.torrent {
+                let (full_url, _filename) = if let Some(torrent) = &self.state.torrent {
                     if url.ends_with('/') {
                         (format!("{}{}", url, torrent.info.name), torrent.info.name.clone())
                     } else {
