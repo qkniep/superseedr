@@ -1954,13 +1954,31 @@ impl App {
                 _ => SortDirection::Descending,
             };
 
-            if sort_direction != default_direction {
+            // 1. Calculate Primary Sort Result
+            let primary_ordering = if sort_direction != default_direction {
                 ordering.reverse()
             } else {
                 ordering
-            }
-        });
+            };
 
+            // 2. Apply Secondary Sort (Peer Activity)
+            primary_ordering.then_with(|| {
+                // Calculate activity score (Sum of recent peer events)
+                let calculate_activity = |t: &TorrentDisplayState| -> u64 {
+                    let window = 60; // Look at last ~60 ticks
+                    let disc: u64 = t.peer_discovery_history.iter().rev().take(window).sum();
+                    let conn: u64 = t.peer_connection_history.iter().rev().take(window).sum();
+                    let disconn: u64 = t.peer_disconnect_history.iter().rev().take(window).sum();
+                    disc + conn + disconn
+                };
+
+                let a_activity = calculate_activity(a_torrent);
+                let b_activity = calculate_activity(b_torrent);
+
+                // Sort Descending (Highest activity first)
+                b_activity.cmp(&a_activity)
+            })
+        });
         self.app_state.torrent_list_order = torrent_list;
         self.clamp_selected_indices();
     }

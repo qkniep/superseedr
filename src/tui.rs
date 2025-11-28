@@ -160,7 +160,7 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
 
     let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(top_chunk);
 
     let left_pane = top_chunks[0]; // The entire left pane
@@ -326,18 +326,18 @@ fn draw_left_pane(f: &mut Frame, app_state: &AppState, left_pane: Rect) {
         (
             vec![
                 Constraint::Length(7),      // Progress
-                Constraint::Percentage(65), // Name
-                Constraint::Percentage(15), // DL
-                Constraint::Percentage(15), // UL
+                Constraint::Percentage(75), // Name (Increased from 65)
+                Constraint::Percentage(10), // DL (Reduced from 15)
+                Constraint::Percentage(10), // UL (Reduced from 15)
             ],
             1,
         )
     } else {
         (
             vec![
-                Constraint::Percentage(70),
-                Constraint::Percentage(15),
-                Constraint::Percentage(15),
+                Constraint::Percentage(80), // Name (Increased from 70)
+                Constraint::Percentage(10), // DL (Reduced from 15)
+                Constraint::Percentage(10), // UL (Reduced from 15)
             ],
             0,
         )
@@ -1196,10 +1196,20 @@ fn draw_right_pane(
                     PeerSortColumn::Address => a.address.cmp(&b.address),
                     PeerSortColumn::Client => a.peer_id.cmp(&b.peer_id),
                     PeerSortColumn::Action => a.last_action.cmp(&b.last_action),
-                    PeerSortColumn::DL => a.download_speed_bps.cmp(&b.download_speed_bps),
-                    PeerSortColumn::UL => a.upload_speed_bps.cmp(&b.upload_speed_bps),
-                    PeerSortColumn::TotalDL => a.total_downloaded.cmp(&b.total_downloaded),
-                    PeerSortColumn::TotalUL => a.total_uploaded.cmp(&b.total_uploaded),
+                    PeerSortColumn::DL => {
+                        a.download_speed_bps.cmp(&b.download_speed_bps)
+                            // Secondary: Invert sort (b.cmp(a)) to push active uploaders to the bottom
+                            .then(b.upload_speed_bps.cmp(&a.upload_speed_bps)) 
+                            // Tertiary: Standard sort for total downloaded
+                            .then(a.total_downloaded.cmp(&b.total_downloaded))
+                    },
+                    PeerSortColumn::UL => {
+                        a.upload_speed_bps.cmp(&b.upload_speed_bps)
+                            // Secondary: Invert sort (b.cmp(a)) to push active downloaders to the bottom
+                            .then(b.download_speed_bps.cmp(&a.download_speed_bps))
+                            // Tertiary: Standard sort for total uploaded
+                            .then(a.total_uploaded.cmp(&b.total_uploaded))
+                    },
                 };
 
                 if sort_direction == SortDirection::Ascending {
@@ -1230,10 +1240,8 @@ fn draw_right_pane(
                         PeerSortColumn::Client => "Client",
                         PeerSortColumn::Action => "Action",
                         PeerSortColumn::Completed => "Done %",
-                        PeerSortColumn::DL => "DL Speed",
-                        PeerSortColumn::UL => "UL Speed",
-                        PeerSortColumn::TotalDL => "Total DL",
-                        PeerSortColumn::TotalUL => "Total UL",
+                        PeerSortColumn::DL => "Down (Total)",
+                        PeerSortColumn::UL => "Up (Total)",
                     };
 
                     let mut text_with_indicator = text.to_string();
@@ -1323,28 +1331,31 @@ fn draw_right_pane(
                     };
                     Row::new(vec![
                         Cell::from(flags_spans),
+                        Cell::from(format!("{:.1}%", percentage)),
                         Cell::from(peer.address.clone()),
                         Cell::from(parse_peer_id(&peer.peer_id)),
                         Cell::from(peer.last_action.clone()),
-                        Cell::from(format!("{:.1}%", percentage)),
-                        Cell::from(format_speed(peer.download_speed_bps)),
-                        Cell::from(format_speed(peer.upload_speed_bps)),
-                        Cell::from(format_bytes(peer.total_downloaded)),
-                        Cell::from(format_bytes(peer.total_uploaded)),
+                        Cell::from(format!("{} ({})", 
+                            format_speed(peer.download_speed_bps), 
+                            format_bytes(peer.total_downloaded))
+                        ),
+                        // Combine UL Speed + Total
+                        Cell::from(format!("{} ({})", 
+                            format_speed(peer.upload_speed_bps), 
+                            format_bytes(peer.total_uploaded))
+                        ),
                     ])
                     .style(Style::default().fg(row_color))
                 });
 
                 let peer_widths = [
-                    Constraint::Length(5),
-                    Constraint::Percentage(20),
-                    Constraint::Percentage(15),
-                    Constraint::Percentage(20),
-                    Constraint::Percentage(5),
-                    Constraint::Percentage(10),
-                    Constraint::Percentage(10),
-                    Constraint::Percentage(10),
-                    Constraint::Percentage(5),
+                    Constraint::Length(5),      // Flags
+                    Constraint::Percentage(5), // Done % (Moved here)
+                    Constraint::Percentage(15), // Address
+                    Constraint::Percentage(15), // Client
+                    Constraint::Percentage(30), // Action (Increased space)
+                    Constraint::Percentage(15), // DL (Reduced)
+                    Constraint::Percentage(15), // UL (Reduced)
                 ];
 
                 let peers_table = Table::new(peer_rows, peer_widths)

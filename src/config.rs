@@ -26,15 +26,17 @@ pub enum TorrentSortColumn {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default, EnumIter, EnumCount)]
 pub enum PeerSortColumn {
     Flags,
+    Completed,
     Address,
     Client,
     Action,
-    Completed,
+    
+    #[serde(alias = "TotalDL")]
     DL,
+
     #[default]
+    #[serde(alias = "TotalUL")]
     UL,
-    TotalDL,
-    TotalUL,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
