@@ -3,6 +3,7 @@
 
 pub mod manager;
 pub mod piece_manager;
+pub mod block_manager;
 pub mod state;
 
 use crate::Settings;
