@@ -47,8 +47,8 @@ impl PieceManager {
         self.block_manager.set_geometry(
             piece_length,
             total_length,
-            Vec::new(),     // V1 hashes (omitted for this context)
-            HashMap::new(), // V2 roots (omitted for this context)
+            Vec::new(),
+            Vec::new(),
             validation_complete
         );
     }

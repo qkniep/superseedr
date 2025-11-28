@@ -8,10 +8,10 @@ pub const V2_HASH_LEN: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct LegacyAssembler {
-    pub buffer: Vec<u8>,        // Pre-allocated flat buffer
-    pub received_blocks: usize, // Count of blocks received
-    pub total_blocks: usize,    // Total expected blocks
-    pub mask: Vec<bool>,        // Tracks which blocks are filled
+    pub buffer: Vec<u8>,
+    pub received_blocks: usize,
+    pub total_blocks: usize,
+    pub mask: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,12 +34,20 @@ pub enum BlockResult {
 #[derive(Debug, PartialEq)]
 pub enum BlockDecision {
     VerifyV2 {
+        file_index: usize,
         root_hash: [u8; 32],
-        proof: Vec<[u8; 32]>,
+        block_index_in_file: u32,
     },
     BufferV1,
     Duplicate,
     Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileInfo {
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub root_hash: [u8; 32],
 }
 
 #[derive(Default, Debug, Clone)]
@@ -51,7 +59,9 @@ pub struct BlockManager {
 
     // --- METADATA ---
     pub piece_hashes_v1: Vec<[u8; 20]>,
-    pub file_merkle_roots: HashMap<usize, [u8; 32]>,
+    
+    // V2: Files are mapped by index to their geometry and root hash
+    pub files: Vec<FileInfo>,
 
     // --- V1 COMPATIBILITY ---
     pub legacy_buffers: HashMap<u32, LegacyAssembler>,
@@ -72,24 +82,96 @@ impl BlockManager {
         piece_length: u32,
         total_length: u64,
         v1_hashes: Vec<[u8; 20]>,
-        v2_roots: HashMap<usize, [u8; 32]>,
+        // Map of file_index -> (size, root_hash)
+        v2_file_info: Vec<(u64, [u8; 32])>, 
         validation_complete: bool,
     ) {
         self.piece_length = piece_length;
         self.total_length = total_length;
         self.piece_hashes_v1 = v1_hashes;
-        self.file_merkle_roots = v2_roots;
+        
+        // Construct File Layout
+        let mut current_offset = 0;
+        self.files = v2_file_info.into_iter().map(|(size, root)| {
+            let info = FileInfo {
+                start_offset: current_offset,
+                end_offset: current_offset + size,
+                root_hash: root,
+            };
+            current_offset += size;
+            info
+        }).collect();
+
         self.total_blocks = (total_length as f64 / BLOCK_SIZE as f64).ceil() as u32;
         self.block_bitfield = vec![validation_complete; self.total_blocks as usize];
     }
 
+    // --- DECISION LOGIC ---
+
+    /// Determines what to do with an incoming block:
+    /// 1. If it maps to a V2 file, return VerifyV2 (Caller must handle async hashing).
+    /// 2. If it's V1, return BufferV1 (Manager handles buffering).
+    pub fn handle_incoming_block_decision(&self, addr: BlockAddress) -> BlockDecision {
+        let global_idx = self.flatten_address(addr);
+
+        if global_idx as usize >= self.block_bitfield.len() {
+            return BlockDecision::Error;
+        }
+        if self.block_bitfield[global_idx as usize] {
+            return BlockDecision::Duplicate;
+        }
+
+        // V2 Check: Do we have a V2 Root for this file location?
+        if let Some((file_idx, file)) = self.get_file_for_offset(addr.global_offset) {
+            // Calculate which block index *within this specific file* we are verifying
+            let offset_in_file = addr.global_offset - file.start_offset;
+            let block_index_in_file = (offset_in_file / BLOCK_SIZE as u64) as u32;
+
+            return BlockDecision::VerifyV2 {
+                file_index: file_idx,
+                root_hash: file.root_hash,
+                block_index_in_file,
+            };
+        }
+
+        BlockDecision::BufferV1
+    }
+
+    // --- HELPER: Find which file owns this offset ---
+    fn get_file_for_offset(&self, global_offset: u64) -> Option<(usize, &FileInfo)> {
+        // Simple linear scan for now; Binary search recommended for production with many files
+        self.files.iter().enumerate().find(|(_, f)| {
+            global_offset >= f.start_offset && global_offset < f.end_offset
+        })
+    }
+
+    // --- STATE COMMITMENT ---
+
+    pub fn commit_verified_block(&mut self, addr: BlockAddress) -> BlockResult {
+        let global_idx = self.flatten_address(addr);
+
+        if global_idx as usize >= self.block_bitfield.len() {
+            return BlockResult::Duplicate;
+        }
+
+        if self.block_bitfield[global_idx as usize] {
+            return BlockResult::Duplicate;
+        }
+
+        self.block_bitfield[global_idx as usize] = true;
+        self.pending_blocks.remove(&global_idx);
+
+        BlockResult::Accepted
+    }
+
     // --- WORK SELECTION ---
+
     pub fn pick_blocks_for_peer(
         &self,
         peer_bitfield: &[bool],
         count: usize,
         rarest_pieces: &[u32],
-        endgame_mode: bool, // <--- NEW ARGUMENT
+        endgame_mode: bool,
     ) -> Vec<BlockAddress> {
         let mut picked = Vec::with_capacity(count);
 
@@ -126,6 +208,7 @@ impl BlockManager {
         }
         picked
     }
+    
     pub fn mark_pending(&mut self, global_idx: u32) {
         self.pending_blocks.insert(global_idx);
     }
@@ -134,28 +217,9 @@ impl BlockManager {
         self.pending_blocks.remove(&global_idx);
     }
 
-    // --- STATE COMMITMENT ---
-
-    pub fn commit_verified_block(&mut self, addr: BlockAddress) -> BlockResult {
-        let global_idx = self.flatten_address(addr);
-
-        if global_idx as usize >= self.block_bitfield.len() {
-            return BlockResult::Duplicate;
-        }
-
-        if self.block_bitfield[global_idx as usize] {
-            return BlockResult::Duplicate;
-        }
-
-        self.block_bitfield[global_idx as usize] = true;
-        self.pending_blocks.remove(&global_idx);
-
-        BlockResult::Accepted
-    }
-
     // --- GEOMETRY HELPERS ---
+    
     fn blocks_in_piece(&self, piece_len: u32) -> u32 {
-        // Equivalent to ceil(len / 16384) but using pure integers
         (piece_len + BLOCK_SIZE - 1) / BLOCK_SIZE
     }
 
@@ -196,7 +260,6 @@ impl BlockManager {
         (addr.global_offset / BLOCK_SIZE as u64) as u32
     }
 
-    /// V1 HELPER: Check if a full piece is complete.
     pub fn is_piece_complete(&self, piece_index: u32) -> bool {
         let (start, end) = self.get_block_range(piece_index);
         for i in start..end {
@@ -212,7 +275,8 @@ impl BlockManager {
         true
     }
 
-    /// V1 HELPER: Buffer a block for legacy assembly.
+    // --- V1 COMPATIBILITY BUFFERING ---
+
     pub fn handle_v1_block_buffering(
         &mut self,
         addr: BlockAddress,
@@ -221,7 +285,6 @@ impl BlockManager {
         let piece_len = self.calculate_piece_size(addr.piece_index);
         let num_blocks = self.blocks_in_piece(piece_len);
 
-        // Get or Create Assembler
         let assembler = self
             .legacy_buffers
             .entry(addr.piece_index)
@@ -232,18 +295,15 @@ impl BlockManager {
                 mask: vec![false; num_blocks as usize],
             });
 
-        // Write Data (Flat Copy)
         let offset = addr.byte_offset as usize;
         let end = offset + data.len();
 
-        // Safety Check
         if end <= assembler.buffer.len() && !assembler.mask[addr.block_index as usize] {
             assembler.buffer[offset..end].copy_from_slice(data);
             assembler.mask[addr.block_index as usize] = true;
             assembler.received_blocks += 1;
         }
 
-        // Check Completion
         if assembler.received_blocks == assembler.total_blocks {
             if let Some(finished) = self.legacy_buffers.remove(&addr.piece_index) {
                 return Some(finished.buffer);
@@ -258,12 +318,7 @@ impl BlockManager {
         byte_offset: u32,
         length: u32,
     ) -> Option<BlockAddress> {
-        // <--- Returns Option now
-
         let piece_len = self.calculate_piece_size(piece_index);
-
-        // SECURITY GUARD: Ensure the block fits INSIDE the piece boundaries.
-        // This prevents "Overlay Attacks" where offset points to a different piece.
         if byte_offset.saturating_add(length) > piece_len {
             return None;
         }
@@ -282,26 +337,6 @@ impl BlockManager {
 
     pub fn total_pieces(&self) -> usize {
         self.piece_hashes_v1.len()
-    }
-
-    pub fn handle_incoming_block_decision(&self, addr: BlockAddress) -> BlockDecision {
-        let global_idx = self.flatten_address(addr);
-
-        if global_idx as usize >= self.block_bitfield.len() {
-            return BlockDecision::Error;
-        }
-        if self.block_bitfield[global_idx as usize] {
-            return BlockDecision::Duplicate;
-        }
-
-        if let Some(root) = self.get_root_for_offset(addr.global_offset) {
-            return BlockDecision::VerifyV2 {
-                root_hash: root,
-                proof: Vec::new(),
-            };
-        }
-
-        BlockDecision::BufferV1
     }
 
     pub fn update_rarity<'a, I>(&mut self, peer_bitfields: I)
@@ -343,7 +378,6 @@ impl BlockManager {
         self.legacy_buffers.remove(&piece_index);
     }
 
-    /// Reverts a piece status to Incomplete (e.g. after Disk Write Failure)
     pub fn revert_v1_piece_completion(&mut self, piece_index: u32) {
         let (start, end) = self.get_block_range(piece_index);
         for global_idx in start..end {
@@ -351,18 +385,13 @@ impl BlockManager {
                 self.block_bitfield[global_idx as usize] = false;
             }
         }
-        // Note: we don't restore pending_blocks because we want them to be picked up again
     }
 
     pub fn reset_v1_buffer(&mut self, piece_index: u32) {
         self.legacy_buffers.remove(&piece_index);
     }
-
-    // Helper to map global offset to a file's merkle root
-    fn get_root_for_offset(&self, _offset: u64) -> Option<[u8; 32]> {
-        None
-    }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -375,7 +404,7 @@ mod tests {
         let piece_count = (total_len as f64 / piece_len as f64).ceil() as usize;
         let v1_hashes = vec![[0; 20]; piece_count];
         let mut manager = BlockManager::new();
-        manager.set_geometry(piece_len, total_len, v1_hashes, HashMap::new(), false);
+        manager.set_geometry(piece_len, total_len, v1_hashes, vec![], false);
         manager
     }
 
@@ -517,6 +546,91 @@ mod tests {
         let invalid_addr_3 = manager.inflate_address_from_overlay(0, piece_len, BLK_SIZE);
         assert!(invalid_addr_3.is_none());
     }
+
+    #[test]
+    fn test_decision_routing_v1_only() {
+        let mut bm = BlockManager::new();
+        // V1 Setup: No V2 file info provided
+        bm.set_geometry(16384, 16384 * 10, vec![], vec![], false);
+
+        let addr = bm.inflate_address(0); // Block 0
+        let decision = bm.handle_incoming_block_decision(addr);
+
+        // MUST return BufferV1
+        assert_eq!(decision, BlockDecision::BufferV1);
+    }
+
+    #[test]
+    fn test_decision_routing_v2_simple() {
+        let mut bm = BlockManager::new();
+        let root_a = [0xAA; 32];
+        let root_b = [0xBB; 32];
+
+        // V2 Setup: 2 Files. 
+        // File A: 32KB (2 blocks)
+        // File B: 16KB (1 block)
+        let v2_info = vec![
+            (32768, root_a),
+            (16384, root_b),
+        ];
+
+        // Total len = 48KB
+        bm.set_geometry(16384, 49152, vec![], v2_info, false);
+
+        // 1. Test Block inside File A (Offset 0)
+        let addr_a1 = bm.inflate_address(0); // Block 0
+        let dec_a1 = bm.handle_incoming_block_decision(addr_a1);
+        
+        match dec_a1 {
+            BlockDecision::VerifyV2 { file_index, root_hash, block_index_in_file } => {
+                assert_eq!(file_index, 0); // File A
+                assert_eq!(root_hash, root_a);
+                assert_eq!(block_index_in_file, 0);
+            },
+            _ => panic!("Expected VerifyV2 for File A"),
+        }
+
+        // 2. Test Block inside File B (Offset 32768, Global Block 2)
+        let addr_b = bm.inflate_address(2); // Block 2
+        let dec_b = bm.handle_incoming_block_decision(addr_b);
+
+        match dec_b {
+            BlockDecision::VerifyV2 { file_index, root_hash, block_index_in_file } => {
+                assert_eq!(file_index, 1); // File B
+                assert_eq!(root_hash, root_b);
+                assert_eq!(block_index_in_file, 0); // First block relative to File B
+            },
+            _ => panic!("Expected VerifyV2 for File B"),
+        }
+    }
+
+    #[test]
+    fn test_decision_routing_boundary_check() {
+        let mut bm = BlockManager::new();
+        let root = [0xCC; 32];
+        // File starts at 0, ends at 16385 (1 block + 1 byte)
+        let v2_info = vec![(16385, root)]; 
+        
+        bm.set_geometry(16384, 16385, vec![], v2_info, false);
+
+        // 1. First full block
+        let addr_0 = bm.inflate_address(0);
+        let dec_0 = bm.handle_incoming_block_decision(addr_0);
+        assert!(matches!(dec_0, BlockDecision::VerifyV2 { block_index_in_file: 0, .. }));
+
+        // 2. Second partial block (starts at 16384)
+        // Global offset 16384 is inside the file range [0, 16385)
+        let addr_1 = bm.inflate_address(1);
+        let dec_1 = bm.handle_incoming_block_decision(addr_1);
+        
+        match dec_1 {
+            BlockDecision::VerifyV2 { file_index, block_index_in_file, .. } => {
+                assert_eq!(file_index, 0);
+                assert_eq!(block_index_in_file, 1);
+            },
+            _ => panic!("Expected VerifyV2 for partial block at end of file"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -527,7 +641,7 @@ mod comprehensive_tests {
 
     fn create_manager(piece_len: u32, total_len: u64) -> BlockManager {
         let mut bm = BlockManager::new();
-        bm.set_geometry(piece_len, total_len, vec![], HashMap::new(), false);
+        bm.set_geometry(piece_len, total_len, vec![], vec![], false);
         bm
     }
 
@@ -611,7 +725,7 @@ mod security_tests {
 
     fn create_manager(piece_len: u32, total_len: u64) -> BlockManager {
         let mut bm = BlockManager::new();
-        bm.set_geometry(piece_len, total_len, vec![], HashMap::new(), false);
+        bm.set_geometry(piece_len, total_len, vec![], vec![], false);
         bm
     }
 
@@ -682,7 +796,7 @@ mod state_tests {
         let mut bm = BlockManager::new();
         let piece_len = 32768; // 2 blocks
         let total_len = 32768;
-        bm.set_geometry(piece_len, total_len, vec![], HashMap::new(), false);
+        bm.set_geometry(piece_len, total_len, vec![], vec![], false);
 
         // 1. Mark both blocks as done
         bm.commit_v1_piece(0);
@@ -717,7 +831,7 @@ mod selection_tests {
         let mut bm = BlockManager::new();
         // 1 piece, 4 blocks
         let piece_len = 16384 * 4; 
-        bm.set_geometry(piece_len, piece_len as u64, vec![], HashMap::new(), false);
+        bm.set_geometry(piece_len, piece_len as u64, vec![], vec![], false);
 
         let peer_bitfield = vec![true]; // Peer has Piece 0
         let rarest = vec![0];
