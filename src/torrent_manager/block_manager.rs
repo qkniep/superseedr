@@ -1,9 +1,12 @@
+#[allow(dead_code)]
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
-
 use std::collections::{HashMap, HashSet};
 
 pub const BLOCK_SIZE: u32 = 16_384;
+
+#[allow(dead_code)]
+
 pub const V2_HASH_LEN: usize = 32;
 
 #[derive(Debug, Clone)]
@@ -24,6 +27,7 @@ pub struct BlockAddress {
 }
 
 #[derive(Debug, PartialEq)]
+#[allow(dead_code)]
 pub enum BlockResult {
     Accepted,
     Duplicate,
@@ -32,6 +36,7 @@ pub enum BlockResult {
 }
 
 #[derive(Debug, PartialEq)]
+#[allow(dead_code)]
 pub enum BlockDecision {
     VerifyV2 {
         file_index: usize,
@@ -44,6 +49,7 @@ pub enum BlockDecision {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FileInfo {
     pub start_offset: u64,
     pub end_offset: u64,
@@ -59,7 +65,7 @@ pub struct BlockManager {
 
     // --- METADATA ---
     pub piece_hashes_v1: Vec<[u8; 20]>,
-    
+
     // V2: Files are mapped by index to their geometry and root hash
     pub files: Vec<FileInfo>,
 
@@ -72,6 +78,7 @@ pub struct BlockManager {
     pub total_blocks: u32,
 }
 
+#[allow(dead_code)]
 impl BlockManager {
     pub fn new() -> Self {
         Self::default()
@@ -83,24 +90,27 @@ impl BlockManager {
         total_length: u64,
         v1_hashes: Vec<[u8; 20]>,
         // Map of file_index -> (size, root_hash)
-        v2_file_info: Vec<(u64, [u8; 32])>, 
+        v2_file_info: Vec<(u64, [u8; 32])>,
         validation_complete: bool,
     ) {
         self.piece_length = piece_length;
         self.total_length = total_length;
         self.piece_hashes_v1 = v1_hashes;
-        
+
         // Construct File Layout
         let mut current_offset = 0;
-        self.files = v2_file_info.into_iter().map(|(size, root)| {
-            let info = FileInfo {
-                start_offset: current_offset,
-                end_offset: current_offset + size,
-                root_hash: root,
-            };
-            current_offset += size;
-            info
-        }).collect();
+        self.files = v2_file_info
+            .into_iter()
+            .map(|(size, root)| {
+                let info = FileInfo {
+                    start_offset: current_offset,
+                    end_offset: current_offset + size,
+                    root_hash: root,
+                };
+                current_offset += size;
+                info
+            })
+            .collect();
 
         self.total_blocks = (total_length as f64 / BLOCK_SIZE as f64).ceil() as u32;
         self.block_bitfield = vec![validation_complete; self.total_blocks as usize];
@@ -140,9 +150,10 @@ impl BlockManager {
     // --- HELPER: Find which file owns this offset ---
     fn get_file_for_offset(&self, global_offset: u64) -> Option<(usize, &FileInfo)> {
         // Simple linear scan for now; Binary search recommended for production with many files
-        self.files.iter().enumerate().find(|(_, f)| {
-            global_offset >= f.start_offset && global_offset < f.end_offset
-        })
+        self.files
+            .iter()
+            .enumerate()
+            .find(|(_, f)| global_offset >= f.start_offset && global_offset < f.end_offset)
     }
 
     // --- STATE COMMITMENT ---
@@ -208,7 +219,7 @@ impl BlockManager {
         }
         picked
     }
-    
+
     pub fn mark_pending(&mut self, global_idx: u32) {
         self.pending_blocks.insert(global_idx);
     }
@@ -218,7 +229,7 @@ impl BlockManager {
     }
 
     // --- GEOMETRY HELPERS ---
-    
+
     fn blocks_in_piece(&self, piece_len: u32) -> u32 {
         (piece_len + BLOCK_SIZE - 1) / BLOCK_SIZE
     }
@@ -391,7 +402,6 @@ impl BlockManager {
         self.legacy_buffers.remove(&piece_index);
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -566,13 +576,10 @@ mod tests {
         let root_a = [0xAA; 32];
         let root_b = [0xBB; 32];
 
-        // V2 Setup: 2 Files. 
+        // V2 Setup: 2 Files.
         // File A: 32KB (2 blocks)
         // File B: 16KB (1 block)
-        let v2_info = vec![
-            (32768, root_a),
-            (16384, root_b),
-        ];
+        let v2_info = vec![(32768, root_a), (16384, root_b)];
 
         // Total len = 48KB
         bm.set_geometry(16384, 49152, vec![], v2_info, false);
@@ -580,13 +587,17 @@ mod tests {
         // 1. Test Block inside File A (Offset 0)
         let addr_a1 = bm.inflate_address(0); // Block 0
         let dec_a1 = bm.handle_incoming_block_decision(addr_a1);
-        
+
         match dec_a1 {
-            BlockDecision::VerifyV2 { file_index, root_hash, block_index_in_file } => {
+            BlockDecision::VerifyV2 {
+                file_index,
+                root_hash,
+                block_index_in_file,
+            } => {
                 assert_eq!(file_index, 0); // File A
                 assert_eq!(root_hash, root_a);
                 assert_eq!(block_index_in_file, 0);
-            },
+            }
             _ => panic!("Expected VerifyV2 for File A"),
         }
 
@@ -595,11 +606,15 @@ mod tests {
         let dec_b = bm.handle_incoming_block_decision(addr_b);
 
         match dec_b {
-            BlockDecision::VerifyV2 { file_index, root_hash, block_index_in_file } => {
+            BlockDecision::VerifyV2 {
+                file_index,
+                root_hash,
+                block_index_in_file,
+            } => {
                 assert_eq!(file_index, 1); // File B
                 assert_eq!(root_hash, root_b);
                 assert_eq!(block_index_in_file, 0); // First block relative to File B
-            },
+            }
             _ => panic!("Expected VerifyV2 for File B"),
         }
     }
@@ -609,25 +624,35 @@ mod tests {
         let mut bm = BlockManager::new();
         let root = [0xCC; 32];
         // File starts at 0, ends at 16385 (1 block + 1 byte)
-        let v2_info = vec![(16385, root)]; 
-        
+        let v2_info = vec![(16385, root)];
+
         bm.set_geometry(16384, 16385, vec![], v2_info, false);
 
         // 1. First full block
         let addr_0 = bm.inflate_address(0);
         let dec_0 = bm.handle_incoming_block_decision(addr_0);
-        assert!(matches!(dec_0, BlockDecision::VerifyV2 { block_index_in_file: 0, .. }));
+        assert!(matches!(
+            dec_0,
+            BlockDecision::VerifyV2 {
+                block_index_in_file: 0,
+                ..
+            }
+        ));
 
         // 2. Second partial block (starts at 16384)
         // Global offset 16384 is inside the file range [0, 16385)
         let addr_1 = bm.inflate_address(1);
         let dec_1 = bm.handle_incoming_block_decision(addr_1);
-        
+
         match dec_1 {
-            BlockDecision::VerifyV2 { file_index, block_index_in_file, .. } => {
+            BlockDecision::VerifyV2 {
+                file_index,
+                block_index_in_file,
+                ..
+            } => {
                 assert_eq!(file_index, 0);
                 assert_eq!(block_index_in_file, 1);
-            },
+            }
             _ => panic!("Expected VerifyV2 for partial block at end of file"),
         }
     }
@@ -654,7 +679,7 @@ mod comprehensive_tests {
 
         assert_eq!(bm.total_blocks, 4);
         assert_eq!(bm.block_bitfield.len(), 4);
-        
+
         // Check ranges
         assert_eq!(bm.get_block_range(0), (0, 2));
         assert_eq!(bm.get_block_range(1), (2, 4));
@@ -669,8 +694,8 @@ mod comprehensive_tests {
         let total_len = 16385;
         let bm = create_manager(piece_len, total_len);
 
-        assert_eq!(bm.total_blocks, 2); 
-        
+        assert_eq!(bm.total_blocks, 2);
+
         // Piece 0: 1 full block
         let (s0, e0) = bm.get_block_range(0);
         assert_eq!((s0, e0), (0, 1));
@@ -694,23 +719,23 @@ mod comprehensive_tests {
         let total_len = 40000;
         let bm = create_manager(piece_len, total_len);
 
-        // Piece 0: Blocks 0 and 1. 
+        // Piece 0: Blocks 0 and 1.
         // Block 0 is full (0-16384). Block 1 is partial (16384-20000).
-        // BUT: BlockManager aligns strictly to 16k grid globally. 
+        // BUT: BlockManager aligns strictly to 16k grid globally.
         // Let's verify how get_block_range handles this.
-        
+
         // Piece 0 spans bytes 0..20000.
         // Block 0: 0..16384
         // Block 1: 16384..32768 (Piece 0 ends at 20000, so it uses part of Block 1)
-        
+
         let (s0, e0) = bm.get_block_range(0);
         // Start block 0, End block 2 (covers indices 0, 1)
-        assert_eq!((s0, e0), (0, 2)); 
+        assert_eq!((s0, e0), (0, 2));
 
         // Piece 1 spans bytes 20000..40000.
         // Starts in Block 1 (offset 3616 inside block).
         // Ends in Block 2 (32768..49152).
-        
+
         let (s1, e1) = bm.get_block_range(1);
         // Should include Block 1 and Block 2.
         assert_eq!((s1, e1), (1, 3));
@@ -738,7 +763,10 @@ mod security_tests {
         // 1. Request overflow: Byte offset + length > piece length
         // Offset 32760, length 10 (Sums to 32770 > 32768)
         let res = bm.inflate_address_from_overlay(0, 32760, 10);
-        assert!(res.is_none(), "Should reject block extending past piece boundary");
+        assert!(
+            res.is_none(),
+            "Should reject block extending past piece boundary"
+        );
 
         // 2. Request massive length
         let res = bm.inflate_address_from_overlay(0, 0, u32::MAX);
@@ -765,20 +793,20 @@ mod security_tests {
 
         // 2. Duplicate arrival (Simulate peer sending after we verified)
         // inflate_address might succeed, but processing should handle logic
-        
+
         // We simulate logic in PieceManager: check bitfield first
         if bm.block_bitfield[0] {
-             // Logic handles it
+            // Logic handles it
         }
 
         // Test low-level buffering refusal if mask is set
         // Reset buffer state manually to simulate a race where assembler exists
         // but piece is already done globally.
         let addr_dup = bm.inflate_address_from_overlay(0, 0, 16384).unwrap();
-        
+
         // If we try to handle it again:
         // handle_v1_block_buffering creates a new assembler if one doesn't exist.
-        // It returns data. This is "correct" for V1 (idempotent), 
+        // It returns data. This is "correct" for V1 (idempotent),
         // but verify it doesn't crash or corrupt state.
         let res2 = bm.handle_v1_block_buffering(addr_dup, &data);
         assert!(res2.is_some());
@@ -808,13 +836,13 @@ mod state_tests {
         bm.revert_v1_piece_completion(0);
         assert!(!bm.block_bitfield[0], "Block 0 bit not cleared");
         assert!(!bm.block_bitfield[1], "Block 1 bit not cleared");
-        
+
         // 3. Verify we can start over
         let data = vec![0u8; 16384];
         let addr = bm.inflate_address_from_overlay(0, 0, 16384).unwrap();
         let res = bm.handle_v1_block_buffering(addr, &data);
         assert!(res.is_none()); // Buffered 1/2 blocks
-        
+
         let assembler = bm.legacy_buffers.get(&0).unwrap();
         assert_eq!(assembler.received_blocks, 1);
     }
@@ -830,7 +858,7 @@ mod selection_tests {
     fn test_pick_blocks_standard_vs_endgame() {
         let mut bm = BlockManager::new();
         // 1 piece, 4 blocks
-        let piece_len = 16384 * 4; 
+        let piece_len = 16384 * 4;
         bm.set_geometry(piece_len, piece_len as u64, vec![], vec![], false);
 
         let peer_bitfield = vec![true]; // Peer has Piece 0
@@ -839,7 +867,7 @@ mod selection_tests {
         // 1. Mark block 0 as PENDING (assigned to Peer A)
         bm.mark_pending(0);
 
-        // 2. Peer B wants work. 
+        // 2. Peer B wants work.
         // Standard Mode: Should skip Block 0, pick Block 1
         let picks_std = bm.pick_blocks_for_peer(&peer_bitfield, 1, &rarest, false);
         assert_eq!(picks_std.len(), 1);
@@ -847,17 +875,16 @@ mod selection_tests {
 
         // 3. Peer C wants work.
         // Endgame Mode: Should duplicate Block 0 if needed, or pick others.
-        // Our logic: pick unacquired blocks. If unacquired is pending, 
+        // Our logic: pick unacquired blocks. If unacquired is pending,
         // skip in standard, take in endgame.
-        
+
         let picks_endgame = bm.pick_blocks_for_peer(&peer_bitfield, 5, &rarest, true);
-        
+
         // Should define behavior:
         // Current impl iterates: 0 (Pending), 1 (Pending-ish/Available), 2, 3
         // If logic is correct, it returns all 4 blocks including pending ones.
-        
+
         let has_block_0 = picks_endgame.iter().any(|b| b.block_index == 0);
         assert!(has_block_0, "Endgame should pick pending blocks");
     }
 }
-

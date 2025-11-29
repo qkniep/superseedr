@@ -1133,7 +1133,7 @@ impl TorrentState {
                 self.piece_manager.set_geometry(
                     torrent.info.piece_length as u32,
                     total_len,
-                    self.torrent_validation_status
+                    self.torrent_validation_status,
                 );
 
                 // Retroactive bitfield resize for non-compliant clients
@@ -3465,11 +3465,15 @@ mod prop_tests {
     }
 
     fn network_action_strategy() -> impl Strategy<Value = Action> {
-        let peer_id_strat = proptest::string::string_regex(".+").unwrap().boxed(); 
-        
+        let peer_id_strat = proptest::string::string_regex(".+").unwrap().boxed();
+
         prop_oneof![
-            peer_id_strat.clone().prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id }),
-            peer_id_strat.clone().prop_map(|id| Action::PeerDisconnected { peer_id: id }),
+            peer_id_strat
+                .clone()
+                .prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id }),
+            peer_id_strat
+                .clone()
+                .prop_map(|id| Action::PeerDisconnected { peer_id: id }),
             any::<String>().prop_map(|addr| Action::PeerConnectionFailed { peer_addr: addr }),
             (any::<String>(), proptest::collection::vec(any::<u8>(), 20)).prop_map(|(addr, id)| {
                 Action::UpdatePeerId {
@@ -3492,17 +3496,27 @@ mod prop_tests {
 
     fn protocol_action_strategy() -> impl Strategy<Value = Action> {
         let peer_id_strat = proptest::string::string_regex(".+").unwrap().boxed();
-        
+
         prop_oneof![
-            peer_id_strat.clone().prop_map(|id| Action::PeerChoked { peer_id: id }),
-            peer_id_strat.clone().prop_map(|id| Action::PeerUnchoked { peer_id: id }),
-            peer_id_strat.clone().prop_map(|id| Action::PeerInterested { peer_id: id }),
-            (peer_id_strat.clone(), proptest::collection::vec(any::<u8>(), 1..10)).prop_map(|(id, bf)| {
-                Action::PeerBitfieldReceived {
-                    peer_id: id,
-                    bitfield: bf,
-                }
-            }),
+            peer_id_strat
+                .clone()
+                .prop_map(|id| Action::PeerChoked { peer_id: id }),
+            peer_id_strat
+                .clone()
+                .prop_map(|id| Action::PeerUnchoked { peer_id: id }),
+            peer_id_strat
+                .clone()
+                .prop_map(|id| Action::PeerInterested { peer_id: id }),
+            (
+                peer_id_strat.clone(),
+                proptest::collection::vec(any::<u8>(), 1..10)
+            )
+                .prop_map(|(id, bf)| {
+                    Action::PeerBitfieldReceived {
+                        peer_id: id,
+                        bitfield: bf,
+                    }
+                }),
             (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 Action::PeerHavePiece {
                     peer_id: id,
@@ -3515,7 +3529,7 @@ mod prop_tests {
 
     fn boundary_data_strategy() -> impl Strategy<Value = Action> {
         let peer_id_strat = proptest::string::string_regex(".+").unwrap().boxed();
-        
+
         prop_oneof![
             // FIX: Access NUM_PIECES and PIECE_LEN directly
             (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
@@ -3559,28 +3573,30 @@ mod prop_tests {
                 any::<u32>(),
                 proptest::collection::vec(any::<u8>(), 1..1024)
             )
-            .prop_map(|(id, idx, off, data)| Action::IncomingBlock {
-                peer_id: id,
-                piece_index: idx,
-                block_offset: off,
-                data
-            }),
+                .prop_map(|(id, idx, off, data)| Action::IncomingBlock {
+                    peer_id: id,
+                    piece_index: idx,
+                    block_offset: off,
+                    data
+                }),
         ]
     }
 
-fn system_response_strategy() -> impl Strategy<Value = Action> {
+    fn system_response_strategy() -> impl Strategy<Value = Action> {
         let peer_id_strat = proptest::string::string_regex(".+").unwrap().boxed();
-        
+
         prop_oneof![
             // FIX: Access NUM_PIECES directly
-            (peer_id_strat.clone(), 0..NUM_PIECES as u32, any::<bool>()).prop_map(|(id, idx, valid)| {
-                Action::PieceVerified {
-                    peer_id: id,
-                    piece_index: idx,
-                    valid,
-                    data: vec![],
+            (peer_id_strat.clone(), 0..NUM_PIECES as u32, any::<bool>()).prop_map(
+                |(id, idx, valid)| {
+                    Action::PieceVerified {
+                        peer_id: id,
+                        piece_index: idx,
+                        valid,
+                        data: vec![],
+                    }
                 }
-            }),
+            ),
             (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 Action::PieceWrittenToDisk {
                     peer_id: id,
@@ -3595,7 +3611,6 @@ fn system_response_strategy() -> impl Strategy<Value = Action> {
             }),
         ]
     }
-
 
     // E. Global Lifecycle
     fn lifecycle_strategy() -> impl Strategy<Value = Action> {
@@ -4148,88 +4163,88 @@ fn system_response_strategy() -> impl Strategy<Value = Action> {
                 .boxed()
             }
 
-        fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
-            let mut strategies = vec![
-                Just(Action::Tick { dt_ms: 1000 }).boxed(),
-                Just(Action::Cleanup).boxed(),
-                Just(Action::FatalError).boxed(),
-                Just(Action::Shutdown).boxed(),
-                Just(Action::Delete).boxed(),
-                Just(Action::ConnectToWebSeeds).boxed(),
-            ];
+            fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
+                let mut strategies = vec![
+                    Just(Action::Tick { dt_ms: 1000 }).boxed(),
+                    Just(Action::Cleanup).boxed(),
+                    Just(Action::FatalError).boxed(),
+                    Just(Action::Shutdown).boxed(),
+                    Just(Action::Delete).boxed(),
+                    Just(Action::ConnectToWebSeeds).boxed(),
+                ];
 
-            // ... (Re-Init, Pause/Resume, Metadata, Phase Transitions logic unchanged) ...
-             strategies.push(
-                any::<bool>()
-                    .prop_map(|paused| Action::TorrentManagerInit {
-                        is_paused: paused,
-                        announce_immediately: !paused,
-                    })
-                    .boxed(),
-            );
-            
-            if state.paused {
-                strategies.push(Just(Action::Resume).boxed());
-            } else {
-                strategies.push(Just(Action::Pause).boxed());
-            }
-
-            if state.status == TorrentStatus::AwaitingMetadata {
+                // ... (Re-Init, Pause/Resume, Metadata, Phase Transitions logic unchanged) ...
                 strategies.push(
-                    Just(Action::MetadataReceived {
-                        torrent: Box::new(create_dummy_torrent(state.total_pieces as usize)),
-                        metadata_length: (state.total_pieces * 16384) as i64,
-                    })
-                    .boxed(),
-                );
-            }
-            
-             if state.status == TorrentStatus::Validating {
-                let max_pieces = state.total_pieces;
-                strategies.push(
-                    proptest::collection::vec(0..max_pieces, 0..max_pieces as usize)
-                        .prop_map(|pieces| Action::ValidationComplete {
-                            completed_pieces: pieces,
+                    any::<bool>()
+                        .prop_map(|paused| Action::TorrentManagerInit {
+                            is_paused: paused,
+                            announce_immediately: !paused,
                         })
                         .boxed(),
                 );
-            }
 
-            if state.status == TorrentStatus::Standard || state.status == TorrentStatus::Endgame
-            {
-                strategies.push(Just(Action::CheckCompletion).boxed());
-            }
+                if state.paused {
+                    strategies.push(Just(Action::Resume).boxed());
+                } else {
+                    strategies.push(Just(Action::Pause).boxed());
+                }
 
-            // Connection Actions
-            // -> FIX HERE: Ensure we don't generate empty peer IDs
-            strategies.push(
-                proptest::string::string_regex(".+")
-                    .unwrap()
-                    .prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id })
-                    .boxed(),
-            );
+                if state.status == TorrentStatus::AwaitingMetadata {
+                    strategies.push(
+                        Just(Action::MetadataReceived {
+                            torrent: Box::new(create_dummy_torrent(state.total_pieces as usize)),
+                            metadata_length: (state.total_pieces * 16384) as i64,
+                        })
+                        .boxed(),
+                    );
+                }
 
-            // Peer Interaction (unchanged logic, selects from existing peers)
-            if !state.connected_peers.is_empty() && state.has_metadata {
-                let peer_strategy =
-                    prop::sample::select(Vec::from_iter(state.connected_peers.clone()));
-                // ... (rest of peer interaction logic)
-                let piece_strategy = 0..state.total_pieces;
+                if state.status == TorrentStatus::Validating {
+                    let max_pieces = state.total_pieces;
+                    strategies.push(
+                        proptest::collection::vec(0..max_pieces, 0..max_pieces as usize)
+                            .prop_map(|pieces| Action::ValidationComplete {
+                                completed_pieces: pieces,
+                            })
+                            .boxed(),
+                    );
+                }
 
+                if state.status == TorrentStatus::Standard || state.status == TorrentStatus::Endgame
+                {
+                    strategies.push(Just(Action::CheckCompletion).boxed());
+                }
+
+                // Connection Actions
+                // -> FIX HERE: Ensure we don't generate empty peer IDs
                 strategies.push(
-                    peer_strategy
-                        .clone()
-                        .prop_map(|id| Action::PeerDisconnected { peer_id: id })
+                    proptest::string::string_regex(".+")
+                        .unwrap()
+                        .prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id })
                         .boxed(),
                 );
-                strategies.push(
-                    peer_strategy
-                        .clone()
-                        .prop_map(|id| Action::PeerUnchoked { peer_id: id })
-                        .boxed(),
-                );
-                
-                 if state.status != TorrentStatus::Validating
+
+                // Peer Interaction (unchanged logic, selects from existing peers)
+                if !state.connected_peers.is_empty() && state.has_metadata {
+                    let peer_strategy =
+                        prop::sample::select(Vec::from_iter(state.connected_peers.clone()));
+                    // ... (rest of peer interaction logic)
+                    let piece_strategy = 0..state.total_pieces;
+
+                    strategies.push(
+                        peer_strategy
+                            .clone()
+                            .prop_map(|id| Action::PeerDisconnected { peer_id: id })
+                            .boxed(),
+                    );
+                    strategies.push(
+                        peer_strategy
+                            .clone()
+                            .prop_map(|id| Action::PeerUnchoked { peer_id: id })
+                            .boxed(),
+                    );
+
+                    if state.status != TorrentStatus::Validating
                         && state.status != TorrentStatus::AwaitingMetadata
                     {
                         strategies.push(
@@ -4273,10 +4288,10 @@ fn system_response_strategy() -> impl Strategy<Value = Action> {
                                 .boxed(),
                         );
                     }
-            }
+                }
 
-            prop::strategy::Union::new(strategies).boxed()
-        }
+                prop::strategy::Union::new(strategies).boxed()
+            }
 
             fn apply(mut state: Self::State, trans: &Self::Transition) -> Self::State {
                 match trans {

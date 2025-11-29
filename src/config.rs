@@ -34,7 +34,7 @@ pub enum PeerSortColumn {
     #[default]
     #[serde(alias = "TotalUL")]
     UL,
-    
+
     #[serde(alias = "TotalDL")]
     DL,
 }

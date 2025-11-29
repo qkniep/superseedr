@@ -789,8 +789,11 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
     let dl_limit = settings.global_download_limit_bps;
 
     let mut dl_spans = vec![
-        Span::styled("DL Speed: ", Style::default().fg(theme::SKY)),
-        Span::raw(format_speed(dl_speed)),
+        Span::styled("DL Speed: ", Style::default().fg(theme::SKY).bold()),
+        Span::styled(
+            format_speed(dl_speed),
+            Style::default().fg(theme::SKY).bold(),
+        ),
         Span::raw(" / "),
     ];
     if dl_limit > 0 && dl_speed >= dl_limit {
@@ -809,8 +812,11 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
     let ul_limit = settings.global_upload_limit_bps;
 
     let mut ul_spans = vec![
-        Span::styled("UL Speed: ", Style::default().fg(theme::GREEN)),
-        Span::raw(format_speed(ul_speed)),
+        Span::styled("UL Speed: ", Style::default().fg(theme::GREEN).bold()),
+        Span::styled(
+            format_speed(ul_speed),
+            Style::default().fg(theme::GREEN).bold(),
+        ),
         Span::raw(" / "),
     ];
 
@@ -1197,19 +1203,21 @@ fn draw_right_pane(
                     PeerSortColumn::Client => a.peer_id.cmp(&b.peer_id),
                     PeerSortColumn::Action => a.last_action.cmp(&b.last_action),
                     PeerSortColumn::DL => {
-                        a.download_speed_bps.cmp(&b.download_speed_bps)
+                        a.download_speed_bps
+                            .cmp(&b.download_speed_bps)
                             // Secondary: Invert sort (b.cmp(a)) to push active uploaders to the bottom
-                            .then(b.upload_speed_bps.cmp(&a.upload_speed_bps)) 
+                            .then(b.upload_speed_bps.cmp(&a.upload_speed_bps))
                             // Tertiary: Standard sort for total downloaded
                             .then(a.total_downloaded.cmp(&b.total_downloaded))
-                    },
+                    }
                     PeerSortColumn::UL => {
-                        a.upload_speed_bps.cmp(&b.upload_speed_bps)
+                        a.upload_speed_bps
+                            .cmp(&b.upload_speed_bps)
                             // Secondary: Invert sort (b.cmp(a)) to push active downloaders to the bottom
                             .then(b.download_speed_bps.cmp(&a.download_speed_bps))
                             // Tertiary: Standard sort for total uploaded
                             .then(a.total_uploaded.cmp(&b.total_uploaded))
-                    },
+                    }
                 };
 
                 if sort_direction == SortDirection::Ascending {
@@ -1335,21 +1343,23 @@ fn draw_right_pane(
                         Cell::from(peer.address.clone()),
                         Cell::from(parse_peer_id(&peer.peer_id)),
                         Cell::from(peer.last_action.clone()),
-                        Cell::from(format!("{} ({})", 
-                            format_speed(peer.upload_speed_bps), 
-                            format_bytes(peer.total_uploaded))
-                        ),
-                        Cell::from(format!("{} ({})", 
-                            format_speed(peer.download_speed_bps), 
-                            format_bytes(peer.total_downloaded))
-                        ),
+                        Cell::from(format!(
+                            "{} ({})",
+                            format_speed(peer.upload_speed_bps),
+                            format_bytes(peer.total_uploaded)
+                        )),
+                        Cell::from(format!(
+                            "{} ({})",
+                            format_speed(peer.download_speed_bps),
+                            format_bytes(peer.total_downloaded)
+                        )),
                     ])
                     .style(Style::default().fg(row_color))
                 });
 
                 let peer_widths = [
                     Constraint::Length(5),      // Flags
-                    Constraint::Percentage(5), // Done % (Moved here)
+                    Constraint::Percentage(5),  // Done % (Moved here)
                     Constraint::Percentage(15), // Address
                     Constraint::Percentage(15), // Client
                     Constraint::Percentage(20), // Action (Increased space)

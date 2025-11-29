@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::torrent_manager::block_manager::{BlockManager, BlockAddress};
+use crate::torrent_manager::block_manager::BlockManager;
 use crate::torrent_manager::state::TorrentStatus;
 
 use rand::prelude::IndexedRandom;
-use tracing::{event, Level};
 use std::collections::{HashMap, HashSet};
+use tracing::{event, Level};
 
 #[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub enum PieceStatus {
@@ -43,13 +43,18 @@ impl PieceManager {
     /// GEOMETRY SETUP:
     /// This must be called (usually from state.rs Action::MetadataReceived) to allow
     /// the inner BlockManager to calculate offsets correctly.
-    pub fn set_geometry(&mut self, piece_length: u32, total_length: u64, validation_complete: bool) {
+    pub fn set_geometry(
+        &mut self,
+        piece_length: u32,
+        total_length: u64,
+        validation_complete: bool,
+    ) {
         self.block_manager.set_geometry(
             piece_length,
             total_length,
             Vec::new(),
             Vec::new(),
-            validation_complete
+            validation_complete,
         );
     }
 
@@ -87,11 +92,13 @@ impl PieceManager {
         let addr = self.block_manager.inflate_address_from_overlay(
             piece_index,
             block_offset,
-            block_data.len() as u32
+            block_data.len() as u32,
         )?;
 
         // 3. Delegate buffering to BlockManager
-        let completed_data = self.block_manager.handle_v1_block_buffering(addr, block_data);
+        let completed_data = self
+            .block_manager
+            .handle_v1_block_buffering(addr, block_data);
 
         // 4. Return data if piece is complete
         completed_data
@@ -106,7 +113,7 @@ impl PieceManager {
         self.bitfield[piece_index as usize] = PieceStatus::Done;
         self.pieces_remaining = self.pieces_remaining.saturating_sub(1);
         self.need_queue.retain(|&p| p != piece_index);
-        
+
         let peers_to_cancel = self.pending_queue.remove(&piece_index).unwrap_or_default();
 
         // 2. Update Low-Level State (BlockManager)
@@ -129,10 +136,10 @@ impl PieceManager {
 
     pub fn requeue_pending_to_need(&mut self, piece_index: u32) {
         self.pending_queue.remove(&piece_index);
-        
+
         let was_done = self.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done);
         if was_done {
-             self.pieces_remaining += 1;
+            self.pieces_remaining += 1;
         }
 
         // Always force status to Need (handles Done -> Need and Pending -> Need)
@@ -155,21 +162,21 @@ impl PieceManager {
     {
         // 1. Delegate calculation to BlockManager (counts everything)
         self.block_manager.update_rarity(all_peer_bitfields);
-        
+
         // 2. Sync AND Filter
         // We only want to expose rarity for pieces we actually Need or are Pending.
         // This matches the original API contract and passes the existing tests.
-        self.piece_rarity = self.block_manager.piece_rarity
+        self.piece_rarity = self
+            .block_manager
+            .piece_rarity
             .clone()
             .into_iter()
-            .filter(|(k, _)| {
-                self.bitfield.get(*k as usize) != Some(&PieceStatus::Done)
-            })
+            .filter(|(k, _)| self.bitfield.get(*k as usize) != Some(&PieceStatus::Done))
             .collect();
     }
 
     // --- SELECTION LOGIC (High-Level Strategy) ---
-    // This logic remains here because it orchestrates the high-level queues 
+    // This logic remains here because it orchestrates the high-level queues
     // (need_queue, pending_queue) which define the download strategy.
 
     pub fn choose_piece_for_peer(
@@ -225,10 +232,10 @@ mod tests {
         let mut pm = PieceManager::new();
         // Set dummy geometry so BlockManager math works (assuming standard 16KB blocks)
         // 16KB * 10 blocks per piece = 163840 bytes per piece
-        let piece_len = 163_840; 
+        let piece_len = 163_840;
         let total_len = piece_len as u64 * num_pieces as u64;
         pm.set_geometry(piece_len, total_len, false);
-        
+
         pm.set_initial_fields(num_pieces, false);
         pm
     }
@@ -330,7 +337,7 @@ mod tests {
         // 1. Add first block
         let result = pm.handle_block(piece_index, 0, &block_data_0, piece_size);
         assert!(result.is_none());
-        
+
         // CHECK: Access inner BlockManager legacy_buffers
         assert!(pm.block_manager.legacy_buffers.contains_key(&piece_index));
         let assembler = pm.block_manager.legacy_buffers.get(&piece_index).unwrap();
@@ -364,7 +371,7 @@ mod tests {
         let mut pm = setup_manager(4); // need = [0, 1, 2, 3]
         pm.mark_as_pending(2, "peer_A".to_string()); // need = [0, 1, 3], pending = [2]
         pm.mark_as_complete(0); // need = [1, 3], pending = [2], done = [0]
-        
+
         // Pieces to check: 1, 3, 2
 
         let peer1_bitfield = vec![true, true, false, true]; // Has 0, 1, 3
@@ -428,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_choose_piece_endgame_mode_prioritizes_pending() {
-        let mut pm = setup_manager(5); 
+        let mut pm = setup_manager(5);
         pm.mark_as_pending(1, "peer_A".to_string());
         pm.mark_as_pending(2, "peer_B".to_string());
 
@@ -476,16 +483,16 @@ mod tests {
         let piece_index = 0;
         let piece_size = 32768;
         let block_size = 16384;
-        
+
         pm.set_geometry(piece_size as u32, piece_size as u64 * 5, false);
-        
+
         let block_data_0 = vec![1; block_size];
         let block_data_1 = vec![2; block_size];
 
         // Receive block 1 first
         let result1 = pm.handle_block(piece_index, block_size as u32, &block_data_1, piece_size);
         assert!(result1.is_none());
-        
+
         let assembler1 = pm.block_manager.legacy_buffers.get(&piece_index).unwrap();
         assert_eq!(assembler1.received_blocks, 1);
         assert!(assembler1.mask[1]); // Block index 1 is set
@@ -494,7 +501,7 @@ mod tests {
         let result0 = pm.handle_block(piece_index, 0, &block_data_0, piece_size);
         assert!(result0.is_some());
         let full_piece = result0.unwrap();
-        
+
         assert_eq!(full_piece.len(), piece_size);
         assert_eq!(&full_piece[0..block_size], &block_data_0[..]);
         assert_eq!(&full_piece[block_size..], &block_data_1[..]);
@@ -513,20 +520,20 @@ mod tests {
 
         // Receive block 0
         let result1 = pm.handle_block(piece_index, 0, &block_data, piece_size);
-        assert!(result1.is_some()); 
+        assert!(result1.is_some());
         assert!(!pm.block_manager.legacy_buffers.contains_key(&piece_index));
 
         // Test duplicate detection during assembly
         let piece_size_2 = 32768;
-        
+
         pm.set_geometry(piece_size_2 as u32, piece_size_2 as u64 * 2, false);
-        
+
         let block_data_0 = vec![1; block_size];
         let block_data_1 = vec![2; block_size];
 
         // Add block 0 for Piece 1
         pm.handle_block(1, 0, &block_data_0, piece_size_2);
-        
+
         // This unwrap will now succeed because Piece 1 is valid within the total length
         let assembler1 = pm.block_manager.legacy_buffers.get(&1).unwrap();
         assert_eq!(assembler1.received_blocks, 1);
@@ -534,7 +541,7 @@ mod tests {
         // Add block 0 again (should be ignored)
         pm.handle_block(1, 0, &block_data_0, piece_size_2);
         let assembler2 = pm.block_manager.legacy_buffers.get(&1).unwrap();
-        assert_eq!(assembler2.received_blocks, 1); 
+        assert_eq!(assembler2.received_blocks, 1);
 
         // Add block 1 to complete
         let result_final = pm.handle_block(1, block_size as u32, &block_data_1, piece_size_2);
@@ -563,30 +570,33 @@ mod tests {
         // However, the current handle_block wrapper calls `handle_v1_block_buffering` directly.
         // BlockManager's handle_v1_block_buffering checks `blocks_in_piece`.
         // The key is that `mark_as_complete` sets the block bits in BlockManager.
-        // But `handle_v1_block_buffering` doesn't currently check the global block bitfield, 
-        // it only checks the assembler mask. 
-        // So this will re-assemble. This behavior is "acceptable" for the unit test, 
-        // but arguably `handle_block` should check `bitfield` first. 
+        // But `handle_v1_block_buffering` doesn't currently check the global block bitfield,
+        // it only checks the assembler mask.
+        // So this will re-assemble. This behavior is "acceptable" for the unit test,
+        // but arguably `handle_block` should check `bitfield` first.
         // In the provided implementation, it will simply re-buffer and return Data again.
-        
+
         let result = pm.handle_block(piece_index, 0, &block_data, piece_size);
-        assert!(result.is_some()); 
+        assert!(result.is_some());
     }
 
-#[test]
+    #[test]
     fn test_revert_synchronization() {
         // Scenario: Piece completes, verifying commits to BlockManager,
         // then Disk Write fails, requiring a revert.
         let mut pm = setup_manager(1);
         let piece_index = 0;
-        
+
         // 1. Mark as complete (simulates verification success)
         pm.mark_as_complete(piece_index);
-        
+
         // Assertion: BlockManager must think it's done
         let (start, end) = pm.block_manager.get_block_range(piece_index);
         for i in start..end {
-            assert!(pm.block_manager.block_bitfield[i as usize], "Blocks should be true after commit");
+            assert!(
+                pm.block_manager.block_bitfield[i as usize],
+                "Blocks should be true after commit"
+            );
         }
 
         // 2. Simulate Disk Write Failure -> Requeue
@@ -599,7 +609,10 @@ mod tests {
         // CRITICAL ASSERTION: BlockManager bits must be cleared.
         // If this fails, we cannot re-download the blocks!
         for i in start..end {
-            assert!(!pm.block_manager.block_bitfield[i as usize], "Blocks should be false after revert");
+            assert!(
+                !pm.block_manager.block_bitfield[i as usize],
+                "Blocks should be false after revert"
+            );
         }
     }
 
@@ -607,7 +620,7 @@ mod tests {
     fn test_lazy_geometry_initialization() {
         // Scenario: We receive a block before Metadata/Geometry is explicitly set.
         let mut pm = PieceManager::new();
-        let piece_size = 16384; 
+        let piece_size = 16384;
         let block_data = vec![1u8; 16384];
 
         // We do NOT call set_geometry. We rely on handle_block to infer it.
@@ -622,8 +635,8 @@ mod tests {
         // Scenario: Total length is 16385 (1 full block + 1 byte)
         let mut pm = PieceManager::new();
         let piece_size = 32768; // Standard 32KB piece size
-        let total_len = 16385;  
-        
+        let total_len = 16385;
+
         pm.set_geometry(piece_size, total_len, false);
 
         // 1. Handle the full block (0-16384)
@@ -638,8 +651,8 @@ mod tests {
         // Should complete successfully
         assert!(res_1.is_some());
         let data = res_1.unwrap();
-        
-        // The buffer should be sized to the PIECE size (32KB) usually, 
+
+        // The buffer should be sized to the PIECE size (32KB) usually,
         // or the specific remaining size?
         // Current implementation allocates `vec![0u8; piece_len]` in BlockManager.
         // Let's verify we got the data we put in.

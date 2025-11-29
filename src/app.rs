@@ -1966,7 +1966,7 @@ impl App {
             primary_ordering.then_with(|| {
                 let calculate_weighted_activity = |t: &TorrentDisplayState| -> u64 {
                     // Still look at 60s window to break ties if last 5s are quiet
-                    let window = 60; 
+                    let window = 60;
                     let mut score = 0;
 
                     let mut sum_vec = |history: &Vec<u64>| {
@@ -1976,11 +1976,11 @@ impl App {
                                 // WEIGHTING LOGIC:
                                 // If within the last 5 seconds (indices 0-4), apply heavy weight.
                                 // Otherwise, apply a nominal weight of 1.
-                                let weight = if i < 5 { 
+                                let weight = if i < 5 {
                                     // Example: 0s ago = 50, 1s ago = 40, ... 4s ago = 10
-                                    (5 - i) as u64 * 10 
-                                } else { 
-                                    1 
+                                    (5 - i) as u64 * 10
+                                } else {
+                                    1
                                 };
                                 score += count * weight;
                             }
@@ -1990,7 +1990,7 @@ impl App {
                     sum_vec(&t.peer_discovery_history);
                     sum_vec(&t.peer_connection_history);
                     sum_vec(&t.peer_disconnect_history);
-                    
+
                     score
                 };
 
