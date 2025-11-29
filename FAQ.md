@@ -18,7 +18,7 @@ The Superseedr software is legal. However, the legality of downloading and shari
 
 For users concerned with privacy, superseedr does provide a docker compose solution using gluetun.
 
-Superseedr does not provide SOCKS5 or proxies. SOCKS5 is designed to be unencrypted, so any client with this feature will leak clear text data (tcp, udp, http) without specialized local server setups. Its is recommended to use network isolation such as docker to solve this.
+Superseedr does not provide SOCKS5 proxies. SOCKS5 is designed to be unencrypted, so any client with this feature will leak clear text data (tcp, udp, http) without specialized local server setups. Its is recommended to use network isolation such as docker to solve this issue.
 
 ### How can I improve my download speed?
 

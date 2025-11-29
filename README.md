@@ -51,11 +51,11 @@ superseedr
 > For optimal performance, consider increasing file descriptor limits: `ulimit -n 65536`
 
 ## More Info
-- 🤝[Contributing](CONTRIBUTING.md)
-- 🗺️[Roadmap](ROADMAP.md)
-- ❓[FAQ](FAQ.md)
-- 📜[Changelog](CHANGELOG.md)
-- 🧑‍🤝‍🧑[Code of Conduct](CODE_OF_CONDUCT.md)
+- 🤝[Contributing](CONTRIBUTING.md): How you can contribute to the project (technical and non-technical).
+- ❓[FAQ](FAQ.md): Find answers to common questions about superseedr.
+- 📜[Changelog](CHANGELOG.md): See what's new in recent versions of superseedr.
+- 🗺️[Roadmap](ROADMAP.md): Discover upcoming features and future plans for superseedr.
+- 🧑‍🤝‍🧑[Code of Conduct](CODE_OF_CONDUCT.md): Understand the community standards and expectations.
 
 ## ⚡ Quick Start (Advanced)
 ```bash
