@@ -38,8 +38,6 @@ Download the latest release for your platform:
 
 👉 Available on the [releases page](https://github.com/Jagalite/superseedr/releases).
 
-## [🤝 Contributing](CONTRIBUTING.md)
-
 ## Usage
 Open up a terminal and run:
 ```bash
@@ -47,9 +45,14 @@ superseedr
 ```
 > [!NOTE]  
 > Add torrents by clicking magnet links in your browser or opening .torrent files.
-> Optimal performance by increasing file descriptor limits: ulimit -n 65536
 
-## ⚡ Quick Start
+> [!NOTE]  
+> For optimal performance, consider increasing file descriptor limits: `ulimit -n 65536`
+
+## More Info
+- 🤝[Contributing](CONTRIBUTING.md)
+
+## ⚡ Quick Start (Advanced)
 ```bash
 # Recommended (native install)
 cargo install superseedr
@@ -64,7 +67,7 @@ docker compose up -d && docker compose attach superseedr
 
 ```
 
-## Running with Docker
+## Running with Docker (Advanced)
 
 superseedr offers a fully secured Docker setup using Gluetun. All BitTorrent traffic is routed through a VPN tunnel with dynamic port forwarding and zero manual network configuration.
 
@@ -222,8 +225,8 @@ flowchart TD
 ```
 </details>
 
-
 ---
+
 
 ### Private Tracker Support 
 `superseedr` fully supports private trackers. We offer specific builds (releases page) that strictly disable DHT and PEX to comply with private tracker rules while maintaining high-performance peering.
