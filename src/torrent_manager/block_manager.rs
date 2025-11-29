@@ -657,7 +657,7 @@ mod tests {
 
 #[cfg(test)]
 mod comprehensive_tests {
-    use crate::torrent_manager::block_manager::{BlockManager};
+    use crate::torrent_manager::block_manager::BlockManager;
 
     fn create_manager(piece_len: u32, total_len: u64) -> BlockManager {
         let mut bm = BlockManager::new();
@@ -739,7 +739,7 @@ mod comprehensive_tests {
 
 #[cfg(test)]
 mod security_tests {
-    use crate::torrent_manager::block_manager::{BlockManager};
+    use crate::torrent_manager::block_manager::BlockManager;
 
     fn create_manager(piece_len: u32, total_len: u64) -> BlockManager {
         let mut bm = BlockManager::new();
@@ -808,7 +808,7 @@ mod security_tests {
 
 #[cfg(test)]
 mod state_tests {
-    use crate::torrent_manager::block_manager::{BlockManager};
+    use crate::torrent_manager::block_manager::BlockManager;
 
     #[test]
     fn test_revert_piece_clears_bits() {

@@ -96,8 +96,7 @@ impl PieceManager {
         )?;
 
         // 3. Delegate buffering to BlockManager
-        self
-            .block_manager
+        self.block_manager
             .handle_v1_block_buffering(addr, block_data)
     }
 
