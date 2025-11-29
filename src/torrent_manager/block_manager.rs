@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 pub const BLOCK_SIZE: u32 = 16_384;
 
 #[allow(dead_code)]
-
 pub const V2_HASH_LEN: usize = 32;
 
 #[derive(Debug, Clone)]
@@ -210,10 +209,8 @@ impl BlockManager {
                     .unwrap_or(true);
                 let is_pending = self.pending_blocks.contains(&global_idx);
 
-                if !already_have {
-                    if !is_pending || endgame_mode {
-                        picked.push(self.inflate_address(global_idx));
-                    }
+                if !already_have && (!is_pending || endgame_mode) {
+                    picked.push(self.inflate_address(global_idx));
                 }
             }
         }
@@ -231,7 +228,7 @@ impl BlockManager {
     // --- GEOMETRY HELPERS ---
 
     fn blocks_in_piece(&self, piece_len: u32) -> u32 {
-        (piece_len + BLOCK_SIZE - 1) / BLOCK_SIZE
+        piece_len.div_ceil(BLOCK_SIZE)
     }
 
     pub fn get_block_range(&self, piece_idx: u32) -> (u32, u32) {
@@ -660,9 +657,7 @@ mod tests {
 
 #[cfg(test)]
 mod comprehensive_tests {
-    use super::*;
-    use crate::torrent_manager::block_manager::{BlockManager, BLOCK_SIZE};
-    use std::collections::HashMap;
+    use crate::torrent_manager::block_manager::{BlockManager};
 
     fn create_manager(piece_len: u32, total_len: u64) -> BlockManager {
         let mut bm = BlockManager::new();
@@ -744,9 +739,7 @@ mod comprehensive_tests {
 
 #[cfg(test)]
 mod security_tests {
-    use super::*;
-    use crate::torrent_manager::block_manager::{BlockManager, BLOCK_SIZE};
-    use std::collections::HashMap;
+    use crate::torrent_manager::block_manager::{BlockManager};
 
     fn create_manager(piece_len: u32, total_len: u64) -> BlockManager {
         let mut bm = BlockManager::new();
@@ -815,9 +808,7 @@ mod security_tests {
 
 #[cfg(test)]
 mod state_tests {
-    use super::*;
-    use crate::torrent_manager::block_manager::{BlockManager, BLOCK_SIZE};
-    use std::collections::HashMap;
+    use crate::torrent_manager::block_manager::{BlockManager};
 
     #[test]
     fn test_revert_piece_clears_bits() {
@@ -850,9 +841,7 @@ mod state_tests {
 
 #[cfg(test)]
 mod selection_tests {
-    use super::*;
     use crate::torrent_manager::block_manager::BlockManager;
-    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn test_pick_blocks_standard_vs_endgame() {

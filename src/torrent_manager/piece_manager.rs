@@ -96,12 +96,9 @@ impl PieceManager {
         )?;
 
         // 3. Delegate buffering to BlockManager
-        let completed_data = self
+        self
             .block_manager
-            .handle_v1_block_buffering(addr, block_data);
-
-        // 4. Return data if piece is complete
-        completed_data
+            .handle_v1_block_buffering(addr, block_data)
     }
 
     pub fn mark_as_complete(&mut self, piece_index: u32) -> Vec<String> {
