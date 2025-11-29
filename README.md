@@ -57,15 +57,15 @@ superseedr
 | :--- | :--- |
 | `m` | **Open full manual / help** |
 | `q` | Quit |
-| `Enter` | View Details / Edit |
 | `↑` `↓` `←` `→` | Navigate |
 | `c` | Configure Settings |
 
 > [!TIP]
 > Press `m` inside the app to see the full list of shortcuts, legends, and features.
 
-> [!NOTE]  
+> [!TIP]  
 > Add torrents by clicking magnet links in your browser or opening .torrent files.
+> Copying and pasting (crtl + v) magnet links or paths to torrent files will also work.
 
 > [!NOTE]  
 > For optimal performance, consider increasing file descriptor limits: `ulimit -n 65536`
