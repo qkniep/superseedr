@@ -434,31 +434,6 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # --- Build and push NORMAL image ---
-      - name: Extract metadata for normal build
-        id: meta_normal
-        uses: docker/metadata-action@v5
-        with:
-          images: jagatranvo/superseedr
-          tags: |
-            type=ref,event=tag
-            type=raw,value=latest
-
-      - name: Build and push normal image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta_normal.outputs.tags }}
-          labels: ${{ steps.meta_normal.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha,scope=docker-normal
-          cache-to: type=gha,mode=max,scope=docker-normal
-          build-args: |
-            PRIVATE_BUILD=false
-
-
       # --- Build and push PRIVATE image ---
       - name: Extract metadata for private build
         id: meta_private
@@ -484,6 +459,31 @@ jobs:
           cache-to: type=gha,mode=max,scope=docker-private
           build-args: |
             PRIVATE_BUILD=true
+
+      # --- Build and push NORMAL image ---
+      - name: Extract metadata for normal build
+        id: meta_normal
+        uses: docker/metadata-action@v5
+        with:
+          images: jagatranvo/superseedr
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+
+      - name: Build and push normal image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta_normal.outputs.tags }}
+          labels: ${{ steps.meta_normal.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=docker-normal
+          cache-to: type=gha,mode=max,scope=docker-normal
+          build-args: |
+            PRIVATE_BUILD=false
+
 
       - name: Update Docker Hub Description
         uses: peter-evans/dockerhub-description@v5
