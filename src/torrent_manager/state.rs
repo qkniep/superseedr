@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 
 const MAX_TIMEOUT_COUNT: u32 = 10;
 const SMOOTHING_PERIOD_MS: f64 = 5000.0;
-const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 20;
+const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 16;
 const MAX_BLOCK_SIZE: u32 = 131_072;
 const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;

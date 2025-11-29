@@ -326,9 +326,9 @@ fn draw_left_pane(f: &mut Frame, app_state: &AppState, left_pane: Rect) {
         (
             vec![
                 Constraint::Length(7),      // Progress
-                Constraint::Percentage(75), // Name (Increased from 65)
-                Constraint::Percentage(10), // DL (Reduced from 15)
-                Constraint::Percentage(10), // UL (Reduced from 15)
+                Constraint::Percentage(68), // Name
+                Constraint::Percentage(13), // DL
+                Constraint::Percentage(12), // UL
             ],
             1,
         )
@@ -448,10 +448,10 @@ fn draw_left_pane(f: &mut Frame, app_state: &AppState, left_pane: Rect) {
 
                     let mut row_cells = vec![
                         name_cell,
-                        Cell::from(format_speed(torrent.smoothed_download_speed_bps))
-                            .style(speed_to_style(torrent.smoothed_download_speed_bps)),
                         Cell::from(format_speed(torrent.smoothed_upload_speed_bps))
                             .style(speed_to_style(torrent.smoothed_upload_speed_bps)),
+                        Cell::from(format_speed(torrent.smoothed_download_speed_bps))
+                            .style(speed_to_style(torrent.smoothed_download_speed_bps)),
                     ];
 
                     if has_unfinished_torrents {
@@ -1240,8 +1240,8 @@ fn draw_right_pane(
                         PeerSortColumn::Client => "Client",
                         PeerSortColumn::Action => "Action",
                         PeerSortColumn::Completed => "Done %",
-                        PeerSortColumn::DL => "Down (Total)",
                         PeerSortColumn::UL => "Up (Total)",
+                        PeerSortColumn::DL => "Down (Total)",
                     };
 
                     let mut text_with_indicator = text.to_string();
@@ -1336,13 +1336,12 @@ fn draw_right_pane(
                         Cell::from(parse_peer_id(&peer.peer_id)),
                         Cell::from(peer.last_action.clone()),
                         Cell::from(format!("{} ({})", 
-                            format_speed(peer.download_speed_bps), 
-                            format_bytes(peer.total_downloaded))
-                        ),
-                        // Combine UL Speed + Total
-                        Cell::from(format!("{} ({})", 
                             format_speed(peer.upload_speed_bps), 
                             format_bytes(peer.total_uploaded))
+                        ),
+                        Cell::from(format!("{} ({})", 
+                            format_speed(peer.download_speed_bps), 
+                            format_bytes(peer.total_downloaded))
                         ),
                     ])
                     .style(Style::default().fg(row_color))
@@ -1353,9 +1352,9 @@ fn draw_right_pane(
                     Constraint::Percentage(5), // Done % (Moved here)
                     Constraint::Percentage(15), // Address
                     Constraint::Percentage(15), // Client
-                    Constraint::Percentage(30), // Action (Increased space)
-                    Constraint::Percentage(15), // DL (Reduced)
-                    Constraint::Percentage(15), // UL (Reduced)
+                    Constraint::Percentage(20), // Action (Increased space)
+                    Constraint::Percentage(20), // UL (Reduced)
+                    Constraint::Percentage(20), // DL (Reduced)
                 ];
 
                 let peers_table = Table::new(peer_rows, peer_widths)

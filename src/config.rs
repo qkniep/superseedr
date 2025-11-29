@@ -18,9 +18,9 @@ use strum_macros::EnumIter;
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default, EnumIter, EnumCount)]
 pub enum TorrentSortColumn {
     Name,
-    Down,
     #[default]
     Up,
+    Down,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default, EnumIter, EnumCount)]
@@ -30,13 +30,13 @@ pub enum PeerSortColumn {
     Address,
     Client,
     Action,
-    
-    #[serde(alias = "TotalDL")]
-    DL,
 
     #[default]
     #[serde(alias = "TotalUL")]
     UL,
+    
+    #[serde(alias = "TotalDL")]
+    DL,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
