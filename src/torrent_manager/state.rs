@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 
 const MAX_TIMEOUT_COUNT: u32 = 10;
 const SMOOTHING_PERIOD_MS: f64 = 5000.0;
-const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 4;
+const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 16;
 const MAX_BLOCK_SIZE: u32 = 131_072;
 const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
@@ -1123,6 +1123,19 @@ impl TorrentState {
                 self.piece_manager
                     .set_initial_fields(num_pieces, self.torrent_validation_status);
 
+                let total_len: u64 = if torrent.info.files.is_empty() {
+                    torrent.info.length as u64
+                } else {
+                    torrent.info.files.iter().map(|f| f.length as u64).sum()
+                };
+
+                // Pass geometry so BlockManager can do math
+                self.piece_manager.set_geometry(
+                    torrent.info.piece_length as u32,
+                    total_len,
+                    self.torrent_validation_status,
+                );
+
                 // Retroactive bitfield resize for non-compliant clients
                 for peer in self.peers.values_mut() {
                     if peer.bitfield.len() > num_pieces {
@@ -1168,7 +1181,7 @@ impl TorrentState {
                 for peer in self.peers.values_mut() {
                     peer.pending_requests.clear();
                 }
-                self.piece_manager.piece_assemblers.clear();
+                self.piece_manager.clear_assembly_buffers();
 
                 for status in self.piece_manager.bitfield.iter_mut() {
                     if *status != PieceStatus::Done {
@@ -3451,11 +3464,16 @@ mod prop_tests {
         ]
     }
 
-    // A. Network & Tracker Events (Standard)
     fn network_action_strategy() -> impl Strategy<Value = Action> {
+        let peer_id_strat = proptest::string::string_regex(".+").unwrap().boxed();
+
         prop_oneof![
-            any::<String>().prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id }),
-            any::<String>().prop_map(|id| Action::PeerDisconnected { peer_id: id }),
+            peer_id_strat
+                .clone()
+                .prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id }),
+            peer_id_strat
+                .clone()
+                .prop_map(|id| Action::PeerDisconnected { peer_id: id }),
             any::<String>().prop_map(|addr| Action::PeerConnectionFailed { peer_addr: addr }),
             (any::<String>(), proptest::collection::vec(any::<u8>(), 20)).prop_map(|(addr, id)| {
                 Action::UpdatePeerId {
@@ -3476,20 +3494,30 @@ mod prop_tests {
         ]
     }
 
-    // B. Peer Protocol Messages (Standard)
     fn protocol_action_strategy() -> impl Strategy<Value = Action> {
-        let peer_id_strat = any::<String>();
+        let peer_id_strat = proptest::string::string_regex(".+").unwrap().boxed();
+
         prop_oneof![
-            peer_id_strat.prop_map(|id| Action::PeerChoked { peer_id: id }),
-            peer_id_strat.prop_map(|id| Action::PeerUnchoked { peer_id: id }),
-            peer_id_strat.prop_map(|id| Action::PeerInterested { peer_id: id }),
-            (peer_id_strat, proptest::collection::vec(any::<u8>(), 1..10)).prop_map(|(id, bf)| {
-                Action::PeerBitfieldReceived {
-                    peer_id: id,
-                    bitfield: bf,
-                }
-            }),
-            (peer_id_strat, 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
+            peer_id_strat
+                .clone()
+                .prop_map(|id| Action::PeerChoked { peer_id: id }),
+            peer_id_strat
+                .clone()
+                .prop_map(|id| Action::PeerUnchoked { peer_id: id }),
+            peer_id_strat
+                .clone()
+                .prop_map(|id| Action::PeerInterested { peer_id: id }),
+            (
+                peer_id_strat.clone(),
+                proptest::collection::vec(any::<u8>(), 1..10)
+            )
+                .prop_map(|(id, bf)| {
+                    Action::PeerBitfieldReceived {
+                        peer_id: id,
+                        bitfield: bf,
+                    }
+                }),
+            (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 Action::PeerHavePiece {
                     peer_id: id,
                     piece_index: idx,
@@ -3499,15 +3527,12 @@ mod prop_tests {
         ]
     }
 
-    // C. NEW: Edge of Bounds Data Strategy
-    // Targets off-by-one errors, buffer overflows, and exact piece boundary conditions.
     fn boundary_data_strategy() -> impl Strategy<Value = Action> {
-        let peer_id_strat = any::<String>();
+        let peer_id_strat = proptest::string::string_regex(".+").unwrap().boxed();
 
         prop_oneof![
-            // 1. Exact Boundary Hits (Finish a piece exactly)
-            (peer_id_strat, 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
-                // Offset is piece_len - 1024, data is 1024. Sum = piece_len.
+            // FIX: Access NUM_PIECES and PIECE_LEN directly
+            (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 let data = vec![1u8; 1024];
                 Action::IncomingBlock {
                     peer_id: id,
@@ -3516,9 +3541,7 @@ mod prop_tests {
                     data,
                 }
             }),
-            // 2. Tiny Overflows (Security/Panic check)
-            (peer_id_strat, 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
-                // Offset is piece_len - 5. Data is 10 bytes. Result > Piece Length.
+            (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 let data = vec![0u8; 10];
                 Action::IncomingBlock {
                     peer_id: id,
@@ -3527,17 +3550,16 @@ mod prop_tests {
                     data,
                 }
             }),
-            // 3. Massive Length Requests (DoS protection check)
-            (peer_id_strat, 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
+            // FIX: Access MAX_BLOCK directly
+            (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 Action::RequestUpload {
                     peer_id: id,
                     piece_index: idx,
                     block_offset: 0,
-                    length: MAX_BLOCK + 1, // Exceeds protocol limit
+                    length: MAX_BLOCK + 1,
                 }
             }),
-            // 4. Zero Length Request (Division by zero check)
-            (peer_id_strat, 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
+            (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 Action::RequestUpload {
                     peer_id: id,
                     piece_index: idx,
@@ -3545,9 +3567,8 @@ mod prop_tests {
                     length: 0,
                 }
             }),
-            // 5. Standard random data (Filling the gap)
             (
-                peer_id_strat,
+                peer_id_strat.clone(),
                 0..NUM_PIECES as u32,
                 any::<u32>(),
                 proptest::collection::vec(any::<u8>(), 1..1024)
@@ -3561,18 +3582,22 @@ mod prop_tests {
         ]
     }
 
-    // D. System / Disk Responses
     fn system_response_strategy() -> impl Strategy<Value = Action> {
+        let peer_id_strat = proptest::string::string_regex(".+").unwrap().boxed();
+
         prop_oneof![
-            (any::<String>(), 0..NUM_PIECES as u32, any::<bool>()).prop_map(|(id, idx, valid)| {
-                Action::PieceVerified {
-                    peer_id: id,
-                    piece_index: idx,
-                    valid,
-                    data: vec![],
+            // FIX: Access NUM_PIECES directly
+            (peer_id_strat.clone(), 0..NUM_PIECES as u32, any::<bool>()).prop_map(
+                |(id, idx, valid)| {
+                    Action::PieceVerified {
+                        peer_id: id,
+                        piece_index: idx,
+                        valid,
+                        data: vec![],
+                    }
                 }
-            }),
-            (any::<String>(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
+            ),
+            (peer_id_strat.clone(), 0..NUM_PIECES as u32).prop_map(|(id, idx)| {
                 Action::PieceWrittenToDisk {
                     peer_id: id,
                     piece_index: idx,
@@ -4140,7 +4165,6 @@ mod prop_tests {
 
             fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
                 let mut strategies = vec![
-                    // Global Actions
                     Just(Action::Tick { dt_ms: 1000 }).boxed(),
                     Just(Action::Cleanup).boxed(),
                     Just(Action::FatalError).boxed(),
@@ -4149,7 +4173,7 @@ mod prop_tests {
                     Just(Action::ConnectToWebSeeds).boxed(),
                 ];
 
-                // Re-Init
+                // ... (Re-Init, Pause/Resume, Metadata, Phase Transitions logic unchanged) ...
                 strategies.push(
                     any::<bool>()
                         .prop_map(|paused| Action::TorrentManagerInit {
@@ -4159,14 +4183,12 @@ mod prop_tests {
                         .boxed(),
                 );
 
-                // Pause/Resume
                 if state.paused {
                     strategies.push(Just(Action::Resume).boxed());
                 } else {
                     strategies.push(Just(Action::Pause).boxed());
                 }
 
-                // Phase Transitions
                 if state.status == TorrentStatus::AwaitingMetadata {
                     strategies.push(
                         Just(Action::MetadataReceived {
@@ -4178,7 +4200,6 @@ mod prop_tests {
                 }
 
                 if state.status == TorrentStatus::Validating {
-                    // Fuzzing: Simulate finding 0 to all pieces
                     let max_pieces = state.total_pieces;
                     strategies.push(
                         proptest::collection::vec(0..max_pieces, 0..max_pieces as usize)
@@ -4195,16 +4216,19 @@ mod prop_tests {
                 }
 
                 // Connection Actions
+                // -> FIX HERE: Ensure we don't generate empty peer IDs
                 strategies.push(
-                    any::<String>()
+                    proptest::string::string_regex(".+")
+                        .unwrap()
                         .prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id })
                         .boxed(),
                 );
 
-                // Peer Interaction
+                // Peer Interaction (unchanged logic, selects from existing peers)
                 if !state.connected_peers.is_empty() && state.has_metadata {
                     let peer_strategy =
                         prop::sample::select(Vec::from_iter(state.connected_peers.clone()));
+                    // ... (rest of peer interaction logic)
                     let piece_strategy = 0..state.total_pieces;
 
                     strategies.push(
@@ -4507,7 +4531,6 @@ mod prop_tests {
                             sut = new_sut;
                             ref_state = <TorrentModel as ReferenceStateMachine>::apply(ref_state, &action);
 
-                            // FIX: Resync Model peer list after Cleanup.
                             if matches!(action, Action::Cleanup) {
                                 ref_state.connected_peers = sut.peers.keys().cloned().collect();
                             }

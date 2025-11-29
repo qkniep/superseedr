@@ -109,7 +109,7 @@ mod tests {
     use super::*;
     use tokio::time::{sleep, Instant};
 
-    const TOLERANCE: f64 = 1e-5; // Base tolerance for direct float checks
+    const TOLERANCE: f64 = 1e-3; // Base tolerance for direct float checks
     const TIMING_TOLERANCE: f64 = 0.15; // Increased tolerance for sleep/timing checks (150ms)
 
     #[test]

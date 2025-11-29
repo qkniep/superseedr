@@ -1936,6 +1936,7 @@ impl App {
                 return std::cmp::Ordering::Equal;
             };
 
+            // 1. Primary Sort (Existing)
             let ordering = match sort_by {
                 TorrentSortColumn::Name => a_torrent
                     .latest_state
@@ -1954,11 +1955,51 @@ impl App {
                 _ => SortDirection::Descending,
             };
 
-            if sort_direction != default_direction {
+            let primary_ordering = if sort_direction != default_direction {
                 ordering.reverse()
             } else {
                 ordering
-            }
+            };
+
+            // 2. Secondary Sort: Weighted Peer Activity
+            // If primary sort is equal (e.g. both 0 DL), use activity score.
+            primary_ordering.then_with(|| {
+                let calculate_weighted_activity = |t: &TorrentDisplayState| -> u64 {
+                    // Still look at 60s window to break ties if last 5s are quiet
+                    let window = 60;
+                    let mut score = 0;
+
+                    let mut sum_vec = |history: &Vec<u64>| {
+                        // iter().rev() means index 0 is the most recent second
+                        for (i, &count) in history.iter().rev().take(window).enumerate() {
+                            if count > 0 {
+                                // WEIGHTING LOGIC:
+                                // If within the last 5 seconds (indices 0-4), apply heavy weight.
+                                // Otherwise, apply a nominal weight of 1.
+                                let weight = if i < 5 {
+                                    // Example: 0s ago = 50, 1s ago = 40, ... 4s ago = 10
+                                    (5 - i) as u64 * 10
+                                } else {
+                                    1
+                                };
+                                score += count * weight;
+                            }
+                        }
+                    };
+
+                    sum_vec(&t.peer_discovery_history);
+                    sum_vec(&t.peer_connection_history);
+                    sum_vec(&t.peer_disconnect_history);
+
+                    score
+                };
+
+                let a_activity = calculate_weighted_activity(a_torrent);
+                let b_activity = calculate_weighted_activity(b_torrent);
+
+                // Sort Descending
+                b_activity.cmp(&a_activity)
+            })
         });
 
         self.app_state.torrent_list_order = torrent_list;
