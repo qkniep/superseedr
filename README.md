@@ -8,15 +8,23 @@
            | |                                       
            |_|                                    
 ```
-# superseedr - A Rust BitTorrent Client in your Terminal
+# Superseedr - A Rust BitTorrent Client in your Terminal
 
 [![Rust](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml) [![Nightly Fuzzing](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml) ![Verification](https://img.shields.io/badge/Logic_Verification-Model--Based_Fuzzing-blueviolet?style=flat-square)
 
 ![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr) ![crates.io](https://img.shields.io/crates/v/superseedr) ![License](https://img.shields.io/github/license/Jagalite/superseedr) [![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/)
 
-superseedr is a modern Rust BitTorrent client featuring a high-performance terminal UI, real-time swarm observability, secure VPN-aware Docker setups, and zero manual network configuration. It is fast, privacy-oriented, and built for both desktop users and homelab/server workflows.
+Superseedr is a modern Rust BitTorrent client featuring a high-performance terminal UI, real-time swarm observability, secure VPN-aware Docker setups, and zero manual network configuration. It is fast, privacy-oriented, and built for both desktop users and homelab/server workflows.
 
 ![Feature Demo](https://github.com/Jagalite/superseedr-assets/blob/main/superseedr_landing.webp)
+
+### 🎯 Why Superseedr?
+
+Superseedr brings the BitTorrent into the modern termnial environment, focusing on speed, visibility, and reliability.
+
+* **Deep Swarm Analytics:** Moves beyond simple progress bars by providing high performance real-time heatmaps, peer metrics, and network graphs for complete swarm observability.
+* **Modern Rust Engine:** Leverages Rust and Model-Based Testing to ensure memory safety, high performance, and unparalleled reliability.
+* **Seamless Networking:** Designed for resilient connectivity, featuring automatic listener reloading for dynamic VPN ports to maintain uptime without manual intervention.
 
 ## 🚀 Features
 - 🎨 Animated, high-performance TUI (1–60 FPS)
@@ -44,6 +52,18 @@ Open up a terminal and run:
 ```bash
 superseedr
 ```
+### ⌨️ Key Controls
+| Key | Action |
+| :--- | :--- |
+| `m` | **Open full manual / help** |
+| `q` | Quit |
+| `Enter` | View Details / Edit |
+| `↑` `↓` `←` `→` | Navigate |
+| `c` | Configure Settings |
+
+> [!TIP]
+> Press `m` inside the app to see the full list of shortcuts, legends, and features.
+
 > [!NOTE]  
 > Add torrents by clicking magnet links in your browser or opening .torrent files.
 
@@ -52,9 +72,9 @@ superseedr
 
 ## More Info
 - 🤝[Contributing](CONTRIBUTING.md): How you can contribute to the project (technical and non-technical).
-- ❓[FAQ](FAQ.md): Find answers to common questions about superseedr.
-- 📜[Changelog](CHANGELOG.md): See what's new in recent versions of superseedr.
-- 🗺️[Roadmap](ROADMAP.md): Discover upcoming features and future plans for superseedr.
+- ❓[FAQ](FAQ.md): Find answers to common questions about Superseedr.
+- 📜[Changelog](CHANGELOG.md): See what's new in recent versions of Superseedr.
+- 🗺️[Roadmap](ROADMAP.md): Discover upcoming features and future plans for Superseedr.
 - 🧑‍🤝‍🧑[Code of Conduct](CODE_OF_CONDUCT.md): Understand the community standards and expectations.
 
 ## ⚡ Quick Start (Advanced)
@@ -74,9 +94,9 @@ docker compose up -d && docker compose attach superseedr
 
 ## Running with Docker (Advanced)
 
-superseedr offers a fully secured Docker setup using Gluetun. All BitTorrent traffic is routed through a VPN tunnel with dynamic port forwarding and zero manual network configuration.
+Superseedr offers a fully secured Docker setup using Gluetun. All BitTorrent traffic is routed through a VPN tunnel with dynamic port forwarding and zero manual network configuration.
 
-If you want privacy and simplicity, Docker is the recommended way to run superseedr.
+If you want privacy and simplicity, Docker is the recommended way to run Superseedr.
 
 Follow steps below to create .env and .gluetun.env files to configure OpenVPN or WireGuard.
 
@@ -135,7 +155,7 @@ Gluetun provides:
 - Dynamic port changes from your VPN provider
 
 Many VPN providers frequently assign new inbound ports. Most BitTorrent clients must be restarted when this port changes, breaking connectability and slowing downloads.
-superseedr can detect Gluetun’s updated port and reload the listener **live**, without a restart, preserving swarm performance.
+Superseedr can detect Gluetun’s updated port and reload the listener **live**, without a restart, preserving swarm performance.
 
 1.  Make sure you have created and configured your `.gluetun.env` file.
 2.  Run the stack using the default `docker-compose.yml` file:
