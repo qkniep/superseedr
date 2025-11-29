@@ -52,6 +52,10 @@ superseedr
 
 ## More Info
 - 🤝[Contributing](CONTRIBUTING.md)
+- 🗺️[Roadmap](ROADMAP.md)
+- ❓[FAQ](FAQ.md)
+- 📜[Changelog](CHANGELOG.md)
+- 🧑‍🤝‍🧑[Code of Conduct](CODE_OF_CONDUCT.md)
 
 ## ⚡ Quick Start (Advanced)
 ```bash
