@@ -24,7 +24,8 @@ superseedr is a modern Rust BitTorrent client featuring a high-performance termi
 - 📊 Real-time network graphs and swarm analytics
 - 🔐 Official Docker + VPN setup with automatic port forwarding
 - 🔄 Dynamic inbound port reloading without restarting the client
-- 🌐 Trackers, DHT, PEX, magnet links, private tracker support
+- ✅ Unparalleled Reliability & Correctness through Model-Based Testing
+- 🛡️ Private Tracker Builds without PEX and DHT
 - ⚡ Rust-based engine for performance and safety
 - 💾 Persistent state with crash recovery
 - 🧵 Peer-level metrics and availability heatmaps
@@ -158,27 +159,3 @@ docker compose -f docker-compose.standalone.yml up -d && docker compose attach s
 > **Optional:** press `[z]` first to enter power-saving mode.
 
 </details>
-
----
-
-## Reliability & Correctness
-`superseedr` ensures unparalleled reliability through Model-Based Testing and Deterministic Simulation, continuously fuzzed against an abstract reference model. Every release undergoes rigorous verification, simulating millions of state transitions under network chaos to eliminate logic bugs before deployment. This proactive approach, coupled with permanent regression testing, guarantees a stable and correct client.
-
-### Private Tracker Support 
-`superseedr` fully supports private trackers. We offer specific builds (releases page) that strictly disable DHT and PEX to comply with private tracker rules while maintaining high-performance peering.
-
-### Core Protocol & Peer Discovery
-- **Real Time Performance Tuning:** Periodic resource optimizations (file handles) to maximize speeds and disk stability.
-- **Peer Discovery:** Full support for Trackers, DHT, PEX, and Magnet Links (including metadata download).
-- **Piece Selection:** Utilizes a Rarest-First strategy for optimal swarm health, switching to Endgame Mode for the final pieces.
-- **Choking Algorithm:** Employs a tit-for-tat based choking algorithm with optimistic unchoking for efficient upload slot management.
-
-### User Interface (TUI)
-- **Real-time Dashboard:** A `ratatui`-based terminal UI displaying overall status, individual torrent progress, peer lists, and network graphs.
-- **High Performance TUI:** FPS selector that allows 1-60fps.
-- **Network Graph:** Historic time periods selector on network activity for network speed and disk failures.
-
-### Configuration & Management
-- **Persistent State:** Saves the torrent list, progress, and lifetime stats to a configuration file.
-- **Speed Limits:** Allows setting global upload and download speed limits.
-
