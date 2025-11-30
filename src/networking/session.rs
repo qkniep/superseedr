@@ -4,7 +4,6 @@
 use crate::torrent_file::Info;
 use crate::torrent_file::Torrent;
 
-
 use super::protocol::{
     calculate_blocks_for_piece, parse_message, writer_task, BlockInfo, ClientExtendedId,
     ExtendedHandshakePayload, Message, MessageSummary, MetadataMessage,
@@ -27,10 +26,9 @@ use std::sync::Arc;
 
 use tokio::io::AsyncReadExt;
 
-use tokio::io::AsyncWrite;
-use tokio::io::AsyncRead;
 use tokio::io::split;
-use tokio::net::TcpStream;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -158,7 +156,7 @@ impl PeerSession {
         current_bitfield: Option<Vec<u8>>,
     ) -> Result<(), Box<dyn StdError + Send + Sync>>
     where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let _guard = DisconnectGuard {
             peer_ip_port: self.peer_ip_port.clone(),
@@ -323,25 +321,25 @@ impl PeerSession {
 
                             self.block_request_joinset.spawn(async move {
                                 let len = block_data.len() as f64;
-                                
+
                                 {
                                     let mut stash = local_stash_clone.lock().await;
-                                    
+
                                     if *stash < len {
                                         let rate = {
                                             let b = global_dl_bucket_clone.lock().await;
                                             b.get_rate()
                                         };
-                                        
+
                                         let target_duration = 0.2;
                                         let dynamic_batch = rate * target_duration;
                                         let batch_size = dynamic_batch.clamp(16384.0, 5.0 * 1024.0 * 1024.0);
                                         let amount_to_request = batch_size.max(len);
-                                        
+
                                         consume_tokens(&global_dl_bucket_clone, amount_to_request).await;
                                         *stash += amount_to_request;
                                     }
-                                    
+
                                     *stash -= len;
                                 }
 
@@ -649,11 +647,11 @@ impl PeerSession {
 
 #[cfg(test)]
 mod tests {
-    use proptest::proptest;
-    use proptest::prelude::ProptestConfig;
-    use proptest::collection;
     use super::*;
     use crate::networking::protocol::{generate_message, parse_message, Message};
+    use proptest::collection;
+    use proptest::prelude::ProptestConfig;
+    use proptest::proptest;
     use std::collections::HashSet;
     use std::sync::Arc;
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
@@ -669,8 +667,7 @@ mod tests {
         let (client_socket, mock_peer_socket) = duplex(64 * 1024);
 
         // 2. Mock Global Resources (Infinite Bandwidth)
-        let infinite_bucket =
-            Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+        let infinite_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
         let (manager_tx, manager_rx) = mpsc::channel(100);
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -752,12 +749,15 @@ mod tests {
         println!("Checking for initial burst of 5 requests (Order Agnostic)...");
         let mut requests_received = HashSet::new();
 
-        // We loop to collect exactly 5 REQUESTS. 
+        // We loop to collect exactly 5 REQUESTS.
         // If we see other messages (like Interested), we ignore them but keep looking.
         let start = std::time::Instant::now();
         while requests_received.len() < 5 {
             if start.elapsed() > Duration::from_millis(500) {
-                panic!("Timed out waiting for 5 requests. Got: {}", requests_received.len());
+                panic!(
+                    "Timed out waiting for 5 requests. Got: {}",
+                    requests_received.len()
+                );
             }
 
             let msg = timeout(Duration::from_millis(100), parse_message(&mut network))
@@ -787,10 +787,13 @@ mod tests {
         // Now that we have 5 requests, the 6th REQUEST must not appear.
         // We allow other messages (like KeepAlive), but if we see a Request, it's a violation.
         let result = timeout(Duration::from_millis(50), parse_message(&mut network)).await;
-        
+
         if let Ok(Ok(extra_msg)) = result {
             if let Message::Request(..) = extra_msg {
-                panic!("Client violated pipeline limit! Sent 6th Request: {:?}", extra_msg);
+                panic!(
+                    "Client violated pipeline limit! Sent 6th Request: {:?}",
+                    extra_msg
+                );
             } else {
                 println!("Received innocuous extra message: {:?}", extra_msg);
             }
@@ -815,7 +818,7 @@ mod tests {
         // Again, ignore non-requests until we get the refill
         let refill_start = std::time::Instant::now();
         let mut got_refill = false;
-        
+
         while !got_refill {
             if refill_start.elapsed() > Duration::from_millis(500) {
                 panic!("Timed out waiting for refill request.");
@@ -833,13 +836,13 @@ mod tests {
                     "Client re-requested an existing block! Offset: {}",
                     begin
                 );
-                println!(
-                    "Success! Client requested new block {} immediately.",
-                    begin
-                );
+                println!("Success! Client requested new block {} immediately.", begin);
                 got_refill = true;
             } else {
-                println!("Note: Received non-request message during refill wait: {:?}", msg);
+                println!(
+                    "Note: Received non-request message during refill wait: {:?}",
+                    msg
+                );
             }
         }
     }
@@ -848,28 +851,30 @@ mod tests {
     async fn test_fragmented_pipeline_saturation() {
         // This test simulates "Stream Saturation" (v2 style).
         // Can we keep the pipe full even if the Manager gives us work in tiny, separate chunks?
-        
+
         let (mut network, client_cmd_tx, _manager_event_rx) = spawn_test_session().await;
 
         // --- Setup: Handshake & Bitfield ---
         let mut handshake_buf = vec![0u8; 68];
         network.read_exact(&mut handshake_buf).await.unwrap();
-        
+
         let mut response = vec![0u8; 68];
         response[0] = 19;
         response[1..20].copy_from_slice(b"BitTorrent protocol");
-        response[20..28].copy_from_slice(&[0, 0, 0, 0, 0, 0x10, 0, 0]); 
+        response[20..28].copy_from_slice(&[0, 0, 0, 0, 0, 0x10, 0, 0]);
         network.write_all(&response).await.unwrap();
 
         // Consume setup messages
         for _ in 0..5 {
-            if let Ok(Ok(Message::Bitfield(_))) = timeout(Duration::from_millis(100), parse_message(&mut network)).await {
+            if let Ok(Ok(Message::Bitfield(_))) =
+                timeout(Duration::from_millis(100), parse_message(&mut network)).await
+            {
                 break;
             }
         }
 
         // --- The V2 Stress Test ---
-        
+
         let block_size = 16384;
         let total_torrent_size = block_size * 10; // Enough for 10 pieces
 
@@ -877,9 +882,9 @@ mod tests {
         for i in 0..10 {
             client_cmd_tx
                 .send(TorrentCommand::RequestDownload(
-                    i as u32, 
-                    block_size as i64, 
-                    total_torrent_size as i64 
+                    i as u32,
+                    block_size as i64,
+                    total_torrent_size as i64,
                 ))
                 .await
                 .expect("Failed to send command");
@@ -888,12 +893,15 @@ mod tests {
         // --- ASSERTION 1: Aggregation ---
         println!("Checking for burst of 5 distinct piece requests...");
         let mut requested_pieces = HashSet::new();
-        
+
         // Loop until we have 5 requests or timeout. Ignore KeepAlives.
         let start = std::time::Instant::now();
         while requested_pieces.len() < 5 {
             if start.elapsed() > Duration::from_millis(500) {
-                panic!("Timed out waiting for 5 requests. Got: {:?}", requested_pieces);
+                panic!(
+                    "Timed out waiting for 5 requests. Got: {:?}",
+                    requested_pieces
+                );
             }
 
             let msg = timeout(Duration::from_millis(100), parse_message(&mut network))
@@ -904,22 +912,26 @@ mod tests {
             match msg {
                 Message::Request(index, _, _) => {
                     requested_pieces.insert(index);
-                },
+                }
                 Message::KeepAlive => {
                     println!("Ignored KeepAlive during burst check...");
-                },
+                }
                 _ => panic!("Unexpected message during burst: {:?}", msg),
             }
         }
 
-        assert_eq!(requested_pieces.len(), 5, "Client failed to pipeline distinct pieces!");
+        assert_eq!(
+            requested_pieces.len(),
+            5,
+            "Client failed to pipeline distinct pieces!"
+        );
         println!("Success: Client pipelined pieces {:?}\n", requested_pieces);
 
         // --- ASSERTION 2: Refill across boundaries ---
-        
+
         let piece_to_fulfill = *requested_pieces.iter().next().unwrap();
         println!("Fulfilling Piece {}...", piece_to_fulfill);
-        
+
         let piece_msg = Message::Piece(piece_to_fulfill, 0, vec![0xAA; 16384]);
         let piece_bytes = generate_message(piece_msg).unwrap();
         network.write_all(&piece_bytes).await.unwrap();
@@ -937,21 +949,29 @@ mod tests {
 
             match msg {
                 Message::Request(index, _, _) => {
-                    assert!(!requested_pieces.contains(&index), "Client re-requested finished piece!");
-                    println!("Success: Client crossed boundary and requested Piece {}", index);
+                    assert!(
+                        !requested_pieces.contains(&index),
+                        "Client re-requested finished piece!"
+                    );
+                    println!(
+                        "Success: Client crossed boundary and requested Piece {}",
+                        index
+                    );
                     break; // Success!
-                },
+                }
                 Message::KeepAlive => {
                     println!("Ignored KeepAlive during refill check...");
                     continue; // Keep looking
-                },
+                }
                 _ => panic!("Expected Request, got {:?}", msg),
             }
         }
     }
 
     // --- Helper for Custom Bucket (Matches your current struct) ---
-    async fn spawn_custom_session(bucket: Arc<Mutex<TokenBucket>>) -> (
+    async fn spawn_custom_session(
+        bucket: Arc<Mutex<TokenBucket>>,
+    ) -> (
         tokio::io::DuplexStream,
         mpsc::Sender<TorrentCommand>,
         mpsc::Receiver<TorrentCommand>,
@@ -989,17 +1009,18 @@ mod tests {
         // --- TEST 1: CORRECTNESS ---
         // Verify that "Wholesale" batching doesn't accidentally allow speeding.
         // Limit: 1 MB/s. Task: 5 MB. Target Time: ~5.0s.
-        
-        let rate_limit = 1_000_000.0; 
+
+        let rate_limit = 1_000_000.0;
         let bucket = Arc::new(Mutex::new(TokenBucket::new(rate_limit, rate_limit)));
-        
-        let (mut network, client_cmd_tx, mut manager_event_rx) = spawn_custom_session(bucket.clone()).await;
+
+        let (mut network, client_cmd_tx, mut manager_event_rx) =
+            spawn_custom_session(bucket.clone()).await;
 
         // 1. Handshake Boilerplate
         let mut handshake = vec![0u8; 68];
         network.read_exact(&mut handshake).await.unwrap();
         let mut resp = vec![0u8; 68];
-        resp[0] = 19; 
+        resp[0] = 19;
         resp[1..20].copy_from_slice(b"BitTorrent protocol");
         network.write_all(&resp).await.unwrap();
         // Consume Bitfield
@@ -1008,19 +1029,22 @@ mod tests {
         // 2. Setup the transfer
         let total_size = 5 * 1024 * 1024;
         let piece_index = 0;
-        
-        client_cmd_tx.send(TorrentCommand::RequestDownload(
-            piece_index, total_size as i64, total_size as i64
-        )).await.unwrap();
+
+        client_cmd_tx
+            .send(TorrentCommand::RequestDownload(
+                piece_index,
+                total_size as i64,
+                total_size as i64,
+            ))
+            .await
+            .unwrap();
 
         // 3. Reader Task: Drain 'Requests' so the client doesn't block on a full pipe
-        let mut read_task = tokio::spawn(async move {
-            loop {
-                if let Ok(Ok(Message::Request(_, _, _))) = timeout(Duration::from_millis(10), parse_message(&mut network)).await {
-                    // Keep reading requests
-                } else {
-                    break; 
-                }
+        let read_task = tokio::spawn(async move {
+            while let Ok(Ok(Message::Request(_, _, _))) =
+                timeout(Duration::from_millis(10), parse_message(&mut network)).await
+            {
+                // Keep reading requests
             }
             network
         });
@@ -1029,10 +1053,10 @@ mod tests {
         // The Client's "Token Wallet" is the only thing stopping this from finishing instantly.
         let start = std::time::Instant::now();
         let mut network_writer = read_task.await.unwrap();
-        
-        let block = vec![0u8; 16384]; 
+
+        let block = vec![0u8; 16384];
         let blocks_to_send = total_size / 16384;
-        
+
         for i in 0..blocks_to_send {
             let msg = Message::Piece(0, i * 16384, block.clone());
             let bytes = generate_message(msg).unwrap();
@@ -1048,13 +1072,22 @@ mod tests {
         }
 
         let elapsed = start.elapsed();
-        println!("Transferred 5MB in {:.2} seconds (Target: 5.0s)", elapsed.as_secs_f64());
+        println!(
+            "Transferred 5MB in {:.2} seconds (Target: 5.0s)",
+            elapsed.as_secs_f64()
+        );
 
         // Assert Correctness:
         // Must not be too fast (Cheating limits)
-        assert!(elapsed.as_secs_f64() > 4.0, "Client ignored rate limit! Batching logic is flawed.");
+        assert!(
+            elapsed.as_secs_f64() > 4.0,
+            "Client ignored rate limit! Batching logic is flawed."
+        );
         // Must not be too slow (Lock contention)
-        assert!(elapsed.as_secs_f64() < 6.0, "Client was too slow! Lock contention issue?");
+        assert!(
+            elapsed.as_secs_f64() < 6.0,
+            "Client was too slow! Lock contention issue?"
+        );
     }
 
     #[tokio::test]
@@ -1062,7 +1095,7 @@ mod tests {
         // --- TEST 2: PERFORMANCE (Overhead Check) ---
         // Verify that "Wholesale" logic handles INFINITY correctly.
         // It should calculate a batch size (clamped to 5MB) and finish instantly.
-        
+
         let bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
         let (mut network, client_cmd_tx, mut manager_event_rx) = spawn_custom_session(bucket).await;
 
@@ -1070,33 +1103,38 @@ mod tests {
         let mut handshake = vec![0u8; 68];
         network.read_exact(&mut handshake).await.unwrap();
         let mut resp = vec![0u8; 68];
-        resp[0] = 19; 
+        resp[0] = 19;
         resp[1..20].copy_from_slice(b"BitTorrent protocol");
         network.write_all(&resp).await.unwrap();
         let _ = timeout(Duration::from_millis(100), parse_message(&mut network)).await;
 
         let total_size = 5 * 1024 * 1024; // 5 MB
-        
-        client_cmd_tx.send(TorrentCommand::RequestDownload(
-            0, total_size as i64, total_size as i64
-        )).await.unwrap();
+
+        client_cmd_tx
+            .send(TorrentCommand::RequestDownload(
+                0,
+                total_size as i64,
+                total_size as i64,
+            ))
+            .await
+            .unwrap();
 
         // Drain requests
-        let mut read_task = tokio::spawn(async move {
-            loop {
-                if let Ok(Ok(Message::Request(_, _, _))) = timeout(Duration::from_millis(10), parse_message(&mut network)).await {
-                } else { break; }
+        let read_task = tokio::spawn(async move {
+            while let Ok(Ok(Message::Request(_, _, _))) =
+                timeout(Duration::from_millis(10), parse_message(&mut network)).await
+            {
             }
             network
         });
 
         let start = std::time::Instant::now();
         let mut network_writer = read_task.await.unwrap();
-        
+
         // Send data instantly
-        let block = vec![0u8; 16384]; 
+        let block = vec![0u8; 16384];
         let blocks_to_send = total_size / 16384;
-        
+
         for i in 0..blocks_to_send {
             let msg = Message::Piece(0, i * 16384, block.clone());
             let bytes = generate_message(msg).unwrap();
@@ -1112,11 +1150,17 @@ mod tests {
         }
 
         let elapsed = start.elapsed();
-        println!("Transferred 5MB Unthrottled in {:.4} seconds", elapsed.as_secs_f64());
+        println!(
+            "Transferred 5MB Unthrottled in {:.4} seconds",
+            elapsed.as_secs_f64()
+        );
 
         // Assert Performance:
         // 5MB in memory should take milliseconds. If it takes > 0.5s, the batching logic is blocking.
-        assert!(elapsed.as_secs_f64() < 0.5, "Unthrottled performance is degraded!");
+        assert!(
+            elapsed.as_secs_f64() < 0.5,
+            "Unthrottled performance is degraded!"
+        );
     }
 
     #[tokio::test]
@@ -1129,7 +1173,7 @@ mod tests {
         let mut handshake = vec![0u8; 68];
         network.read_exact(&mut handshake).await.unwrap();
         let mut resp = vec![0u8; 68];
-        resp[0] = 19; 
+        resp[0] = 19;
         resp[1..20].copy_from_slice(b"BitTorrent protocol");
         network.write_all(&resp).await.unwrap();
         let _ = timeout(Duration::from_millis(100), parse_message(&mut network)).await;
@@ -1137,12 +1181,17 @@ mod tests {
         // --- The 1000 Block Load Test ---
         let block_count = 1000;
         let block_size = 16384;
-        let total_size = block_count * block_size; 
+        let total_size = block_count * block_size;
 
         // 1. Tell client to expect the data
-        client_cmd_tx.send(TorrentCommand::RequestDownload(
-            0, total_size as i64, total_size as i64
-        )).await.unwrap();
+        client_cmd_tx
+            .send(TorrentCommand::RequestDownload(
+                0,
+                total_size as i64,
+                total_size as i64,
+            ))
+            .await
+            .unwrap();
 
         // SPLIT THE NETWORK: This allows us to Read and Write simultaneously
         let (mut peer_read, mut peer_write) = tokio::io::split(network);
@@ -1152,7 +1201,9 @@ mod tests {
         tokio::spawn(async move {
             let mut buf = [0u8; 1024];
             while let Ok(n) = peer_read.read(&mut buf).await {
-                if n == 0 { break; } // EOF
+                if n == 0 {
+                    break;
+                } // EOF
             }
         });
 
@@ -1164,7 +1215,7 @@ mod tests {
             for i in 0..block_count {
                 let msg = Message::Piece(0, i * block_size, block.clone());
                 let bytes = generate_message(msg).unwrap();
-                // This might block if the client is slow, but that's fine 
+                // This might block if the client is slow, but that's fine
                 // because the main thread is draining the client's output simultaneously.
                 peer_write.write_all(&bytes).await.unwrap();
             }
@@ -1173,16 +1224,19 @@ mod tests {
         // 4. Verify All Processed (Main Thread)
         let start = std::time::Instant::now();
         let mut blocks_received = 0;
-        
+
         while blocks_received < block_count {
             // We expect this to fly. 5s timeout is extremely generous.
             match timeout(Duration::from_secs(5), manager_event_rx.recv()).await {
                 Ok(Some(TorrentCommand::Block(..))) => {
                     blocks_received += 1;
                 }
-                Ok(_) => {}, // Ignore other events
+                Ok(_) => {} // Ignore other events
                 Err(_) => {
-                    panic!("Stalled at block {}/{}! throughput dropped to zero.", blocks_received, block_count);
+                    panic!(
+                        "Stalled at block {}/{}! throughput dropped to zero.",
+                        blocks_received, block_count
+                    );
                 }
             }
         }
@@ -1191,19 +1245,25 @@ mod tests {
         writer_handle.await.unwrap();
 
         let elapsed = start.elapsed();
-        println!("Processed {} blocks (16MB) in {:.4} seconds", block_count, elapsed.as_secs_f64());
+        println!(
+            "Processed {} blocks (16MB) in {:.4} seconds",
+            block_count,
+            elapsed.as_secs_f64()
+        );
 
         // Performance Assertion:
         // With concurrency, this should take ~0.05s - 0.20s in Release mode.
         // We set 1.0s as a very safe upper bound for CI/Debug builds.
-        assert!(elapsed.as_secs_f64() < 3.0, "Throughput test failed! System is too slow.");
+        assert!(
+            elapsed.as_secs_f64() < 3.0,
+            "Throughput test failed! System is too slow."
+        );
     }
-
 
     proptest! {
 
         #![proptest_config(ProptestConfig::default())]
-        
+
         #[test]
         fn fuzz_token_wallet_stability(
             // 1. Random Rate Limit: 10 KB/s to 100 MB/s
@@ -1222,14 +1282,14 @@ mod tests {
                 // --- Setup ---
                 let total_bytes: usize = block_sizes.iter().sum();
                 let bucket = Arc::new(Mutex::new(TokenBucket::new(rate_limit, rate_limit)));
-                
+
                 let (mut network, client_cmd_tx, mut manager_event_rx) = spawn_custom_session(bucket.clone()).await;
 
                 // Handshake
                 let mut handshake = vec![0u8; 68];
                 network.read_exact(&mut handshake).await.unwrap();
                 let mut resp = vec![0u8; 68];
-                resp[0] = 19; 
+                resp[0] = 19;
                 resp[1..20].copy_from_slice(b"BitTorrent protocol");
                 network.write_all(&resp).await.unwrap();
                 // Drain setup messages
@@ -1244,7 +1304,7 @@ mod tests {
                 // --- Helper: Writer Task ---
                 // Spawns a background task to write the weirdly sized blocks
                 let (mut peer_read, mut peer_write) = tokio::io::split(network);
-                
+
                 // Drain requests
                 tokio::spawn(async move {
                     let mut buf = [0u8; 1024];
@@ -1267,7 +1327,7 @@ mod tests {
 
                 // --- Measurement Loop ---
                 let start = std::time::Instant::now();
-                
+
                 let mut received_count = 0;
                 while received_count < block_sizes.len() {
                     // Generous timeout per block to avoid flakes on slow CI
@@ -1277,21 +1337,21 @@ mod tests {
                         Err(_) => panic!("Stalled during fuzz test! Rate: {}, BlockSizes: {:?}", rate_limit, block_sizes),
                     }
                 }
-                
+
                 writer.await.unwrap();
                 let elapsed = start.elapsed().as_secs_f64();
 
                 // --- Assertions ---
-                
+
                 // 1. Minimum Time: It MUST NOT be faster than the rate limit allows.
                 // We subtract 1.0s to account for the initial bucket burst (bucket starts full).
                 let ideal_time = total_bytes as f64 / rate_limit;
-                
+
                 // Only enforce rate limit if the transfer is large enough to drain the initial burst
                 // Otherwise, it's instant, which is correct behavior for TokenBuckets.
                 if total_bytes as f64 > rate_limit {
                      assert!(
-                        elapsed >= (ideal_time - 1.0).max(0.0), 
+                        elapsed >= (ideal_time - 1.0).max(0.0),
                         "Client cheated! Too fast. Rate: {}, Time: {}, Ideal: {}", rate_limit, elapsed, ideal_time
                     );
                 }
@@ -1299,13 +1359,12 @@ mod tests {
                 // 2. Maximum Time: It MUST NOT be egregiously slow (overhead).
                 // We allow a 200ms buffer + 50% overhead margin for test runtime.
                 // This detects if your batching logic accidentally sleeps for 5 seconds on small packets.
-                let max_allowed = ideal_time * 1.5 + 2.0; 
+                let max_allowed = ideal_time * 1.5 + 2.0;
                 assert!(
-                    elapsed <= max_allowed, 
+                    elapsed <= max_allowed,
                     "Client too slow/laggy! Rate: {}, Time: {}, Ideal: {}", rate_limit, elapsed, ideal_time
                 );
             });
         }
     }
 }
-

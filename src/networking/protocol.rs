@@ -14,7 +14,6 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
@@ -200,7 +199,7 @@ pub async fn writer_task<W>(
                             // 2. Calculate dynamic batch (Target: 200ms of data)
                             let target_duration = 0.2;
                             let dynamic_batch = rate * target_duration;
-                            
+
                             // 3. Clamp batch size (Min: 1 Block, Max: 5 MB)
                             let batch_size = dynamic_batch.clamp(16384.0, 5.0 * 1024.0 * 1024.0);
                             let amount_to_request = batch_size.max(len);
@@ -208,7 +207,7 @@ pub async fn writer_task<W>(
                             // 4. "Wholesale" Purchase (Locks Global Mutex)
                             // This waits if we are throttled
                             consume_tokens(&global_ul_bucket, amount_to_request).await;
-                            
+
                             upload_allowance_stash += amount_to_request;
                         }
 

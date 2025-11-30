@@ -11,9 +11,8 @@ I am preparing to commit my changes. Please perform the following 4 tasks sequen
    - **CONSTRAINT:** If any warning requires a logic change or is ambiguous, **STOP and report it** instead of attempting to fix it.
 
 3. **Update Changelog:**
-   - Analyze the recent changes on this branch
+   - Analyze the new changes on this branch
    - Update `CHANGELOG.md` following the **exact format** of the existing entries:
-     - Create a new `## Unreleased` section at the top if it doesn't exist.
      - Categorize changes under `### Performance`, `### Refactoring`, and `### Testing`.
      - Use concise bullet points.
 
