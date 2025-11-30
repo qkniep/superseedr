@@ -176,22 +176,44 @@ pub async fn writer_task<W>(
     error_tx: oneshot::Sender<Box<dyn StdError + Send + Sync>>,
     global_ul_bucket: Arc<Mutex<TokenBucket>>,
     mut shutdown_rx: broadcast::Receiver<()>,
-) 
-where 
-    W: AsyncWriteExt + Unpin + Send + 'static
+) where
+    W: AsyncWriteExt + Unpin + Send + 'static,
 {
+    // Local "Wallet" for Uploads
+    let mut upload_allowance_stash: f64 = 0.0;
+
     loop {
         event!(Level::DEBUG, "Writer task loop running");
-        tokio::select! {            Some(message) = write_rx.recv() => {
+        tokio::select! {
+            Some(message) = write_rx.recv() => {
                 if let Message::Piece(_, _, data) = &message {
-                    if !data.is_empty() {
-                        tokio::select! {
-                            _ = consume_tokens(&global_ul_bucket, data.len() as f64) => {},
-                            _ = shutdown_rx.recv() => {
-                                event!(Level::TRACE, "writer task shutting down during token wait.");
-                                break;
-                            }
+                    let len = data.len() as f64;
+                    if len > 0.0 {
+                        // --- Wholesale / Retail Logic ---
+                        if upload_allowance_stash < len {
+                            // 1. Peek at the rate to determine batch size
+                            let rate = {
+                                let b = global_ul_bucket.lock().await;
+                                b.get_rate()
+                            };
+
+                            // 2. Calculate dynamic batch (Target: 200ms of data)
+                            let target_duration = 0.2;
+                            let dynamic_batch = rate * target_duration;
+                            
+                            // 3. Clamp batch size (Min: 1 Block, Max: 5 MB)
+                            let batch_size = dynamic_batch.clamp(16384.0, 5.0 * 1024.0 * 1024.0);
+                            let amount_to_request = batch_size.max(len);
+
+                            // 4. "Wholesale" Purchase (Locks Global Mutex)
+                            // This waits if we are throttled
+                            consume_tokens(&global_ul_bucket, amount_to_request).await;
+                            
+                            upload_allowance_stash += amount_to_request;
                         }
+
+                        // 5. "Retail" Spend (No Lock)
+                        upload_allowance_stash -= len;
                     }
                 }
 
@@ -211,11 +233,7 @@ where
                         }
                     }
                     Err(e) => {
-                        event!(
-                            Level::ERROR,
-                            "Failed to generate message for writer task: {}",
-                            e
-                        );
+                        event!(Level::ERROR, "Failed to generate message for writer task: {}", e);
                         break;
                     }
                 }

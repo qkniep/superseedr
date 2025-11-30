@@ -2240,3 +2240,155 @@ impl TorrentManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Settings;
+    use crate::resource_manager::ResourceManager;
+    use crate::token_bucket::TokenBucket;
+    use crate::torrent_manager::{ManagerCommand, TorrentParameters};
+    use magnet_url::Magnet;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::{broadcast, mpsc, watch};
+
+    #[tokio::test]
+    async fn test_manager_event_loop_throughput() {
+        // 1. Setup Channels & Dependencies
+        let (incoming_peer_tx, incoming_peer_rx) = mpsc::channel(100);
+        let (manager_command_tx, manager_command_rx) = mpsc::channel(100);
+        let (metrics_tx, _) = broadcast::channel(100);
+        let (manager_event_tx, mut manager_event_rx) = mpsc::channel(100);
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let settings = Arc::new(Settings::default());
+
+        // 2. Setup Resource Manager (Infinite Resources)
+        let mut limits = HashMap::new();
+        limits.insert(
+            crate::resource_manager::ResourceType::PeerConnection,
+            (10_000, 10_000),
+        );
+        limits.insert(
+            crate::resource_manager::ResourceType::DiskRead,
+            (10_000, 10_000),
+        );
+        limits.insert(
+            crate::resource_manager::ResourceType::DiskWrite,
+            (10_000, 10_000),
+        );
+        limits.insert(crate::resource_manager::ResourceType::Reserve, (0, 0));
+
+        let (resource_manager, resource_manager_client) =
+            ResourceManager::new(limits, shutdown_tx.clone());
+        tokio::spawn(resource_manager.run());
+
+        // 3. Setup Buckets (Infinite Speed)
+        let dl_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+        let ul_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+
+        // 4. Handle DHT Dependency (Bind port 0 for test if feature enabled)
+        let dht_handle = {
+            #[cfg(feature = "dht")]
+            {
+                mainline::Dht::builder()
+                    .port(0)
+                    .build()
+                    .unwrap()
+                    .as_async()
+            }
+            #[cfg(not(feature = "dht"))]
+            {
+                ()
+            }
+        };
+
+        // 5. Construct Manager via `from_magnet`
+        // We use a dummy magnet link to initialize the state machine correctly.
+        let magnet_link = "magnet:?xt=urn:btih:0000000000000000000000000000000000000000";
+        let magnet = Magnet::new(magnet_link).unwrap();
+
+        let params = TorrentParameters {
+            dht_handle,
+            incoming_peer_rx,
+            metrics_tx,
+            torrent_validation_status: false,
+            download_dir: PathBuf::from("."),
+            manager_command_rx,
+            manager_event_tx,
+            settings,
+            resource_manager: resource_manager_client,
+            global_dl_bucket: dl_bucket,
+            global_ul_bucket: ul_bucket,
+        };
+
+        let mut manager =
+            TorrentManager::from_magnet(params, magnet).expect("Failed to create manager");
+
+        // 6. The Firehose Setup
+        let block_count = 100_000;
+        let dummy_data = vec![0u8; 16384];
+        let peer_id = "peer1".to_string();
+
+        // Capture the internal sender so we can inject messages directly
+        let tx = manager.torrent_manager_tx.clone();
+
+        // 7. Spawn the Manager (System Under Test)
+        let manager_handle = tokio::spawn(async move {
+            let start = Instant::now();
+            // Run the loop (it will exit when it receives Shutdown command)
+            let _ = manager.run(false).await;
+            start.elapsed()
+        });
+
+        // 8. Blast Data (Background Task)
+        tokio::spawn(async move {
+            // We simulate 100,000 blocks arriving from the network layer.
+            // This tests the "Fan-In" capability of the manager's channel and loop.
+            for i in 0..block_count {
+                let _ = tx
+                    .send(TorrentCommand::Block(
+                        peer_id.clone(),
+                        0,
+                        i * 16384,
+                        dummy_data.clone(),
+                    ))
+                    .await;
+            }
+
+            // Tell the Manager to stop
+            let _ = manager_command_tx.send(ManagerCommand::Shutdown).await;
+        });
+
+        // 9. Measure & Assert
+        // We expect the manager to process all messages + shutdown.
+        // We use a timeout to catch deadlocks.
+        let result = tokio::time::timeout(Duration::from_secs(10), manager_handle).await;
+
+        match result {
+            Ok(Ok(duration)) => {
+                let ops = block_count as f64 / duration.as_secs_f64();
+                let mb_sec = (ops * 16384.0) / 1_048_576.0;
+
+                println!(
+                    "Processed {} blocks in {:.4}s",
+                    block_count,
+                    duration.as_secs_f64()
+                );
+                println!("Throughput: {:.0} Events/sec ({:.2} MB/s)", ops, mb_sec);
+
+                // Performance Assertion:
+                // > 10k OPS means the loop overhead is < 100µs per message.
+                // This is plenty for 1Gbps+ speeds (which generate ~8k blocks/sec).
+                assert!(
+                    ops > 10_000.0,
+                    "Manager loop is too slow! Throughput: {:.0} OPS",
+                    ops
+                );
+            }
+            Ok(Err(e)) => panic!("Manager task panicked: {:?}", e),
+            Err(_) => panic!("Test timed out! Manager loop likely deadlocked processing blocks."),
+        }
+    }
+}

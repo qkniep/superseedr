@@ -30,6 +30,10 @@ impl TokenBucket {
         }
     }
 
+    pub fn get_rate(&self) -> f64 {
+        self.fill_rate
+    }
+
     pub fn set_rate(&mut self, new_fill_rate: f64) {
         let rate = new_fill_rate.max(0.0);
         if !rate.is_finite() || rate == 0.0 {
