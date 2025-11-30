@@ -170,13 +170,16 @@ pub fn calculate_blocks_for_piece(piece_index: u32, piece_size: u32) -> HashSet<
     blocks
 }
 
-pub async fn writer_task(
-    mut stream_write_half: OwnedWriteHalf,
+pub async fn writer_task<W>(
+    mut stream_write_half: W,
     mut write_rx: Receiver<Message>,
     error_tx: oneshot::Sender<Box<dyn StdError + Send + Sync>>,
     global_ul_bucket: Arc<Mutex<TokenBucket>>,
     mut shutdown_rx: broadcast::Receiver<()>,
-) {
+) 
+where 
+    W: AsyncWriteExt + Unpin + Send + 'static
+{
     loop {
         event!(Level::DEBUG, "Writer task loop running");
         tokio::select! {            Some(message) = write_rx.recv() => {
