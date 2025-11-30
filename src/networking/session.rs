@@ -1123,8 +1123,7 @@ mod tests {
         let read_task = tokio::spawn(async move {
             while let Ok(Ok(Message::Request(_, _, _))) =
                 timeout(Duration::from_millis(10), parse_message(&mut network)).await
-            {
-            }
+            {}
             network
         });
 
