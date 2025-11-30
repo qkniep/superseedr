@@ -1,0 +1,24 @@
+I am preparing to commit my changes. Please perform the following 4 tasks sequentially, strictly adhering to the constraints below:
+
+1. **Security Scan:**
+   - Scan the changed files for any hardcoded secrets, API keys, or sensitive credentials.
+   - If any are found, **STOP immediately** and report them to me.
+
+2. **Mechanical Cleanup Only:**
+   - Run `cargo fmt --all` to apply standard formatting.
+   - Run `cargo clippy --all-targets --all-features -- -D warnings` to fix lints.
+   - **CONSTRAINT:** Do NOT change any program logic or behavior. Only apply mechanical fixes (e.g., removing unused imports, removing unnecessary `mut`, fixing whitespace).
+   - **CONSTRAINT:** If any warning requires a logic change or is ambiguous, **STOP and report it** instead of attempting to fix it.
+
+3. **Update Changelog:**
+   - Analyze the recent changes on this branch (specifically: Token Wallet bandwidth optimization, removal of global mutex contention, and the new performance test suite).
+   - Update `CHANGELOG.md` following the **exact format** of the existing entries:
+     - Create a new `## Unreleased` section at the top if it doesn't exist.
+     - Categorize changes under `### Performance`, `### Refactoring`, and `### Testing`.
+     - Use concise bullet points.
+
+4. **Verify:**
+   - Run the full test suite using: `cargo test --all-targets --all-features`
+   - Notify me only if all tests pass.
+
+**IMPORTANT:** Do NOT run `git commit` or `git push`. Just modify the files and verify the build.

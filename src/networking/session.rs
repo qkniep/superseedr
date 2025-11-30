@@ -649,6 +649,9 @@ impl PeerSession {
 
 #[cfg(test)]
 mod tests {
+    use proptest::proptest;
+    use proptest::prelude::ProptestConfig;
+    use proptest::collection;
     use super::*;
     use crate::networking::protocol::{generate_message, parse_message, Message};
     use std::collections::HashSet;
@@ -1207,7 +1210,7 @@ mod tests {
             rate_limit in 10_000.0..100_000_000.0f64,
             // 2. Random "Jittery" Block Sizes: A vector of sizes from 1 byte to 16KB
             // We'll simulate a transfer of ~10 items
-            block_sizes in prop::collection::vec(1usize..16384, 10..20)
+            block_sizes in collection::vec(1usize..16384, 10..20)
         ) {
             // We must create a new Runtime for each proptest iteration
             let rt = tokio::runtime::Builder::new_current_thread()
