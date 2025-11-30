@@ -24,32 +24,32 @@ jobs:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v5
-    
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: actions/checkout@v5
+      
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        rustup component add rustfmt clippy
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          rustup component add rustfmt clippy
 
-    - name: Check Formatting
-      run: cargo fmt --all --check
+      - name: Check Formatting
+        run: cargo fmt --all --check
 
-    - name: Lint with Clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Lint with Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-    - name: Run Tests
-      run: cargo test --all-targets --all-features
+      - name: Run Tests
+        run: cargo test --all-targets --all-features
 
   package_linux:
     timeout-minutes: 120
@@ -64,78 +64,78 @@ jobs:
           - suffix: "private"
             flags: --no-default-features
     steps:
-    - uses: actions/checkout@v5
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: actions/checkout@v5
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y musl-tools libssl-dev pkg-config
-        cargo install cargo-bundle
-        rustup target add x86_64-unknown-linux-musl
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools libssl-dev pkg-config
+          cargo install cargo-bundle
+          rustup target add x86_64-unknown-linux-musl
 
-    - name: Create Staging Directory
-      run: mkdir staging
+      - name: Create Staging Directory
+        run: mkdir staging
 
-    # --- Build/Package Debian (.deb) ---
-    - name: Build Debian Package
-      run: cargo bundle --release --format deb ${{ matrix.flags }}
+      # --- Build/Package Debian (.deb) ---
+      - name: Build Debian Package
+        run: cargo bundle --release --format deb ${{ matrix.flags }}
 
-    - name: Move Debian Package
-      run: |
-        DEB_FILE=$(find target/release/bundle/deb -name '*.deb')
-        if [ -z "$DEB_FILE" ]; then
-          echo "::error:: No .deb file found."
-          exit 1
-        fi
+      - name: Move Debian Package
+        run: |
+          DEB_FILE=$(find target/release/bundle/deb -name '*.deb')
+          if [ -z "$DEB_FILE" ]; then
+            echo "::error:: No .deb file found."
+            exit 1
+          fi
+          
+          if [ "${{ matrix.suffix }}" = "private" ]; then
+            FILE_NAME="${APP_NAME}-private_${{ github.ref_name }}_amd64.deb"
+          else
+            FILE_NAME="${APP_NAME}_${{ github.ref_name }}_amd64.deb"
+          fi
+          
+          echo "Moving $DEB_FILE to staging/$FILE_NAME"
+          mv "$DEB_FILE" "staging/$FILE_NAME"
+
+
+      # --- Build/Package MUSL (.tar.gz) ---
+      # - name: Build MUSL Binary
+      #   env:
+      #     OPENSSL_STATIC: "true"
+      #     OPENSSL_LIB_DIR: /usr/lib/x86_64-linux-gnu
+      #     OPENSSL_INCLUDE_DIR: /usr/include
+      #     CC_x86_64_unknown_linux_musl: musl-gcc
+      #     CFLAGS_x86_64_unknown_linux_musl: -I /usr/include/x86_64-linux-gnu
+      #   run: cargo build --target x86_64-unknown-linux-musl --release ${{ matrix.flags }}
         
-        if [ "${{ matrix.suffix }}" = "private" ]; then
-          FILE_NAME="${APP_NAME}-private_${{ github.ref_name }}_amd64.deb"
-        else
-          FILE_NAME="${APP_NAME}_${{ github.ref_name }}_amd64.deb"
-        fi
-        
-        echo "Moving $DEB_FILE to staging/$FILE_NAME"
-        mv "$DEB_FILE" "staging/$FILE_NAME"
+      # - name: Package MUSL Binary
+      #   run: |
+      #     if [ "${{ matrix.suffix }}" = "private" ]; then
+      #       FILE_NAME="${APP_NAME}-private_${{ github.ref_name }}_linux-x86_64-musl.tar.gz"
+      #     else
+      #       FILE_NAME="${APP_NAME}_${{ github.ref_name }}_linux-x86_64-musl.tar.gz"
+      #     fi
+          
+      #     cd target/x86_64-unknown-linux-musl/release
+      #     echo "Creating staging/$FILE_NAME"
+      #     tar -czvf "../../../staging/$FILE_NAME" "${APP_NAME}"
+      #     cd ../../../.. # Return to root
 
-
-    # --- Build/Package MUSL (.tar.gz) ---
-    # - name: Build MUSL Binary
-    #   env:
-    #     OPENSSL_STATIC: "true"
-    #     OPENSSL_LIB_DIR: /usr/lib/x86_64-linux-gnu
-    #     OPENSSL_INCLUDE_DIR: /usr/include
-    #     CC_x86_64_unknown_linux_musl: musl-gcc
-    #     CFLAGS_x86_64_unknown_linux_musl: -I /usr/include/x86_64-linux-gnu
-    #   run: cargo build --target x86_64-unknown-linux-musl --release ${{ matrix.flags }}
-      
-    # - name: Package MUSL Binary
-    #   run: |
-    #     if [ "${{ matrix.suffix }}" = "private" ]; then
-    #       FILE_NAME="${APP_NAME}-private_${{ github.ref_name }}_linux-x86_64-musl.tar.gz"
-    #     else
-    #       FILE_NAME="${APP_NAME}_${{ github.ref_name }}_linux-x86_64-musl.tar.gz"
-    #     fi
-        
-    #     cd target/x86_64-unknown-linux-musl/release
-    #     echo "Creating staging/$FILE_NAME"
-    #     tar -czvf "../../../staging/$FILE_NAME" "${APP_NAME}"
-    #     cd ../../../.. # Return to root
-
-    - name: Upload Linux Artifacts
-      uses: actions/upload-artifact@v5
-      with:
-        name: superseedr-linux-amd64-${{ matrix.suffix }}-${{ github.ref_name }}
-        path: staging/* # Uploads both .deb and .tar.gz
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: superseedr-linux-amd64-${{ matrix.suffix }}-${{ github.ref_name }}
+          path: staging/* # Uploads both .deb and .tar.gz
 
   bundle_macos:
     timeout-minutes: 120
@@ -152,133 +152,133 @@ jobs:
           - suffix: "private"
             flags: --no-default-features
     steps:
-    - uses: actions/checkout@v5 
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: actions/checkout@v5 
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Install Rust Apple Targets
-      run: |
-        rustup target add aarch64-apple-darwin
-        rustup target add x86_64-apple-darwin
+      - name: Install Rust Apple Targets
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
 
-    - name: Setup macOS Keychain and Certificate
-      id: setup_keychain
-      env:
-        APPLE_INSTALLER_CERT_P12_BASE64: ${{ secrets.APPLE_INSTALLER_CERT_P12_BASE64 }}
-        APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
-      run: |
-        # Create a new keychain
-        security create-keychain -p "$RUNNER_TEMP" "$KEYCHAIN_NAME"
-        security list-keychains -s "$KEYCHAIN_NAME"
-        security default-keychain -s "$KEYCHAIN_NAME"
-        security unlock-keychain -p "$RUNNER_TEMP" "$KEYCHAIN_NAME"
-        
-        # Decode and import the .p12
-        echo $APPLE_INSTALLER_CERT_P12_BASE64 | base64 --decode > certificate.p12
-        security import certificate.p12 -k "$KEYCHAIN_NAME" -P "$APPLE_INSTALLER_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
-        rm certificate.p12
-        
-        # Set keychain to allow signing
-        security set-key-partition-list -S apple-tool:,apple: -s -k "$RUNNER_TEMP" "$KEYCHAIN_NAME"
-        
-        echo "Waiting for keychain to settle..."
-        sleep 2
-
-        # Find the certificate's Common Name (CN).
-        CERT_CN=$(security find-identity -v "$KEYCHAIN_NAME" | grep "Developer ID Installer" | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
-
-        if [ -z "$CERT_CN" ]; then
-          echo "::error:: No valid codesigning identity found in keychain."
-          security find-identity -v "$KEYCHAIN_NAME" # Print all identities for debugging
-          exit 1
-        fi
-        echo "Using certificate: $CERT_CN"
-        echo "CERT_NAME=$CERT_CN" >> $GITHUB_ENV
-    
-    - name: Execute Custom macOS Build Script
-      id: build_pkg
-      run: |
-        SCRIPT_PATH="build_scripts/build_osx_universal_pkg.sh"
-        chmod +x "$SCRIPT_PATH"
-        
-        set -o pipefail
-        
-        "$SCRIPT_PATH" \
-          ${{ github.ref_name }} \
-          ${{ matrix.suffix }} \
-          "${{ env.CERT_NAME }}" \
-          ${{ matrix.flags }} \
-          2>&1 | tee build_log.txt
-        
-        PKG_PATH=$(grep 'PKG_PATH=' build_log.txt | head -n 1 | sed -n 's/.*PKG_PATH=\(.*\)/\1/p' | tr -d '[:space:]')
-        
-        if [ -z "$PKG_PATH" ]; then
-          echo "::error::Build script finished, but 'PKG_PATH=' was not found in the log."
-          exit 1
-        fi
-        
-        echo "PKG_PATH found: $PKG_PATH"
-        echo "pkg_path=$PKG_PATH" >> $GITHUB_OUTPUT
-
-    - name: Notarize and Staple PKG
-      id: notarize
-      env:
-        APPLE_NOTARY_USERNAME: ${{ secrets.APPLE_NOTARY_USERNAME }}
-        APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
-        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      run: |
-        PKG_FILE_PATH="${{ steps.build_pkg.outputs.pkg_path }}"
-        echo "Submitting $PKG_FILE_PATH for notarization..."
-        
-        xcrun notarytool submit "$PKG_FILE_PATH" \
-          --apple-id "$APPLE_NOTARY_USERNAME" \
-          --password "$APPLE_NOTARY_PASSWORD" \
-          --team-id "$APPLE_TEAM_ID" \
-          --wait
+      - name: Setup macOS Keychain and Certificate
+        id: setup_keychain
+        env:
+          APPLE_INSTALLER_CERT_P12_BASE64: ${{ secrets.APPLE_INSTALLER_CERT_P12_BASE64 }}
+          APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
+        run: |
+          # Create a new keychain
+          security create-keychain -p "$RUNNER_TEMP" "$KEYCHAIN_NAME"
+          security list-keychains -s "$KEYCHAIN_NAME"
+          security default-keychain -s "$KEYCHAIN_NAME"
+          security unlock-keychain -p "$RUNNER_TEMP" "$KEYCHAIN_NAME"
           
-        echo "Notarization successful. Stapling ticket..."
-        
-        xcrun stapler staple "$PKG_FILE_PATH"
+          # Decode and import the .p12
+          echo $APPLE_INSTALLER_CERT_P12_BASE64 | base64 --decode > certificate.p12
+          security import certificate.p12 -k "$KEYCHAIN_NAME" -P "$APPLE_INSTALLER_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
+          rm certificate.p12
+          
+          # Set keychain to allow signing
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$RUNNER_TEMP" "$KEYCHAIN_NAME"
+          
+          echo "Waiting for keychain to settle..."
+          sleep 2
 
-    - name: Stage macOS PKG
-      id: stage_pkg
-      run: |
-        mkdir -p staging
-        
-        PKG_SRC_PATH="${{ steps.build_pkg.outputs.pkg_path }}"
-        VERSION_TAG="${{ github.ref_name }}"
-        SUFFIX="${{ matrix.suffix }}"
-        
-        if [ "$SUFFIX" = "normal" ]; then
-            PKG_NAME="${{ env.APP_NAME }}-${VERSION_TAG}-universal-macos.pkg"
-        else
-            PKG_NAME="${{ env.APP_NAME }}-${VERSION_TAG}-${SUFFIX}-universal-macos.pkg"
-        fi
-        
-        DEST_PATH="staging/$PKG_NAME"
-        echo "Moving $PKG_SRC_PATH to $DEST_PATH"
-        mv "$PKG_SRC_PATH" "$DEST_PATH"
-        
-        echo "final_pkg_path=$DEST_PATH" >> $GITHUB_OUTPUT
+          # Find the certificate's Common Name (CN).
+          CERT_CN=$(security find-identity -v "$KEYCHAIN_NAME" | grep "Developer ID Installer" | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
 
-    - name: Cleanup Keychain
-      if: always() # Always run this, even if previous steps fail
-      run: |
-        security delete-keychain "$KEYCHAIN_NAME"
+          if [ -z "$CERT_CN" ]; then
+            echo "::error:: No valid codesigning identity found in keychain."
+            security find-identity -v "$KEYCHAIN_NAME" # Print all identities for debugging
+            exit 1
+          fi
+          echo "Using certificate: $CERT_CN"
+          echo "CERT_NAME=$CERT_CN" >> $GITHUB_ENV
+      
+      - name: Execute Custom macOS Build Script
+        id: build_pkg
+        run: |
+          SCRIPT_PATH="build_scripts/build_osx_universal_pkg.sh"
+          chmod +x "$SCRIPT_PATH"
+          
+          set -o pipefail
+          
+          "$SCRIPT_PATH" \
+            ${{ github.ref_name }} \
+            ${{ matrix.suffix }} \
+            "${{ env.CERT_NAME }}" \
+            ${{ matrix.flags }} \
+            2>&1 | tee build_log.txt
+          
+          PKG_PATH=$(grep 'PKG_PATH=' build_log.txt | head -n 1 | sed -n 's/.*PKG_PATH=\(.*\)/\1/p' | tr -d '[:space:]')
+          
+          if [ -z "$PKG_PATH" ]; then
+            echo "::error::Build script finished, but 'PKG_PATH=' was not found in the log."
+            exit 1
+          fi
+          
+          echo "PKG_PATH found: $PKG_PATH"
+          echo "pkg_path=$PKG_PATH" >> $GITHUB_OUTPUT
 
-    - name: Upload macOS PKG Artifact
-      uses: actions/upload-artifact@v5
-      with:
-        name: superseedr-macos-${{ matrix.suffix }}-universal-${{ github.ref_name }} 
-        path: ${{ steps.stage_pkg.outputs.final_pkg_path }}
+      - name: Notarize and Staple PKG
+        id: notarize
+        env:
+          APPLE_NOTARY_USERNAME: ${{ secrets.APPLE_NOTARY_USERNAME }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          PKG_FILE_PATH="${{ steps.build_pkg.outputs.pkg_path }}"
+          echo "Submitting $PKG_FILE_PATH for notarization..."
+          
+          xcrun notarytool submit "$PKG_FILE_PATH" \
+            --apple-id "$APPLE_NOTARY_USERNAME" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+            
+          echo "Notarization successful. Stapling ticket..."
+          
+          xcrun stapler staple "$PKG_FILE_PATH"
+
+      - name: Stage macOS PKG
+        id: stage_pkg
+        run: |
+          mkdir -p staging
+          
+          PKG_SRC_PATH="${{ steps.build_pkg.outputs.pkg_path }}"
+          VERSION_TAG="${{ github.ref_name }}"
+          SUFFIX="${{ matrix.suffix }}"
+          
+          if [ "$SUFFIX" = "normal" ]; then
+              PKG_NAME="${{ env.APP_NAME }}-${VERSION_TAG}-universal-macos.pkg"
+          else
+              PKG_NAME="${{ env.APP_NAME }}-${VERSION_TAG}-${SUFFIX}-universal-macos.pkg"
+          fi
+          
+          DEST_PATH="staging/$PKG_NAME"
+          echo "Moving $PKG_SRC_PATH to $DEST_PATH"
+          mv "$PKG_SRC_PATH" "$DEST_PATH"
+          
+          echo "final_pkg_path=$DEST_PATH" >> $GITHUB_OUTPUT
+
+      - name: Cleanup Keychain
+        if: always() # Always run this, even if previous steps fail
+        run: |
+          security delete-keychain "$KEYCHAIN_NAME"
+
+      - name: Upload macOS PKG Artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: superseedr-macos-${{ matrix.suffix }}-universal-${{ github.ref_name }} 
+          path: ${{ steps.stage_pkg.outputs.final_pkg_path }}
         
   build_windows:
     timeout-minutes: 120
@@ -293,109 +293,109 @@ jobs:
           - suffix: "private"
             flags: "--no-default-features"
     steps:
-    - uses: actions/checkout@v5
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: actions/checkout@v5
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Install Rust MSVC Target
-      run: rustup target add x86_64-pc-windows-msvc
-      
-    - name: Install WiX Toolset v3
-      run: choco install wixtoolset
-      
-    - name: Install cargo-wix
-      run: cargo install cargo-wix
-      
-    - name: Build MSI Installer (${{ matrix.suffix }})
-      id: build_msi
-      run: |
+      - name: Install Rust MSVC Target
+        run: rustup target add x86_64-pc-windows-msvc
+        
+      - name: Install WiX Toolset v3
+        run: choco install wixtoolset
+        
+      - name: Install cargo-wix
+        run: cargo install cargo-wix
+        
+      - name: Build MSI Installer (${{ matrix.suffix }})
+        id: build_msi
+        run: |
 
-        if ("${{ matrix.flags }}" -eq "") {
-          # For the "normal" build, just run the default command.
-          # This runs 'cargo build --release' AND packages the MSI.
-          echo "Running: cargo wix"
-          cargo wix
-        } else {
-          # For the "private" build, we must build manually first.
+          if ("${{ matrix.flags }}" -eq "") {
+            # For the "normal" build, just run the default command.
+            # This runs 'cargo build --release' AND packages the MSI.
+            echo "Running: cargo wix"
+            cargo wix
+          } else {
+            # For the "private" build, we must build manually first.
+            
+            # 1. Run cargo build with our private flags
+            echo "Running: cargo build --release ${{ matrix.flags }}"
+            cargo build --release ${{ matrix.flags }}
+            
+            # 2. Run cargo wix with '--no-build' to package the binaries we just made
+            echo "Running: cargo wix --no-build"
+            cargo wix --no-build
+          }
+
           
-          # 1. Run cargo build with our private flags
-          echo "Running: cargo build --release ${{ matrix.flags }}"
-          cargo build --release ${{ matrix.flags }}
+          # Update the path: 'cargo wix' outputs to 'target/wix'
+          $MSI_FILE = Get-ChildItem -Path "target/wix" -Filter "*.msi" | Select-Object -First 1
+          if ($null -eq $MSI_FILE) { echo "::error:: No .msi file found"; exit 1; }
+          echo "msi_path=$($MSI_FILE.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Sign MSI Installer (if secret is present)
+        # This step will be SKIPPED if the secret is empty
+        if: env.WINDOWS_CERT_P12_BASE64 != ''
+        id: sign_msi
+        env:
+          WINDOWS_CERT_P12_BASE64: ${{ secrets.WINDOWS_CERT_P12_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          # Decode the certificate
+          [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($env:WINDOWS_CERT_P12_BASE64)) | Out-File -FilePath windows.pfx -Encoding OEM
           
-          # 2. Run cargo wix with '--no-build' to package the binaries we just made
-          echo "Running: cargo wix --no-build"
-          cargo wix --no-build
-        }
+          $MSI_PATH = "${{ steps.build_msi.outputs.msi_path }}"
+          echo "Signing $MSI_PATH..."
+          
+          # Find signtool.exe (it's part of the Windows SDK)
+          $SIGNTOOL_PATH = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse | Sort-Object VersionInfo -Descending | Select-Object -First 1).FullName
+          if ($null -eq $SIGNTOOL_PATH) {
+            echo "::error:: signtool.exe not found."
+            exit 1
+          }
+          echo "Using signtool at $SIGNTOOL_PATH"
 
-        
-        # Update the path: 'cargo wix' outputs to 'target/wix'
-        $MSI_FILE = Get-ChildItem -Path "target/wix" -Filter "*.msi" | Select-Object -First 1
-        if ($null -eq $MSI_FILE) { echo "::error:: No .msi file found"; exit 1; }
-        echo "msi_path=$($MSI_FILE.FullName)" >> $env:GITHUB_OUTPUT
+          # Sign the file
+          & $SIGNTOOL_PATH sign /f "windows.pfx" /p $env:WINDOWS_CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $MSI_PATH
+          
+          # Clean up
+          Remove-Item windows.pfx
 
-    - name: Sign MSI Installer (if secret is present)
-      # This step will be SKIPPED if the secret is empty
-      if: env.WINDOWS_CERT_P12_BASE64 != ''
-      id: sign_msi
-      env:
-        WINDOWS_CERT_P12_BASE64: ${{ secrets.WINDOWS_CERT_P12_BASE64 }}
-        WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-      shell: pwsh
-      run: |
-        # Decode the certificate
-        [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($env:WINDOWS_CERT_P12_BASE64)) | Out-File -FilePath windows.pfx -Encoding OEM
-        
-        $MSI_PATH = "${{ steps.build_msi.outputs.msi_path }}"
-        echo "Signing $MSI_PATH..."
-        
-        # Find signtool.exe (it's part of the Windows SDK)
-        $SIGNTOOL_PATH = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse | Sort-Object VersionInfo -Descending | Select-Object -First 1).FullName
-        if ($null -eq $SIGNTOOL_PATH) {
-          echo "::error:: signtool.exe not found."
-          exit 1
-        }
-        echo "Using signtool at $SIGNTOOL_PATH"
+      - name: Stage MSI
+        shell: pwsh
+        run: |
+          # Use the git tag for the version, not the Cargo.toml version
+          $VERSION_TAG = "${{ github.ref_name }}"
+          $MSI_FILE_PATH = "${{ steps.build_msi.outputs.msi_path }}"
+          
+          $SUFFIX = "${{ matrix.suffix }}"
+          if ($SUFFIX -eq "normal") {
+              $MSI_NAME = "${{ env.APP_NAME }}_${VERSION_TAG}_x64_en-US.msi"
+          } else {
+              $MSI_NAME = "${{ env.APP_NAME }}-${SUFFIX}_${VERSION_TAG}_x64_en-US.msi"
+          }
+          mkdir staging
+          $DEST_PATH = "staging/$MSI_NAME"
+          echo "Moving $MSI_FILE_PATH to $DEST_PATH"
+          mv $MSI_FILE_PATH $DEST_PATH
+          
+          # Output the final staged name for the release body
+          echo "final_msi_name=$MSI_NAME" >> $env:GITHUB_OUTPUT
 
-        # Sign the file
-        & $SIGNTOOL_PATH sign /f "windows.pfx" /p $env:WINDOWS_CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $MSI_PATH
-        
-        # Clean up
-        Remove-Item windows.pfx
-
-    - name: Stage MSI
-      shell: pwsh
-      run: |
-        # Use the git tag for the version, not the Cargo.toml version
-        $VERSION_TAG = "${{ github.ref_name }}"
-        $MSI_FILE_PATH = "${{ steps.build_msi.outputs.msi_path }}"
-        
-        $SUFFIX = "${{ matrix.suffix }}"
-        if ($SUFFIX -eq "normal") {
-            $MSI_NAME = "${{ env.APP_NAME }}_${VERSION_TAG}_x64_en-US.msi"
-        } else {
-            $MSI_NAME = "${{ env.APP_NAME }}-${SUFFIX}_${VERSION_TAG}_x64_en-US.msi"
-        }
-        mkdir staging
-        $DEST_PATH = "staging/$MSI_NAME"
-        echo "Moving $MSI_FILE_PATH to $DEST_PATH"
-        mv $MSI_FILE_PATH $DEST_PATH
-        
-        # Output the final staged name for the release body
-        echo "final_msi_name=$MSI_NAME" >> $env:GITHUB_OUTPUT
-
-    - name: Upload Windows MSI Artifact
-      uses: actions/upload-artifact@v5
-      with:
-        name: superseedr-windows-${{ matrix.suffix }}-${{ github.ref_name }}
-        path: staging/*.msi
+      - name: Upload Windows MSI Artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: superseedr-windows-${{ matrix.suffix }}-${{ github.ref_name }}
+          path: staging/*.msi
 
   publish_crates_io:
     timeout-minutes: 120
@@ -419,11 +419,14 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
 
-  build_and_push_docker:
-    timeout-minutes: 120
-    name: Build & Push Docker Images
+  build_and_push_docker: 
+    name: Docker (${{ matrix.flavor }})
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [normal, private]
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -440,64 +443,39 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # --- Build and push PRIVATE image ---
-      - name: Extract metadata for private build
-        id: meta_private
+      - name: Extract metadata
+        id: meta
         uses: docker/metadata-action@v5
         with:
           images: jagatranvo/superseedr
-          flavor: |
-            latest=false
           tags: |
-            type=ref,event=tag,suffix=-private
-            type=raw,value=private
+            type=ref,event=tag${{ matrix.flavor == 'private' && ',suffix=-private' || '' }}
+            type=raw,value=${{ matrix.flavor == 'private' && 'private' || 'latest' }}
+            ${{ matrix.flavor == 'normal' && 'type=ref,event=tag' || '' }}
 
-      - name: Build and push private image
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ${{ steps.meta_private.outputs.tags }}
-          labels: ${{ steps.meta_private.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
-          cache-from: type=gha,scope=docker-private
-          cache-to: type=gha,mode=max,scope=docker-private
+          cache-from: type=gha,scope=docker-${{ matrix.flavor }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.flavor }}
           build-args: |
-            PRIVATE_BUILD=true
-
-      # --- Build and push NORMAL image ---
-      - name: Extract metadata for normal build
-        id: meta_normal
-        uses: docker/metadata-action@v5
-        with:
-          images: jagatranvo/superseedr
-          tags: |
-            type=ref,event=tag
-            type=raw,value=latest
-
-      - name: Build and push normal image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta_normal.outputs.tags }}
-          labels: ${{ steps.meta_normal.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha,scope=docker-normal
-          cache-to: type=gha,mode=max,scope=docker-normal
-          build-args: |
-            PRIVATE_BUILD=false
-
+            PRIVATE_BUILD=${{ matrix.flavor == 'private' }}
 
       - name: Update Docker Hub Description
+        if: matrix.flavor == 'normal'
         uses: peter-evans/dockerhub-description@v5
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
           repository: jagatranvo/superseedr
           readme-filepath: ./README.md
+
 
   release:
     timeout-minutes: 120
