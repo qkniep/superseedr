@@ -6,7 +6,7 @@ use reqwest::header::RANGE;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-const BLOCK_SIZE: usize = 16384; // Standard 16KB block size
+// REMOVED: const BLOCK_SIZE = 16384; -> The Manager now controls block size via 'length'
 
 pub async fn web_seed_worker(
     url: String,
@@ -19,7 +19,7 @@ pub async fn web_seed_worker(
 ) {
     let client = reqwest::Client::new();
 
-    // 1. Handshake sequence
+    // 1. Handshake sequence (Unchanged)
     if manager_tx
         .send(TorrentCommand::SuccessfullyConnected(peer_id.clone()))
         .await
@@ -56,9 +56,12 @@ pub async fn web_seed_worker(
             }
             cmd = peer_rx.recv() => {
                 match cmd {
-                    Some(TorrentCommand::RequestDownload(piece_index, length, _)) => {
+                    // UPDATED: Handle specific block request (Micro-command)
+                    Some(TorrentCommand::SendRequest { index, begin, length }) => {
+                        
                         // Calculate absolute byte range for the HTTP request
-                        let start = piece_index as u64 * piece_length;
+                        // Formula: (Piece Index * Piece Size) + Offset within piece
+                        let start = (index as u64 * piece_length) + begin as u64;
                         let end = start + length as u64 - 1;
                         let range_header = format!("bytes={}-{}", start, end);
 
@@ -76,55 +79,34 @@ pub async fn web_seed_worker(
                             }
                         };
 
-                        // 3. Stream the body and chunk it into blocks
-                        let mut buffer = Vec::with_capacity(BLOCK_SIZE * 2);
-                        let mut current_block_offset = 0u32;
+                        // 3. Stream the body
+                        // UPDATED: We no longer chop this up. We expect the server to return
+                        // exactly 'length' bytes (e.g., 16KB). We gather them and send ONE block back.
+                        let mut buffer = Vec::with_capacity(length as usize);
 
                         loop {
-                            // Await the next network chunk (cancellable)
                             let chunk_option = tokio::select! {
                                 res = response.chunk() => res,
-                                _ = shutdown_rx.recv() => {
-                                    return; // Exit function immediately on shutdown
-                                }
+                                _ = shutdown_rx.recv() => return, 
                             };
 
                             match chunk_option {
                                 Ok(Some(bytes)) => {
                                     buffer.extend_from_slice(&bytes);
-
-                                    // While we have enough data for a full block, slice it off and send it
-                                    while buffer.len() >= BLOCK_SIZE {
-                                        let data: Vec<u8> = buffer.drain(..BLOCK_SIZE).collect();
-
-                                        let send_result = manager_tx.send(TorrentCommand::Block(
-                                            peer_id.clone(),
-                                            piece_index,
-                                            current_block_offset,
-                                            data,
-                                        )).await;
-
-                                        if send_result.is_err() {
-                                            return; // Manager died
-                                        }
-
-                                        current_block_offset += BLOCK_SIZE as u32;
-                                    }
                                 }
                                 Ok(None) => {
-                                    // End of stream. Send any remaining bytes (tail of the piece).
+                                    // End of stream. Send the accumulated block.
                                     if !buffer.is_empty() {
                                         let _ = manager_tx.send(TorrentCommand::Block(
                                             peer_id.clone(),
-                                            piece_index,
-                                            current_block_offset,
+                                            index, // piece_index
+                                            begin, // block_offset
                                             buffer,
                                         )).await;
                                     }
-                                    break; // Finished this piece
+                                    break; // Finished this request
                                 }
                                 Err(_) => {
-                                    // Network error mid-stream
                                     let _ = manager_tx.send(TorrentCommand::Disconnect(peer_id)).await;
                                     return;
                                 }
@@ -132,8 +114,8 @@ pub async fn web_seed_worker(
                         }
                     }
                     Some(TorrentCommand::Disconnect(_)) => break,
-                    Some(_) => {} // Ignore Choke, Interested, etc.
-                    None => break, // Channel closed
+                    Some(_) => {} 
+                    None => break, 
                 }
             }
         }

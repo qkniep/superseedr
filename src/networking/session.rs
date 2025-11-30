@@ -5,7 +5,7 @@ use crate::torrent_file::Info;
 use crate::torrent_file::Torrent;
 
 use super::protocol::{
-    calculate_blocks_for_piece, parse_message, writer_task, BlockInfo, ClientExtendedId,
+    parse_message, writer_task, BlockInfo, ClientExtendedId,
     ExtendedHandshakePayload, Message, MessageSummary, MetadataMessage,
 };
 
@@ -565,6 +565,7 @@ impl PeerSession {
                                 let _ = self.writer_tx
                                     .try_send(Message::Have(piece_index));
                         }
+                        /*
                         TorrentCommand::RequestDownload(piece_index, piece_length, torrent_size) => {
                             let piece_start = piece_index as u64 * piece_length as u64;
                             let remaining_bytes = (torrent_size as u64).saturating_sub(piece_start);
@@ -606,6 +607,10 @@ impl PeerSession {
                                     }
                                 });
                             }
+                        }
+                        */
+                        TorrentCommand::SendRequest { index, begin, length } => {
+                            let _ = self.writer_tx.try_send(Message::Request(index, begin, length));
                         }
                         TorrentCommand::Upload(piece_index, block_offset, block_data) => {
                             let writer_tx_clone = self.writer_tx.clone();
@@ -703,270 +708,95 @@ mod tests {
 
         // --- Step 1: Handshake (Standard Protocol) ---
         let mut handshake_buf = vec![0u8; 68];
-        network
-            .read_exact(&mut handshake_buf)
-            .await
-            .expect("Failed to read client handshake");
-
-        // Send Valid Handshake Response (With Extensions Enabled)
-        let mut response = vec![0u8; 68];
-        response[0] = 19;
-        response[1..20].copy_from_slice(b"BitTorrent protocol");
-        response[20..28].copy_from_slice(&[0, 0, 0, 0, 0, 0x10, 0, 0]); // Extension bit set
-        network
-            .write_all(&response)
-            .await
-            .expect("Failed to write handshake");
-
-        // Consume Initial Messages (Extended Handshake + Bitfield)
-        let mut seen_bitfield = false;
-        for _ in 0..5 {
-            if let Ok(msg) = timeout(Duration::from_millis(100), parse_message(&mut network)).await
-            {
-                let msg = msg.expect("Failed to parse");
-                if let Message::Bitfield(_) = msg {
-                    seen_bitfield = true;
-                    break;
-                }
-            }
-        }
-        assert!(seen_bitfield, "Client did not send Bitfield");
-
-        // --- Step 2: The Saturation Test (Pipeline Pressure) ---
-
-        // Command the client to download 10 blocks (More than limit of 5)
-        let piece_len = 16384 * 10;
-        client_cmd_tx
-            .send(TorrentCommand::RequestDownload(
-                0,
-                piece_len as i64,
-                piece_len as i64,
-            ))
-            .await
-            .expect("Failed to send command");
-
-        // ASSERTION 1: Immediate Burst
-        println!("Checking for initial burst of 5 requests (Order Agnostic)...");
-        let mut requests_received = HashSet::new();
-
-        // We loop to collect exactly 5 REQUESTS.
-        // If we see other messages (like Interested), we ignore them but keep looking.
-        let start = std::time::Instant::now();
-        while requests_received.len() < 5 {
-            if start.elapsed() > Duration::from_millis(500) {
-                panic!(
-                    "Timed out waiting for 5 requests. Got: {}",
-                    requests_received.len()
-                );
-            }
-
-            let msg = timeout(Duration::from_millis(100), parse_message(&mut network))
-                .await
-                .expect("Client stalled! Pipeline burst incomplete.")
-                .expect("Failed to parse message");
-
-            match msg {
-                Message::Request(idx, begin, len) => {
-                    assert_eq!(idx, 0);
-                    assert_eq!(len, 16384);
-                    requests_received.insert(begin);
-                }
-                _ => {
-                    println!("Note: Received non-request message during burst: {:?}", msg);
-                }
-            }
-        }
-
-        assert_eq!(
-            requests_received.len(),
-            5,
-            "Client sent duplicate requests!"
-        );
-
-        // ASSERTION 2: Respect Limit
-        // Now that we have 5 requests, the 6th REQUEST must not appear.
-        // We allow other messages (like KeepAlive), but if we see a Request, it's a violation.
-        let result = timeout(Duration::from_millis(50), parse_message(&mut network)).await;
-
-        if let Ok(Ok(extra_msg)) = result {
-            if let Message::Request(..) = extra_msg {
-                panic!(
-                    "Client violated pipeline limit! Sent 6th Request: {:?}",
-                    extra_msg
-                );
-            } else {
-                println!("Received innocuous extra message: {:?}", extra_msg);
-            }
-        }
-
-        // --- Step 3: The Refill (Latency Simulation) ---
-
-        println!("Simulating network latency...");
-        // Pick ANY block the client requested and fulfill it.
-        let offset_to_fulfill = *requests_received.iter().next().unwrap();
-
-        let block_payload = vec![0xAA; 16384]; // Dummy data
-        let piece_msg = Message::Piece(0, offset_to_fulfill, block_payload);
-        let piece_bytes = generate_message(piece_msg).expect("Failed to generate piece");
-        network
-            .write_all(&piece_bytes)
-            .await
-            .expect("Failed to send piece");
-
-        // ASSERTION 3: Pipeline Maintenance
-        println!("Checking for refill request...");
-        // Again, ignore non-requests until we get the refill
-        let refill_start = std::time::Instant::now();
-        let mut got_refill = false;
-
-        while !got_refill {
-            if refill_start.elapsed() > Duration::from_millis(500) {
-                panic!("Timed out waiting for refill request.");
-            }
-
-            let msg = timeout(Duration::from_millis(100), parse_message(&mut network))
-                .await
-                .expect("Client failed to refill pipeline after receiving data.")
-                .expect("Failed to parse refill message");
-
-            if let Message::Request(idx, begin, _) = msg {
-                assert_eq!(idx, 0);
-                assert!(
-                    !requests_received.contains(&begin),
-                    "Client re-requested an existing block! Offset: {}",
-                    begin
-                );
-                println!("Success! Client requested new block {} immediately.", begin);
-                got_refill = true;
-            } else {
-                println!(
-                    "Note: Received non-request message during refill wait: {:?}",
-                    msg
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_fragmented_pipeline_saturation() {
-        // This test simulates "Stream Saturation" (v2 style).
-        // Can we keep the pipe full even if the Manager gives us work in tiny, separate chunks?
-
-        let (mut network, client_cmd_tx, _manager_event_rx) = spawn_test_session().await;
-
-        // --- Setup: Handshake & Bitfield ---
-        let mut handshake_buf = vec![0u8; 68];
-        network.read_exact(&mut handshake_buf).await.unwrap();
+        network.read_exact(&mut handshake_buf).await.expect("Failed to read client handshake");
 
         let mut response = vec![0u8; 68];
         response[0] = 19;
         response[1..20].copy_from_slice(b"BitTorrent protocol");
         response[20..28].copy_from_slice(&[0, 0, 0, 0, 0, 0x10, 0, 0]);
-        network.write_all(&response).await.unwrap();
+        network.write_all(&response).await.expect("Failed to write handshake");
 
-        // Consume setup messages
+        // Consume Initial Messages
         for _ in 0..5 {
-            if let Ok(Ok(Message::Bitfield(_))) =
-                timeout(Duration::from_millis(100), parse_message(&mut network)).await
-            {
-                break;
+            if let Ok(msg) = timeout(Duration::from_millis(100), parse_message(&mut network)).await {
+                if let Ok(Message::Bitfield(_)) = msg { break; }
             }
         }
 
-        // --- The V2 Stress Test ---
-
-        let block_size = 16384;
-        let total_torrent_size = block_size * 10; // Enough for 10 pieces
-
-        println!("Queueing 10 separate 'Micro-Downloads' (1 block each)...");
-        for i in 0..10 {
+        // --- Step 2: The Saturation Test (Pipeline Pressure) ---
+        // NEW: Manager (Test) sends 5 distinct requests directly
+        for i in 0..5 {
             client_cmd_tx
-                .send(TorrentCommand::RequestDownload(
-                    i as u32,
-                    block_size as i64,
-                    total_torrent_size as i64,
-                ))
+                .send(TorrentCommand::SendRequest {
+                    index: 0,
+                    begin: i * 16384,
+                    length: 16384
+                })
                 .await
                 .expect("Failed to send command");
         }
 
-        // --- ASSERTION 1: Aggregation ---
-        println!("Checking for burst of 5 distinct piece requests...");
-        let mut requested_pieces = HashSet::new();
-
-        // Loop until we have 5 requests or timeout. Ignore KeepAlives.
+        // ASSERTION 1: Immediate Burst
+        let mut requests_received = HashSet::new();
         let start = std::time::Instant::now();
-        while requested_pieces.len() < 5 {
+        
+        while requests_received.len() < 5 {
             if start.elapsed() > Duration::from_millis(500) {
-                panic!(
-                    "Timed out waiting for 5 requests. Got: {:?}",
-                    requested_pieces
-                );
+                panic!("Timed out waiting for requests. Got: {}", requests_received.len());
             }
 
             let msg = timeout(Duration::from_millis(100), parse_message(&mut network))
-                .await
-                .expect("Pipeline Stalled!")
-                .expect("Failed to parse");
+                .await.expect("Stalled").expect("Parse fail");
 
-            match msg {
-                Message::Request(index, _, _) => {
-                    requested_pieces.insert(index);
-                }
-                Message::KeepAlive => {
-                    println!("Ignored KeepAlive during burst check...");
-                }
-                _ => panic!("Unexpected message during burst: {:?}", msg),
+            if let Message::Request(idx, begin, len) = msg {
+                assert_eq!(idx, 0);
+                assert_eq!(len, 16384);
+                requests_received.insert(begin);
             }
         }
-
-        assert_eq!(
-            requested_pieces.len(),
-            5,
-            "Client failed to pipeline distinct pieces!"
-        );
-        println!("Success: Client pipelined pieces {:?}\n", requested_pieces);
-
-        // --- ASSERTION 2: Refill across boundaries ---
-
-        let piece_to_fulfill = *requested_pieces.iter().next().unwrap();
-        println!("Fulfilling Piece {}...", piece_to_fulfill);
-
-        let piece_msg = Message::Piece(piece_to_fulfill, 0, vec![0xAA; 16384]);
-        let piece_bytes = generate_message(piece_msg).unwrap();
-        network.write_all(&piece_bytes).await.unwrap();
-
-        let loop_start = std::time::Instant::now();
-        loop {
-            if loop_start.elapsed() > Duration::from_millis(500) {
-                panic!("Timed out waiting for Refill Request");
-            }
-
-            let msg = timeout(Duration::from_millis(200), parse_message(&mut network))
-                .await
-                .expect("Client stalled after finishing piece.")
-                .unwrap();
-
-            match msg {
-                Message::Request(index, _, _) => {
-                    assert!(
-                        !requested_pieces.contains(&index),
-                        "Client re-requested finished piece!"
-                    );
-                    println!(
-                        "Success: Client crossed boundary and requested Piece {}",
-                        index
-                    );
-                    break; // Success!
-                }
-                Message::KeepAlive => {
-                    println!("Ignored KeepAlive during refill check...");
-                    continue; // Keep looking
-                }
-                _ => panic!("Expected Request, got {:?}", msg),
-            }
-        }
+        assert_eq!(requests_received.len(), 5);
     }
+
+    #[tokio::test]
+    async fn test_fragmented_pipeline_saturation() {
+        let (mut network, client_cmd_tx, _manager_event_rx) = spawn_test_session().await;
+
+        // ... (Handshake setup omitted for brevity, assume same as above) ...
+        let mut handshake_buf = vec![0u8; 68];
+        network.read_exact(&mut handshake_buf).await.unwrap();
+        let mut response = vec![0u8; 68];
+        response[0] = 19;
+        response[1..20].copy_from_slice(b"BitTorrent protocol");
+        response[20..28].copy_from_slice(&[0, 0, 0, 0, 0, 0x10, 0, 0]);
+        network.write_all(&response).await.unwrap();
+        for _ in 0..5 {
+            if let Ok(Ok(Message::Bitfield(_))) = timeout(Duration::from_millis(100), parse_message(&mut network)).await { break; }
+        }
+
+        // NEW: Send 5 separate commands for 5 separate pieces
+        for i in 0..5 {
+            client_cmd_tx
+                .send(TorrentCommand::SendRequest {
+                    index: i as u32,
+                    begin: 0,
+                    length: 16384
+                })
+                .await
+                .expect("Failed to send command");
+        }
+
+        let mut requested_pieces = HashSet::new();
+        let start = std::time::Instant::now();
+        
+        while requested_pieces.len() < 5 {
+            if start.elapsed() > Duration::from_millis(500) { panic!("Timeout"); }
+            if let Ok(Ok(Message::Request(idx, _, _))) = timeout(Duration::from_millis(100), parse_message(&mut network)).await {
+                requested_pieces.insert(idx);
+            }
+        }
+        assert_eq!(requested_pieces.len(), 5);
+    }
+
 
     // --- Helper for Custom Bucket (Matches your current struct) ---
     async fn spawn_custom_session(
@@ -1023,21 +853,22 @@ mod tests {
         resp[0] = 19;
         resp[1..20].copy_from_slice(b"BitTorrent protocol");
         network.write_all(&resp).await.unwrap();
-        // Consume Bitfield
         let _ = timeout(Duration::from_millis(100), parse_message(&mut network)).await;
 
         // 2. Setup the transfer
         let total_size = 5 * 1024 * 1024;
-        let piece_index = 0;
-
-        client_cmd_tx
-            .send(TorrentCommand::RequestDownload(
-                piece_index,
-                total_size as i64,
-                total_size as i64,
-            ))
-            .await
-            .unwrap();
+        let total_blocks = (5 * 1024 * 1024) / 16384;
+        
+        // We spawn this so we don't block the test loop
+        tokio::spawn(async move {
+            for i in 0..total_blocks {
+                let _ = client_cmd_tx.send(TorrentCommand::SendRequest {
+                    index: 0,
+                    begin: i * 16384,
+                    length: 16384
+                }).await;
+            }
+        });
 
         // 3. Reader Task: Drain 'Requests' so the client doesn't block on a full pipe
         let read_task = tokio::spawn(async move {
@@ -1109,15 +940,17 @@ mod tests {
         let _ = timeout(Duration::from_millis(100), parse_message(&mut network)).await;
 
         let total_size = 5 * 1024 * 1024; // 5 MB
+        let total_blocks = total_size / 16384;
+        tokio::spawn(async move {
+            for i in 0..total_blocks {
+                let _ = client_cmd_tx.send(TorrentCommand::SendRequest {
+                    index: 0,
+                    begin: (i * 16384) as u32,
+                    length: 16384
+                }).await;
+            }
+        });
 
-        client_cmd_tx
-            .send(TorrentCommand::RequestDownload(
-                0,
-                total_size as i64,
-                total_size as i64,
-            ))
-            .await
-            .unwrap();
 
         // Drain requests
         let read_task = tokio::spawn(async move {
@@ -1180,17 +1013,17 @@ mod tests {
         // --- The 1000 Block Load Test ---
         let block_count = 1000;
         let block_size = 16384;
-        let total_size = block_count * block_size;
 
-        // 1. Tell client to expect the data
-        client_cmd_tx
-            .send(TorrentCommand::RequestDownload(
-                0,
-                total_size as i64,
-                total_size as i64,
-            ))
-            .await
-            .unwrap();
+        // FIXED: Replaced RequestDownload with manual loop
+        tokio::spawn(async move {
+            for i in 0..block_count {
+                let _ = client_cmd_tx.send(TorrentCommand::SendRequest {
+                    index: 0,
+                    begin: (i * block_size) as u32,
+                    length: block_size as u32
+                }).await;
+            }
+        });
 
         // SPLIT THE NETWORK: This allows us to Read and Write simultaneously
         let (mut peer_read, mut peer_write) = tokio::io::split(network);
@@ -1296,9 +1129,18 @@ mod tests {
 
                 // --- Command Client ---
                 // Tell client to expect the total size
-                client_cmd_tx.send(TorrentCommand::RequestDownload(
-                    0, total_bytes as i64, total_bytes as i64
-                )).await.unwrap();
+                let block_sizes_clone = block_sizes.clone();
+                tokio::spawn(async move {
+                    let mut offset = 0;
+                    for size in block_sizes_clone {
+                        let _ = client_cmd_tx.send(TorrentCommand::SendRequest {
+                            index: 0,
+                            begin: offset,
+                            length: size as u32
+                        }).await;
+                        offset += size as u32;
+                    }
+                });
 
                 // --- Helper: Writer Task ---
                 // Spawns a background task to write the weirdly sized blocks

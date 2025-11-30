@@ -29,7 +29,11 @@ pub enum TorrentCommand {
 
     PeerBitfield(String, Vec<u8>),
 
-    RequestDownload(u32, i64, i64),
+    SendRequest {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
 
     RequestUpload(String, u32, u32, u32),
     Upload(u32, u32, Vec<u8>),
