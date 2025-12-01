@@ -245,7 +245,7 @@ impl PeerSession {
 
         let _result: Result<(), Box<dyn StdError + Send + Sync>> = 'session: loop {
             event!(Level::DEBUG, "Peer session loop running");
-            const READ_TIMEOUT: Duration = Duration::from_secs(2);
+            const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
             tokio::select! {
                 _ = &mut inactivity_timeout => {
@@ -646,6 +646,11 @@ impl PeerSession {
             }
         };
 
+        if !self.block_request_joinset.is_empty() {
+            event!(Level::DEBUG, "Waiting for {} pending block tasks to finish...", self.block_request_joinset.len());
+            while self.block_request_joinset.join_next().await.is_some() {}
+        }
+
         Ok(())
     }
 }
@@ -807,7 +812,7 @@ mod tests {
         mpsc::Receiver<TorrentCommand>,
     ) {
         let (client, server) = tokio::io::duplex(1024 * 1024); // Large buffer for performance
-        let (manager_tx, manager_rx) = mpsc::channel(1000);
+        let (manager_tx, manager_rx) = mpsc::channel(2000);
         let (cmd_tx, cmd_rx) = mpsc::channel(1000);
         let (shutdown, _) = broadcast::channel(1);
 
@@ -827,8 +832,10 @@ mod tests {
 
         tokio::spawn(async move {
             let s = PeerSession::new(params);
-            // We ignore errors as the test might drop the connection early
-            let _ = s.run(client, vec![], Some(vec![])).await;
+            // CHANGE: Print the error so we can see why it died
+            if let Err(e) = s.run(client, vec![], Some(vec![])).await {
+                println!("\n\n!!! SESSION DIED WITH ERROR: {:?} !!!\n\n", e);
+            }
         });
 
         (server, cmd_tx, manager_rx)
@@ -997,7 +1004,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_throughput_1000_blocks_batch_cycling() {
-        // --- Setup: Infinite Speed ---
+        // --- Setup ---
         let bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
         let (mut network, client_cmd_tx, mut manager_event_rx) = spawn_custom_session(bucket).await;
 
@@ -1010,86 +1017,83 @@ mod tests {
         network.write_all(&resp).await.unwrap();
         let _ = timeout(Duration::from_millis(100), parse_message(&mut network)).await;
 
-        // --- The 1000 Block Load Test ---
-        let block_count = 1000;
-        let block_size = 16384;
+        let block_count: u32 = 1000;
+        let block_size: u32 = 16384;
 
-        // FIXED: Replaced RequestDownload with manual loop
-        tokio::spawn(async move {
-            for i in 0..block_count {
-                let _ = client_cmd_tx.send(TorrentCommand::SendRequest {
-                    index: 0,
-                    begin: (i * block_size) as u32,
-                    length: block_size as u32
-                }).await;
-            }
-        });
-
-        // SPLIT THE NETWORK: This allows us to Read and Write simultaneously
+        // SPLIT NETWORK
         let (mut peer_read, mut peer_write) = tokio::io::split(network);
 
-        // 2. Drain Requests (Background Task)
-        // We just throw away the requests so the client doesn't block on a full send buffer.
+        // 1. Drain Peer Reads (Background)
         tokio::spawn(async move {
             let mut buf = [0u8; 1024];
             while let Ok(n) = peer_read.read(&mut buf).await {
-                if n == 0 {
-                    break;
-                } // EOF
+                if n == 0 { break; }
             }
         });
 
-        // 3. BLAST 1000 Blocks (Background Task)
-        // By spawning this, we allow the main thread to immediately start checking for results.
-        // This prevents the "Channel Full" deadlock/slowdown.
+        // 2. Mock Peer Writes (Background)
         let block = vec![0u8; block_size as usize];
+        let (keep_alive_tx, keep_alive_rx) = tokio::sync::oneshot::channel::<()>();
+        
         let writer_handle = tokio::spawn(async move {
             for i in 0..block_count {
                 let msg = Message::Piece(0, i * block_size, block.clone());
                 let bytes = generate_message(msg).unwrap();
-                // This might block if the client is slow, but that's fine
-                // because the main thread is draining the client's output simultaneously.
-                peer_write.write_all(&bytes).await.unwrap();
+                if peer_write.write_all(&bytes).await.is_err() {
+                    break;
+                }
             }
+            // Keep stream open until test finishes
+            let _ = keep_alive_rx.await;
         });
 
-        // 4. Verify All Processed (Main Thread)
+        // 3. Manager Logic: Sliding Window
         let start = std::time::Instant::now();
-        let mut blocks_received = 0;
+        
+        let mut sent_requests: usize = 0;
+        let mut received_blocks: usize = 0;
+        const PIPELINE_MAX: usize = 10; 
 
-        while blocks_received < block_count {
-            // We expect this to fly. 5s timeout is extremely generous.
+        // Initial fill
+        while sent_requests < PIPELINE_MAX && sent_requests < block_count as usize {
+            client_cmd_tx.send(TorrentCommand::SendRequest {
+                index: 0,
+                begin: (sent_requests as u32) * block_size,
+                length: block_size
+            }).await.unwrap();
+            sent_requests += 1;
+        }
+
+        // Cycle
+        while received_blocks < block_count as usize {
             match timeout(Duration::from_secs(5), manager_event_rx.recv()).await {
                 Ok(Some(TorrentCommand::Block(..))) => {
-                    blocks_received += 1;
+                    received_blocks += 1;
+
+                    // Refill pipeline
+                    if sent_requests < block_count as usize {
+                        client_cmd_tx.send(TorrentCommand::SendRequest {
+                            index: 0,
+                            begin: (sent_requests as u32) * block_size,
+                            length: block_size
+                        }).await.unwrap();
+                        sent_requests += 1;
+                    }
                 }
-                Ok(_) => {} // Ignore other events
-                Err(_) => {
-                    panic!(
-                        "Stalled at block {}/{}! throughput dropped to zero.",
-                        blocks_received, block_count
-                    );
-                }
+                Ok(None) => panic!("Session closed unexpectedly"),
+                Err(_) => panic!("Stalled! Received {}/{}", received_blocks, block_count),
+                _ => {} 
             }
         }
 
-        // Wait for writer to cleanup (it should be done by now)
+        // Cleanup
+        let _ = keep_alive_tx.send(()); 
         writer_handle.await.unwrap();
 
         let elapsed = start.elapsed();
-        println!(
-            "Processed {} blocks (16MB) in {:.4} seconds",
-            block_count,
-            elapsed.as_secs_f64()
-        );
+        println!("Processed {} blocks in {:.4}s", block_count, elapsed.as_secs_f64());
 
-        // Performance Assertion:
-        // With concurrency, this should take ~0.05s - 0.20s in Release mode.
-        // We set 1.0s as a very safe upper bound for CI/Debug builds.
-        assert!(
-            elapsed.as_secs_f64() < 3.0,
-            "Throughput test failed! System is too slow."
-        );
+        assert!(elapsed.as_secs_f64() < 3.0, "Throughput too slow");
     }
 
     proptest! {

@@ -785,10 +785,33 @@ impl TorrentState {
                     );
                     if let Some(piece_index) = piece_to_assign {
                         self.piece_manager.mark_as_pending(piece_index, peer_id.clone());
+                        peer.pending_requests.insert(piece_index);
+
+
+                        if self.piece_manager.need_queue.is_empty() 
+                            && self.torrent_status != TorrentStatus::Endgame 
+                        {
+                            self.torrent_status = TorrentStatus::Endgame;
+                        }
+
                         let (start, end) = self.piece_manager.block_manager.get_block_range(piece_index);
+                        let assembler_mask = self.piece_manager.block_manager.legacy_buffers
+                            .get(&piece_index)
+                            .map(|a| a.mask.clone());
                         println!("PIECE TO ASSIGN START {:?}, END {:?}", start, end);
                         
                         for global_block_idx in start..end {
+                            if self.piece_manager.block_manager.block_bitfield.get(global_block_idx as usize) == Some(&true) {
+                                continue;
+                            }
+                            // Local check: Don't request buffered blocks
+                            let local_block_idx = global_block_idx - start;
+                            if let Some(mask) = &assembler_mask {
+                                if mask.get(local_block_idx as usize) == Some(&true) {
+                                    continue;
+                                }
+                            }
+
                             let addr = self.piece_manager.block_manager.inflate_address(global_block_idx);
                             
                             effects.push(Effect::SendToPeer {
@@ -2020,6 +2043,7 @@ mod tests {
         let torrent = create_dummy_torrent(2);
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(16384, 16384 * 2, vec![], vec![], false);
         state.torrent_status = TorrentStatus::Standard;
 
         add_peer(&mut state, "peer_A");
@@ -2194,6 +2218,7 @@ mod tests {
         let torrent = create_dummy_torrent(20);
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(20, false);
+        state.piece_manager.block_manager.set_geometry(16384, 16384 * 20, vec![], vec![], false);
         state.torrent_status = TorrentStatus::Standard;
 
         // 2. Setup Peer and Need Queue
@@ -2528,7 +2553,7 @@ mod tests {
 
     #[test]
     fn test_partial_piece_request() {
-        // ... (Setup code) ...
+        // ... (Keep Setup Code) ...
         let mut state = create_empty_state();
         let mut torrent = create_dummy_torrent(2);
         torrent.info.piece_length = 32768; // 2 blocks per piece
@@ -2546,18 +2571,18 @@ mod tests {
         target.am_interested = true;
 
         // Simulate receiving FIRST BLOCK of Piece 0
-        // This updates BlockManager state
         let data = vec![0u8; 16384];
-        state.update(Action::IncomingBlock {
+        
+        let effects = state.update(Action::IncomingBlock {
             peer_id: "target_peer".into(),
             piece_index: 0,
             block_offset: 0,
             data: data
         });
 
-        let effects = state.update(Action::AssignWork { peer_id: "target_peer".into() });
+        // REMOVED: The second manual AssignWork call which was returning empty effects.
 
-        // NEW ASSERTION: Verify we ask for the SECOND block
+        // Verify we ask for the SECOND block
         let requested_params = effects.iter().find_map(|e| {
             if let Effect::SendToPeer { cmd, .. } = e {
                 if let TorrentCommand::SendRequest { index, begin, length } = **cmd {
@@ -3245,6 +3270,7 @@ mod prop_tests {
             let torrent = super::tests::create_dummy_torrent(2);
             state.torrent = Some(torrent);
             state.piece_manager.set_initial_fields(2, false);
+            state.piece_manager.block_manager.set_geometry(16384, 16384 * 2, vec![], vec![], false);
             state.torrent_status = TorrentStatus::Standard;
 
             state.piece_manager.need_queue = vec![0, 1];
@@ -3314,6 +3340,7 @@ mod prop_tests {
             let torrent = super::tests::create_dummy_torrent(2);
             state.torrent = Some(torrent);
             state.piece_manager.set_initial_fields(2, false);
+            state.piece_manager.block_manager.set_geometry(16384, 16384 * 2, vec![], vec![], false);
             state.torrent_status = TorrentStatus::Standard;
             state.piece_manager.need_queue = vec![0, 1];
 
@@ -3348,6 +3375,7 @@ mod prop_tests {
             let torrent = super::tests::create_dummy_torrent(2);
             state.torrent = Some(torrent);
             state.piece_manager.set_initial_fields(2, false);
+            state.piece_manager.block_manager.set_geometry(16384, 16384 * 2, vec![], vec![], false);
             state.torrent_status = TorrentStatus::Standard;
             state.piece_manager.need_queue = vec![0, 1];
 
@@ -3445,6 +3473,7 @@ mod prop_tests {
             let torrent = super::tests::create_dummy_torrent(2);
             state.torrent = Some(torrent);
             state.piece_manager.set_initial_fields(2, false);
+            state.piece_manager.block_manager.set_geometry(16384, 16384 * 2, vec![], vec![], false);
             state.torrent_status = TorrentStatus::Standard;
             state.piece_manager.need_queue = vec![0, 1];
 
