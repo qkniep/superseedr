@@ -245,7 +245,7 @@ impl PeerSession {
 
         let _result: Result<(), Box<dyn StdError + Send + Sync>> = 'session: loop {
             event!(Level::DEBUG, "Peer session loop running");
-            const READ_TIMEOUT: Duration = Duration::from_secs(2);
+            const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
             tokio::select! {
                 _ = &mut inactivity_timeout => {
