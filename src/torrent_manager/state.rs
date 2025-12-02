@@ -318,7 +318,7 @@ impl TorrentState {
         info_hash: Vec<u8>,
         torrent: Option<Torrent>,
         torrent_metadata_length: Option<i64>,
-        piece_manager: PieceManager,
+        mut piece_manager: PieceManager,
         trackers: HashMap<String, TrackerState>,
         torrent_validation_status: bool,
     ) -> Self {
@@ -327,6 +327,20 @@ impl TorrentState {
         } else {
             TorrentStatus::AwaitingMetadata
         };
+
+        if let Some(ref t) = torrent {
+            let total_len: u64 = if t.info.files.is_empty() {
+                t.info.length as u64
+            } else {
+                t.info.files.iter().map(|f| f.length as u64).sum()
+            };
+
+            piece_manager.set_geometry(
+                t.info.piece_length as u32,
+                total_len,
+                torrent_validation_status,
+            );
+        }
 
         Self {
             info_hash,
@@ -4651,5 +4665,256 @@ mod prop_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::{broadcast, mpsc, Mutex};
+    use std::sync::Arc;
+    use std::collections::HashMap;
+    use sha1::{Digest, Sha1};
+    use crate::config::Settings;
+    use crate::resource_manager::ResourceManager;
+    use crate::token_bucket::TokenBucket;
+    use crate::torrent_file::Torrent;
+    use crate::torrent_manager::{TorrentManager, TorrentParameters, ManagerCommand};
+
+    // --- REUSABLE TEST HARNESS ---
+    async fn run_integration_suite(test_name: &str, num_pieces: usize, piece_size: usize) {
+        println!("=== STARTING TEST: {} (Pieces: {}, Size: {}) ===", test_name, num_pieces, piece_size);
+        
+        // 1. Setup Environment
+        let temp_dir = std::env::temp_dir().join(format!("superseedr_{}_{}", test_name, rand::random::<u32>()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 2. Channels & Resources
+        // FIX: Variable name matches struct field now
+        let (_incoming_tx, incoming_peer_rx) = mpsc::channel(100); 
+        let (cmd_tx, cmd_rx) = mpsc::channel(100);
+        
+        // Event Drainer (Prevent Deadlocks)
+        let (event_tx, mut event_rx) = mpsc::channel(500);
+        tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+
+        let (metrics_tx, mut metrics_rx) = broadcast::channel(100);
+        let (shutdown_tx, _) = broadcast::channel(1);
+
+        let mut settings_val = Settings::default();
+        settings_val.client_id = "-SS0001-TESTTESTTEST".to_string();
+        let settings = Arc::new(settings_val);
+
+        let mut limits = HashMap::new();
+        limits.insert(crate::resource_manager::ResourceType::PeerConnection, (1000, 1000));
+        limits.insert(crate::resource_manager::ResourceType::DiskRead, (1000, 1000));
+        limits.insert(crate::resource_manager::ResourceType::DiskWrite, (1000, 1000));
+        limits.insert(crate::resource_manager::ResourceType::Reserve, (0, 0));
+        let (resource_manager, rm_client) = ResourceManager::new(limits, shutdown_tx.clone());
+        tokio::spawn(resource_manager.run());
+
+        let bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+
+        // 3. Create Torrent Data
+        // We assume every piece is full of 0xAA
+        let single_piece_hash = Sha1::digest(&vec![0xAA; piece_size]).to_vec();
+        let mut all_hashes = Vec::new();
+        for _ in 0..num_pieces {
+            all_hashes.extend_from_slice(&single_piece_hash);
+        }
+
+        let total_len = (num_pieces * piece_size) as i64;
+        
+        let torrent = Torrent {
+            announce: None, announce_list: None, url_list: None,
+            info: crate::torrent_file::Info {
+                name: test_name.to_string(),
+                piece_length: piece_size as i64,
+                pieces: all_hashes,
+                length: total_len,
+                files: vec![],
+                private: None, md5sum: None,
+            },
+            info_dict_bencode: vec![0u8; 20], created_by: None, creation_date: None, encoding: None, comment: None,
+        };
+
+        let params = TorrentParameters {
+            dht_handle: { #[cfg(feature = "dht")] { mainline::Dht::builder().port(0).build().unwrap().as_async() } #[cfg(not(feature = "dht"))] { () } },
+            incoming_peer_rx, // Matches local variable now
+            metrics_tx,
+            torrent_validation_status: false,
+            download_dir: temp_dir.clone(),
+            manager_command_rx: cmd_rx, manager_event_tx: event_tx,
+            settings, resource_manager: rm_client,
+            global_dl_bucket: bucket.clone(), global_ul_bucket: bucket,
+        };
+
+        let mut manager = TorrentManager::from_torrent(params, torrent).unwrap();
+
+        // 4. Setup Smart Mock Peer
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = socket.into_split();
+            let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1000); // Buffer for responses
+
+            // Writer Task
+            tokio::spawn(async move {
+                while let Some(data) = rx.recv().await {
+                    if wr.write_all(&data).await.is_err() { break; }
+                }
+            });
+
+            // Handshake Logic
+            let mut handshake_buf = vec![0u8; 68];
+            if rd.read_exact(&mut handshake_buf).await.is_err() { return; }
+
+            // Send Handshake Response
+            let mut h_resp = vec![0u8; 68];
+            h_resp[0] = 19;
+            h_resp[1..20].copy_from_slice(b"BitTorrent protocol");
+            h_resp[28..48].copy_from_slice(&handshake_buf[28..48]);
+            tx.send(h_resp).await.unwrap();
+
+            // Send Bitfield
+            // Calculate bytes needed: ceil(num_pieces / 8)
+            let bitfield_bytes = (num_pieces + 7) / 8;
+            let mut bitfield = vec![0xFFu8; bitfield_bytes];
+            
+            // Mask the last byte if necessary (strict BitTorrent compliance)
+            // Example: 10 pieces. 10 % 8 = 2 remainder. 
+            // Byte 0: 11111111. Byte 1: 11000000 (0xC0).
+            let remainder = num_pieces % 8;
+            if remainder != 0 {
+                let last_idx = bitfield_bytes - 1;
+                // e.g. remainder 1 -> 10000000 (0x80)
+                bitfield[last_idx] = 0xFF << (8 - remainder);
+            }
+
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&(1 + bitfield.len() as u32).to_be_bytes());
+            msg.push(5);
+            msg.extend_from_slice(&bitfield);
+            tx.send(msg).await.unwrap();
+
+            // Message Loop
+            let mut am_choking = true;
+            let mut buf = vec![0u8; 4096];
+            let mut buffer = Vec::new();
+
+            loop {
+                let n = match rd.read(&mut buf).await {
+                    Ok(n) if n > 0 => n,
+                    _ => break,
+                };
+                buffer.extend_from_slice(&buf[..n]);
+
+                while buffer.len() >= 4 {
+                    let len = u32::from_be_bytes(buffer[0..4].try_into().unwrap()) as usize;
+                    if buffer.len() < 4 + len { break; }
+
+                    let msg_frame = &buffer[4..4+len];
+                    if !msg_frame.is_empty() {
+                        match msg_frame[0] {
+                            2 => { // Interested
+                                if am_choking {
+                                    let _ = tx.send(vec![0, 0, 0, 1, 1]).await; // Unchoke
+                                    am_choking = false;
+                                }
+                            }
+                            6 => { // Request
+                                if msg_frame.len() >= 13 {
+                                    let index = u32::from_be_bytes(msg_frame[1..5].try_into().unwrap());
+                                    let begin = u32::from_be_bytes(msg_frame[5..9].try_into().unwrap());
+                                    let length = u32::from_be_bytes(msg_frame[9..13].try_into().unwrap());
+
+                                    // Send 0xAA data matching requested length
+                                    let data = vec![0xAA; length as usize];
+                                    let total_len = 9 + data.len() as u32;
+                                    let mut resp = Vec::with_capacity(total_len as usize + 4);
+                                    resp.extend_from_slice(&total_len.to_be_bytes());
+                                    resp.push(7);
+                                    resp.extend_from_slice(&index.to_be_bytes());
+                                    resp.extend_from_slice(&begin.to_be_bytes());
+                                    resp.extend_from_slice(&data);
+                                    
+                                    let _ = tx.send(resp).await;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    buffer.drain(0..4+len);
+                }
+            }
+        });
+
+        // 5. Run
+        manager.connect_to_peer(peer_addr.ip().to_string(), peer_addr.port()).await;
+        let manager_handle = tokio::spawn(async move { let _ = manager.run(false).await; });
+
+        // 6. Monitor
+        let start = Instant::now();
+        // Give 10s for small tests, 30s for large tests
+        let timeout_duration = if num_pieces > 100 { std::time::Duration::from_secs(30) } else { std::time::Duration::from_secs(10) };
+        
+        let check_loop = async {
+            let mut last_log = 0;
+            loop {
+                if let Ok(m) = metrics_rx.recv().await {
+                    // Log progress every 10%
+                    if num_pieces > 10 && m.number_of_pieces_completed > last_log + (num_pieces as u32 / 10) {
+                        println!("Progress: {}/{}", m.number_of_pieces_completed, num_pieces);
+                        last_log = m.number_of_pieces_completed;
+                    }
+                    if m.number_of_pieces_completed >= num_pieces as u32 { break; }
+                }
+            }
+        };
+
+        if tokio::time::timeout(timeout_duration, check_loop).await.is_err() {
+            panic!("TEST FAILED: Timed out waiting for completion.");
+        }
+
+        println!("SUCCESS: {} in {:.2?}", test_name, start.elapsed());
+
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    // --- TEST CASES ---
+
+    #[tokio::test]
+    async fn test_case_01_baseline_single_block() {
+        // 1 piece, 16KB (Standard Block)
+        run_integration_suite("Baseline", 1, 16_384).await;
+    }
+
+    #[tokio::test]
+    async fn test_case_02_throughput_1000_blocks() {
+        // 1000 pieces, 16KB each (~16MB Total)
+        // Tests pipeline throughput and file writing speed
+        run_integration_suite("Throughput_1000", 1000, 16_384).await;
+    }
+
+    #[tokio::test]
+    async fn test_case_03_boundary_odd_pieces() {
+        // 5 pieces.
+        // Tests Bitfield padding logic (5 pieces needs 1 byte, bits 11111000)
+        run_integration_suite("Odd_Pieces_5", 5, 16_384).await;
+    }
+
+    #[tokio::test]
+    async fn test_case_04_multi_block_pieces() {
+        // 10 pieces, 32KB each.
+        // Since standard block size is 16KB, the Manager MUST request 
+        // 2 blocks per piece (Block 0 and Block 1).
+        // This validates the PieceAssembler and BlockManager offset logic.
+        run_integration_suite("Multi_Block_32KB", 10, 32_768).await;
     }
 }
