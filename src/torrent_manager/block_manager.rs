@@ -313,9 +313,10 @@ impl BlockManager {
         }
 
         if assembler.received_blocks == assembler.total_blocks {
-            if let Some(finished) = self.legacy_buffers.remove(&addr.piece_index) {
-                return Some(finished.buffer);
-            }
+            // FIX: Do NOT remove the buffer yet. Keep it until `commit_v1_piece` (WriteToDisk)
+            // so that `AssignWork` knows we have the data and doesn't re-request it
+            // during the Verification/IO gap.
+            return Some(assembler.buffer.clone());
         }
         None
     }
@@ -393,6 +394,8 @@ impl BlockManager {
                 self.block_bitfield[global_idx as usize] = false;
             }
         }
+        // Ensure buffer is gone so we can re-download/re-verify if needed
+        self.legacy_buffers.remove(&piece_index);
     }
 
     pub fn reset_v1_buffer(&mut self, piece_index: u32) {

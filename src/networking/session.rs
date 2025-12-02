@@ -294,6 +294,7 @@ impl PeerSession {
                                     self.torrent_manager_tx
                                     .try_send(TorrentCommand::Unchoke(self.peer_ip_port.clone()));
                         },
+                        /*
                         Ok(Message::Piece(piece_index, block_offset , block_data)) => {
 
                             let received_block = BlockInfo {
@@ -347,6 +348,11 @@ impl PeerSession {
                                     .send(TorrentCommand::Block(peer_ip_port_clone, piece_index, block_offset, block_data))
                                     .await;
                             });
+                        },
+                        */
+                        Ok(Message::Piece(piece_index, block_offset , block_data)) => {
+                            let _ = self.torrent_manager_tx
+                                .try_send(TorrentCommand::Block(self.peer_ip_port.clone(), piece_index, block_offset, block_data));
                         },
                         Ok(Message::Request(piece_index, block_offset, block_length)) => {
                                 let _ = self.torrent_manager_tx
