@@ -350,10 +350,41 @@ impl PeerSession {
                             });
                         },
                         */
+                        /*
                         Ok(Message::Piece(piece_index, block_offset , block_data)) => {
                             let _ = self.torrent_manager_tx
                                 .try_send(TorrentCommand::Block(self.peer_ip_port.clone(), piece_index, block_offset, block_data));
                         },
+                        */
+// session.rs
+
+Ok(Message::Piece(piece_index, block_offset, block_data)) => {
+    // 1. Clone handles for the new task (Arc/Sender clones are cheap)
+    let manager_tx = self.torrent_manager_tx.clone();
+    let peer_id = self.peer_ip_port.clone();
+    let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+    // 2. Spawn the "Forwarder" task
+    // This immediately frees up the main loop to read the next packet.
+    tokio::spawn(async move {
+        // 3. Robust Send with Shutdown Guard
+        tokio::select! {
+            res = manager_tx.send(TorrentCommand::Block(
+                peer_id,
+                piece_index,
+                block_offset,
+                block_data
+            )) => {
+                if res.is_err() {
+                    event!(Level::DEBUG, "Manager channel closed during block forward");
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                // Drop the data if we are shutting down
+            }
+        }
+    });
+},
                         Ok(Message::Request(piece_index, block_offset, block_length)) => {
                                 let _ = self.torrent_manager_tx
                                     .try_send(TorrentCommand::RequestUpload(self.peer_ip_port.clone(), piece_index, block_offset, block_length));
@@ -615,9 +646,34 @@ impl PeerSession {
                             }
                         }
                         */
+                        /*
                         TorrentCommand::SendRequest { index, begin, length } => {
                             let _ = self.writer_tx.try_send(Message::Request(index, begin, length));
                         }
+                        */
+// session.rs
+
+TorrentCommand::SendRequest { index, begin, length } => {
+    // 1. Clone handles
+    let writer_tx = self.writer_tx.clone();
+    let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+    // 2. Spawn the "Request" task
+    // This ensures that if the Writer channel is full (TCP buffer full),
+    // we don't stop processing other Manager commands (like Chokes/Cancels).
+    tokio::spawn(async move {
+        tokio::select! {
+            res = writer_tx.send(Message::Request(index, begin, length)) => {
+                if res.is_err() {
+                    event!(Level::DEBUG, "Writer channel closed during request send");
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                // Drop request on shutdown
+            }
+        }
+    });
+},
                         TorrentCommand::Upload(piece_index, block_offset, block_data) => {
                             let writer_tx_clone = self.writer_tx.clone();
                             let _semaphore_clone = self.block_upload_limit_semaphore.clone();
