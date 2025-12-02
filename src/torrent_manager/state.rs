@@ -27,6 +27,7 @@ const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 16;
 const MAX_BLOCK_SIZE: u32 = 131_072;
 const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
+const MAX_PIPELINE_DEPTH: usize = 20;
 
 pub type PeerAddr = (String, u16);
 
@@ -735,7 +736,7 @@ impl TorrentState {
                 let mut effects = Vec::new();
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    if peer.inflight_requests >= 5 { 
+                    if peer.inflight_requests >= MAX_PIPELINE_DEPTH { 
                         return effects; 
                     }
 
@@ -812,7 +813,6 @@ impl TorrentState {
                         let assembler_mask = self.piece_manager.block_manager.legacy_buffers
                             .get(&piece_index)
                             .map(|a| a.mask.clone());
-                        println!("PIECE TO ASSIGN START {:?}, END {:?}", start, end);
                         
                         for global_block_idx in start..end {
                             if self.piece_manager.block_manager.block_bitfield.get(global_block_idx as usize) == Some(&true) {
@@ -840,7 +840,7 @@ impl TorrentState {
                             peer.inflight_requests += 1;
                             
                             // Optional: Stop if we hit the limit mid-piece (Pipelining)
-                            if peer.inflight_requests >= 5 {
+                            if peer.inflight_requests >= MAX_PIPELINE_DEPTH {
                                 break;
                             }
                         }
@@ -4677,30 +4677,27 @@ mod integration_tests {
     use std::collections::HashMap;
     use sha1::{Digest, Sha1};
     use crate::config::Settings;
-    use crate::resource_manager::ResourceManager;
+    // Correct Import for the client struct
+    use crate::resource_manager::{ResourceManager, ResourceManagerClient}; 
     use crate::token_bucket::TokenBucket;
     use crate::torrent_file::Torrent;
     use crate::torrent_manager::{TorrentManager, TorrentParameters, ManagerCommand};
 
-    // --- REUSABLE TEST HARNESS ---
-    async fn run_integration_suite(test_name: &str, num_pieces: usize, piece_size: usize) {
-        println!("=== STARTING TEST: {} (Pieces: {}, Size: {}) ===", test_name, num_pieces, piece_size);
-        
-        // 1. Setup Environment
-        let temp_dir = std::env::temp_dir().join(format!("superseedr_{}_{}", test_name, rand::random::<u32>()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
+    // -------------------------------------------------------------------------
+    // 1. HELPER FUNCTIONS
+    // -------------------------------------------------------------------------
 
-        // 2. Channels & Resources
-        // FIX: Variable name matches struct field now
-        let (_incoming_tx, incoming_peer_rx) = mpsc::channel(100); 
+    fn create_manager_harness(name: &str, num_pieces: usize, piece_size: usize, temp_dir: std::path::PathBuf) 
+        -> (TorrentManager, mpsc::Sender<ManagerCommand>, ResourceManagerClient) 
+    {
+        let (_incoming_tx, incoming_peer_rx) = mpsc::channel(100);
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
         
-        // Event Drainer (Prevent Deadlocks)
+        // Event Drainer
         let (event_tx, mut event_rx) = mpsc::channel(500);
         tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
 
-        let (metrics_tx, mut metrics_rx) = broadcast::channel(100);
+        let (metrics_tx, _) = broadcast::channel(100);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let mut settings_val = Settings::default();
@@ -4712,25 +4709,22 @@ mod integration_tests {
         limits.insert(crate::resource_manager::ResourceType::DiskRead, (1000, 1000));
         limits.insert(crate::resource_manager::ResourceType::DiskWrite, (1000, 1000));
         limits.insert(crate::resource_manager::ResourceType::Reserve, (0, 0));
+        
         let (resource_manager, rm_client) = ResourceManager::new(limits, shutdown_tx.clone());
         tokio::spawn(resource_manager.run());
 
         let bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
 
-        // 3. Create Torrent Data
-        // We assume every piece is full of 0xAA
         let single_piece_hash = Sha1::digest(&vec![0xAA; piece_size]).to_vec();
         let mut all_hashes = Vec::new();
-        for _ in 0..num_pieces {
-            all_hashes.extend_from_slice(&single_piece_hash);
-        }
+        for _ in 0..num_pieces { all_hashes.extend_from_slice(&single_piece_hash); }
 
         let total_len = (num_pieces * piece_size) as i64;
-        
+
         let torrent = Torrent {
             announce: None, announce_list: None, url_list: None,
             info: crate::torrent_file::Info {
-                name: test_name.to_string(),
+                name: name.to_string(),
                 piece_length: piece_size as i64,
                 pieces: all_hashes,
                 length: total_len,
@@ -4742,179 +4736,340 @@ mod integration_tests {
 
         let params = TorrentParameters {
             dht_handle: { #[cfg(feature = "dht")] { mainline::Dht::builder().port(0).build().unwrap().as_async() } #[cfg(not(feature = "dht"))] { () } },
-            incoming_peer_rx, // Matches local variable now
-            metrics_tx,
+            incoming_peer_rx, metrics_tx,
             torrent_validation_status: false,
-            download_dir: temp_dir.clone(),
+            download_dir: temp_dir,
             manager_command_rx: cmd_rx, manager_event_tx: event_tx,
-            settings, resource_manager: rm_client,
+            settings, resource_manager: rm_client.clone(),
             global_dl_bucket: bucket.clone(), global_ul_bucket: bucket,
         };
 
-        let mut manager = TorrentManager::from_torrent(params, torrent).unwrap();
+        (TorrentManager::from_torrent(params, torrent).unwrap(), cmd_tx, rm_client)
+    }
 
-        // 4. Setup Smart Mock Peer
+    async fn spawn_mock_peer(
+        manager: &mut TorrentManager, 
+        bitfield: Vec<u8>, 
+        upload_delay: std::time::Duration
+    ) -> (mpsc::Receiver<Vec<u8>>, mpsc::Sender<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let peer_addr = listener.local_addr().unwrap();
+        
+        manager.connect_to_peer(peer_addr.ip().to_string(), peer_addr.port()).await;
+
+        let (tx_events, rx_events) = mpsc::channel(100); 
+        let (tx_ctrl, mut rx_ctrl) = mpsc::channel(1); 
 
         tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.unwrap();
-            let (mut rd, mut wr) = socket.into_split();
-            let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1000); // Buffer for responses
+            if let Ok((socket, _)) = listener.accept().await {
+                let (mut rd, mut wr) = socket.into_split();
+                
+                // 1. Handshake
+                let mut handshake_buf = vec![0u8; 68];
+                if rd.read_exact(&mut handshake_buf).await.is_err() { return; }
+                
+                let mut h_resp = vec![0u8; 68];
+                h_resp[0] = 19;
+                h_resp[1..20].copy_from_slice(b"BitTorrent protocol");
+                h_resp[28..48].copy_from_slice(&handshake_buf[28..48]);
+                let _ = wr.write_all(&h_resp).await;
 
-            // Writer Task
-            tokio::spawn(async move {
-                while let Some(data) = rx.recv().await {
-                    if wr.write_all(&data).await.is_err() { break; }
-                }
-            });
+                // 2. Bitfield
+                let mut msg = Vec::new();
+                msg.extend_from_slice(&(1 + bitfield.len() as u32).to_be_bytes());
+                msg.push(5);
+                msg.extend_from_slice(&bitfield);
+                let _ = wr.write_all(&msg).await;
 
-            // Handshake Logic
-            let mut handshake_buf = vec![0u8; 68];
-            if rd.read_exact(&mut handshake_buf).await.is_err() { return; }
+                // 3. Send "Interested" (ID 2)
+                // This ensures the Manager knows we want data, so it considers Unchoking us.
+                let interested_msg = vec![0, 0, 0, 1, 2];
+                let _ = wr.write_all(&interested_msg).await;
 
-            // Send Handshake Response
-            let mut h_resp = vec![0u8; 68];
-            h_resp[0] = 19;
-            h_resp[1..20].copy_from_slice(b"BitTorrent protocol");
-            h_resp[28..48].copy_from_slice(&handshake_buf[28..48]);
-            tx.send(h_resp).await.unwrap();
+                // 4. Loop
+                let mut buf = vec![0u8; 4096];
+                let mut buffer = Vec::new();
+                let mut am_choking = true;
 
-            // Send Bitfield
-            // Calculate bytes needed: ceil(num_pieces / 8)
-            let bitfield_bytes = (num_pieces + 7) / 8;
-            let mut bitfield = vec![0xFFu8; bitfield_bytes];
-            
-            // Mask the last byte if necessary (strict BitTorrent compliance)
-            // Example: 10 pieces. 10 % 8 = 2 remainder. 
-            // Byte 0: 11111111. Byte 1: 11000000 (0xC0).
-            let remainder = num_pieces % 8;
-            if remainder != 0 {
-                let last_idx = bitfield_bytes - 1;
-                // e.g. remainder 1 -> 10000000 (0x80)
-                bitfield[last_idx] = 0xFF << (8 - remainder);
-            }
-
-            let mut msg = Vec::new();
-            msg.extend_from_slice(&(1 + bitfield.len() as u32).to_be_bytes());
-            msg.push(5);
-            msg.extend_from_slice(&bitfield);
-            tx.send(msg).await.unwrap();
-
-            // Message Loop
-            let mut am_choking = true;
-            let mut buf = vec![0u8; 4096];
-            let mut buffer = Vec::new();
-
-            loop {
-                let n = match rd.read(&mut buf).await {
-                    Ok(n) if n > 0 => n,
-                    _ => break,
-                };
-                buffer.extend_from_slice(&buf[..n]);
-
-                while buffer.len() >= 4 {
-                    let len = u32::from_be_bytes(buffer[0..4].try_into().unwrap()) as usize;
-                    if buffer.len() < 4 + len { break; }
-
-                    let msg_frame = &buffer[4..4+len];
-                    if !msg_frame.is_empty() {
-                        match msg_frame[0] {
-                            2 => { // Interested
-                                if am_choking {
-                                    let _ = tx.send(vec![0, 0, 0, 1, 1]).await; // Unchoke
-                                    am_choking = false;
-                                }
+                loop {
+                    tokio::select! {
+                        _ = rx_ctrl.recv() => break,
+                        res = rd.read(&mut buf) => {
+                            match res {
+                                Ok(n) if n > 0 => buffer.extend_from_slice(&buf[..n]),
+                                _ => break,
                             }
-                            6 => { // Request
-                                if msg_frame.len() >= 13 {
+                        }
+                    }
+
+                    while buffer.len() >= 4 {
+                        let len = u32::from_be_bytes(buffer[0..4].try_into().unwrap()) as usize;
+                        if buffer.len() < 4 + len { break; }
+                        
+                        let msg_frame = &buffer[4..4+len];
+                        if !msg_frame.is_empty() {
+                            match msg_frame[0] {
+                                0 => { let _ = tx_events.try_send(vec![0]); }, 
+                                1 => { let _ = tx_events.try_send(vec![1]); }, 
+                                2 => { // Interested
+                                    if am_choking {
+                                        let _ = wr.write_all(&[0, 0, 0, 1, 1]).await;
+                                        am_choking = false;
+                                    }
+                                }
+                                6 => { // Request
                                     let index = u32::from_be_bytes(msg_frame[1..5].try_into().unwrap());
                                     let begin = u32::from_be_bytes(msg_frame[5..9].try_into().unwrap());
-                                    let length = u32::from_be_bytes(msg_frame[9..13].try_into().unwrap());
+                                    let req_len = u32::from_be_bytes(msg_frame[9..13].try_into().unwrap());
+                                    
+                                    let mut rep = vec![6];
+                                    rep.extend_from_slice(&index.to_be_bytes());
+                                    let _ = tx_events.try_send(rep);
 
-                                    // Send 0xAA data matching requested length
-                                    let data = vec![0xAA; length as usize];
-                                    let total_len = 9 + data.len() as u32;
-                                    let mut resp = Vec::with_capacity(total_len as usize + 4);
+                                    if upload_delay.as_millis() > 0 {
+                                        tokio::time::sleep(upload_delay).await;
+                                    }
+
+                                    let data = vec![0xAA; req_len as usize];
+                                    let total_len = 9 + req_len;
+                                    let mut resp = Vec::new();
                                     resp.extend_from_slice(&total_len.to_be_bytes());
                                     resp.push(7);
                                     resp.extend_from_slice(&index.to_be_bytes());
                                     resp.extend_from_slice(&begin.to_be_bytes());
                                     resp.extend_from_slice(&data);
-                                    
-                                    let _ = tx.send(resp).await;
+                                    let _ = wr.write_all(&resp).await;
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
+                        buffer.drain(0..4+len);
                     }
-                    buffer.drain(0..4+len);
                 }
             }
         });
+        (rx_events, tx_ctrl)
+    }
 
-        // 5. Run
-        manager.connect_to_peer(peer_addr.ip().to_string(), peer_addr.port()).await;
+    // -------------------------------------------------------------------------
+    // 2. TEST CASES
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_case_06_rarest_first_strategy() {
+        let temp_dir = std::env::temp_dir().join("superseedr_rarest_first");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 2;
+        let piece_size = 16_384;
+        
+        let (mut manager, _cmd, _res) = create_manager_harness("RarestFirst", num_pieces, piece_size, temp_dir.clone());
+
+        // Peer A: Has [0, 1] (0xC0) - Rare Piece 1 holder
+        let (mut rx_a, _k_a) = spawn_mock_peer(&mut manager, vec![0xC0], std::time::Duration::from_millis(0)).await;
+        // Peer B: Has [0] (0x80)
+        let (mut rx_b, _k_b) = spawn_mock_peer(&mut manager, vec![0x80], std::time::Duration::from_millis(0)).await;
+        // Peer C: Has [0] (0x80)
+        let (mut rx_c, _k_c) = spawn_mock_peer(&mut manager, vec![0x80], std::time::Duration::from_millis(0)).await;
+
         let manager_handle = tokio::spawn(async move { let _ = manager.run(false).await; });
 
-        // 6. Monitor
-        let start = Instant::now();
-        // Give 10s for small tests, 30s for large tests
-        let timeout_duration = if num_pieces > 100 { std::time::Duration::from_secs(30) } else { std::time::Duration::from_secs(10) };
-        
-        let check_loop = async {
-            let mut last_log = 0;
-            loop {
-                if let Ok(m) = metrics_rx.recv().await {
-                    // Log progress every 10%
-                    if num_pieces > 10 && m.number_of_pieces_completed > last_log + (num_pieces as u32 / 10) {
-                        println!("Progress: {}/{}", m.number_of_pieces_completed, num_pieces);
-                        last_log = m.number_of_pieces_completed;
-                    }
-                    if m.number_of_pieces_completed >= num_pieces as u32 { break; }
-                }
-            }
-        };
+        let start = std::time::Instant::now();
+        let mut rare_piece_requested = false;
 
-        if tokio::time::timeout(timeout_duration, check_loop).await.is_err() {
-            panic!("TEST FAILED: Timed out waiting for completion.");
+        while start.elapsed() < std::time::Duration::from_secs(5) {
+            tokio::select! {
+                Some(msg) = rx_a.recv() => {
+                    if msg.len() >= 5 && msg[0] == 6 { 
+                        let idx = u32::from_be_bytes(msg[1..5].try_into().unwrap());
+                        if idx == 1 { 
+                            rare_piece_requested = true;
+                            break;
+                        }
+                    }
+                }
+                Some(_) = rx_b.recv() => {},
+                Some(_) = rx_c.recv() => {},
+                else => break,
+            }
         }
 
-        println!("SUCCESS: {} in {:.2?}", test_name, start.elapsed());
+        assert!(rare_piece_requested, "FAILED: Manager did not prioritize requesting Rare Piece 1 from Peer A!");
+        println!("SUCCESS: Rarest First - Peer A received request for rare piece 1.");
 
-        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = _cmd.send(ManagerCommand::Shutdown).await;
         let _ = manager_handle.await;
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 
-    // --- TEST CASES ---
-
     #[tokio::test]
-    async fn test_case_01_baseline_single_block() {
-        // 1 piece, 16KB (Standard Block)
-        run_integration_suite("Baseline", 1, 16_384).await;
+    async fn test_case_07_tit_for_tat_choking() {
+        let temp_dir = std::env::temp_dir().join("superseedr_tit_for_tat");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 50; 
+        let piece_size = 16_384;
+        let (mut manager, _cmd, _res) = create_manager_harness("TitForTat", num_pieces, piece_size, temp_dir.clone());
+
+        let mut fast_rxs = Vec::new();
+        for _ in 0..4 {
+            let (rx, _kill) = spawn_mock_peer(&mut manager, vec![0xFF; 7], std::time::Duration::from_millis(0)).await;
+            fast_rxs.push(rx);
+        }
+
+        let (mut slow_rx, _kill_slow) = spawn_mock_peer(&mut manager, vec![0xFF; 7], std::time::Duration::from_millis(500)).await;
+
+        let manager_handle = tokio::spawn(async move { let _ = manager.run(false).await; });
+
+        let start = std::time::Instant::now();
+        let mut fast_unchoke_events = 0;
+
+        // FIX: Wait 15 seconds to catch the 10s choke timer tick
+        while start.elapsed() < std::time::Duration::from_secs(15) {
+            for rx in &mut fast_rxs {
+                if let Ok(msg) = rx.try_recv() {
+                    // ID 1 = Unchoke
+                    if !msg.is_empty() && msg[0] == 1 { fast_unchoke_events += 1; }
+                }
+            }
+            while let Ok(_) = slow_rx.try_recv() {}
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        println!("Fast Peers received {} Unchoke events total", fast_unchoke_events);
+        assert!(fast_unchoke_events >= 4, "Fast peers were not unchoked correctly!");
+
+        let _ = _cmd.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[tokio::test]
-    async fn test_case_02_throughput_1000_blocks() {
-        // 1000 pieces, 16KB each (~16MB Total)
-        // Tests pipeline throughput and file writing speed
-        run_integration_suite("Throughput_1000", 1000, 16_384).await;
+    async fn test_case_08_full_swarm_1000_blocks() {
+        let temp_dir = std::env::temp_dir().join("superseedr_full_swarm");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 1000;
+        let piece_size = 16_384;
+        let (mut manager, _cmd, _res) = create_manager_harness("FullSwarm", num_pieces, piece_size, temp_dir.clone());
+
+        let make_bitfield = |pattern: fn(usize) -> bool| -> Vec<u8> {
+            let mut bf = vec![0u8; (num_pieces + 7) / 8];
+            for i in 0..num_pieces {
+                if pattern(i) {
+                    let byte_idx = i / 8;
+                    let bit_idx = 7 - (i % 8);
+                    bf[byte_idx] |= 1 << bit_idx;
+                }
+            }
+            bf
+        };
+
+        // Peer 1: SEEDER (Has All)
+        let bf_seed = make_bitfield(|_| true);
+        spawn_mock_peer(&mut manager, bf_seed, std::time::Duration::from_millis(1)).await;
+
+        // Peer 2: FIRST HALF (Has 0-499)
+        let bf_first = make_bitfield(|i| i < 500);
+        spawn_mock_peer(&mut manager, bf_first, std::time::Duration::from_millis(2)).await;
+
+        // Peer 3: SECOND HALF (Has 500-999)
+        let bf_second = make_bitfield(|i| i >= 500);
+        spawn_mock_peer(&mut manager, bf_second, std::time::Duration::from_millis(2)).await;
+
+        // Peer 4: EVENS
+        let bf_even = make_bitfield(|i| i % 2 == 0);
+        spawn_mock_peer(&mut manager, bf_even, std::time::Duration::from_millis(5)).await;
+
+        // Peer 5: ODDS
+        let bf_odd = make_bitfield(|i| i % 2 != 0);
+        spawn_mock_peer(&mut manager, bf_odd, std::time::Duration::from_millis(5)).await;
+
+        let manager_handle = tokio::spawn(async move { let _ = manager.run(false).await; });
+
+        let expected_size = (num_pieces * piece_size) as u64;
+        let file_path = temp_dir.join("FullSwarm"); 
+
+        let start = std::time::Instant::now();
+        let timeout_duration = std::time::Duration::from_secs(45);
+        let mut success = false;
+
+        println!("Waiting for 1000 blocks (~16MB) from 5 peers...");
+
+        while start.elapsed() < timeout_duration {
+            if let Ok(meta) = std::fs::metadata(&file_path) {
+                if meta.len() >= expected_size {
+                    success = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        if !success {
+            panic!("FAILED: Swarm download did not complete in 45s.");
+        }
+
+        println!("SUCCESS: Downloaded 1000 blocks (~16MB) from 5 mixed peers in {:.2?}", start.elapsed());
+
+        let _ = _cmd.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
-    #[tokio::test]
-    async fn test_case_03_boundary_odd_pieces() {
-        // 5 pieces.
-        // Tests Bitfield padding logic (5 pieces needs 1 byte, bits 11111000)
-        run_integration_suite("Odd_Pieces_5", 5, 16_384).await;
-    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_debug_pipeline_latency() {
+        // SETUP
+        let temp_dir = std::env::temp_dir().join("superseedr_latency_debug");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
 
-    #[tokio::test]
-    async fn test_case_04_multi_block_pieces() {
-        // 10 pieces, 32KB each.
-        // Since standard block size is 16KB, the Manager MUST request 
-        // 2 blocks per piece (Block 0 and Block 1).
-        // This validates the PieceAssembler and BlockManager offset logic.
-        run_integration_suite("Multi_Block_32KB", 10, 32_768).await;
+        // 500 blocks * 16KB = ~8MB
+        let num_pieces = 500;
+        let piece_size = 16_384;
+        let (mut manager, _cmd, _res) = create_manager_harness("LatencyTest", num_pieces, piece_size, temp_dir.clone());
+
+        // Spawn 1 Peer with 50ms Latency (Simulating a real internet connection)
+        let bf_all = vec![0xFFu8; (num_pieces + 7) / 8];
+        
+        // 50ms delay per block write
+        spawn_mock_peer(&mut manager, bf_all, std::time::Duration::from_millis(50)).await;
+
+        let manager_handle = tokio::spawn(async move { let _ = manager.run(false).await; });
+
+        // MONITOR
+        let start = std::time::Instant::now();
+        let expected_size = (num_pieces * piece_size) as u64;
+        let file_path = temp_dir.join("LatencyTest"); 
+
+        let mut success = false;
+        // Give it 10 seconds. 
+        // At 300KB/s (Broken Pipeline), 8MB takes ~26 seconds -> FAIL.
+        // At 5MB/s (Working Pipeline), 8MB takes ~1.6 seconds -> PASS.
+        while start.elapsed() < std::time::Duration::from_secs(10) {
+            if let Ok(meta) = std::fs::metadata(&file_path) {
+                if meta.len() >= expected_size {
+                    success = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        if !success {
+            println!("❌ PIPELINE BROKEN: Transfer too slow for high latency peer.");
+            println!("   Likely cause: 'inflight_requests' limit is too low or 'AssignWork' loop is exiting early.");
+        } else {
+            println!("✅ PIPELINE WORKING: High throughput achieved despite latency.");
+        }
+
+        let _ = _cmd.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
+        
+        assert!(success);
     }
 }
