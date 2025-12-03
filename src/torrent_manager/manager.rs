@@ -192,7 +192,7 @@ impl TorrentManager {
         info_dict_hasher.update(&torrent.info_dict_bencode);
         let info_hash = info_dict_hasher.finalize();
 
-        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(100);
+        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(10_000);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         #[cfg(feature = "dht")]
@@ -326,7 +326,7 @@ impl TorrentManager {
             );
         }
 
-        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(100);
+        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(10_000);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         #[cfg(feature = "dht")]
@@ -401,7 +401,19 @@ impl TorrentManager {
 
             Effect::SendToPeer { peer_id, cmd } => {
                 if let Some(peer) = self.state.peers.get(&peer_id) {
-                    let _ = peer.peer_tx.try_send(*cmd);
+                    match peer.peer_tx.try_send(*cmd) {
+                        Ok(_) => {},
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            event!(Level::ERROR, "CRITICAL: Dropped command to peer {} (Channel Full). Pipeline stalled.", peer_id);
+                        },
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            // The peer session has exited. We must clean up immediately.
+                            event!(Level::DEBUG, "Peer {} channel closed. Removing from state.", peer_id);
+                            // We can't mutate state here directly (borrow checker), so we send a self-command
+                            // to handle the disconnect cleanly in the next loop iteration.
+                            let _ = self.torrent_manager_tx.try_send(TorrentCommand::Disconnect(peer_id));
+                        }
+                    }
                 }
             }
 
@@ -704,7 +716,7 @@ impl TorrentManager {
                 let shutdown_tx = self.shutdown_tx.clone();
                 let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-                let (peer_tx, peer_rx) = mpsc::channel(10);
+                let (peer_tx, peer_rx) = mpsc::channel(1000);
                 self.state.peers.insert(
                     peer_ip_port.clone(),
                     PeerState::new(peer_ip_port.clone(), peer_tx, Instant::now()),
@@ -1537,7 +1549,7 @@ impl TorrentManager {
         let mut shutdown_rx_session = self.shutdown_tx.subscribe();
         let shutdown_tx = self.shutdown_tx.clone();
 
-        let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(10);
+        let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(1000);
         self.apply_action(Action::RegisterPeer {
             peer_id: peer_ip_port.clone(),
             tx: peer_session_tx,

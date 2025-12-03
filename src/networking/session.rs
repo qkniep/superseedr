@@ -123,7 +123,7 @@ impl PeerSession {
 
     pub fn new(params: PeerSessionParameters) -> Self {
         // Increase channel size to buffer the Manager's "shotgun" blasts of requests
-        let (writer_tx, writer_rx) = mpsc::channel::<Message>(200);
+        let (writer_tx, writer_rx) = mpsc::channel::<Message>(1000);
 
         Self {
             info_hash: params.info_hash,
@@ -399,7 +399,7 @@ impl PeerSession {
                                 // preventing semaphore inflation.
                             }
 
-                            event!(Level::INFO, "BLOCK RECEIVED: peer {} - index {} - offset {} - len {}", self.peer_ip_port, piece_index, block_offset, block_data.len());
+                            //event!(Level::INFO, "BLOCK RECEIVED: peer {} - index {} - offset {} - len {}", self.peer_ip_port, piece_index, block_offset, block_data.len());
 
                             let peer_ip_port_clone = self.peer_ip_port.clone();
                             let torrent_manager_tx_clone = self.torrent_manager_tx.clone();
@@ -407,10 +407,10 @@ impl PeerSession {
                             
                             // Offload the heavy lifting to avoid blocking the read loop
                             self.block_request_joinset.spawn(async move {
-                                consume_tokens(&global_dl_bucket_clone, block_data.len() as f64).await;
                                 let _ = torrent_manager_tx_clone
-                                    .send(TorrentCommand::Block(peer_ip_port_clone, piece_index, block_offset, block_data))
+                                    .send(TorrentCommand::Block(peer_ip_port_clone.clone(), piece_index, block_offset, block_data.clone()))
                                     .await;
+                                    //event!(Level::INFO, "MANAGER SENT: peer {} - index {} - offset {} - len {}", peer_ip_port_clone, piece_index, block_offset, block_data.len());
                             });
                         },
 
@@ -781,7 +781,7 @@ impl PeerSession {
                                     // This creates the backpressure mechanism.
                                     permit.forget(); 
                                     
-                                    event!(Level::INFO, "BLOCK REQUESTED: peer {} - index {} - offset {} - datalen {}", "...", index, begin, length);
+                                    //event!(Level::INFO, "BLOCK REQUESTED: peer {} - index {} - offset {} - datalen {}", "...", index, begin, length);
                                 }
                             });
                         },

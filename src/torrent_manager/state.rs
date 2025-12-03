@@ -27,7 +27,7 @@ const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 16;
 const MAX_BLOCK_SIZE: u32 = 131_072;
 const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
-const MAX_PIPELINE_DEPTH: usize = 100;
+const MAX_PIPELINE_DEPTH: usize = 50;
 
 pub type PeerAddr = (String, u16);
 
@@ -1224,7 +1224,34 @@ impl TorrentState {
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     
-                    // --- Interest Logic (Standard) ---
+                    // --- DEBUG LOGGING ---
+                    // Print state if we are "Stalled" (Interested but not downloading) 
+                    if peer.am_interested {
+                        // Log every 500ms or if stuck at MAX
+                        if peer.inflight_requests == 0 || peer.inflight_requests >= MAX_PIPELINE_DEPTH {
+                            /*
+                             event!(Level::INFO, 
+                                "AssignWork[{}]: Inflight: {}/{} | ActiveBlocks: {} | PendingPieces: {} | GlobalNeed: {} | Status: {:?} | Choked: {:?}", 
+                                peer_id, 
+                                peer.inflight_requests, MAX_PIPELINE_DEPTH,
+                                peer.active_blocks.len(), 
+                                peer.pending_requests.len(), 
+                                self.piece_manager.need_queue.len(),
+                                self.torrent_status,
+                                peer.peer_choking
+                            );
+                            */
+                        }
+                    }
+
+                    // --- SELF-HEALING FIX: Clear Zombies ---
+                    // If the session says we have 0 requests in flight, we MUST NOT have any blocks marked active.
+                    if peer.inflight_requests == 0 && !peer.active_blocks.is_empty() {
+                        event!(Level::WARN, "HEALING: Found {} zombie blocks for {} with 0 inflight. Clearing.", peer.active_blocks.len(), peer_id);
+                        peer.active_blocks.clear();
+                    }
+
+                    // --- Interest Logic ---
                     let has_needed_pieces = !peer.bitfield.is_empty()
                         && self.piece_manager.need_queue.iter().any(|&p| peer.bitfield.get(p as usize) == Some(&true));
 
@@ -1246,7 +1273,7 @@ impl TorrentState {
                     // Guard 4: Capacity Check
                     if peer.inflight_requests >= MAX_PIPELINE_DEPTH { return effects; }
 
-                    // PHASE 1: Fill pipeline with currently pending pieces (Exact Deduplication)
+                    // PHASE 1: Fill pipeline with currently pending pieces
                     let pending_pieces: Vec<u32> = peer.pending_requests.iter().cloned().collect();
                     
                     for piece_index in pending_pieces {
@@ -1260,10 +1287,8 @@ impl TorrentState {
                         for global_block_idx in start..end {
                             if peer.inflight_requests >= MAX_PIPELINE_DEPTH { break; }
 
-                            // Check 1: Do we already have it globally?
                             if self.piece_manager.block_manager.block_bitfield.get(global_block_idx as usize) == Some(&true) { continue; }
                             
-                            // Check 2: Do we have it partially buffered?
                             let local_block_idx = global_block_idx - start;
                             if let Some(mask) = &assembler_mask {
                                 if mask.get(local_block_idx as usize) == Some(&true) { continue; }
@@ -1271,13 +1296,10 @@ impl TorrentState {
 
                             let addr = self.piece_manager.block_manager.inflate_address(global_block_idx);
 
-                            // Check 3: Is it already on the wire for THIS peer?
-                            // Replaces the fragile 'skips' logic
                             if peer.active_blocks.contains(&(addr.piece_index, addr.byte_offset, addr.length)) {
                                 continue;
                             }
 
-                            // ACTION: Request it
                             peer.active_blocks.insert((addr.piece_index, addr.byte_offset, addr.length));
                             effects.push(Effect::SendToPeer {
                                 peer_id: peer_id.clone(),
@@ -1552,7 +1574,13 @@ impl TorrentState {
                     });
                 }
 
-                effects.extend(self.update(Action::AssignWork { peer_id: peer_id.clone() }));
+                if let Some(peer) = self.peers.get(&peer_id) {
+                    // Threshold: 50% of max depth. 
+                    // This keeps the pipe full without burning CPU on every single block.
+                    if peer.inflight_requests < (MAX_PIPELINE_DEPTH / 2) {
+                         effects.extend(self.update(Action::AssignWork { peer_id: peer_id.clone() }));
+                    }
+                }
 
                 effects
             }
