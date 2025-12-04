@@ -399,26 +399,6 @@ impl TorrentManager {
                 self.send_metrics(bytes_dl, bytes_ul);
             }
 
-            /*
-            Effect::SendToPeer { peer_id, cmd } => {
-                if let Some(peer) = self.state.peers.get(&peer_id) {
-                    match peer.peer_tx.try_send(*cmd) {
-                        Ok(_) => {},
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            event!(Level::ERROR, "CRITICAL: Dropped command to peer {} (Channel Full). Pipeline stalled.", peer_id);
-                        },
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                            // The peer session has exited. We must clean up immediately.
-                            event!(Level::DEBUG, "Peer {} channel closed. Removing from state.", peer_id);
-                            // We can't mutate state here directly (borrow checker), so we send a self-command
-                            // to handle the disconnect cleanly in the next loop iteration.
-                            let _ = self.torrent_manager_tx.try_send(TorrentCommand::Disconnect(peer_id));
-                        }
-                    }
-                }
-            }
-            */
-
             Effect::SendToPeer { peer_id, cmd } => {
                 if let Some(peer) = self.state.peers.get(&peer_id) {
                     let tx = peer.peer_tx.clone();
@@ -1854,7 +1834,7 @@ impl TorrentManager {
                         TorrentCommand::RequestUpload(_, _, _, _) => {
                             "Peer is Requesting".to_string()
                         }
-                        TorrentCommand::Cancel(_) => "Peer Canceling Request".to_string(),
+                        TorrentCommand::Cancel(_, _, _) => "Peer Canceling Request".to_string(),
                         _ => "Idle".to_string(),
                     };
                     let discriminant = std::mem::discriminant(&p.last_action);

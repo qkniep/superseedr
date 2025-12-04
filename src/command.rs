@@ -39,7 +39,7 @@ pub enum TorrentCommand {
     Upload(u32, u32, Vec<u8>),
 
     CancelUpload(String, u32, u32, u32),
-    Cancel(u32),
+    Cancel(u32, u32, u32),
 
     Disconnect(String),
 
