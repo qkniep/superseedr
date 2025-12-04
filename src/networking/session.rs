@@ -98,7 +98,8 @@ pub struct PeerSession {
     writer_tx: Sender<Message>,
 
     // Tracks blocks IN FLIGHT. Used to credit permits back on receipt/cancel.
-    block_tracker: HashMap<u32, HashSet<BlockInfo>>,
+    //block_tracker: HashMap<u32, HashSet<BlockInfo>>,
+    block_tracker: HashSet<BlockInfo>,
     
     // The "Gatekeeper". We control permits manually for max speed.
     block_request_limit_semaphore: Arc<Semaphore>,
@@ -136,7 +137,7 @@ impl PeerSession {
             peer_ip_port: params.peer_ip_port,
             writer_rx,
             writer_tx,
-            block_tracker: HashMap::new(),
+            block_tracker: HashSet::new(),
             // Semaphore matches pipeline depth
             block_request_limit_semaphore: Arc::new(Semaphore::new(PEER_BLOCK_IN_FLIGHT_LIMIT)),
             block_request_joinset: JoinSet::new(),
@@ -375,6 +376,7 @@ impl PeerSession {
                         },
                         */
 
+                        /*
                         Ok(Message::Piece(piece_index, block_offset, block_data)) => {
                             let received_block = BlockInfo {
                                 piece_index,
@@ -382,13 +384,9 @@ impl PeerSession {
                                 length: block_data.len() as u32,
                             };
 
-                            // PERFORMANCE FIX: Restore Credit Logic
-                            // If we were tracking this block, it means we spent a semaphore permit on it.
-                            // We now remove it from the tracker and ADD the permit back.
                             if let Entry::Occupied(mut entry) = self.block_tracker.entry(piece_index) {
                                 let blocks_for_piece = entry.get_mut();
                                 if blocks_for_piece.remove(&received_block) {
-                                    // CRITICAL: This wakes up the next pending request instantly.
                                     self.block_request_limit_semaphore.add_permits(1);
                                 }
                                 if blocks_for_piece.is_empty() {
@@ -399,18 +397,77 @@ impl PeerSession {
                                 // preventing semaphore inflation.
                             }
 
-                            //event!(Level::INFO, "BLOCK RECEIVED: peer {} - index {} - offset {} - len {}", self.peer_ip_port, piece_index, block_offset, block_data.len());
+                            event!(Level::INFO, "BLOCK RECEIVED: peer {} - index {} - offset {} - len {}", self.peer_ip_port, piece_index, block_offset, block_data.len());
 
                             let peer_ip_port_clone = self.peer_ip_port.clone();
                             let torrent_manager_tx_clone = self.torrent_manager_tx.clone();
                             let global_dl_bucket_clone = self.global_dl_bucket.clone();
                             
-                            // Offload the heavy lifting to avoid blocking the read loop
-                            self.block_request_joinset.spawn(async move {
-                                let _ = torrent_manager_tx_clone
-                                    .send(TorrentCommand::Block(peer_ip_port_clone.clone(), piece_index, block_offset, block_data.clone()))
-                                    .await;
-                                    //event!(Level::INFO, "MANAGER SENT: peer {} - index {} - offset {} - len {}", peer_ip_port_clone, piece_index, block_offset, block_data.len());
+                             self.block_request_joinset.spawn(async move {
+                                // Construct the command
+                                let cmd = TorrentCommand::Block(
+                                    peer_ip_port_clone.clone(), 
+                                    piece_index, 
+                                    block_offset, 
+                                    block_data.clone()
+                                );
+
+                                // 1. Try to send immediately (non-blocking)
+                                match torrent_manager_tx_clone.try_send(cmd) {
+                                    Ok(_) => {
+                                        // Success! Channel had room.
+                                    }
+                                    Err(tokio::sync::mpsc::error::TrySendError::Full(returned_cmd)) => {
+                                        // 2. Channel is FULL. Log it so we know we hit the limit.
+                                        event!(Level::WARN, "⚠️  CHANNEL FULL: Peer {} stalling. Manager is processing too slow.", peer_ip_port_clone);
+                                        
+                                        // 3. Fallback: Wait asynchronously until there is room (Don't drop the block!)
+                                        if let Err(e) = torrent_manager_tx_clone.send(returned_cmd).await {
+                                            event!(Level::ERROR, "Failed to send block after waiting: {}", e);
+                                        }
+                                    }
+                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                        event!(Level::ERROR, "Manager channel disconnected.");
+                                    }
+                                }
+                            });
+                        },
+                        */
+
+
+                        Ok(Message::Piece(piece_index, block_offset, block_data)) => {
+                            // 1. FAST THROTTLE RELEASE
+                            // We don't check the hashmap. We just check if we have room to accept a credit.
+                            // We implicitly trust that if we received a block, a request finished.
+                            // The 'if' guard prevents unsolicited blocks from inflating our limit > 5.
+                            if self.block_request_limit_semaphore.available_permits() < PEER_BLOCK_IN_FLIGHT_LIMIT {
+                                self.block_request_limit_semaphore.add_permits(1);
+                            }
+
+                            // 2. DISPATCH (Standard logic)
+                            let peer_ip_port_clone = self.peer_ip_port.clone();
+                            let torrent_manager_tx_clone = self.torrent_manager_tx.clone();
+                            let mut shutdown_rx = self.shutdown_tx.subscribe();
+                            
+                            tokio::spawn(async move {
+                                let cmd = TorrentCommand::Block(
+                                    peer_ip_port_clone.clone(), 
+                                    piece_index, 
+                                    block_offset, 
+                                    block_data.clone() // Clone is unavoidable here unless you use Arc<Vec<u8>>
+                                );
+
+                                tokio::select! {
+                                     res = torrent_manager_tx_clone.send(cmd) => {
+                                         if let Err(e) = res {
+                                             event!(Level::ERROR, "Manager channel closed unexpectedly: {}", e);
+                                         }
+                                     }
+                                     _ = shutdown_rx.recv() => {
+                                         // No log needed usually, or TRACE level
+                                         // We simply drop the 'cmd' (the block data) and exit.
+                                     }
+                                }
                             });
                         },
 
@@ -629,6 +686,7 @@ impl PeerSession {
                         */
 
                         TorrentCommand::Cancel(piece_index) => {
+                        /*
                             if let Some(blocks) = self.block_tracker.remove(&piece_index) {
                                 for block in blocks {
                                     // If we cancel, we must give back the permits we took!
@@ -638,6 +696,7 @@ impl PeerSession {
                                     let _ = self.writer_tx.try_send(Message::Cancel(block.piece_index, block.offset, block.length));
                                 }
                             }
+                        */
                         },
                         TorrentCommand::Have(_peer_id, piece_index) => {
                                 let _ = self.writer_tx
@@ -752,6 +811,7 @@ impl PeerSession {
                         }
                         */
 
+                        /*
                         TorrentCommand::SendRequest { index, begin, length } => {
                             // 1. Track the block locally
                             self.block_tracker.entry(index).or_default().insert(BlockInfo {
@@ -763,6 +823,7 @@ impl PeerSession {
                             let writer_tx_clone = self.writer_tx.clone();
                             let semaphore_clone = self.block_request_limit_semaphore.clone();
                             let mut shutdown_rx = self.shutdown_tx.subscribe();
+                            let peer_port_ip_clone = self.peer_ip_port.clone();
                             
                             // 2. Spawn a lightweight task to handle the waiting.
                             // This ensures the main loop (this loop) isn't blocked waiting for a semaphore.
@@ -781,7 +842,40 @@ impl PeerSession {
                                     // This creates the backpressure mechanism.
                                     permit.forget(); 
                                     
-                                    //event!(Level::INFO, "BLOCK REQUESTED: peer {} - index {} - offset {} - datalen {}", "...", index, begin, length);
+                                    event!(Level::INFO, "BLOCK REQUESTED: peer {} - index {} - offset {} - datalen {}", peer_port_ip_clone, index, begin, length);
+                                }
+                            });
+                        },
+                        */
+
+                        TorrentCommand::SendRequest { index, begin, length } => {
+                            // 1. REMOVED: self.block_tracker.insert(...) logic.
+
+                            let writer_tx_clone = self.writer_tx.clone();
+                            let semaphore_clone = self.block_request_limit_semaphore.clone();
+                            let mut shutdown_rx = self.shutdown_tx.subscribe();
+                            // let peer_port_ip_clone = self.peer_ip_port.clone(); // Optional: remove logging for max speed
+
+                            // 2. SPAWN WAIT TASK
+                            // This creates the "Pipeline". We can queue 1000 requests here in memory,
+                            // but they will only hit the network 5 at a time.
+                            tokio::spawn(async move {
+                                // A. Wait for Atomic Permit
+                                let permit = tokio::select! {
+                                    Ok(p) = semaphore_clone.acquire_owned() => p,
+                                    _ = shutdown_rx.recv() => return,
+                                };
+
+                                // B. Send to Network
+                                if writer_tx_clone.send(Message::Request(index, begin, length)).await.is_ok() {
+                                    // C. CRITICAL: "Forget" the permit.
+                                    // We do NOT drop it (which would give it back immediately).
+                                    // We destroy the permit struct, keeping the Semaphore count low.
+                                    // The count will be restored by the Main Loop when Message::Piece arrives.
+                                    permit.forget(); 
+                                }
+                                else {
+                                    event!(Level::ERROR, "WRITER TASK OVERLOADED");
                                 }
                             });
                         },

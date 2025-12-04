@@ -399,6 +399,7 @@ impl TorrentManager {
                 self.send_metrics(bytes_dl, bytes_ul);
             }
 
+            /*
             Effect::SendToPeer { peer_id, cmd } => {
                 if let Some(peer) = self.state.peers.get(&peer_id) {
                     match peer.peer_tx.try_send(*cmd) {
@@ -414,6 +415,34 @@ impl TorrentManager {
                             let _ = self.torrent_manager_tx.try_send(TorrentCommand::Disconnect(peer_id));
                         }
                     }
+                }
+            }
+            */
+
+            Effect::SendToPeer { peer_id, cmd } => {
+                if let Some(peer) = self.state.peers.get(&peer_id) {
+                    let tx = peer.peer_tx.clone();
+                    let command = *cmd; 
+                    let pid = peer_id.clone();
+                    
+                    // 1. Get a shutdown listener for this specific task
+                    let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+                    // 2. Spawn the task
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            // Option A: Send successfully (waits if full)
+                            res = tx.send(command) => {
+                                if let Err(_e) = res {
+                                     event!(Level::TRACE, "Failed to send to peer {}: Channel closed", pid);
+                                }
+                            }
+                            // Option B: Shutdown triggered -> Cancel immediately
+                            _ = shutdown_rx.recv() => {
+                                event!(Level::TRACE, "Dropping command to peer {} due to shutdown", pid);
+                            }
+                        }
+                    });
                 }
             }
 
