@@ -19,6 +19,8 @@ use crate::token_bucket::TokenBucket;
 
 use crate::command::TorrentCommand;
 
+use crate::torrent_manager::state::MAX_PIPELINE_DEPTH;
+
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -153,7 +155,7 @@ impl PeerSession {
             global_dl_bucket: params.global_dl_bucket,
             global_ul_bucket: params.global_ul_bucket,
             shutdown_tx: params.shutdown_tx,
-            cancellation_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(50))),
+            cancellation_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_PIPELINE_DEPTH))),
         }
     }
 
