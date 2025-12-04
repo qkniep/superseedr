@@ -849,46 +849,73 @@ impl PeerSession {
                         */
 
                         TorrentCommand::SendRequest { index, begin, length } => {
-                            // 1. REMOVED: self.block_tracker.insert(...) logic.
-
                             let writer_tx_clone = self.writer_tx.clone();
                             let semaphore_clone = self.block_request_limit_semaphore.clone();
                             let mut shutdown_rx = self.shutdown_tx.subscribe();
-                            // let peer_port_ip_clone = self.peer_ip_port.clone(); // Optional: remove logging for max speed
+                            // let peer_port_ip_clone = self.peer_ip_port.clone(); 
 
-                            // 2. SPAWN WAIT TASK
-                            // This creates the "Pipeline". We can queue 1000 requests here in memory,
-                            // but they will only hit the network 5 at a time.
                             tokio::spawn(async move {
                                 // A. Wait for Atomic Permit
+                                // This throttles the pipeline to 5 concurrent requests
                                 let permit = tokio::select! {
                                     Ok(p) = semaphore_clone.acquire_owned() => p,
                                     _ = shutdown_rx.recv() => return,
                                 };
 
-                                // B. Send to Network
-                                if writer_tx_clone.send(Message::Request(index, begin, length)).await.is_ok() {
-                                    // C. CRITICAL: "Forget" the permit.
-                                    // We do NOT drop it (which would give it back immediately).
-                                    // We destroy the permit struct, keeping the Semaphore count low.
-                                    // The count will be restored by the Main Loop when Message::Piece arrives.
-                                    permit.forget(); 
+                                // B. Send to Network (Safe & Shutdown Aware)
+                                // We use select! to ensure we don't hang if the channel is full during shutdown.
+                                tokio::select! {
+                                    res = writer_tx_clone.send(Message::Request(index, begin, length)) => {
+                                        match res {
+                                            Ok(_) => {
+                                                // Success! The request is queued.
+                                                // C. CRITICAL: "Forget" the permit.
+                                                // We manually keep the semaphore count low.
+                                                // It will be incremented back when the DATA (Piece) arrives in the Main Loop.
+
+                                                permit.forget();
+                                            }
+                                            Err(_) => {
+                                                // The Writer channel is closed (Connection died).
+                                                // We simply let 'permit' go out of scope here.
+                                                // This automatically credits the semaphore back (+1), preventing leaks.
+                                                event!(Level::DEBUG, "Connection closed while sending request");
+                                            }
+                                        }
+                                    }
+                                    _ = shutdown_rx.recv() => {
+                                        // Shutdown signal received while waiting for channel space.
+                                        // We drop the permit (auto-restoring the slot) and exit.
+                                        // No log needed.
+                                    }
                                 }
-                                else {
-                                    event!(Level::ERROR, "WRITER TASK OVERLOADED");
-                                }
+
                             });
                         },
-
                         TorrentCommand::Upload(piece_index, block_offset, block_data) => {
                             let writer_tx_clone = self.writer_tx.clone();
-                            let _semaphore_clone = self.block_upload_limit_semaphore.clone();
-                                let _ = writer_tx_clone
-                                    .try_send(Message::Piece(
-                                        piece_index,
-                                        block_offset,
-                                        block_data,
-                                    ));
+                            // 1. Get shutdown listener
+                            let mut shutdown_rx = self.shutdown_tx.subscribe();
+                            
+                            // 2. We spawn a task to wait for the writer channel to have space.
+                            // This provides backpressure: if the TCP connection is slow,
+                            // these tasks will pile up in memory (waiting) rather than dropping data.
+                            // Note: You might want to limit the number of these spawned tasks via a 
+                            // semaphore if memory usage becomes a concern, but usually it's fine.
+                            tokio::spawn(async move {
+                                let msg = Message::Piece(piece_index, block_offset, block_data);
+                                
+                                tokio::select! {
+                                    res = writer_tx_clone.send(msg) => {
+                                        if let Err(_) = res {
+                                            event!(Level::DEBUG, "Writer channel closed, upload canceled.");
+                                        }
+                                    }
+                                    _ = shutdown_rx.recv() => {
+                                        // Shutdown -> Drop the block and exit
+                                    }
+                                }
+                            });
                         }
                         _ => {
                             event!(Level::WARN, "UNIMPLEMENTED TORRENT COMMAND {:?}", command);
