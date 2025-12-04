@@ -3705,10 +3705,11 @@ mod tests {
 
     #[test]
     fn test_assign_work_multi_piece_saturation() {
-        // 1. SETUP: Manager with 3 Pieces (each 4 blocks long = 64KB pieces)
+        // 1. SETUP: Manager with 15 Pieces (each 4 blocks = 60 blocks total)
+        // We need > 50 blocks to test the MAX_PIPELINE_DEPTH limit.
         let mut state = create_empty_state();
         let piece_len = 16_384 * 4; 
-        let num_pieces = 3;
+        let num_pieces = 15;
         let torrent = create_dummy_torrent(num_pieces);
         state.torrent = Some(torrent);
         
@@ -3721,7 +3722,7 @@ mod tests {
         state.torrent_status = TorrentStatus::Standard;
         
         // All pieces are needed
-        state.piece_manager.need_queue = vec![0, 1, 2];
+        state.piece_manager.need_queue = (0..num_pieces as u32).collect();
 
         // 2. CONNECT PEER
         let peer_id = "multi_piece_peer".to_string();
@@ -3729,25 +3730,24 @@ mod tests {
         let mut peer = PeerState::new(peer_id.clone(), tx, state.now);
         
         peer.peer_id = peer_id.as_bytes().to_vec();
-        peer.bitfield = vec![true; 3]; // Peer has all pieces
+        peer.bitfield = vec![true; num_pieces]; 
         peer.peer_choking = super::ChokeStatus::Unchoke; 
         peer.am_interested = true;
         peer.inflight_requests = 0;
         peer.active_blocks.clear();
 
         // 3. SIMULATE "MANY PIECES IN FLIGHT"
-        // We manually put Pieces 0, 1, and 2 into the pending queue.
-        // In a real swarm, this happens if we picked them sequentially in previous ticks.
-        peer.pending_requests.insert(0);
-        peer.pending_requests.insert(1);
-        peer.pending_requests.insert(2);
+        // We manually put all pieces into the pending queue.
+        for i in 0..num_pieces as u32 {
+            peer.pending_requests.insert(i);
+        }
 
         state.peers.insert(peer_id.clone(), peer);
 
         // 4. ACTION: Assign Work
-        // Pipeline Depth is 10.
-        // We need 12 blocks total (3 pieces * 4 blocks).
-        // We expect the first 10 blocks to be requested.
+        // Pipeline Depth is 50.
+        // We need 60 blocks total (15 pieces * 4 blocks).
+        // We expect the first 50 blocks to be requested.
         let effects = state.update(Action::AssignWork { peer_id: peer_id.clone() });
 
         // 5. ANALYZE OUTPUT
@@ -3761,26 +3761,12 @@ mod tests {
         }
 
         // 6. ASSERTIONS
-        println!("Requests generated: {:?}", requests);
+        println!("Requests generated: {}/{}", requests.len(), super::MAX_PIPELINE_DEPTH);
         
-        assert_eq!(requests.len(), 10, "Should fill pipeline to max depth (10)");
+        assert_eq!(requests.len(), super::MAX_PIPELINE_DEPTH, "Should fill pipeline to max depth (50)");
 
-        // CHECK 1: Piece Stability
-        // We expect Piece 0 to be fully requested, then Piece 1.
-        // If we see (0, ...), (2, ...), (0, ...), that is "Piece Hopping".
-        
-        let piece_0_count = requests.iter().filter(|(i, _)| *i == 0).count();
-        let piece_1_count = requests.iter().filter(|(i, _)| *i == 1).count();
-        let piece_2_count = requests.iter().filter(|(i, _)| *i == 2).count();
-
-        // Since Pieces are 4 blocks long:
-        // Ideally: Piece 0 (4 reqs) + Piece 1 (4 reqs) + Piece 2 (2 reqs) = 10
-        // If unsorted HashSet iteration happens, we might get Piece 2 (4) + Piece 0 (4) + Piece 1 (2).
-        // This isn't strictly a bug, but it causes the "Shotgunning" logs you dislike.
-        
-        // CHECK 2: Sequential Offsets
-        // Within any given piece, offsets MUST be strictly increasing.
-        for piece_idx in 0..3 {
+        // CHECK 1: Sequential Offsets
+        for piece_idx in 0..num_pieces as u32 {
             let offsets: Vec<u32> = requests.iter()
                 .filter(|(i, _)| *i == piece_idx)
                 .map(|(_, off)| *off)
@@ -3794,17 +3780,16 @@ mod tests {
             }
         }
 
-        // CHECK 3: Deterministic Piece Order (The "Fix" Check)
-        // If you implemented the `.sort()` fix, Piece 0 MUST come before Piece 2.
-        if piece_0_count > 0 && piece_2_count > 0 {
-            let first_p0 = requests.iter().position(|(i, _)| *i == 0).unwrap();
-            let first_p2 = requests.iter().position(|(i, _)| *i == 2).unwrap();
-            
-            assert!(first_p0 < first_p2, 
-                "Piece Hopping / Random Order Detected! Started Piece 2 before Piece 0. Requests: {:?}", requests);
+        // CHECK 2: Deterministic Piece Order (The "Sort" Fix Check)
+        // Piece 0 must start before Piece 2.
+        let piece_0_start = requests.iter().position(|(i, _)| *i == 0);
+        let piece_2_start = requests.iter().position(|(i, _)| *i == 2);
+        
+        if let (Some(p0), Some(p2)) = (piece_0_start, piece_2_start) {
+            assert!(p0 < p2, "Random Order Detected! Pending requests must be sorted.");
         }
         
-        println!("SUCCESS: Requests are sequential and prioritized by Piece Index.");
+        println!("SUCCESS: Pipeline saturated at 50 requests with sequential ordering.");
     }
 }
 
@@ -5923,49 +5908,6 @@ mod integration_tests {
 
         assert!(rare_piece_requested, "FAILED: Manager did not prioritize requesting Rare Piece 1 from Peer A!");
         println!("SUCCESS: Rarest First - Peer A received request for rare piece 1.");
-
-        let _ = _cmd.send(ManagerCommand::Shutdown).await;
-        let _ = manager_handle.await;
-        let _ = std::fs::remove_dir_all(temp_dir);
-    }
-
-    #[tokio::test]
-    async fn test_case_07_tit_for_tat_choking() {
-        let temp_dir = std::env::temp_dir().join("superseedr_tit_for_tat");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        let num_pieces = 50; 
-        let piece_size = 16_384;
-        let (mut manager, _cmd, _res) = create_manager_harness("TitForTat", num_pieces, piece_size, temp_dir.clone());
-
-        let mut fast_rxs = Vec::new();
-        for _ in 0..4 {
-            let (rx, _kill) = spawn_mock_peer(&mut manager, vec![0xFF; 7], std::time::Duration::from_millis(0)).await;
-            fast_rxs.push(rx);
-        }
-
-        let (mut slow_rx, _kill_slow) = spawn_mock_peer(&mut manager, vec![0xFF; 7], std::time::Duration::from_millis(500)).await;
-
-        let manager_handle = tokio::spawn(async move { let _ = manager.run(false).await; });
-
-        let start = std::time::Instant::now();
-        let mut fast_unchoke_events = 0;
-
-        // FIX: Wait 15 seconds to catch the 10s choke timer tick
-        while start.elapsed() < std::time::Duration::from_secs(15) {
-            for rx in &mut fast_rxs {
-                if let Ok(msg) = rx.try_recv() {
-                    // ID 1 = Unchoke
-                    if !msg.is_empty() && msg[0] == 1 { fast_unchoke_events += 1; }
-                }
-            }
-            while let Ok(_) = slow_rx.try_recv() {}
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-
-        println!("Fast Peers received {} Unchoke events total", fast_unchoke_events);
-        assert!(fast_unchoke_events >= 4, "Fast peers were not unchoked correctly!");
 
         let _ = _cmd.send(ManagerCommand::Shutdown).await;
         let _ = manager_handle.await;

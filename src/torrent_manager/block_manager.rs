@@ -284,7 +284,6 @@ impl BlockManager {
     }
 
     // --- V1 COMPATIBILITY BUFFERING ---
-
     pub fn handle_v1_block_buffering(
         &mut self,
         addr: BlockAddress,
@@ -303,6 +302,9 @@ impl BlockManager {
                 mask: vec![false; num_blocks as usize],
             });
 
+        // Capture state BEFORE processing this block
+        let was_complete = assembler.received_blocks == assembler.total_blocks;
+
         let offset = addr.byte_offset as usize;
         let end = offset + data.len();
 
@@ -312,10 +314,9 @@ impl BlockManager {
             assembler.received_blocks += 1;
         }
 
-        if assembler.received_blocks == assembler.total_blocks {
-            // FIX: Do NOT remove the buffer yet. Keep it until `commit_v1_piece` (WriteToDisk)
-            // so that `AssignWork` knows we have the data and doesn't re-request it
-            // during the Verification/IO gap.
+        // Capture state AFTER processing
+        let is_complete = assembler.received_blocks == assembler.total_blocks;
+        if is_complete && !was_complete {
             return Some(assembler.buffer.clone());
         }
         None
@@ -655,6 +656,42 @@ mod tests {
             }
             _ => panic!("Expected VerifyV2 for partial block at end of file"),
         }
+    }
+
+    #[test]
+    fn test_endgame_duplicate_completion_suppression() {
+        // 1. Setup a BlockManager with 1 piece consisting of 2 blocks (32KB total)
+        let mut bm = BlockManager::new();
+        let piece_len = 32768; 
+        let total_len = 32768;
+        // v1_hashes and v2_file_info can be empty for this logic test
+        bm.set_geometry(piece_len, total_len, vec![], vec![], false);
+
+        let block_size = 16384;
+        let data_block_0 = vec![1u8; block_size];
+        let data_block_1 = vec![2u8; block_size];
+
+        // Create addresses for Block 0 and Block 1
+        let addr_0 = bm.inflate_address_from_overlay(0, 0, block_size as u32).unwrap();
+        let addr_1 = bm.inflate_address_from_overlay(0, block_size as u32, block_size as u32).unwrap();
+
+        // 2. Receive Block 0 (Piece Incomplete)
+        let res1 = bm.handle_v1_block_buffering(addr_0, &data_block_0);
+        assert!(res1.is_none(), "First block should not trigger completion");
+
+        // 3. Receive Block 1 (Piece Completes)
+        let res2 = bm.handle_v1_block_buffering(addr_1, &data_block_1);
+        assert!(res2.is_some(), "Second block SHOULD trigger completion and return data");
+
+        // 4. SIMULATE THE BUG: Receive Block 1 again (Duplicate from another peer)
+        // In the old code, this would return Some(data) again, triggering a verification storm.
+        let res3 = bm.handle_v1_block_buffering(addr_1, &data_block_1);
+
+        // 5. ASSERT THE FIX
+        assert!(
+            res3.is_none(), 
+            "Duplicate block received after completion MUST return None to prevent double-verification"
+        );
     }
 }
 
