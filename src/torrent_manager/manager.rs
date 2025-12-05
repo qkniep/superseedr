@@ -3017,27 +3017,64 @@ mod resource_tests {
             let _ = manager.run(false).await;
         });
 
-        // --- 4. Wait for Completion ---
+        // --- 4. Wait for Completion & Measure Performance ---
         let start = Instant::now();
         let timeout_duration = Duration::from_secs(30);
+        const CHUNK_SIZE: u32 = 10;
         
         let check_loop = async {
+            let mut chunk_timestamps = vec![Instant::now()];
+            let mut next_chunk_target = CHUNK_SIZE;
             loop {
                 if let Ok(m) = metrics_rx.recv().await {
                     if m.number_of_pieces_completed >= NUM_PIECES as u32 {
+                        chunk_timestamps.push(Instant::now());
                         break;
+                    }
+                    if m.number_of_pieces_completed >= next_chunk_target {
+                        chunk_timestamps.push(Instant::now());
+                        next_chunk_target += CHUNK_SIZE;
                     }
                 }
             }
+            chunk_timestamps
         };
 
-        if timeout(timeout_duration, check_loop).await.is_err() {
-            panic!("Test Failed: Timeout waiting for download of {} pieces.", NUM_PIECES);
-        }
+        let timestamps = match timeout(timeout_duration, check_loop).await {
+            Ok(ts) => ts,
+            Err(_) => panic!("Test Failed: Timeout waiting for download of {} pieces.", NUM_PIECES),
+        };
 
         println!("SUCCESS: Downloaded {} pieces ({} blocks) in {:?}", NUM_PIECES, TOTAL_BLOCKS, start.elapsed());
 
-        // --- 5. Verify file contents ---
+        // --- 5. Performance Analysis ---
+        let chunk_durations: Vec<_> = timestamps.windows(2).map(|w| w[1] - w[0]).collect();
+        if chunk_durations.is_empty() {
+            panic!("No chunk durations recorded, cannot analyze performance.");
+        }
+        let total_duration: Duration = chunk_durations.iter().sum();
+        let avg_duration = total_duration / chunk_durations.len() as u32;
+
+        println!("Chunk Durations ({} chunks): {:?}", chunk_durations.len(), chunk_durations);
+        println!("Average Chunk Duration: {:?}", avg_duration);
+
+        for (i, &duration) in chunk_durations.iter().enumerate() {
+            assert!(
+                duration.as_nanos() < avg_duration.as_nanos() * 4, // Allow up to 4x deviation
+                "Chunk {} was too slow ({:?}), indicating choppy pipelining. Average was {:?}",
+                i, duration, avg_duration
+            );
+        }
+
+        let total_bytes = (PIECE_SIZE * NUM_PIECES) as f64;
+        let total_seconds = total_duration.as_secs_f64();
+        if total_seconds > 0.0 {
+            let throughput_mbps = (total_bytes / 1_048_576.0) / total_seconds;
+            println!("Average throughput: {:.2} MB/s", throughput_mbps);
+            assert!(throughput_mbps > 50.0, "Throughput {:.2} MB/s is below the 50 MB/s threshold", throughput_mbps);
+        }
+
+        // --- 6. Verify file contents ---
         let file_path = temp_dir.join(&torrent.info.name);
         let downloaded_data = tokio::fs::read(&file_path).await.unwrap();
 
