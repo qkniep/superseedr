@@ -173,79 +173,72 @@ pub async fn writer_task<W>(
     mut stream_write_half: W,
     mut write_rx: Receiver<Message>,
     error_tx: oneshot::Sender<Box<dyn StdError + Send + Sync>>,
-    global_ul_bucket: Arc<Mutex<TokenBucket>>,
+    _global_ul_bucket: Arc<Mutex<TokenBucket>>, // Param kept but unused
     mut shutdown_rx: broadcast::Receiver<()>,
 ) where
     W: AsyncWriteExt + Unpin + Send + 'static,
 {
-    // Local "Wallet" for Uploads
-    let mut upload_allowance_stash: f64 = 0.0;
+    // A reusable buffer to aggregate messages before writing to TCP.
+    // 16KB initial capacity covers a standard block + headers.
+    let mut batch_buffer = Vec::with_capacity(16 * 1024 + 1024);
 
     loop {
-        event!(Level::DEBUG, "Writer task loop running");
+        // Clear buffer for the new batch (retains capacity)
+        batch_buffer.clear();
+
         tokio::select! {
-            Some(message) = write_rx.recv() => {
-                if let Message::Piece(_, _, data) = &message {
-                    let len = data.len() as f64;
-                    if len > 0.0 {
-                        // --- Wholesale / Retail Logic ---
-                        if upload_allowance_stash < len {
-                            // 1. Peek at the rate to determine batch size
-                            let rate = {
-                                let b = global_ul_bucket.lock().await;
-                                b.get_rate()
-                            };
+            // Priority: Check for shutdown signal
+            _ = shutdown_rx.recv() => {
+                event!(Level::TRACE, "Writer task shutting down.");
+                break;
+            }
 
-                            // 2. Calculate dynamic batch (Target: 200ms of data)
-                            let target_duration = 0.2;
-                            let dynamic_batch = rate * target_duration;
-
-                            // 3. Clamp batch size (Min: 1 Block, Max: 5 MB)
-                            let batch_size = dynamic_batch.clamp(16384.0, 5.0 * 1024.0 * 1024.0);
-                            let amount_to_request = batch_size.max(len);
-
-                            // 4. "Wholesale" Purchase (Locks Global Mutex)
-                            // This waits if we are throttled
-                            consume_tokens(&global_ul_bucket, amount_to_request).await;
-
-                            upload_allowance_stash += amount_to_request;
+            // Wait for at least one message
+            res = write_rx.recv() => {
+                match res {
+                    Some(first_msg) => {
+                        // 1. Serialize the first message
+                        match generate_message(first_msg) {
+                            Ok(bytes) => batch_buffer.extend_from_slice(&bytes),
+                            Err(e) => {
+                                event!(Level::ERROR, "Failed to generate message: {}", e);
+                                break;
+                            }
                         }
 
-                        // 5. "Retail" Spend (No Lock)
-                        upload_allowance_stash -= len;
-                    }
-                }
-
-                match generate_message(message) {
-                    Ok(message_bytes) => {
-                        tokio::select! {
-                            write_result = stream_write_half.write_all(&message_bytes) => {
-                                if let Err(e) = write_result {
-                                    let _ = error_tx.send(e.into());
-                                    break;
+                        // 2. Greedy Batching:
+                        // Check if more messages are immediately available in the channel.
+                        // This reduces syscalls by writing multiple messages in one go.
+                        // We cap the batch size (e.g., ~256KB) to ensure we don't hog memory
+                        // or introduce too much latency for the first message.
+                        while batch_buffer.len() < 262_144 {
+                            match write_rx.try_recv() {
+                                Ok(next_msg) => {
+                                    match generate_message(next_msg) {
+                                        Ok(bytes) => batch_buffer.extend_from_slice(&bytes),
+                                        Err(e) => {
+                                            event!(Level::ERROR, "Failed to generate batched message: {}", e);
+                                            // We don't break here, we try to send what we have so far
+                                        }
+                                    }
                                 }
+                                Err(_) => break, // Channel empty for now
                             }
-                            _ = shutdown_rx.recv() => {
-                                event!(Level::TRACE, "Writer task shutting down during TCP write.");
+                        }
+
+                        // 3. Flush the batch to the socket
+                        if !batch_buffer.is_empty() {
+                            if let Err(e) = stream_write_half.write_all(&batch_buffer).await {
+                                let _ = error_tx.send(e.into());
                                 break;
                             }
                         }
                     }
-                    Err(e) => {
-                        event!(Level::ERROR, "Failed to generate message for writer task: {}", e);
+                    None => {
+                        event!(Level::TRACE, "Writer channel closed.");
                         break;
                     }
                 }
-            }
-
-            _ = shutdown_rx.recv() => {
-                event!(Level::TRACE, "Writer task shutting down while idle.");
-                break;
-            }
-
-            else => {
-                event!(Level::TRACE, "Writer task shutting down, channel closed.");
-                break;
             }
         }
     }

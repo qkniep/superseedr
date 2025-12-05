@@ -47,7 +47,7 @@ use tokio::time::Instant;
 
 use tracing::{event, instrument, Level};
 
-const PEER_BLOCK_IN_FLIGHT_LIMIT: usize = 8;
+const PEER_BLOCK_IN_FLIGHT_LIMIT: usize = 16;
 
 struct DisconnectGuard {
     peer_ip_port: String,
@@ -319,6 +319,17 @@ impl PeerSession {
                             let torrent_manager_tx_clone = self.torrent_manager_tx.clone();
                             let mut shutdown_rx = self.shutdown_tx.subscribe();
                             
+
+                            let capacity = torrent_manager_tx_clone.capacity();
+                            let max_cap = torrent_manager_tx_clone.max_capacity();
+                            if capacity < (max_cap / 20) { // Log if less than 10% free
+                                event!(
+                                    Level::WARN, 
+                                    "⚠️  MANAGER CHANNEL CONGESTION: {}/{} permits remaining. Manager is lagging!", 
+                                    capacity, max_cap
+                                );
+                            }
+
                             tokio::spawn(async move {
                                 let cmd = TorrentCommand::Block(
                                     peer_ip_port_clone.clone(), 
@@ -564,6 +575,17 @@ impl PeerSession {
                             let cancel_buffer = self.cancellation_buffer.clone();
                             let mut shutdown_rx = self.shutdown_tx.subscribe();
 
+
+
+                            let capacity = writer_tx_clone.capacity();
+                            let max_cap = writer_tx_clone.max_capacity();
+                            if capacity < (max_cap / 20) { // Log if less than 10% free
+                                event!(
+                                    Level::WARN, 
+                                    "⚠️  WRITER CHANNEL CONGESTION: {}/{} permits remaining. WRITER is lagging!", 
+                                    capacity, max_cap
+                                );
+                            }
                             tokio::spawn(async move {
                                 let permit = tokio::select! {
                                     Ok(p) = semaphore_clone.acquire_owned() => p,
