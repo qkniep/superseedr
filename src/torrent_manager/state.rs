@@ -27,7 +27,7 @@ const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 16;
 const MAX_BLOCK_SIZE: u32 = 131_072;
 const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
-pub const MAX_PIPELINE_DEPTH: usize = 256;
+pub const MAX_PIPELINE_DEPTH: usize = 2048;
 
 pub type PeerAddr = (String, u16);
 
@@ -925,6 +925,14 @@ impl TorrentState {
                     info_hash: self.info_hash.clone(),
                 }));
 
+
+                if let Some(peer) = self.peers.get(&peer_id) {
+                    let low_water_mark = MAX_PIPELINE_DEPTH / 2;
+                    if peer.inflight_requests <= low_water_mark {
+                         effects.extend(self.update(Action::AssignWork { peer_id: peer_id.clone() }));
+                    }
+                }
+
                 let piece_size = self.get_piece_size(piece_index);
                 if let Some(complete_data) =
                     self.piece_manager
@@ -938,18 +946,7 @@ impl TorrentState {
                     });
                 }
 
-                if let Some(peer) = self.peers.get(&peer_id) {
-                    // REFILL STRATEGY
-                    // We want to keep the "pipe" full. If we wait until the queue is too empty (25%),
-                    // network latency (RTT) will cause the download to stall while waiting for new requests.
-                    // Refilling at 50% ensures we always have data inflight to cover the round-trip time.
-                    
-                    let low_water_mark = MAX_PIPELINE_DEPTH / 2; // 50% capacity
-                    
-                    if peer.inflight_requests <= low_water_mark {
-                         effects.extend(self.update(Action::AssignWork { peer_id: peer_id.clone() }));
-                    }
-                }
+
 
                 effects
             }

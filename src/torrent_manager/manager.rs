@@ -73,6 +73,7 @@ use urlencoding::decode;
 use data_encoding::BASE32;
 
 use sha1::{Digest, Sha1};
+use tokio::sync::Semaphore;
 use tokio::fs;
 use tokio::net::TcpStream;
 use tokio::signal;
@@ -148,6 +149,8 @@ pub struct TorrentManager {
 
     global_dl_bucket: Arc<Mutex<TokenBucket>>,
     global_ul_bucket: Arc<Mutex<TokenBucket>>,
+
+    verification_semaphore: Arc<Semaphore>,
 }
 
 impl TorrentManager {
@@ -231,6 +234,12 @@ impl TorrentManager {
         )
         .map_err(|e| format!("Failed to initialize file manager: {}", e))?;
 
+
+        let parallel_limit = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let verification_semaphore = Arc::new(Semaphore::new(parallel_limit));
+
         let state = TorrentState::new(
             info_hash.to_vec(),
             Some(torrent),
@@ -262,6 +271,7 @@ impl TorrentManager {
             resource_manager,
             global_dl_bucket,
             global_ul_bucket,
+            verification_semaphore,
         })
     }
 
@@ -326,7 +336,7 @@ impl TorrentManager {
             );
         }
 
-        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(10_000);
+        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(100_000);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         #[cfg(feature = "dht")]
@@ -343,6 +353,11 @@ impl TorrentManager {
         let (dht_trigger_tx, _) = watch::channel(());
         #[cfg(not(feature = "dht"))]
         let dht_trigger_tx = ();
+
+        let parallel_limit = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let verification_semaphore = Arc::new(Semaphore::new(parallel_limit));
 
         let state = TorrentState::new(
             info_hash,
@@ -375,6 +390,7 @@ impl TorrentManager {
             resource_manager,
             global_dl_bucket,
             global_ul_bucket,
+            verification_semaphore,
         })
     }
 
@@ -407,6 +423,14 @@ impl TorrentManager {
                     
                     // 1. Get a shutdown listener for this specific task
                     let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+                    if tx.capacity() == 0 {
+                         event!(
+                            Level::WARN, 
+                            "⚠️  PEER CHANNEL FULL: Peer {} is blocked or slow to process commands.", 
+                            pid
+                        );
+                    }
 
                     // 2. Spawn the task
                     tokio::spawn(async move {
@@ -1148,6 +1172,7 @@ impl TorrentManager {
         event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
+        return Ok(Vec::new());
         let num_pieces = torrent.info.pieces.len() / 20;
         if skip_hashing {
             event!(
@@ -1558,7 +1583,7 @@ impl TorrentManager {
         let mut shutdown_rx_session = self.shutdown_tx.subscribe();
         let shutdown_tx = self.shutdown_tx.clone();
 
-        let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(1000);
+        let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(10000);
         self.apply_action(Action::RegisterPeer {
             peer_id: peer_ip_port.clone(),
             tx: peer_session_tx,
