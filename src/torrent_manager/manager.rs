@@ -2827,4 +2827,234 @@ mod resource_tests {
         let _ = manager_handle.await;
         let _ = std::fs::remove_dir_all(temp_dir);
     }
+
+    #[tokio::test]
+    async fn test_pipelined_download_two_thousand_blocks() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // --- 1. Setup Environment ---
+        let temp_dir = std::env::temp_dir().join(format!("superseedr_test_{}", rand::random::<u32>()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        const PIECE_SIZE: usize = 262_144; // 256 KiB
+        const BLOCK_SIZE: usize = 16_384;
+        const NUM_PIECES: usize = 130;
+        const TOTAL_BLOCKS: usize = (PIECE_SIZE / BLOCK_SIZE) * NUM_PIECES; // 2080 blocks
+
+        // Setup channels
+        let (_incoming_tx, incoming_rx) = mpsc::channel(10);
+        let (cmd_tx, cmd_rx) = mpsc::channel(10);
+        
+        let (event_tx, mut event_rx) = mpsc::channel(100);
+        tokio::spawn(async move {
+            while event_rx.recv().await.is_some() {}
+        });
+
+        let (metrics_tx, mut metrics_rx) = broadcast::channel(100);
+        let (shutdown_tx, _) = broadcast::channel(1);
+        
+        let mut settings_val = Settings::default();
+        settings_val.client_id = "-SS0001-123456789012".to_string();
+        let settings = Arc::new(settings_val);
+
+        // Resources
+        let mut limits = HashMap::new();
+        limits.insert(crate::resource_manager::ResourceType::PeerConnection, (1000, 1000));
+        limits.insert(crate::resource_manager::ResourceType::DiskRead, (1000, 1000));
+        limits.insert(crate::resource_manager::ResourceType::DiskWrite, (1000, 1000));
+        limits.insert(crate::resource_manager::ResourceType::Reserve, (0, 0));
+        let (resource_manager, rm_client) = ResourceManager::new(limits, shutdown_tx.clone());
+        tokio::spawn(resource_manager.run());
+
+        // Infinite Buckets
+        let dl_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+        let ul_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+
+        // --- Create Torrent ---
+        let mut all_piece_hashes = Vec::new();
+        let piece_data: Vec<u8> = (0..PIECE_SIZE).map(|i| (i % 256) as u8).collect();
+        for _ in 0..NUM_PIECES {
+            all_piece_hashes.extend_from_slice(&sha1::Sha1::digest(&piece_data).to_vec());
+        }
+
+        let torrent = Torrent {
+            announce: None,
+            announce_list: None,
+            url_list: None,
+            info: crate::torrent_file::Info {
+                name: "test_2000_blocks".to_string(),
+                piece_length: PIECE_SIZE as i64,
+                pieces: all_piece_hashes,
+                length: (PIECE_SIZE * NUM_PIECES) as i64,
+                files: vec![],
+                private: None,
+                md5sum: None,
+            },
+            info_dict_bencode: vec![0u8; 20], 
+            created_by: None,
+            creation_date: None,
+            encoding: None,
+            comment: None,
+        };
+
+        let params = TorrentParameters {
+            dht_handle: {
+                #[cfg(feature = "dht")] { mainline::Dht::builder().port(0).build().unwrap().as_async() }
+                #[cfg(not(feature = "dht"))] { () }
+            },
+            incoming_peer_rx: incoming_rx,
+            metrics_tx,
+            torrent_validation_status: false,
+            download_dir: temp_dir.clone(),
+            manager_command_rx: cmd_rx,
+            manager_event_tx: event_tx,
+            settings: settings.clone(),
+            resource_manager: rm_client,
+            global_dl_bucket: dl_bucket,
+            global_ul_bucket: ul_bucket,
+        };
+
+        let mut manager = TorrentManager::from_torrent(params, torrent.clone()).unwrap();
+        let info_hash = {
+            let mut hasher = Sha1::new();
+            hasher.update(&torrent.info_dict_bencode);
+            hasher.finalize().to_vec()
+        };
+
+
+        // --- 2. Setup Mock Peer ---
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = socket.into_split();
+            
+            let (tx, mut rx) = mpsc::channel::<Vec<u8>>(200); // Increased channel size for pipelining
+            tokio::spawn(async move {
+                while let Some(data) = rx.recv().await {
+                    if wr.write_all(&data).await.is_err() { break; }
+                }
+            });
+
+            let mut am_choking = true;
+            let mut handshake_received = false;
+            let mut buffer = Vec::with_capacity(100 * 1024); // Larger buffer
+
+            loop {
+                let mut buf = vec![0u8; 65536];
+                let n = match rd.read(&mut buf).await {
+                    Ok(n) if n > 0 => n,
+                    _ => break,
+                };
+                buffer.extend_from_slice(&buf[..n]);
+
+                if !handshake_received && buffer.len() >= 68 {
+                    handshake_received = true;
+
+                    let mut h_resp = vec![0u8; 68];
+                    h_resp[0] = 19;
+                    h_resp[1..20].copy_from_slice(b"BitTorrent protocol");
+                    h_resp[20..28].copy_from_slice(&[0; 8]);
+                    h_resp[28..48].copy_from_slice(&buffer[28..48]);
+                    h_resp[48..68].copy_from_slice(b"-TR2940-k8x1y2z3b4c5");
+                    tx.send(h_resp).await.unwrap();
+
+                    let bitfield = vec![0xFF; (NUM_PIECES + 7) / 8];
+                    let mut msg = Vec::new();
+                    msg.extend_from_slice(&(1 + bitfield.len() as u32).to_be_bytes());
+                    msg.push(5);
+                    msg.extend_from_slice(&bitfield);
+                    tx.send(msg).await.unwrap();
+
+                    buffer.drain(0..68);
+                }
+
+                while handshake_received && buffer.len() >= 4 {
+                    let len = u32::from_be_bytes(buffer[0..4].try_into().unwrap()) as usize;
+                    if buffer.len() < 4 + len { break; }
+
+                    let msg_frame = &buffer[4..4+len];
+                    if !msg_frame.is_empty() {
+                        match msg_frame[0] {
+                            2 => { // Interested
+                                if am_choking {
+                                    let _ = tx.send(vec![0, 0, 0, 1, 1]).await; // Unchoke
+                                    am_choking = false;
+                                }
+                            }
+                            6 => { // Request
+                                if msg_frame.len() >= 13 {
+                                    let index = u32::from_be_bytes(msg_frame[1..5].try_into().unwrap());
+                                    let begin = u32::from_be_bytes(msg_frame[5..9].try_into().unwrap());
+                                    let length = u32::from_be_bytes(msg_frame[9..13].try_into().unwrap());
+                                    
+                                    let data: Vec<u8> = (0..length as usize).map(|i| ((begin as usize + i) % 256) as u8).collect();
+
+                                    let total_len = 9 + data.len() as u32;
+                                    let mut resp = Vec::with_capacity(total_len as usize + 4);
+                                    resp.extend_from_slice(&total_len.to_be_bytes());
+                                    resp.push(7);
+                                    resp.extend_from_slice(&index.to_be_bytes());
+                                    resp.extend_from_slice(&begin.to_be_bytes());
+                                    resp.extend_from_slice(&data);
+                                    
+                                    let _ = tx.send(resp).await;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    buffer.drain(0..4+len);
+                }
+            }
+        });
+        
+        // --- 3. Run Manager ---
+        manager.connect_to_peer(peer_addr.ip().to_string(), peer_addr.port()).await;
+        let manager_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        // --- 4. Wait for Completion ---
+        let start = Instant::now();
+        let timeout_duration = Duration::from_secs(30);
+        
+        let check_loop = async {
+            loop {
+                if let Ok(m) = metrics_rx.recv().await {
+                    if m.number_of_pieces_completed >= NUM_PIECES as u32 {
+                        break;
+                    }
+                }
+            }
+        };
+
+        if timeout(timeout_duration, check_loop).await.is_err() {
+            panic!("Test Failed: Timeout waiting for download of {} pieces.", NUM_PIECES);
+        }
+
+        println!("SUCCESS: Downloaded {} pieces ({} blocks) in {:?}", NUM_PIECES, TOTAL_BLOCKS, start.elapsed());
+
+        // --- 5. Verify file contents ---
+        let file_path = temp_dir.join(&torrent.info.name);
+        let downloaded_data = tokio::fs::read(&file_path).await.unwrap();
+
+        assert_eq!(downloaded_data.len(), PIECE_SIZE * NUM_PIECES);
+
+        for piece_idx in 0..NUM_PIECES {
+            let start = piece_idx * PIECE_SIZE;
+            let end = start + PIECE_SIZE;
+            let piece_slice = &downloaded_data[start..end];
+            let expected_data: Vec<u8> = (0..PIECE_SIZE).map(|i| (i % 256) as u8).collect();
+            assert_eq!(piece_slice, expected_data.as_slice(), "Piece {} data mismatch", piece_idx);
+        }
+        println!("File content verification successful!");
+
+        // Cleanup
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
 }
