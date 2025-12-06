@@ -424,11 +424,17 @@ impl TorrentManager {
                     // 1. Get a shutdown listener for this specific task
                     let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-                    if tx.capacity() == 0 {
+                    let capacity = tx.capacity();
+                    let max_cap = tx.max_capacity();
+                    if capacity == 0 {
                          event!(
                             Level::WARN, 
-                            "⚠️  PEER CHANNEL FULL: Peer {} is blocked or slow to process commands.", 
-                            pid
+                            "⚠️  PEER CHANNEL FULL: Peer {} - Capacity {}/{} - {:?} is blocked or slow to process commands.", 
+                            pid,
+                            capacity,
+                             max_cap,
+
+                            command
                         );
                     }
 
@@ -749,7 +755,7 @@ impl TorrentManager {
                 let shutdown_tx = self.shutdown_tx.clone();
                 let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-                let (peer_tx, peer_rx) = mpsc::channel(1000);
+                let (peer_tx, peer_rx) = mpsc::channel(1024);
                 self.state.peers.insert(
                     peer_ip_port.clone(),
                     PeerState::new(peer_ip_port.clone(), peer_tx, Instant::now()),
@@ -1172,7 +1178,6 @@ impl TorrentManager {
         event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
-        return Ok(Vec::new());
         let num_pieces = torrent.info.pieces.len() / 20;
         if skip_hashing {
             event!(
@@ -1583,7 +1588,7 @@ impl TorrentManager {
         let mut shutdown_rx_session = self.shutdown_tx.subscribe();
         let shutdown_tx = self.shutdown_tx.clone();
 
-        let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(10000);
+        let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(10_000);
         self.apply_action(Action::RegisterPeer {
             peer_id: peer_ip_port.clone(),
             tx: peer_session_tx,
@@ -2078,7 +2083,7 @@ impl TorrentManager {
                         let peer_ip_port = peer_addr.to_string();
                         event!(Level::DEBUG, peer_addr = %peer_ip_port, "NEW INCOMING PEER CONNECTION");
                         let torrent_manager_tx_clone = self.torrent_manager_tx.clone();
-                        let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(10);
+                        let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(10_000);
 
                         if self.state.peers.contains_key(&peer_ip_port) {
                             event!(Level::WARN, peer_ip = %peer_ip_port, "Already connected to this peer. Dropping incoming connection.");
@@ -2569,7 +2574,7 @@ mod resource_tests {
 
     #[tokio::test]
     async fn test_slow_disk_backpressure() {
-        // GOAL: Verify memory behavior when Disk is slower than Network.
+        // GOAL: gerify memory behavior when Disk is slower than Network.
         // WARNING: This test currently exposes that we DO NOT have backpressure (OOM Risk).
 
         let (manager, torrent_tx, manager_cmd_tx, _shutdown_tx, resource_manager) =

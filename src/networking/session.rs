@@ -47,7 +47,7 @@ use tokio::time::Instant;
 
 use tracing::{event, instrument, Level};
 
-const PEER_BLOCK_IN_FLIGHT_LIMIT: usize = 8;
+const PEER_BLOCK_IN_FLIGHT_LIMIT: usize = 4;
 
 struct DisconnectGuard {
     peer_ip_port: String,
