@@ -727,17 +727,14 @@ mod tests {
         }
 
         // --- Step 2: The Saturation Test ---
-        // Send 5 requests.
-        for i in 0..5 {
-            client_cmd_tx
-                .send(TorrentCommand::SendRequest {
-                    index: 0,
-                    begin: i * 16384,
-                    length: 16384
-                })
-                .await
-                .expect("Failed to send command");
-        }
+        // Send 5 requests in a single bulk command.
+        let requests: Vec<_> = (0..5)
+            .map(|i| (0, i * 16384, 16384))
+            .collect();
+        client_cmd_tx
+            .send(TorrentCommand::BulkRequest(requests))
+            .await
+            .expect("Failed to send bulk command");
 
         // ASSERTION: Immediate Burst
         let mut requests_received = HashSet::new();
@@ -785,17 +782,14 @@ mod tests {
             if let Ok(Ok(_)) = timeout(Duration::from_millis(50), parse_message(&mut network)).await { continue; } else { break; }
         }
 
-        // Send 5 separate commands for 5 separate pieces
-        for i in 0..5 {
-            client_cmd_tx
-                .send(TorrentCommand::SendRequest {
-                    index: i as u32,
-                    begin: 0,
-                    length: 16384
-                })
-                .await
-                .expect("Failed to send command");
-        }
+        // Send 5 separate commands for 5 separate pieces in a single bulk command
+        let requests: Vec<_> = (0..5)
+            .map(|i| (i as u32, 0, 16384))
+            .collect();
+        client_cmd_tx
+            .send(TorrentCommand::BulkRequest(requests))
+            .await
+            .expect("Failed to send bulk command");
 
         let mut requested_pieces = HashSet::new();
         let start = Instant::now();
@@ -893,12 +887,14 @@ mod tests {
         let mut blocks_received = 0;
 
         // Fill window
-        while blocks_requested < WINDOW_SIZE {
-            client_cmd_tx.send(TorrentCommand::SendRequest {
-                index: blocks_requested, begin: 0, length: BLOCK_SIZE as u32
-            }).await.unwrap();
-            blocks_requested += 1;
-        }
+        let requests: Vec<_> = (0..WINDOW_SIZE)
+            .map(|i| (i, 0, BLOCK_SIZE as u32))
+            .collect();
+        client_cmd_tx
+            .send(TorrentCommand::BulkRequest(requests))
+            .await
+            .unwrap();
+        blocks_requested += WINDOW_SIZE;
 
         // Process loop
         while blocks_received < TOTAL_BLOCKS {
@@ -906,9 +902,9 @@ mod tests {
                 Ok(Some(TorrentCommand::Block(..))) => {
                     blocks_received += 1;
                     if blocks_requested < TOTAL_BLOCKS {
-                        client_cmd_tx.send(TorrentCommand::SendRequest {
-                            index: blocks_requested, begin: 0, length: BLOCK_SIZE as u32
-                        }).await.unwrap();
+                        client_cmd_tx.send(TorrentCommand::BulkRequest(vec![(
+                            blocks_requested, 0, BLOCK_SIZE as u32
+                        )])).await.unwrap();
                         blocks_requested += 1;
                     }
                 }

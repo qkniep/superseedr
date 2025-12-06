@@ -640,7 +640,8 @@ impl TorrentState {
 
 
                     // PHASE 1: Fill pipeline with currently pending pieces
-                    let pending_pieces: Vec<u32> = peer.pending_requests.iter().cloned().collect();
+                    let mut pending_pieces: Vec<u32> = peer.pending_requests.iter().cloned().collect();
+                    pending_pieces.sort(); // Ensure deterministic order for tests
                     
                     for piece_index in pending_pieces {
                         if peer.inflight_requests >= MAX_PIPELINE_DEPTH { break; }
@@ -1832,13 +1833,22 @@ mod tests {
 
         let effects = state.update(Action::AssignWork { peer_id: "peer_A".to_string() });
 
-        // NEW ASSERTION: Check for SendRequest
-        let request = effects.iter().find(|e| {
-            matches!(e, Effect::SendToPeer { cmd, .. }
-            if matches!(**cmd, TorrentCommand::SendRequest { index: 0, .. }))
+        // NEW ASSERTION: Check for BulkRequest
+        let request = effects.iter().find_map(|e| match e {
+            Effect::SendToPeer { cmd, .. } => match **cmd {
+                TorrentCommand::BulkRequest(ref requests) => {
+                    requests.first().map(|(index, _, _)| *index)
+                }
+                _ => None,
+            },
+            _ => None,
         });
 
-        assert!(request.is_some(), "Should request piece 0 from peer_A");
+        assert_eq!(
+            request,
+            Some(0),
+            "Should request piece 0 from peer_A"
+        );
     }
 
     // --- SCENARIO 5: Piece Verification Success ---
@@ -2395,10 +2405,10 @@ mod tests {
         // 1. Status must be Standard (since piece 1 is still needed)
         assert_eq!(state.torrent_status, TorrentStatus::Standard);
 
-        // 2. We MUST see a RequestDownload effect immediately
+        // 2. We MUST see a BulkRequest effect immediately
         let request_sent = effects.iter().any(|e| {
             matches!(e, Effect::SendToPeer { cmd, .. }
-            if matches!(**cmd, TorrentCommand::SendRequest { index: 0, .. }))
+            if matches!(**cmd, TorrentCommand::BulkRequest(ref reqs) if !reqs.is_empty() && reqs[0].0 == 0))
         });
 
         assert!(
@@ -2451,7 +2461,7 @@ mod tests {
         // Check for Request message
         let sent_request = effects.iter().any(|e| {
             matches!(e, Effect::SendToPeer { cmd, .. }
-            if matches!(**cmd, TorrentCommand::SendRequest {index: 0, ..}))
+            if matches!(**cmd, TorrentCommand::BulkRequest(ref reqs) if !reqs.is_empty() && reqs[0].0 == 0))
         });
 
         // ASSERTIONS
@@ -2503,8 +2513,10 @@ mod tests {
         // Verify we ask for the SECOND block
         let requested_params = effects.iter().find_map(|e| {
             if let Effect::SendToPeer { cmd, .. } = e {
-                if let TorrentCommand::SendRequest { index, begin, length } = **cmd {
-                    return Some((index, begin, length));
+                if let TorrentCommand::BulkRequest(ref reqs) = **cmd {
+                    if let Some((index, begin, length)) = reqs.first() {
+                        return Some((*index, *begin, *length));
+                    }
                 }
             }
             None
@@ -2720,14 +2732,16 @@ mod tests {
         let initial_effects = state.update(Action::PeerUnchoked { peer_id: peer_id.clone() });
         for effect in initial_effects {
             if let Effect::SendToPeer { cmd, .. } = effect {
-                if let TorrentCommand::SendRequest { index, begin, length } = *cmd {
-                    let data = vec![0u8; length as usize];
-                    pending_actions.push_back(Action::IncomingBlock {
-                        peer_id: peer_id.clone(),
-                        piece_index: index,
-                        block_offset: begin,
-                        data
-                    });
+                if let TorrentCommand::BulkRequest(requests) = *cmd {
+                    for (index, begin, length) in requests {
+                        let data = vec![0u8; length as usize];
+                        pending_actions.push_back(Action::IncomingBlock {
+                            peer_id: peer_id.clone(),
+                            piece_index: index,
+                            block_offset: begin,
+                            data,
+                        });
+                    }
                 }
             }
         }
@@ -2775,17 +2789,19 @@ mod tests {
             for effect in effects {
                 match effect {
                     Effect::SendToPeer { cmd, .. } => {
-                        if let TorrentCommand::SendRequest { index, begin, length } = *cmd {
-                            // NETWORK SIM: Queue Response
-                            let data = vec![0u8; length as usize];
-                            pending_actions.push_back(Action::IncomingBlock {
-                                peer_id: peer_id.clone(),
-                                piece_index: index,
-                                block_offset: begin,
-                                data
-                            });
+                        if let TorrentCommand::BulkRequest(requests) = *cmd {
+                            for (index, begin, length) in requests {
+                                // NETWORK SIM: Queue Response
+                                let data = vec![0u8; length as usize];
+                                pending_actions.push_back(Action::IncomingBlock {
+                                    peer_id: peer_id.clone(),
+                                    piece_index: index,
+                                    block_offset: begin,
+                                    data,
+                                });
+                            }
                         }
-                    },
+                    }
                     Effect::VerifyPiece { piece_index, .. } => {
                         // CPU SIM: Verify OK -> Queue Result
                         pending_actions.push_front(Action::PieceVerified {
@@ -2861,15 +2877,20 @@ mod tests {
         // FIX: Feed initial requests into the network queue
         for effect in initial_effects {
             if let Effect::SendToPeer { cmd, .. } = effect {
-                if let TorrentCommand::SendRequest { index, begin, length } = *cmd {
-                    println!("   << Setup Effect: SendToPeer SendRequest {{ index: {}, begin: {}, length: {} }}", index, begin, length);
-                    let data = vec![0u8; length as usize];
-                    pending_actions.push_back(Action::IncomingBlock {
-                        peer_id: peer_id.clone(),
-                        piece_index: index,
-                        block_offset: begin,
-                        data
-                    });
+                if let TorrentCommand::BulkRequest(requests) = *cmd {
+                    println!(
+                        "   << Setup Effect: SendToPeer BulkRequest with {} requests",
+                        requests.len()
+                    );
+                    for (index, begin, length) in requests {
+                        let data = vec![0u8; length as usize];
+                        pending_actions.push_back(Action::IncomingBlock {
+                            peer_id: peer_id.clone(),
+                            piece_index: index,
+                            block_offset: begin,
+                            data,
+                        });
+                    }
                 }
             }
         }
@@ -2914,16 +2935,18 @@ mod tests {
                 match effect {
                     Effect::SendToPeer { cmd, .. } => {
                         println!("   << Effect: SendToPeer {:?}", cmd);
-                        if let TorrentCommand::SendRequest { index, begin, length } = *cmd {
-                            let data = vec![0u8; length as usize];
-                            pending_actions.push_back(Action::IncomingBlock {
-                                peer_id: peer_id.clone(),
-                                piece_index: index,
-                                block_offset: begin,
-                                data
-                            });
+                        if let TorrentCommand::BulkRequest(requests) = *cmd {
+                            for (index, begin, length) in requests {
+                                let data = vec![0u8; length as usize];
+                                pending_actions.push_back(Action::IncomingBlock {
+                                    peer_id: peer_id.clone(),
+                                    piece_index: index,
+                                    block_offset: begin,
+                                    data,
+                                });
+                            }
                         }
-                    },
+                    }
                     Effect::VerifyPiece { piece_index, .. } => {
                         println!("   << Effect: VerifyPiece {}", piece_index);
                         pending_actions.push_front(Action::PieceVerified {
@@ -2997,8 +3020,10 @@ mod tests {
         // - IT REQUESTS BLOCK 2 AGAIN.
         let duplicate_request = effects.iter().any(|e| {
             if let Effect::SendToPeer { cmd, .. } = e {
-                if let TorrentCommand::SendRequest { index, begin, .. } = **cmd {
-                    return index == 0 && begin == 32768; // Block 2 (Offset 32768)
+                if let TorrentCommand::BulkRequest(ref reqs) = **cmd {
+                    return reqs
+                        .iter()
+                        .any(|(index, begin, _)| *index == 0 && *begin == 32768);
                 }
             }
             false
@@ -3054,18 +3079,21 @@ mod tests {
 
         for effect in effects {
             if let Effect::SendToPeer { cmd, .. } = effect {
-                if let TorrentCommand::SendRequest { index, begin, length } = *cmd {
-                    assert_eq!(index, 0, "Should work on Piece 0");
-                    assert_eq!(length, 16384, "Block length mismatch");
-                    
-                    // THE CHECK: Offset must match our expected increment
-                    assert_eq!(begin, expected_offset, 
-                        "Non-sequential request detected! Expected offset {}, got {}. (Shotgunning?)", 
-                        expected_offset, begin
-                    );
+                if let TorrentCommand::BulkRequest(requests) = *cmd {
+                    for (index, begin, length) in requests {
+                        assert_eq!(index, 0, "Should work on Piece 0");
+                        assert_eq!(length, 16384, "Block length mismatch");
 
-                    expected_offset += 16384;
-                    request_count += 1;
+                        // THE CHECK: Offset must match our expected increment
+                        assert_eq!(
+                            begin, expected_offset,
+                            "Non-sequential request detected! Expected offset {}, got {}. (Shotgunning?)",
+                            expected_offset, begin
+                        );
+
+                        expected_offset += 16384;
+                        request_count += 1;
+                    }
                 }
             }
         }
@@ -3126,16 +3154,19 @@ mod tests {
         let mut requests = Vec::new();
         for effect in effects {
             if let Effect::SendToPeer { cmd, .. } = effect {
-                if let TorrentCommand::SendRequest { index, begin, .. } = *cmd {
-                    requests.push((index, begin));
+                if let TorrentCommand::BulkRequest(ref reqs) = *cmd {
+                    requests.extend(reqs.iter().map(|(i, b, _)| (*i, *b)));
                 }
             }
         }
 
         // 6. ASSERTIONS
-        println!("Requests generated: {}/{}", requests.len(), super::MAX_PIPELINE_DEPTH);
-        
-        assert_eq!(requests.len(), super::MAX_PIPELINE_DEPTH, "Should fill pipeline to max depth (50)");
+        assert_eq!(
+            requests.len(),
+            60,
+            "Should request all available blocks (60) as it's less than pipeline depth ({})",
+            super::MAX_PIPELINE_DEPTH
+        );
 
         // CHECK 1: Sequential Offsets
         for piece_idx in 0..num_pieces as u32 {
@@ -4456,8 +4487,8 @@ mod prop_tests {
             // 3. Check request
             let requested_index = effects.iter().find_map(|e| {
                 if let Effect::SendToPeer { cmd, .. } = e {
-                    if let TorrentCommand::SendRequest { index: idx, .. } = **cmd {
-                        return Some(idx);
+                    if let TorrentCommand::BulkRequest(ref reqs) = **cmd {
+                        return reqs.first().map(|(idx, _, _)| *idx);
                     }
                 }
                 None
@@ -4501,8 +4532,8 @@ mod prop_tests {
             // 2. Check Pick
             let picked_idx = effects.iter().find_map(|e| {
                 if let Effect::SendToPeer { cmd, .. } = e {
-                    if let TorrentCommand::SendRequest {index: idx, .. } = **cmd {
-                        return Some(idx);
+                    if let TorrentCommand::BulkRequest(ref reqs) = **cmd {
+                        return reqs.first().map(|(idx, _, _)| *idx);
                     }
                 }
                 None
@@ -4534,11 +4565,16 @@ mod prop_tests {
             // (BitTorrent allows downloading from people we choke, though they might not like it).
             // However, we MUST verify we only request pieces they actually have.
             if let Some(Effect::SendToPeer { cmd, .. }) = effects.first() {
-                if let TorrentCommand::SendRequest { index: idx, .. } = **cmd {
-                     let peer = state.peers.get("medium_both").unwrap();
-                     // Invariant: We must never request a piece the peer doesn't have
-                     prop_assert!(peer.bitfield.get(idx as usize) == Some(&true),
-                        "Logic Error: Requested Piece {} which 'medium_both' does not have!", idx);
+                if let TorrentCommand::BulkRequest(ref reqs) = **cmd {
+                    if let Some((idx, _, _)) = reqs.first() {
+                        let peer = state.peers.get("medium_both").unwrap();
+                        // Invariant: We must never request a piece the peer doesn't have
+                        prop_assert!(
+                            peer.bitfield.get(*idx as usize) == Some(&true),
+                            "Logic Error: Requested Piece {} which 'medium_both' does not have!",
+                            idx
+                        );
+                    }
                 }
             }
         }
@@ -4578,8 +4614,8 @@ mod prop_tests {
 
             let picked = effects.iter().any(|e| {
                 if let Effect::SendToPeer { cmd, .. } = e {
-                    if let TorrentCommand::SendRequest { index: idx, .. } = **cmd {
-                        return idx == 0;
+                    if let TorrentCommand::BulkRequest(ref reqs) = **cmd {
+                        return reqs.iter().any(|(idx, _, _)| *idx == 0);
                     }
                 }
                 false
@@ -4602,10 +4638,9 @@ mod prop_tests {
 
             // 4. Assert Silence
             // If we are choked, we must NOT send a Request, even if we want the data.
-            let sent_request = effects.iter().any(|e| {
-                matches!(e, Effect::SendToPeer { cmd, .. }
-                    if matches!(**cmd, TorrentCommand::SendRequest {..}))
-            });
+            let sent_request = effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendToPeer { cmd, .. } if matches!(**cmd, TorrentCommand::BulkRequest(_))));
 
             prop_assert!(!sent_request, "Race Condition Fail: Requested data while Choked!");
         }

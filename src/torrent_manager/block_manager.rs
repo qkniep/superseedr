@@ -292,6 +292,7 @@ impl BlockManager {
         let piece_len = self.calculate_piece_size(addr.piece_index);
         let num_blocks = self.blocks_in_piece(piece_len);
 
+        // Get or create the assembler.
         let assembler = self
             .legacy_buffers
             .entry(addr.piece_index)
@@ -302,23 +303,26 @@ impl BlockManager {
                 mask: vec![false; num_blocks as usize],
             });
 
-        // Capture state BEFORE processing this block
-        let was_complete = assembler.received_blocks == assembler.total_blocks;
+        // If it was already complete, do nothing. This prevents re-verification.
+        if assembler.received_blocks == assembler.total_blocks {
+            return None;
+        }
 
         let offset = addr.byte_offset as usize;
         let end = offset + data.len();
 
+        // Check bounds and if we already have this block.
         if end <= assembler.buffer.len() && !assembler.mask[addr.block_index as usize] {
             assembler.buffer[offset..end].copy_from_slice(data);
             assembler.mask[addr.block_index as usize] = true;
             assembler.received_blocks += 1;
         }
 
-        // Capture state AFTER processing
-        let is_complete = assembler.received_blocks == assembler.total_blocks;
-        if is_complete && !was_complete {
-            return Some(assembler.buffer.clone());
+        // If it's now complete, remove it and return the data.
+        if assembler.received_blocks == assembler.total_blocks {
+            return self.legacy_buffers.remove(&addr.piece_index).map(|a| a.buffer);
         }
+
         None
     }
 
