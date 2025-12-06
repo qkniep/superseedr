@@ -195,7 +195,7 @@ impl TorrentManager {
         info_dict_hasher.update(&torrent.info_dict_bencode);
         let info_hash = info_dict_hasher.finalize();
 
-        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(10_000);
+        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(100_000);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         #[cfg(feature = "dht")]
