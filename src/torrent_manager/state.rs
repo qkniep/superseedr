@@ -607,6 +607,7 @@ impl TorrentState {
                 }
 
                 let mut effects = Vec::new();
+                let mut request_batch = Vec::new();
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     
@@ -637,6 +638,7 @@ impl TorrentState {
                     // Guard 4: Capacity Check
                     if peer.inflight_requests >= MAX_PIPELINE_DEPTH { return effects; }
 
+
                     // PHASE 1: Fill pipeline with currently pending pieces
                     let pending_pieces: Vec<u32> = peer.pending_requests.iter().cloned().collect();
                     
@@ -665,15 +667,8 @@ impl TorrentState {
                             }
 
                             peer.active_blocks.insert((addr.piece_index, addr.byte_offset, addr.length));
-                            effects.push(Effect::SendToPeer {
-                                peer_id: peer_id.clone(),
-                                cmd: Box::new(TorrentCommand::SendRequest {
-                                    index: addr.piece_index,
-                                    begin: addr.byte_offset,
-                                    length: addr.length
-                                }),
-                            });
                             peer.inflight_requests += 1;
+                            request_batch.push((addr.piece_index, addr.byte_offset, addr.length));
                         }
                     }
 
@@ -714,20 +709,20 @@ impl TorrentState {
                                 }
 
                                 peer.active_blocks.insert((addr.piece_index, addr.byte_offset, addr.length));
-                                effects.push(Effect::SendToPeer {
-                                    peer_id: peer_id.clone(),
-                                    cmd: Box::new(TorrentCommand::SendRequest {
-                                        index: addr.piece_index,
-                                        begin: addr.byte_offset,
-                                        length: addr.length
-                                    }),
-                                });
                                 peer.inflight_requests += 1;
+                                request_batch.push((addr.piece_index, addr.byte_offset, addr.length));
                             }
                         } else {
                             break;
                         }
                     }
+                }
+
+                if !request_batch.is_empty() {
+                    effects.push(Effect::SendToPeer {
+                        peer_id: peer_id.clone(),
+                        cmd: Box::new(TorrentCommand::BulkRequest(request_batch)),
+                    });
                 }
                 effects
             }
@@ -1026,17 +1021,21 @@ impl TorrentState {
                     if other_peer != peer_id {
                         if let Some(peer) = self.peers.get_mut(&other_peer) {
                             peer.pending_requests.remove(&piece_index);
+                            
                             let (start, end) = self.piece_manager.block_manager.get_block_range(piece_index);
+                            let mut batch = Vec::new();
 
                             for global_block_idx in start..end {
                                 let addr = self.piece_manager.block_manager.inflate_address(global_block_idx);
-                                effects.push(Effect::SendToPeer {
-                                    peer_id: other_peer.clone(),
-                                    cmd: Box::new(TorrentCommand::Cancel(addr.piece_index, addr.byte_offset, addr.length)),
-                                });
+                                batch.push((addr.piece_index, addr.byte_offset, addr.length));
                             }
 
-
+                            if !batch.is_empty() {
+                                effects.push(Effect::SendToPeer {
+                                    peer_id: other_peer.clone(),
+                                    cmd: Box::new(TorrentCommand::BulkCancel(batch)),
+                                });
+                            }
                         }
                         effects.extend(self.update(Action::AssignWork {
                             peer_id: other_peer,

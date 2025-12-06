@@ -355,69 +355,90 @@ impl PeerSession {
             TorrentCommand::NotInterested => {
                 let _ = self.writer_tx.try_send(Message::NotInterested);
             }
-            TorrentCommand::Cancel(index, begin, len) => {
-                let _ = self
-                    .writer_tx
-                    .try_send(Message::Cancel(index, begin, len));
 
-                if let Ok(mut buf) = self.cancellation_buffer.try_lock() {
-                    if buf.len() >= 50 {
-                        buf.pop_front();
-                    }
-                    buf.push_back((index, begin));
-                }
-            }
-
-            // --- OUTGOING REQUESTS (FIXED) ---
-            TorrentCommand::SendRequest {
-                index,
-                begin,
-                length,
-            } => {
+            TorrentCommand::BulkRequest(requests) => {
                 let writer = self.writer_tx.clone();
                 let sem = self.block_request_limit_semaphore.clone();
-                
-                let tracker = self.block_tracker.clone(); 
-                
+                let tracker = self.block_tracker.clone();
                 let cancel_buf = self.cancellation_buffer.clone();
                 let mut shutdown = self.shutdown_tx.subscribe();
 
                 self.block_request_joinset.spawn(async move {
-                    // 1. Wait for a slot (Throttle)
-                    let permit = tokio::select! {
-                        Ok(p) = sem.acquire_owned() => p,
-                        _ = shutdown.recv() => return,
-                    };
+                    for (index, begin, length) in requests {
+                        // 1. Wait for a slot
+                        let permit = tokio::select! {
+                            Ok(p) = sem.clone().acquire_owned() => p,
+                            _ = shutdown.recv() => return,
+                        };
 
-                    // 2. Check for cancellation
-                    {
-                        let buf = cancel_buf.lock().await;
-                        if buf.contains(&(index, begin)) {
-                            return;
+                        // 2. Smart Cancel Check
+                        {
+                            let buf = cancel_buf.lock().await;
+                            if buf.contains(&(index, begin)) {
+                                // Drop permit (auto-refund) and skip
+                                continue; 
+                            }
+                        }
+
+                        // 3. Send
+                        if writer.send(Message::Request(index, begin, length)).await.is_ok() {
+                            // 4. Register
+                            {
+                                let mut t = tracker.lock().await;
+                                t.insert(BlockInfo {
+                                    piece_index: index,
+                                    offset: begin,
+                                    length,
+                                });
+                            }
+                            // Manual control active: permit is now represented by the entry in block_tracker
+                            permit.forget();
+                        } else {
+                            break;
+                        }
+                    }
+                });
+            }
+
+            TorrentCommand::BulkCancel(cancels) => {
+                // 1. Send all network messages immediately (Non-blocking)
+                for (index, begin, len) in &cancels {
+                    let _ = self.writer_tx.try_send(Message::Cancel(*index, *begin, *len));
+                    
+                    // Update smart cancel buffer (using try_lock is safe here because it's just an optimization)
+                    if let Ok(mut buf) = self.cancellation_buffer.try_lock() {
+                        if buf.len() >= 50 { buf.pop_front(); }
+                        buf.push_back((*index, *begin));
+                    }
+                }
+
+                // 2. Refund Permits Asynchronously
+                // We clone the Arc references to move them into a background task
+                let tracker = self.block_tracker.clone();
+                let sem = self.block_request_limit_semaphore.clone();
+                
+                // Spawn ONE task to handle the locking/refunding for the whole batch
+                tokio::spawn(async move {
+                    // We acquire the lock ONCE for the whole batch
+                    let mut tracker_guard = tracker.lock().await;
+                    
+                    let mut permits_to_add = 0;
+                    for (index, begin, length) in cancels {
+                        let info = BlockInfo { 
+                            piece_index: index, 
+                            offset: begin, 
+                            length 
+                        };
+                        
+                        // Check if this block was actually in-flight
+                        if tracker_guard.remove(&info) {
+                            permits_to_add += 1;
                         }
                     }
 
-                    // 3. Send Request
-                    if writer
-                        .send(Message::Request(index, begin, length))
-                        .await
-                        .is_ok()
-                    {
-                        // 4. REGISTER THE BLOCK (The Missing Link)
-                        // We must add it to the tracker so Message::Piece can remove it later
-                        // and refill the semaphore.
-                        {
-                            let mut t = tracker.lock().await;
-                            t.insert(BlockInfo {
-                                piece_index: index,
-                                offset: begin,
-                                length,
-                            });
-                        }
-
-                        // 5. Release the permit from the scope, effectively transferring 
-                        // ownership of the "slot" to the tracker/Message::Piece handler.
-                        permit.forget();
+                    // Batch refund the permits
+                    if permits_to_add > 0 {
+                        sem.add_permits(permits_to_add);
                     }
                 });
             }

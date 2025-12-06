@@ -29,17 +29,13 @@ pub enum TorrentCommand {
 
     PeerBitfield(String, Vec<u8>),
 
-    SendRequest {
-        index: u32,
-        begin: u32,
-        length: u32,
-    },
+    BulkRequest(Vec<(u32, u32, u32)>),
+    BulkCancel(Vec<(u32, u32, u32)>),
 
     RequestUpload(String, u32, u32, u32),
     Upload(u32, u32, Vec<u8>),
 
     CancelUpload(String, u32, u32, u32),
-    Cancel(u32, u32, u32),
 
     Disconnect(String),
 

@@ -755,7 +755,7 @@ impl TorrentManager {
                 let shutdown_tx = self.shutdown_tx.clone();
                 let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-                let (peer_tx, peer_rx) = mpsc::channel(1024);
+                let (peer_tx, peer_rx) = mpsc::channel(10_000);
                 self.state.peers.insert(
                     peer_ip_port.clone(),
                     PeerState::new(peer_ip_port.clone(), peer_tx, Instant::now()),
@@ -1178,6 +1178,7 @@ impl TorrentManager {
         event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
+        return Ok(Vec::new());
         let num_pieces = torrent.info.pieces.len() / 20;
         if skip_hashing {
             event!(
@@ -1864,7 +1865,7 @@ impl TorrentManager {
                         TorrentCommand::RequestUpload(_, _, _, _) => {
                             "Peer is Requesting".to_string()
                         }
-                        TorrentCommand::Cancel(_, _, _) => "Peer Canceling Request".to_string(),
+                        TorrentCommand::BulkCancel(_) => "Peer Canceling Request".to_string(),
                         _ => "Idle".to_string(),
                     };
                     let discriminant = std::mem::discriminant(&p.last_action);

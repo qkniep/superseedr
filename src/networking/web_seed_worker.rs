@@ -5,8 +5,7 @@ use crate::command::TorrentCommand;
 use reqwest::header::RANGE;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::{Receiver, Sender};
-
-// REMOVED: const BLOCK_SIZE = 16384; -> The Manager now controls block size via 'length'
+use tracing::{event, Level};
 
 pub async fn web_seed_worker(
     url: String,
@@ -19,7 +18,7 @@ pub async fn web_seed_worker(
 ) {
     let client = reqwest::Client::new();
 
-    // 1. Handshake sequence (Unchanged)
+    // 1. Handshake sequence
     if manager_tx
         .send(TorrentCommand::SuccessfullyConnected(peer_id.clone()))
         .await
@@ -49,73 +48,90 @@ pub async fn web_seed_worker(
     }
 
     // 2. Main Command Loop
-    loop {
+    'outer: loop {
         tokio::select! {
             _ = shutdown_rx.recv() => {
-                break;
+                break 'outer;
             }
             cmd = peer_rx.recv() => {
                 match cmd {
-                    // UPDATED: Handle specific block request (Micro-command)
-                    Some(TorrentCommand::SendRequest { index, begin, length }) => {
-                        
-                        // Calculate absolute byte range for the HTTP request
-                        // Formula: (Piece Index * Piece Size) + Offset within piece
-                        let start = (index as u64 * piece_length) + begin as u64;
-                        let end = start + length as u64 - 1;
-                        let range_header = format!("bytes={}-{}", start, end);
+                    // FIX: Handle BulkRequest (Batch) instead of SendRequest
+                    Some(TorrentCommand::BulkRequest(requests)) => {
+                        for (index, begin, length) in requests {
+                            // Calculate absolute byte range for the HTTP request
+                            let start = (index as u64 * piece_length) + begin as u64;
+                            let end = start + length as u64 - 1;
+                            let range_header = format!("bytes={}-{}", start, end);
 
-                        let request = client.get(&url).header(RANGE, range_header).send();
+                            // event!(Level::DEBUG, "WebSeed Request: {} range={}", url, range_header);
 
-                        // Await the Response Header (cancellable)
-                        let mut response = match tokio::select! {
-                            res = request => res,
-                            _ = shutdown_rx.recv() => break,
-                        } {
-                            Ok(resp) if resp.status().is_success() => resp,
-                            _ => {
-                                let _ = manager_tx.send(TorrentCommand::Disconnect(peer_id)).await;
-                                break;
-                            }
-                        };
+                            let request = client.get(&url).header(RANGE, range_header).send();
 
-                        // 3. Stream the body
-                        // UPDATED: We no longer chop this up. We expect the server to return
-                        // exactly 'length' bytes (e.g., 16KB). We gather them and send ONE block back.
-                        let mut buffer = Vec::with_capacity(length as usize);
-
-                        loop {
-                            let chunk_option = tokio::select! {
-                                res = response.chunk() => res,
-                                _ = shutdown_rx.recv() => return, 
+                            // Await the Response Header (cancellable)
+                            let mut response = match tokio::select! {
+                                res = request => res,
+                                _ = shutdown_rx.recv() => break 'outer,
+                            } {
+                                Ok(resp) if resp.status().is_success() => resp,
+                                Ok(resp) => {
+                                    event!(Level::WARN, "WebSeed Error {}: {}", resp.status(), url);
+                                    let _ = manager_tx.send(TorrentCommand::Disconnect(peer_id)).await;
+                                    break 'outer;
+                                }
+                                Err(e) => {
+                                    event!(Level::WARN, "WebSeed Connection Failed: {}", e);
+                                    let _ = manager_tx.send(TorrentCommand::Disconnect(peer_id)).await;
+                                    break 'outer;
+                                }
                             };
 
-                            match chunk_option {
-                                Ok(Some(bytes)) => {
-                                    buffer.extend_from_slice(&bytes);
-                                }
-                                Ok(None) => {
-                                    // End of stream. Send the accumulated block.
-                                    if !buffer.is_empty() {
-                                        let _ = manager_tx.send(TorrentCommand::Block(
-                                            peer_id.clone(),
-                                            index, // piece_index
-                                            begin, // block_offset
-                                            buffer,
-                                        )).await;
+                            // 3. Stream the body
+                            let mut buffer = Vec::with_capacity(length as usize);
+
+                            loop {
+                                let chunk_option = tokio::select! {
+                                    res = response.chunk() => res,
+                                    _ = shutdown_rx.recv() => break 'outer,
+                                };
+
+                                match chunk_option {
+                                    Ok(Some(bytes)) => {
+                                        buffer.extend_from_slice(&bytes);
                                     }
-                                    break; // Finished this request
-                                }
-                                Err(_) => {
-                                    let _ = manager_tx.send(TorrentCommand::Disconnect(peer_id)).await;
-                                    return;
+                                    Ok(None) => {
+                                        // End of stream. Send the accumulated block.
+                                        if !buffer.is_empty() {
+                                            if manager_tx.send(TorrentCommand::Block(
+                                                peer_id.clone(),
+                                                index,
+                                                begin,
+                                                buffer,
+                                            )).await.is_err() {
+                                                break 'outer;
+                                            }
+                                        }
+                                        break; // Finished this request, move to next in batch
+                                    }
+                                    Err(e) => {
+                                        event!(Level::WARN, "WebSeed Stream Error: {}", e);
+                                        let _ = manager_tx.send(TorrentCommand::Disconnect(peer_id)).await;
+                                        break 'outer;
+                                    }
                                 }
                             }
                         }
                     }
-                    Some(TorrentCommand::Disconnect(_)) => break,
+                    
+                    // FIX: Handle BulkCancel (No-op for HTTP usually, or close connection)
+                    Some(TorrentCommand::BulkCancel(_)) => {
+                        // HTTP requests are synchronous in this loop; we can't easily cancel 
+                        // one in the middle of a batch without dropping the connection.
+                        // For now, we ignore it. The Manager will discard the data if we send it.
+                    }
+
+                    Some(TorrentCommand::Disconnect(_)) => break 'outer,
                     Some(_) => {} 
-                    None => break, 
+                    None => break 'outer, 
                 }
             }
         }
