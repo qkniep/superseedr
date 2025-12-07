@@ -251,40 +251,44 @@ impl PeerSession {
                         Ok(msg) => {
                             inactivity_timeout.as_mut().reset(Instant::now() + Duration::from_secs(120));
                             match msg {
-                                Message::Piece(index, begin, data) => {
 
+                                Message::Piece(index, begin, data) => {
                                     let block_len = data.len() as u32;
-                                    let block_info = BlockInfo {
+                                    let info = BlockInfo {
                                         piece_index: index,
                                         offset: begin,
                                         length: block_len,
                                     };
-                                    if self.block_tracker.lock().await.remove(&block_info) {
-                                        self.block_request_limit_semaphore.add_permits(1);
-                                    }
 
-                                    let cmd = TorrentCommand::Block(self.peer_ip_port.clone(), index, begin, data);
-                                    
-                                    // INNER BACKPRESSURE LOOP
-                                    loop {
-                                        tokio::select! {
-                                            // FIX 3: Use local 'manager_tx' clone to avoid locking 'self'
-                                            permit_res = manager_tx.reserve() => {
-                                                match permit_res {
-                                                    Ok(permit) => {
-                                                        permit.send(cmd);
-                                                        break;
+                                    let was_expected = self.block_tracker.lock().await.remove(&info);
+
+                                    if was_expected {
+                                        self.block_request_limit_semaphore.add_permits(1);
+                                        let cmd = TorrentCommand::Block(self.peer_ip_port.clone(), index, begin, data);
+                                        
+                                        loop {
+                                            tokio::select! {
+                                                permit_res = manager_tx.reserve() => {
+                                                    match permit_res {
+                                                        Ok(permit) => {
+                                                            permit.send(cmd);
+                                                            break;
+                                                        }
+                                                        Err(_) => break 'session Err("Manager Closed".into()),
                                                     }
-                                                    Err(_) => break 'session Err("Manager Closed".into()),
                                                 }
+                                                Some(cmd) = self.torrent_manager_rx.recv() => {
+                                                    if !self.process_manager_command(cmd)? { break 'session Ok(()); }
+                                                }
+                                                _ = shutdown_rx.recv() => break 'session Ok(()),
                                             }
-                                            Some(cmd) = self.torrent_manager_rx.recv() => {
-                                                if !self.process_manager_command(cmd)? { break 'session Ok(()); }
-                                            }
-                                            _ = shutdown_rx.recv() => break 'session Ok(()),
                                         }
+                                    } else {
+                                        event!(Level::TRACE, "Session: Dropped cancelled/unsolicited block {}@{}", index, begin);
                                     }
                                 }
+
+
                                 // ... (Rest of Message handlers same as previous code) ...
                                 Message::Choke => {
                                     self.block_tracker.lock().await.clear();
@@ -918,5 +922,60 @@ mod tests {
         let total_mb = (TOTAL_BLOCKS * BLOCK_SIZE as u32) as f64 / 1_000_000.0;
         println!("Success: {:.2} MB in {:.2?} ({:.2} MB/s)", total_mb, elapsed, total_mb / elapsed.as_secs_f64());
     }
-}
 
+    #[tokio::test]
+    async fn test_bug_repro_unsolicited_forwarding() {
+        let (mut network, _client_cmd_tx, mut manager_rx) = spawn_test_session().await;
+
+        // 1. Handshake
+        let mut handshake_buf = vec![0u8; 68];
+        network.read_exact(&mut handshake_buf).await.unwrap();
+        let mut response = vec![0u8; 68];
+        response[0] = 19;
+        response[1..20].copy_from_slice(b"BitTorrent protocol");
+        response[20..28].copy_from_slice(&[0, 0, 0, 0, 0, 0x10, 0, 0]);
+        network.write_all(&response).await.unwrap();
+        
+        // Drain setup messages on the network side
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(200) {
+            if let Ok(Ok(_)) = timeout(Duration::from_millis(10), parse_message(&mut network)).await { continue; } else { break; }
+        }
+
+        // 2. THE TRIGGER: Send a Block we NEVER requested
+        // Piece 999 is definitely not in the session's tracker.
+        let data = vec![0xAA; 16384];
+        let piece_msg = generate_message(Message::Piece(999, 0, data)).unwrap();
+        network.write_all(&piece_msg).await.unwrap();
+
+        // 3. ASSERTION
+        // We listen to the Manager channel for a fixed window.
+        // We MUST loop because the Session sends 'PeerId', 'SuccessfullyConnected', etc.
+        // first. If we only recv() once, we pop 'PeerId', ignore it, and exit early 
+        // (passing the test falsely).
+        
+        let listen_duration = Duration::from_millis(500);
+        let start_listen = Instant::now();
+
+        while start_listen.elapsed() < listen_duration {
+            // Short timeout per recv to allow checking the total elapsed time
+            match timeout(Duration::from_millis(50), manager_rx.recv()).await {
+                Ok(Some(TorrentCommand::Block(peer_id, index, begin, _))) => {
+                    panic!(
+                        "TEST FAILED (BUG CONFIRMED): Session forwarded unsolicited block {}@{} from {}! \
+                        It should have been dropped because it was not in the tracker.", 
+                        index, begin, peer_id
+                    );
+                }
+                Ok(Some(_cmd)) => {
+                    // Continue loop, draining unrelated startup events (PeerId, Bitfield, etc.)
+                    continue;
+                }
+                Ok(None) => panic!("Session died unexpectedly"),
+                Err(_) => continue, // Timeout on individual recv, keep listening until total time is up
+            }
+        }
+        
+        println!("SUCCESS: Session filtered out the unsolicited block.");
+    }
+}
