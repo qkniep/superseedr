@@ -27,7 +27,7 @@ const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 16;
 const MAX_BLOCK_SIZE: u32 = 131_072;
 const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
-pub const MAX_PIPELINE_DEPTH: usize = 2048;
+pub const MAX_PIPELINE_DEPTH: usize = 128;
 
 pub type PeerAddr = (String, u16);
 
@@ -610,6 +610,18 @@ impl TorrentState {
                 let mut request_batch = Vec::new();
 
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
+
+                    // --- INSERT THIS LOG ---
+                    if peer.inflight_requests == 0 && !self.piece_manager.need_queue.is_empty() {
+                        // We have work needed, and peer is idle. Why aren't we assigning?
+                        let choked = peer.peer_choking == ChokeStatus::Choke;
+                        let interested = peer.am_interested;
+                        // This log will flood if normal, so check if we actually generate requests later
+                        if choked {
+                             // Trace is fine here
+                             // event!(Level::TRACE, "Peer {} is idle because they choked us", peer_id);
+                        }
+                    }
                     
                     if peer.inflight_requests == 0 && !peer.active_blocks.is_empty() {
                         event!(Level::WARN, "HEALING: Found {} zombie blocks for {} with 0 inflight. Clearing.", peer.active_blocks.len(), peer_id);
@@ -722,9 +734,26 @@ impl TorrentState {
                 if !request_batch.is_empty() {
                     effects.push(Effect::SendToPeer {
                         peer_id: peer_id.clone(),
-                        cmd: Box::new(TorrentCommand::BulkRequest(request_batch)),
+                        cmd: Box::new(TorrentCommand::BulkRequest(request_batch.clone())),
                     });
                 }
+
+
+                if let Some(peer) = self.peers.get_mut(&peer_id) {
+
+                    if request_batch.clone().is_empty() 
+                       && peer.inflight_requests == 0 
+                       && !self.piece_manager.need_queue.is_empty() 
+                       && peer.peer_choking == ChokeStatus::Unchoke 
+                    {
+                         tracing::event!(
+                            Level::ERROR, 
+                            "STALL DETECTED: Peer {} is Unchoked, Idle, and we Need pieces, but AssignWork produced NO requests. Check Bitfield overlap!", 
+                            peer_id
+                         );
+                    }
+                }
+
                 effects
             }
 
@@ -828,7 +857,6 @@ impl TorrentState {
             }
 
             Action::PeerChoked { peer_id } => {
-                event!(Level::INFO, "PEER CHOKED US {}", peer_id);
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.inflight_requests = 0;
                     peer.active_blocks.clear();
@@ -887,30 +915,29 @@ impl TorrentState {
                 block_offset,
                 data,
             } => {
+                // 1. Safety Guard: Bounds Check
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
                 }
 
                 let mut effects = Vec::new();
-                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done)
-                {
-                    return effects;
-                }
-                if self.torrent_status == TorrentStatus::Validating {
-                    return effects;
-                }
-
-                self.last_activity = TorrentActivity::DownloadingPiece(piece_index);
-
                 let len = data.len() as u64;
+
+                // 2. Global Metrics Updates
                 self.bytes_downloaded_in_interval =
                     self.bytes_downloaded_in_interval.saturating_add(len);
                 self.session_total_downloaded = self.session_total_downloaded.saturating_add(len);
 
+                // 3. Peer State Updates (CRITICAL FIX)
+                // We MUST perform this accounting before checking if the piece is Done.
+                // If we return early, 'inflight_requests' will leak (remain high), 
+                // eventually stopping 'AssignWork' from triggering.
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.bytes_downloaded_from_peer += len;
                     peer.bytes_downloaded_in_tick += len;
                     peer.total_bytes_downloaded += len;
+                    
+                    // Decrement inflight requests for every block received
                     peer.inflight_requests = peer.inflight_requests.saturating_sub(1);
 
                     let block_len = data.len() as u32;
@@ -921,7 +948,8 @@ impl TorrentState {
                     info_hash: self.info_hash.clone(),
                 }));
 
-
+                // 4. Refill Pipeline (Work Assignment)
+                // We check the low water mark immediately to keep the pipe saturated.
                 if let Some(peer) = self.peers.get(&peer_id) {
                     let low_water_mark = MAX_PIPELINE_DEPTH / 2;
                     if peer.inflight_requests <= low_water_mark {
@@ -929,6 +957,21 @@ impl TorrentState {
                     }
                 }
 
+                // 5. Early Exit: Piece already Done?
+                // Now that we've updated metrics and inflight counts, it is safe to return.
+                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done)
+                {
+                    return effects;
+                }
+
+                // 6. Early Exit: Currently Validating?
+                if self.torrent_status == TorrentStatus::Validating {
+                    return effects;
+                }
+
+                self.last_activity = TorrentActivity::DownloadingPiece(piece_index);
+
+                // 7. Process the Block
                 let piece_size = self.get_piece_size(piece_index);
                 if let Some(complete_data) =
                     self.piece_manager
@@ -941,8 +984,6 @@ impl TorrentState {
                         data: complete_data,
                     });
                 }
-
-
 
                 effects
             }

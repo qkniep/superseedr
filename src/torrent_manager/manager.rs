@@ -1178,7 +1178,7 @@ impl TorrentManager {
         event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
-        return Ok(Vec::new());
+        //return Ok(Vec::new());
         let num_pieces = torrent.info.pieces.len() / 20;
         if skip_hashing {
             event!(
@@ -1984,6 +1984,19 @@ impl TorrentManager {
                             }
                         }
                     }
+
+                    let cmd_len = self.torrent_manager_rx.len();
+                    let cmd_cap = self.torrent_manager_rx.capacity();
+                    let write_tasks = self.in_flight_writes.len();
+                    let upload_tasks = self.in_flight_uploads.len();
+                    let pending_pieces = self.state.piece_manager.pending_queue.len();
+                    let need_pieces = self.state.piece_manager.need_queue.len();
+                    
+                    tracing::event!(
+                        Level::WARN, // Use WARN so it stands out
+                        "❤️ HEARTBEAT: [CmdQueue: {}/{}] [Writes: {}] [Uploads: {}] [PendingPieces: {}] [Need: {}]",
+                        cmd_len, cmd_cap, write_tasks, upload_tasks, pending_pieces, need_pieces
+                    );
 
                     self.apply_action(Action::Tick { dt_ms: actual_ms });
                 }
@@ -2890,9 +2903,9 @@ mod resource_tests {
 
         // Resources
         let mut limits = HashMap::new();
-        limits.insert(crate::resource_manager::ResourceType::PeerConnection, (1000, 1000));
-        limits.insert(crate::resource_manager::ResourceType::DiskRead, (1000, 1000));
-        limits.insert(crate::resource_manager::ResourceType::DiskWrite, (1000, 1000));
+        limits.insert(crate::resource_manager::ResourceType::PeerConnection, (100_000, 100_000));
+        limits.insert(crate::resource_manager::ResourceType::DiskRead, (100_000, 100_000));
+        limits.insert(crate::resource_manager::ResourceType::DiskWrite, (100_000, 100_000));
         limits.insert(crate::resource_manager::ResourceType::Reserve, (0, 0));
         let (resource_manager, rm_client) = ResourceManager::new(limits, shutdown_tx.clone());
         tokio::spawn(resource_manager.run());
@@ -2961,7 +2974,7 @@ mod resource_tests {
             let (socket, _) = listener.accept().await.unwrap();
             let (mut rd, mut wr) = socket.into_split();
             
-            let (tx, mut rx) = mpsc::channel::<Vec<u8>>(200); // Increased channel size for pipelining
+            let (tx, mut rx) = mpsc::channel::<Vec<u8>>(10_000); // Increased channel size for pipelining
             tokio::spawn(async move {
                 while let Some(data) = rx.recv().await {
                     if wr.write_all(&data).await.is_err() { break; }
@@ -3052,23 +3065,56 @@ mod resource_tests {
         let timeout_duration = Duration::from_secs(30);
         const CHUNK_SIZE: u32 = 10;
         
-        let check_loop = async {
-            let mut chunk_timestamps = vec![Instant::now()];
-            let mut next_chunk_target = CHUNK_SIZE;
-            loop {
-                if let Ok(m) = metrics_rx.recv().await {
-                    if m.number_of_pieces_completed >= NUM_PIECES as u32 {
-                        chunk_timestamps.push(Instant::now());
-                        break;
-                    }
-                    if m.number_of_pieces_completed >= next_chunk_target {
-                        chunk_timestamps.push(Instant::now());
-                        next_chunk_target += CHUNK_SIZE;
-                    }
+// --- REPLACE THE check_loop IN test_pipelined_download_two_thousand_blocks ---
+let check_loop = async {
+    let mut chunk_timestamps = vec![Instant::now()];
+    let mut next_chunk_target = 10;
+    
+    // 1. We accumulate the download volume manually
+    let mut accumulated_download: u64 = 0; 
+
+    loop {
+        match timeout(Duration::from_secs(1), metrics_rx.recv()).await {
+            Ok(Ok(m)) => {
+                // 2. Add the bytes from this tick to our total
+                accumulated_download += m.bytes_downloaded_this_tick;
+
+                // Print status occasionally
+                if m.number_of_pieces_completed % 10 == 0 {
+                     println!("STATUS: Completed {}/{} pieces. Acc DL: {}/{}", 
+                        m.number_of_pieces_completed, NUM_PIECES,
+                        accumulated_download, m.total_size);
+                }
+
+                // 3. DETECT INFINITE LOOP
+                // If we downloaded 2x the file size but haven't finished, 
+                // it means writes are failing and we are re-downloading.
+                if accumulated_download > (m.total_size as u64 * 2) {
+                    panic!("CRITICAL: Downloaded {} bytes (accumulated), but file size is {}. We are looping (Write Failure)!", 
+                        accumulated_download, m.total_size);
+                }
+
+                // SUCCESS CONDITION
+                if m.number_of_pieces_completed >= NUM_PIECES as u32 {
+                    chunk_timestamps.push(Instant::now());
+                    break;
+                }
+                
+                // Track timestamps
+                if m.number_of_pieces_completed >= next_chunk_target {
+                    chunk_timestamps.push(Instant::now());
+                    next_chunk_target += 10;
                 }
             }
-            chunk_timestamps
-        };
+            Ok(Err(_)) => break, // Channel closed
+            Err(_) => {
+                // Timeout fired
+                println!("... No activity for 1s. Current Acc DL: {} ...", accumulated_download);
+            }
+        }
+    }
+    chunk_timestamps
+};
 
         let timestamps = match timeout(timeout_duration, check_loop).await {
             Ok(ts) => ts,
