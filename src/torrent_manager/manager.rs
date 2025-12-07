@@ -2667,7 +2667,6 @@ mod resource_tests {
         let (metrics_tx, mut metrics_rx) = broadcast::channel(100);
         let (shutdown_tx, _) = broadcast::channel(1);
         
-        // FIX: Explicit Settings with valid Client ID
         let mut settings_val = Settings::default();
         settings_val.client_id = "-SS0001-123456789012".to_string(); // Exactly 20 bytes
         let settings = Arc::new(settings_val);

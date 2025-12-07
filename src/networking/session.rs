@@ -407,7 +407,7 @@ impl PeerSession {
                     
                     // Update smart cancel buffer (using try_lock is safe here because it's just an optimization)
                     if let Ok(mut buf) = self.cancellation_buffer.try_lock() {
-                        if buf.len() >= 50 { buf.pop_front(); }
+                        if buf.len() >= MAX_PIPELINE_DEPTH { buf.pop_front(); }
                         buf.push_back((*index, *begin));
                     }
                 }
