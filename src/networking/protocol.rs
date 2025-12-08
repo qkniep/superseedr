@@ -173,7 +173,7 @@ pub async fn writer_task<W>(
     mut stream_write_half: W,
     mut write_rx: Receiver<Message>,
     error_tx: oneshot::Sender<Box<dyn StdError + Send + Sync>>,
-    _global_ul_bucket: Arc<Mutex<TokenBucket>>, // Param kept but unused
+    _global_ul_bucket: Arc<Mutex<TokenBucket>>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) where
     W: AsyncWriteExt + Unpin + Send + 'static,

@@ -1990,12 +1990,6 @@ impl TorrentManager {
                     let upload_tasks = self.in_flight_uploads.len();
                     let pending_pieces = self.state.piece_manager.pending_queue.len();
                     let need_pieces = self.state.piece_manager.need_queue.len();
-                    
-                    tracing::event!(
-                        Level::WARN, // Use WARN so it stands out
-                        "❤️ HEARTBEAT: [CmdQueue: {}/{}] [Writes: {}] [Uploads: {}] [PendingPieces: {}] [Need: {}]",
-                        cmd_len, cmd_cap, write_tasks, upload_tasks, pending_pieces, need_pieces
-                    );
 
                     self.apply_action(Action::Tick { dt_ms: actual_ms });
                 }

@@ -161,8 +161,8 @@ fn process_input(input_str: &str, watch_path: &Path) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(feature = "console")]
-    console_subscriber::init();
+    //#[cfg(feature = "console")]
+    //console_subscriber::init();
 
     let base_data_dir = config::get_app_paths()
         .map(|(_, data_dir)| data_dir)

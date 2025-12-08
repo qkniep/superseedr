@@ -591,7 +591,6 @@ impl TorrentState {
             }
 
             Action::AssignWork { peer_id } => {
-                // --- GUARDS ---
                 if self.torrent_status == TorrentStatus::Validating { return vec![Effect::DoNothing]; }
                 if self.piece_manager.bitfield.is_empty() { return vec![Effect::DoNothing]; }
                 if self.piece_manager.need_queue.is_empty() && self.piece_manager.pending_queue.is_empty() { return vec![Effect::DoNothing]; }
@@ -600,15 +599,10 @@ impl TorrentState {
                 let mut effects = Vec::new();
                 let mut request_batch = Vec::new();
                 
-                // Safe separation: Get Peer Mutably, but don't hold it while accessing self methods if possible.
-                // However, we only access self.piece_manager fields which are distinct from self.peers.
-                // Rust splitting borrows usually handles this, but we will be careful.
-                
                 let peer_opt = self.peers.get_mut(&peer_id);
                 if peer_opt.is_none() { return effects; }
                 let peer = peer_opt.unwrap();
 
-                // --- 1. INTEREST LOGIC ---
                 let has_needed_pieces = !peer.bitfield.is_empty() && 
                     (self.piece_manager.need_queue.iter().any(|&p| peer.bitfield.get(p as usize) == Some(&true)) ||
                      self.piece_manager.pending_queue.keys().any(|&p| peer.bitfield.get(p as usize) == Some(&true)));
@@ -627,22 +621,17 @@ impl TorrentState {
                 if peer.peer_choking == ChokeStatus::Choke { return effects; }
                 if peer.bitfield.is_empty() { return effects; }
 
-                // --- 2. PIPELINE CAPACITY ---
                 let current_inflight = peer.inflight_requests;
                 let max_depth = MAX_PIPELINE_DEPTH;
                 
                 if current_inflight >= max_depth { return effects; }
                 let mut available_slots = max_depth - current_inflight;
 
-                // --- 3. PHASE 1: FILL FROM BACKLOG (Pending Requests) ---
-                // We inline the logic here to avoid E0502
                 let mut pending_pieces: Vec<u32> = peer.pending_requests.iter().cloned().collect();
                 pending_pieces.sort(); 
 
                 for piece_index in pending_pieces {
                     if available_slots == 0 { break; }
-                    
-                    // -- INLINED REQUEST GENERATION --
                     let (start, end) = self.piece_manager.block_manager.get_block_range(piece_index);
                     let assembler_mask = self.piece_manager.block_manager.legacy_buffers
                         .get(&piece_index)
@@ -669,12 +658,10 @@ impl TorrentState {
                         peer.active_blocks.insert((addr.piece_index, addr.byte_offset, addr.length));
                         available_slots -= 1;
                     }
-                    // -- END INLINED LOGIC --
                 }
 
                 // --- 4. PHASE 2: FILL FROM NEW PIECES ---
                 while available_slots > 0 {
-                    // Step A: Immutable Borrow (Choose)
                     let choice = self.piece_manager.choose_piece_for_peer(
                         &peer.bitfield,
                         &peer.pending_requests,
@@ -683,7 +670,6 @@ impl TorrentState {
 
                     match choice {
                         Some(piece_index) => {
-                            // Step B: Mutable Borrow (Mark Pending) - Safe because Step A is done
                             self.piece_manager.mark_as_pending(piece_index, peer_id.clone());
                             peer.pending_requests.insert(piece_index);
                             
@@ -691,8 +677,6 @@ impl TorrentState {
                                 self.torrent_status = TorrentStatus::Endgame;
                             }
 
-                            // Step C: Immutable Borrow (Block Manager) - Safe because Step B is done
-                            // We capture length to detect 0-request loops
                             let initial_batch_len = request_batch.len();
 
                             let (start, end) = self.piece_manager.block_manager.get_block_range(piece_index);
@@ -718,19 +702,14 @@ impl TorrentState {
                                 available_slots -= 1;
                             }
 
-                            // INFINITE LOOP PROTECTION:
-                            // If we picked a piece but generated NO requests (e.g. piece was active but 0 blocks needed),
-                            // we must break. Otherwise we'd loop infinitely because 'available_slots' wouldn't decrease
-                            // and 'choose_piece_for_peer' might pick the same piece again (depending on implementation).
                             if request_batch.len() == initial_batch_len {
                                 break;
                             }
                         }
-                        None => break, // No more pieces
+                        None => break,
                     }
                 }
 
-                // --- 5. COMMIT ---
                 if !request_batch.is_empty() {
                     peer.inflight_requests += request_batch.len();
                     effects.push(Effect::SendToPeer {
