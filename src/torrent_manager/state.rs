@@ -27,7 +27,7 @@ const PEER_UPLOAD_IN_FLIGHT_LIMIT: usize = 16;
 const MAX_BLOCK_SIZE: u32 = 131_072;
 const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
-pub const MAX_PIPELINE_DEPTH: usize = 128;
+pub const MAX_PIPELINE_DEPTH: usize = 512;
 
 pub type PeerAddr = (String, u16);
 

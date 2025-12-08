@@ -47,7 +47,7 @@ use tokio::time::Instant;
 
 use tracing::{event, instrument, Level};
 
-const PEER_BLOCK_IN_FLIGHT_LIMIT: usize = 8;
+const PEER_BLOCK_IN_FLIGHT_LIMIT: usize = 16;
 
 struct DisconnectGuard {
     peer_ip_port: String,
@@ -101,15 +101,8 @@ pub struct PeerSession {
     writer_rx: Option<Receiver<Message>>,
     writer_tx: Sender<Message>,
 
-    // Tracks blocks IN FLIGHT. Used to credit permits back on receipt/cancel.
-    //block_tracker: HashMap<u32, HashSet<BlockInfo>>,
     block_tracker: Arc<Mutex<HashSet<BlockInfo>>>,
-    
-    // The "Gatekeeper". We control permits manually for max speed.
     block_request_limit_semaphore: Arc<Semaphore>,
-    
-    // Tracks spawn handles for graceful shutdown
-    block_request_joinset: JoinSet<()>,
     
     block_upload_limit_semaphore: Arc<Semaphore>,
 
@@ -122,8 +115,6 @@ pub struct PeerSession {
     global_ul_bucket: Arc<Mutex<TokenBucket>>,
 
     shutdown_tx: broadcast::Sender<()>,
-
-    cancellation_buffer: Arc<Mutex<VecDeque<(u32, u32)>>>,
 }
 
 impl PeerSession {
@@ -145,7 +136,6 @@ impl PeerSession {
             // PEER_BLOCK_IN_FLIGHT_LIMIT is 8
             block_tracker: Arc::new(Mutex::new(HashSet::new())),
             block_request_limit_semaphore: Arc::new(Semaphore::new(PEER_BLOCK_IN_FLIGHT_LIMIT)),
-            block_request_joinset: JoinSet::new(),
             block_upload_limit_semaphore: Arc::new(Semaphore::new(PEER_BLOCK_IN_FLIGHT_LIMIT)),
             peer_extended_id_mappings: HashMap::new(),
             peer_extended_handshake_payload: None,
@@ -154,7 +144,6 @@ impl PeerSession {
             global_dl_bucket: params.global_dl_bucket,
             global_ul_bucket: params.global_ul_bucket,
             shutdown_tx: params.shutdown_tx,
-            cancellation_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_PIPELINE_DEPTH))),
         }
     }
 
@@ -231,7 +220,6 @@ impl PeerSession {
             let _ = self.torrent_manager_tx.try_send(TorrentCommand::SuccessfullyConnected(self.peer_ip_port.clone()));
         }
 
-        // 4. SPAWN DEDICATED READER TASK (Fixes Cancellation Bug)
         // This task owns the read half and never gets cancelled by timers/manager events.
         let (peer_msg_tx, mut peer_msg_rx) = mpsc::channel::<Message>(100);
         let mut reader_shutdown = self.shutdown_tx.subscribe();
@@ -288,16 +276,13 @@ impl PeerSession {
                                 length: block_len,
                             };
 
-                            // Check against tracker to validate permit
                             let was_expected = self.block_tracker.lock().await.remove(&info);
 
                             if was_expected {
-                                // Release permit immediately
                                 self.block_request_limit_semaphore.add_permits(1);
                                 
                                 let cmd = TorrentCommand::Block(self.peer_ip_port.clone(), index, begin, data);
                                 
-                                // Send to Manager with backpressure support
                                 loop {
                                     tokio::select! {
                                         permit_res = manager_tx.reserve() => {
@@ -365,9 +350,6 @@ impl PeerSession {
             }
         };
 
-        if !self.block_request_joinset.is_empty() {
-            while self.block_request_joinset.join_next().await.is_some() {}
-        }
 
         Ok(())
     }
@@ -397,14 +379,13 @@ impl PeerSession {
                 let writer = self.writer_tx.clone();
                 let sem = self.block_request_limit_semaphore.clone();
                 let tracker = self.block_tracker.clone();
-                let cancel_buf = self.cancellation_buffer.clone();
                 let mut shutdown = self.shutdown_tx.subscribe();
                 
                 // Capture context for reaper
                 let manager_tx = self.torrent_manager_tx.clone();
                 let peer_ip = self.peer_ip_port.clone();
 
-                self.block_request_joinset.spawn(async move {
+                tokio::spawn(async move {
                     for (index, begin, length) in requests {
                         let permit_option = tokio::select! {
                             permit_result = timeout(Duration::from_secs(10), sem.clone().acquire_owned()) => {
@@ -417,15 +398,9 @@ impl PeerSession {
                         };
 
                         if let Some(permit) = permit_option {
-                            // Check Cancel Buffer
-                            {
-                                let buf = cancel_buf.lock().await;
-                                if buf.contains(&(index, begin)) { continue; }
-                            }
 
                             let info = BlockInfo { piece_index: index, offset: begin, length };
 
-                            // Track
                             {
                                 let mut t = tracker.lock().await;
                                 t.insert(info.clone());
@@ -453,7 +428,6 @@ impl PeerSession {
                                         let _ = manager_tx_clone.send(TorrentCommand::Disconnect(peer_ip_clone)).await;
                                     }
                                 });
-                                // ---------------------
 
                                 permit.forget();
                             } else {
@@ -468,10 +442,6 @@ impl PeerSession {
             TorrentCommand::BulkCancel(cancels) => {
                 for (index, begin, len) in &cancels {
                     let _ = self.writer_tx.try_send(Message::Cancel(*index, *begin, *len));
-                    if let Ok(mut buf) = self.cancellation_buffer.try_lock() {
-                        if buf.len() >= MAX_PIPELINE_DEPTH { buf.pop_front(); }
-                        buf.push_back((*index, *begin));
-                    }
                 }
 
                 let tracker = self.block_tracker.clone();

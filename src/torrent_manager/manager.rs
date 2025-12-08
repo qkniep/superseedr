@@ -1178,7 +1178,6 @@ impl TorrentManager {
         event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
-        return Ok(Vec::new());
         let num_pieces = torrent.info.pieces.len() / 20;
         if skip_hashing {
             event!(
