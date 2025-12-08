@@ -47,7 +47,7 @@ use tokio::time::Instant;
 
 use tracing::{event, instrument, Level};
 
-const PEER_BLOCK_IN_FLIGHT_LIMIT: usize = 16;
+const PEER_BLOCK_IN_FLIGHT_LIMIT: usize = 8;
 
 struct DisconnectGuard {
     peer_ip_port: String,
@@ -126,11 +126,9 @@ pub struct PeerSession {
     cancellation_buffer: Arc<Mutex<VecDeque<(u32, u32)>>>,
 }
 
-// session.rs
-
 impl PeerSession {
     pub fn new(params: PeerSessionParameters) -> Self {
-        // Increase channel size to buffer the Manager's requests
+        // Increased channel size to prevent internal bottlenecks
         let (writer_tx, writer_rx) = mpsc::channel::<Message>(1000);
 
         Self {
@@ -144,6 +142,7 @@ impl PeerSession {
             peer_ip_port: params.peer_ip_port,
             writer_rx: Some(writer_rx),
             writer_tx,
+            // PEER_BLOCK_IN_FLIGHT_LIMIT is 8
             block_tracker: Arc::new(Mutex::new(HashSet::new())),
             block_request_limit_semaphore: Arc::new(Semaphore::new(PEER_BLOCK_IN_FLIGHT_LIMIT)),
             block_request_joinset: JoinSet::new(),
@@ -174,13 +173,13 @@ impl PeerSession {
             manager_tx: self.torrent_manager_tx.clone(),
         };
 
+        // 1. Split Stream
         let (mut stream_read_half, stream_write_half) = split(stream);
         let (error_tx, mut error_rx) = oneshot::channel();
 
+        // 2. Spawn Writer Task
         let global_ul_bucket_clone = self.global_ul_bucket.clone();
         let writer_shutdown_rx = self.shutdown_tx.subscribe();
-        
-        // FIX 1: Use take() to move writer_rx out without breaking 'self'
         let writer_rx = self.writer_rx.take().ok_or("Writer RX missing")?;
         
         let writer_handle = tokio::spawn(writer_task(
@@ -192,7 +191,8 @@ impl PeerSession {
         ));
         let _writer_abort_guard = AbortOnDrop(writer_handle);
 
-        // ... (Handshake logic remains the same) ...
+        // 3. Perform Handshake (Synchronous Phase)
+        // We do this BEFORE spawning the reader task so we can validate the connection.
         let handshake_response = match self.connection_type {
             ConnectionType::Outgoing => {
                 let _ = self.writer_tx.try_send(Message::Handshake(
@@ -231,100 +231,137 @@ impl PeerSession {
             let _ = self.torrent_manager_tx.try_send(TorrentCommand::SuccessfullyConnected(self.peer_ip_port.clone()));
         }
 
-        // FIX 2: Create local variables to satisfy the borrow checker
+        // 4. SPAWN DEDICATED READER TASK (Fixes Cancellation Bug)
+        // This task owns the read half and never gets cancelled by timers/manager events.
+        let (peer_msg_tx, mut peer_msg_rx) = mpsc::channel::<Message>(100);
+        let mut reader_shutdown = self.shutdown_tx.subscribe();
+        
+        let reader_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    result = parse_message(&mut stream_read_half) => {
+                        match result {
+                            Ok(msg) => {
+                                if peer_msg_tx.send(msg).await.is_err() {
+                                    break; // Main loop dropped receiver
+                                }
+                            }
+                            Err(e) => {
+                                // Socket error or EOF
+                                tracing::event!(Level::DEBUG, "Reader Error: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    _ = reader_shutdown.recv() => break,
+                }
+            }
+        });
+        let _reader_abort_guard = AbortOnDrop(reader_handle);
+
+        // 5. Main Event Loop
         let mut keep_alive_timer = tokio::time::interval(Duration::from_secs(60));
         let inactivity_timeout = tokio::time::sleep(Duration::from_secs(120));
         tokio::pin!(inactivity_timeout);
 
-        let mut shutdown_rx = self.shutdown_tx.subscribe(); // Created ONCE here
-        let manager_tx = self.torrent_manager_tx.clone(); // Clone for reserve()
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let manager_tx = self.torrent_manager_tx.clone();
 
         let _result: Result<(), Box<dyn StdError + Send + Sync>> = 'session: loop {
-            const READ_TIMEOUT: Duration = Duration::from_secs(120);
-
             tokio::select! {
+                // Timeout Check
                 _ = &mut inactivity_timeout => break 'session Err("Timeout".into()),
+                
+                // KeepAlive
                 _ = keep_alive_timer.tick() => { let _ = self.writer_tx.try_send(Message::KeepAlive); },
                 
-                Ok(message_from_peer) = timeout(READ_TIMEOUT, parse_message(&mut stream_read_half)) => {
-                    match message_from_peer {
-                        Ok(msg) => {
-                            inactivity_timeout.as_mut().reset(Instant::now() + Duration::from_secs(120));
-                            match msg {
+                // INCOMING MESSAGES (From Reader Task)
+                Some(msg) = peer_msg_rx.recv() => {
+                    inactivity_timeout.as_mut().reset(Instant::now() + Duration::from_secs(120));
+                    
+                    match msg {
+                        Message::Piece(index, begin, data) => {
+                            let block_len = data.len() as u32;
+                            let info = BlockInfo {
+                                piece_index: index,
+                                offset: begin,
+                                length: block_len,
+                            };
 
-                                Message::Piece(index, begin, data) => {
-                                    let block_len = data.len() as u32;
-                                    let info = BlockInfo {
-                                        piece_index: index,
-                                        offset: begin,
-                                        length: block_len,
-                                    };
+                            // Check against tracker to validate permit
+                            let was_expected = self.block_tracker.lock().await.remove(&info);
 
-                                    let was_expected = self.block_tracker.lock().await.remove(&info);
-
-                                    if was_expected {
-                                        self.block_request_limit_semaphore.add_permits(1);
-                                        let cmd = TorrentCommand::Block(self.peer_ip_port.clone(), index, begin, data);
-                                        
-                                        loop {
-                                            tokio::select! {
-                                                permit_res = manager_tx.reserve() => {
-                                                    match permit_res {
-                                                        Ok(permit) => {
-                                                            permit.send(cmd);
-                                                            break;
-                                                        }
-                                                        Err(_) => break 'session Err("Manager Closed".into()),
-                                                    }
+                            if was_expected {
+                                // Release permit immediately
+                                self.block_request_limit_semaphore.add_permits(1);
+                                
+                                let cmd = TorrentCommand::Block(self.peer_ip_port.clone(), index, begin, data);
+                                
+                                // Send to Manager with backpressure support
+                                loop {
+                                    tokio::select! {
+                                        permit_res = manager_tx.reserve() => {
+                                            match permit_res {
+                                                Ok(permit) => {
+                                                    permit.send(cmd);
+                                                    break;
                                                 }
-                                                Some(cmd) = self.torrent_manager_rx.recv() => {
-                                                    if !self.process_manager_command(cmd)? { break 'session Ok(()); }
-                                                }
-                                                _ = shutdown_rx.recv() => break 'session Ok(()),
+                                                Err(_) => break 'session Err("Manager Closed".into()),
                                             }
                                         }
-                                    } else {
-                                        event!(Level::TRACE, "Session: Dropped cancelled/unsolicited block {}@{}", index, begin);
+                                        // Still process Manager commands while waiting to send (Avoid Deadlock)
+                                        Some(cmd) = self.torrent_manager_rx.recv() => {
+                                            if !self.process_manager_command(cmd)? { 
+                                                break 'session Ok(()); 
+                                            }
+                                        },
+                                        _ = shutdown_rx.recv() => break 'session Ok(()),
                                     }
                                 }
-
-
-                                // ... (Rest of Message handlers same as previous code) ...
-                                Message::Choke => {
-                                    self.block_tracker.lock().await.clear();
-                                    let max = PEER_BLOCK_IN_FLIGHT_LIMIT;
-                                    let current = self.block_request_limit_semaphore.available_permits();
-                                    if current < max { self.block_request_limit_semaphore.add_permits(max - current); }
-                                    let _ = self.torrent_manager_tx.try_send(TorrentCommand::Choke(self.peer_ip_port.clone()));
-                                }
-                                Message::Unchoke => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::Unchoke(self.peer_ip_port.clone())); }
-                                Message::Interested => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::PeerInterested(self.peer_ip_port.clone())); }
-                                Message::NotInterested => {}
-                                Message::Have(idx) => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::Have(self.peer_ip_port.clone(), idx)); }
-                                Message::Bitfield(bf) => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::PeerBitfield(self.peer_ip_port.clone(), bf)); }
-                                Message::Request(i, b, l) => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::RequestUpload(self.peer_ip_port.clone(), i, b, l)); }
-                                Message::Cancel(i, b, l) => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::CancelUpload(self.peer_ip_port.clone(), i, b, l)); }
-                                Message::Extended(id, p) => { self.handle_extended_message(id, p).await?; }
-                                Message::KeepAlive => {}
-                                Message::Port(_) => {}
-                                Message::Handshake(..) => {}
-                                Message::ExtendedHandshake(_) => {}
+                            } else {
+                                event!(Level::TRACE, "Session: Dropped cancelled/unsolicited block {}@{}", index, begin);
                             }
                         }
-                        Err(e) => break 'session Err(e.into()),
+                        Message::Choke => {
+                            self.block_tracker.lock().await.clear();
+                            // Refill permits
+                            let max = PEER_BLOCK_IN_FLIGHT_LIMIT;
+                            let current = self.block_request_limit_semaphore.available_permits();
+                            if current < max { self.block_request_limit_semaphore.add_permits(max - current); }
+                            let _ = self.torrent_manager_tx.try_send(TorrentCommand::Choke(self.peer_ip_port.clone()));
+                        }
+                        Message::Unchoke => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::Unchoke(self.peer_ip_port.clone())); }
+                        Message::Interested => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::PeerInterested(self.peer_ip_port.clone())); }
+                        Message::NotInterested => {}
+                        Message::Have(idx) => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::Have(self.peer_ip_port.clone(), idx)); }
+                        Message::Bitfield(bf) => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::PeerBitfield(self.peer_ip_port.clone(), bf)); }
+                        Message::Request(i, b, l) => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::RequestUpload(self.peer_ip_port.clone(), i, b, l)); }
+                        Message::Cancel(i, b, l) => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::CancelUpload(self.peer_ip_port.clone(), i, b, l)); }
+                        Message::Extended(id, p) => { self.handle_extended_message(id, p).await?; }
+                        Message::KeepAlive => {}
+                        Message::Port(_) => {}
+                        Message::Handshake(..) => {}
+                        Message::ExtendedHandshake(_) => {}
                     }
                 },
                 
+                // OUTGOING COMMANDS (From Manager)
                 Some(cmd) = self.torrent_manager_rx.recv() => {
                     if !self.process_manager_command(cmd)? { break 'session Ok(()); }
                 },
                 
+                // WRITER ERRORS
                 writer_res = &mut error_rx => {
                     break 'session Err(writer_res.unwrap_or_else(|_| "Writer panicked".into()));
                 },
-                
-                // FIX 4: Use the variable created outside
-                _ = shutdown_rx.recv() => break 'session Ok(()),
+
+                // SHUTDOWN
+                msg = shutdown_rx.recv() => {
+                    match msg {
+                        Ok(()) => break 'session Ok(()),
+                        Err(_) => continue,
+                    }
+                },
             }
         };
 
@@ -335,18 +372,13 @@ impl PeerSession {
         Ok(())
     }
 
-    /// Handles incoming commands from the Manager.
-    /// Returns `Ok(true)` to continue, `Ok(false)` to stop the session gracefully.
     fn process_manager_command(
         &mut self,
         command: TorrentCommand,
     ) -> Result<bool, Box<dyn StdError + Send + Sync>> {
         match command {
-            // --- CRITICAL CONTROL ---
             TorrentCommand::Disconnect(_) => return Ok(false),
 
-            // Use the exact enum variants defined in your `command.rs`.
-            // If PeerChoke doesn't exist, map standard Choke to the writer.
             TorrentCommand::PeerChoke | TorrentCommand::Choke(_) => {
                 let _ = self.writer_tx.try_send(Message::Choke);
             }
@@ -360,140 +392,124 @@ impl PeerSession {
                 let _ = self.writer_tx.try_send(Message::NotInterested);
             }
 
+            // --- BULK REQUEST WITH ZOMBIE REAPER ---
             TorrentCommand::BulkRequest(requests) => {
                 let writer = self.writer_tx.clone();
                 let sem = self.block_request_limit_semaphore.clone();
                 let tracker = self.block_tracker.clone();
                 let cancel_buf = self.cancellation_buffer.clone();
                 let mut shutdown = self.shutdown_tx.subscribe();
+                
+                // Capture context for reaper
+                let manager_tx = self.torrent_manager_tx.clone();
+                let peer_ip = self.peer_ip_port.clone();
 
                 self.block_request_joinset.spawn(async move {
                     for (index, begin, length) in requests {
-                        // 1. Wait for a slot
-                        let permit = tokio::select! {
-                            Ok(p) = sem.clone().acquire_owned() => p,
-                            _ = shutdown.recv() => return,
+                        let permit_option = tokio::select! {
+                            permit_result = timeout(Duration::from_secs(10), sem.clone().acquire_owned()) => {
+                                match permit_result {
+                                    Ok(Ok(permit)) => Some(permit),
+                                    _ => None,
+                                }
+                            }
+                            _ = shutdown.recv() => None
                         };
 
-                        // 2. Smart Cancel Check
-                        {
-                            let buf = cancel_buf.lock().await;
-                            if buf.contains(&(index, begin)) {
-                                // Drop permit (auto-refund) and skip
-                                continue; 
+                        if let Some(permit) = permit_option {
+                            // Check Cancel Buffer
+                            {
+                                let buf = cancel_buf.lock().await;
+                                if buf.contains(&(index, begin)) { continue; }
                             }
-                        }
 
-                        // 3. Send
-                        if writer.send(Message::Request(index, begin, length)).await.is_ok() {
-                            // 4. Register
+                            let info = BlockInfo { piece_index: index, offset: begin, length };
+
+                            // Track
                             {
                                 let mut t = tracker.lock().await;
-                                t.insert(BlockInfo {
-                                    piece_index: index,
-                                    offset: begin,
-                                    length,
-                                });
+                                t.insert(info.clone());
                             }
-                            // Manual control active: permit is now represented by the entry in block_tracker
-                            permit.forget();
-                        } else {
-                            break;
+
+                            if writer.send(Message::Request(index, begin, length)).await.is_ok() {
+                                
+                                // --- ZOMBIE REAPER ---
+                                let sem_clone = sem.clone();
+                                let tracker_clone = tracker.clone();
+                                let info_clone = info.clone();
+                                let manager_tx_clone = manager_tx.clone();
+                                let peer_ip_clone = peer_ip.clone();
+
+                                tokio::spawn(async move {
+                                    // 20s Timeout: Enough for RTT + Queue, but kills dead connections
+                                    tokio::time::sleep(Duration::from_secs(20)).await;
+
+                                    let mut t = tracker_clone.lock().await;
+                                    if t.remove(&info_clone) {
+                                        // 1. Reclaim Permit
+                                        sem_clone.add_permits(1);
+                                        tracing::event!(Level::ERROR, "💀 ZOMBIE REAPER: Peer {} timed out on block {}@{}. Disconnecting.", peer_ip_clone, info_clone.piece_index, info_clone.offset);
+                                        // 2. Kill Session to release blocks back to Manager
+                                        let _ = manager_tx_clone.send(TorrentCommand::Disconnect(peer_ip_clone)).await;
+                                    }
+                                });
+                                // ---------------------
+
+                                permit.forget();
+                            } else {
+                                { let mut t = tracker.lock().await; t.remove(&info); }
+                                break;
+                            }
                         }
                     }
                 });
             }
 
             TorrentCommand::BulkCancel(cancels) => {
-                // 1. Send all network messages immediately (Non-blocking)
                 for (index, begin, len) in &cancels {
                     let _ = self.writer_tx.try_send(Message::Cancel(*index, *begin, *len));
-                    
-                    // Update smart cancel buffer (using try_lock is safe here because it's just an optimization)
                     if let Ok(mut buf) = self.cancellation_buffer.try_lock() {
                         if buf.len() >= MAX_PIPELINE_DEPTH { buf.pop_front(); }
                         buf.push_back((*index, *begin));
                     }
                 }
 
-                // 2. Refund Permits Asynchronously
-                // We clone the Arc references to move them into a background task
                 let tracker = self.block_tracker.clone();
                 let sem = self.block_request_limit_semaphore.clone();
                 
-                // Spawn ONE task to handle the locking/refunding for the whole batch
                 tokio::spawn(async move {
-                    // We acquire the lock ONCE for the whole batch
                     let mut tracker_guard = tracker.lock().await;
-                    
                     let mut permits_to_add = 0;
                     for (index, begin, length) in cancels {
-                        let info = BlockInfo { 
-                            piece_index: index, 
-                            offset: begin, 
-                            length 
-                        };
-                        
-                        // Check if this block was actually in-flight
-                        if tracker_guard.remove(&info) {
-                            permits_to_add += 1;
-                        }
+                        let info = BlockInfo { piece_index: index, offset: begin, length };
+                        if tracker_guard.remove(&info) { permits_to_add += 1; }
                     }
-
-                    // Batch refund the permits
-                    if permits_to_add > 0 {
-                        sem.add_permits(permits_to_add);
-                    }
+                    if permits_to_add > 0 { sem.add_permits(permits_to_add); }
                 });
             }
 
-            // --- SEEDING ---
             TorrentCommand::Upload(index, begin, data) => {
-                let _ = self
-                    .writer_tx
-                    .try_send(Message::Piece(index, begin, data));
+                let _ = self.writer_tx.try_send(Message::Piece(index, begin, data));
             }
-
-            // --- METADATA / PEX ---
             TorrentCommand::PeerBitfield(_, bf) => {
                 let _ = self.writer_tx.try_send(Message::Bitfield(bf));
             }
-
             #[cfg(feature = "pex")]
             TorrentCommand::SendPexPeers(peers) => {
                 self.handle_pex(peers);
             }
-
-            // --- HANDSHAKE / OTHER ---
             TorrentCommand::Have(_, idx) => {
                 let _ = self.writer_tx.try_send(Message::Have(idx));
             }
-
-            // --- SAFETY CATCH ---
-            // 'Block' command is OUTGOING only. If we receive it, it's a bug in Manager.
-            TorrentCommand::Block(..) => {
-                event!(Level::ERROR, "Logic Error: Session received Block command!");
-            }
-
-            // --- IGNORE / WILDCARD ---
-            // Handle events meant for Manager but routed here by mistake, or internal events
-            // like SuccessfullyConnected that don't require Session action.
-            _ => {
-                // event!(Level::TRACE, "Ignored manager command in session: {:?}", command);
-            }
+            _ => {}
         }
         Ok(true)
     }
 
     #[cfg(feature = "pex")]
     fn handle_pex(&self, peers_list: Vec<String>) {
-        if let Some(pex_id) = self
-            .peer_extended_id_mappings
-            .get(ClientExtendedId::UtPex.as_str())
-            .copied()
-        {
-            let added: Vec<u8> = peers_list
-                .iter()
+        if let Some(pex_id) = self.peer_extended_id_mappings.get(ClientExtendedId::UtPex.as_str()).copied() {
+            let added: Vec<u8> = peers_list.iter()
                 .filter(|&ip| *ip != self.peer_ip_port)
                 .filter_map(|ip| ip.parse::<std::net::SocketAddr>().ok())
                 .flat_map(|addr| match addr {
@@ -508,10 +524,7 @@ impl PeerSession {
                 .collect();
 
             if !added.is_empty() {
-                let msg = PexMessage {
-                    added,
-                    ..Default::default()
-                };
+                let msg = PexMessage { added, ..Default::default() };
                 if let Ok(payload) = serde_bencode::to_bytes(&msg) {
                     let _ = self.writer_tx.try_send(Message::Extended(pex_id, payload));
                 }
@@ -525,34 +538,15 @@ impl PeerSession {
         payload: Vec<u8>,
     ) -> Result<(), Box<dyn StdError + Send + Sync>> {
         if extended_id == ClientExtendedId::Handshake.id() {
-            if let Ok(handshake_data) =
-                serde_bencode::from_bytes::<ExtendedHandshakePayload>(&payload)
-            {
+            if let Ok(handshake_data) = serde_bencode::from_bytes::<ExtendedHandshakePayload>(&payload) {
                 self.peer_extended_id_mappings = handshake_data.m.clone();
-
                 if !handshake_data.m.is_empty() {
                     self.peer_extended_handshake_payload = Some(handshake_data.clone());
                     if !self.peer_session_established {
                         if let Some(_torrent_metadata_len) = handshake_data.metadata_size {
-                            let request = MetadataMessage {
-                                msg_type: 0,
-                                piece: 0,
-                                total_size: None,
-                            };
-                            match serde_bencode::to_bytes(&request) {
-                                Ok(payload_bytes) => {
-                                    let _ = self.writer_tx.try_send(Message::Extended(
-                                        ClientExtendedId::UtMetadata.id(),
-                                        payload_bytes,
-                                    ));
-                                }
-                                Err(e) => {
-                                    event!(
-                                        Level::ERROR,
-                                        "Failed to serialize metadata request: {}",
-                                        e
-                                    );
-                                }
+                            let request = MetadataMessage { msg_type: 0, piece: 0, total_size: None };
+                            if let Ok(payload_bytes) = serde_bencode::to_bytes(&request) {
+                                let _ = self.writer_tx.try_send(Message::Extended(ClientExtendedId::UtMetadata.id(), payload_bytes));
                             }
                         }
                     }
@@ -571,9 +565,7 @@ impl PeerSession {
                         new_peers.push((ip.to_string(), port));
                     }
                     if !new_peers.is_empty() {
-                        let _ = self.torrent_manager_tx.try_send(
-                            TorrentCommand::AddPexPeers(self.peer_ip_port.clone(), new_peers),
-                        );
+                        let _ = self.torrent_manager_tx.try_send(TorrentCommand::AddPexPeers(self.peer_ip_port.clone(), new_peers));
                     }
                 }
             }
@@ -583,12 +575,8 @@ impl PeerSession {
             if let Some(ref handshake_data) = self.peer_extended_handshake_payload {
                 if let Some(torrent_metadata_len) = handshake_data.metadata_size {
                     let torrent_metadata_len_usize = torrent_metadata_len as usize;
-
                     let current_offset = self.peer_torrent_metadata_piece_count * 16384;
-                    let expected_data_len = std::cmp::min(
-                        16384,
-                        torrent_metadata_len_usize.saturating_sub(current_offset),
-                    );
+                    let expected_data_len = std::cmp::min(16384, torrent_metadata_len_usize.saturating_sub(current_offset));
                     
                     if payload.len() >= expected_data_len {
                         let header_len = payload.len() - expected_data_len;
@@ -596,60 +584,21 @@ impl PeerSession {
                         self.peer_torrent_metadata_pieces.extend(metadata_binary);
 
                         if torrent_metadata_len_usize == self.peer_torrent_metadata_pieces.len() {
-                            let dht_info_result: Result<Info, _> =
-                                serde_bencode::from_bytes(&self.peer_torrent_metadata_pieces[..]);
-
-                            match dht_info_result {
-                                Ok(dht_info) => {
-                                    let _ = self.torrent_manager_tx.try_send(
-                                        TorrentCommand::DhtTorrent(
-                                            Torrent {
-                                                info_dict_bencode: self
-                                                    .peer_torrent_metadata_pieces
-                                                    .clone(),
-                                                info: dht_info,
-                                                announce: None,
-                                                announce_list: None,
-                                                url_list: None,
-                                                creation_date: None,
-                                                comment: None,
-                                                created_by: None,
-                                                encoding: None,
-                                            },
-                                            torrent_metadata_len,
-                                        ),
-                                    );
-                                }
-                                Err(e) => {
-                                    event!(
-                                        Level::WARN,
-                                        "Failed to decode torrent metadata from peer: {}",
-                                        e
-                                    );
-                                    return Err("Peer sent invalid torrent metadata".into());
-                                }
+                            if let Ok(dht_info) = serde_bencode::from_bytes(&self.peer_torrent_metadata_pieces[..]) {
+                                let _ = self.torrent_manager_tx.try_send(TorrentCommand::DhtTorrent(
+                                    Torrent {
+                                        info_dict_bencode: self.peer_torrent_metadata_pieces.clone(),
+                                        info: dht_info,
+                                        announce: None, announce_list: None, url_list: None, creation_date: None, comment: None, created_by: None, encoding: None,
+                                    },
+                                    torrent_metadata_len,
+                                ));
                             }
                         } else {
                             self.peer_torrent_metadata_piece_count += 1;
-                            let request = MetadataMessage {
-                                msg_type: 0,
-                                piece: self.peer_torrent_metadata_piece_count,
-                                total_size: None,
-                            };
-                            match serde_bencode::to_bytes(&request) {
-                                Ok(payload_bytes) => {
-                                    let _ = self.writer_tx.try_send(Message::Extended(
-                                        ClientExtendedId::UtMetadata.id(),
-                                        payload_bytes,
-                                    ));
-                                }
-                                Err(e) => {
-                                    event!(
-                                        Level::ERROR,
-                                        "Failed to serialize metadata request: {}",
-                                        e
-                                    );
-                                }
+                            let request = MetadataMessage { msg_type: 0, piece: self.peer_torrent_metadata_piece_count, total_size: None };
+                            if let Ok(payload_bytes) = serde_bencode::to_bytes(&request) {
+                                let _ = self.writer_tx.try_send(Message::Extended(ClientExtendedId::UtMetadata.id(), payload_bytes));
                             }
                         }
                     }
@@ -675,10 +624,10 @@ mod tests {
         mpsc::Sender<TorrentCommand>,   // Channel to command the Client (Manager -> Session)
         mpsc::Receiver<TorrentCommand>, // Channel to receive events from Client (Session -> Manager)
     ) {
-        let (client_socket, mock_peer_socket) = duplex(64 * 1024);
+        let (client_socket, mock_peer_socket) = duplex(64 * 1024 * 1024);
         let infinite_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
-        let (manager_tx, manager_rx) = mpsc::channel(100);
-        let (cmd_tx, cmd_rx) = mpsc::channel(100);
+        let (manager_tx, manager_rx) = mpsc::channel(1000);
+        let (cmd_tx, cmd_rx) = mpsc::channel(1000);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let params = PeerSessionParameters {
@@ -977,5 +926,187 @@ mod tests {
         }
         
         println!("SUCCESS: Session filtered out the unsolicited block.");
+    }
+
+
+    async fn spawn_debug_session() -> (
+        tokio::io::DuplexStream,
+        mpsc::Sender<TorrentCommand>,
+        mpsc::Receiver<TorrentCommand>,
+        tokio::task::JoinHandle<()>, // <--- Return the handle
+    ) {
+        // Use a large buffer to prevent blocking
+        let (client_socket, mock_peer_socket) = duplex(64 * 1024 * 1024);
+        let infinite_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+        let (manager_tx, manager_rx) = mpsc::channel(1000);
+        let (cmd_tx, cmd_rx) = mpsc::channel(1000);
+        let (shutdown_tx, _) = broadcast::channel(1);
+
+        let params = PeerSessionParameters {
+            info_hash: [0u8; 20].to_vec(),
+            torrent_metadata_length: None,
+            connection_type: ConnectionType::Outgoing,
+            torrent_manager_rx: cmd_rx,
+            torrent_manager_tx: manager_tx,
+            peer_ip_port: "virtual-peer:1337".to_string(),
+            client_id: b"-SS1000-TESTTESTTEST".to_vec(),
+            global_dl_bucket: infinite_bucket.clone(),
+            global_ul_bucket: infinite_bucket.clone(),
+            shutdown_tx,
+        };
+
+        let handle = tokio::spawn(async move {
+            let session = PeerSession::new(params);
+            match session.run(client_socket, vec![], Some(vec![])).await {
+                Ok(_) => println!("DEBUG: Session exited cleanly"),
+                Err(e) => {
+                    // This print is CRITICAL for seeing why it died
+                    println!("DEBUG: Session CRASHED with error: {:?}", e);
+                    // Force a panic here so the JoinHandle reports it as a panic to the test
+                    panic!("Session crashed: {:?}", e);
+                }
+            }
+        });
+
+        (mock_peer_socket, cmd_tx, manager_rx, handle)
+    }
+
+    #[tokio::test]
+    async fn test_heavy_load_20k_blocks_sliding_window() {
+        const TOTAL_BLOCKS: u32 = 20_000;
+        const PIPELINE_DEPTH: u32 = 128;
+        const BLOCK_SIZE: usize = 16384;
+
+        // 1. Setup Session using the DEBUG helper
+        let (mut network, client_cmd_tx, mut manager_event_rx, session_handle) = spawn_debug_session().await;
+
+        // 2. Handshake
+        let mut handshake_buf = vec![0u8; 68];
+        network.read_exact(&mut handshake_buf).await.expect("Handshake read failed");
+        let mut response = vec![0u8; 68];
+        response[0] = 19;
+        response[1..20].copy_from_slice(b"BitTorrent protocol");
+        response[20..28].copy_from_slice(&[0, 0, 0, 0, 0, 0x10, 0, 0]); 
+        network.write_all(&response).await.expect("Handshake write failed");
+
+        // 3. Mock Peer (High Perf)
+        let (mut peer_read, mut peer_write) = tokio::io::split(network);
+        tokio::spawn(async move {
+            let mut am_choking = true;
+            let dummy_data = vec![0xAA; BLOCK_SIZE];
+            loop {
+                // 30s timeout to prevent starvation
+                match timeout(Duration::from_secs(30), parse_message(&mut peer_read)).await {
+                    Ok(Ok(msg)) => match msg {
+                        Message::Interested => {
+                            if am_choking {
+                                let unchoke = generate_message(Message::Unchoke).unwrap();
+                                if peer_write.write_all(&unchoke).await.is_err() { break; }
+                                am_choking = false;
+                            }
+                        }
+                        Message::Request(index, begin, _len) => {
+                            if !am_choking {
+                                let piece_msg = generate_message(Message::Piece(index, begin, dummy_data.clone())).unwrap();
+                                if peer_write.write_all(&piece_msg).await.is_err() { break; }
+                            }
+                        }
+                        _ => {}
+                    },
+                    _ => break, 
+                }
+            }
+        });
+
+        // 4. Wait for Ready
+        // We add a check for the session handle here too, in case it dies during startup
+        loop {
+            tokio::select! {
+                res = manager_event_rx.recv() => match res {
+                    Some(TorrentCommand::SuccessfullyConnected(_)) => break,
+                    Some(TorrentCommand::PeerBitfield(..)) => break,
+                    Some(_) => continue,
+                    None => {
+                        println!("Session died during startup. checking handle...");
+                        let _ = session_handle.await; 
+                        panic!("Session died during startup (Manager RX Closed)");
+                    }
+                },
+                _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("Timeout waiting for connect"),
+            }
+        }
+
+        client_cmd_tx.send(TorrentCommand::ClientInterested).await.unwrap();
+
+        // Wait for Unchoke
+        loop {
+            tokio::select! {
+                res = manager_event_rx.recv() => match res {
+                    Some(TorrentCommand::Unchoke(_)) => break,
+                    Some(_) => continue,
+                    None => {
+                        let _ = session_handle.await;
+                        panic!("Session died waiting for Unchoke");
+                    }
+                },
+                _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("Timeout waiting for Unchoke"),
+            }
+        }
+
+        // 5. Stress Test
+        println!("Starting transfer of {} blocks...", TOTAL_BLOCKS);
+        tokio::task::yield_now().await;
+
+        let start_time = Instant::now();
+        let mut blocks_requested = 0;
+        let mut blocks_received = 0;
+
+        let initial_batch: Vec<_> = (0..PIPELINE_DEPTH)
+            .map(|i| { blocks_requested += 1; (i, 0, BLOCK_SIZE as u32) })
+            .collect();
+        
+        client_cmd_tx.send(TorrentCommand::BulkRequest(initial_batch)).await.expect("Failed to send initial batch");
+
+        while blocks_received < TOTAL_BLOCKS {
+            tokio::select! {
+                res = manager_event_rx.recv() => match res {
+                    Some(TorrentCommand::Block(..)) => {
+                        blocks_received += 1;
+                        if blocks_requested < TOTAL_BLOCKS {
+                            let req = vec![(blocks_requested, 0, BLOCK_SIZE as u32)];
+                            if client_cmd_tx.send(TorrentCommand::BulkRequest(req)).await.is_err() {
+                                break; // Session dead
+                            }
+                            blocks_requested += 1;
+                        }
+                        if blocks_received % 5000 == 0 {
+                            println!("Progress: {}/{}", blocks_received, TOTAL_BLOCKS);
+                        }
+                    },
+                    Some(_) => continue,
+                    None => {
+                        println!("!!! SESSION DIED PREMATURELY - Awaiting Handle for Panic Info !!!");
+                        // Await the handle to print the panic message from the spawned task
+                        if let Err(e) = session_handle.await {
+                            if e.is_panic() {
+                                std::panic::resume_unwind(e.into_panic());
+                            } else {
+                                panic!("Session task cancelled or failed: {:?}", e);
+                            }
+                        }
+                        panic!("Session closed manager channel but exited cleanly?");
+                    }
+                },
+                _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                    panic!("Stalled: No blocks received for 10s");
+                }
+            }
+        }
+        
+        // Assert success
+        assert_eq!(blocks_received, TOTAL_BLOCKS);
+        let elapsed = start_time.elapsed();
+        let mb = (TOTAL_BLOCKS as f64 * BLOCK_SIZE as f64) / 1024.0 / 1024.0;
+        println!("DONE: {:.2} MB in {:.2?} ({:.2} MB/s)", mb, elapsed, mb / elapsed.as_secs_f64());
     }
 }

@@ -195,7 +195,7 @@ impl TorrentManager {
         info_dict_hasher.update(&torrent.info_dict_bencode);
         let info_hash = info_dict_hasher.finalize();
 
-        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(100_000);
+        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(1000);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         #[cfg(feature = "dht")]
@@ -336,7 +336,7 @@ impl TorrentManager {
             );
         }
 
-        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(100_000);
+        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(1000);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         #[cfg(feature = "dht")]
@@ -1178,7 +1178,7 @@ impl TorrentManager {
         event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
-        //return Ok(Vec::new());
+        return Ok(Vec::new());
         let num_pieces = torrent.info.pieces.len() / 20;
         if skip_hashing {
             event!(
@@ -1589,7 +1589,7 @@ impl TorrentManager {
         let mut shutdown_rx_session = self.shutdown_tx.subscribe();
         let shutdown_tx = self.shutdown_tx.clone();
 
-        let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(10_000);
+        let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(1000);
         self.apply_action(Action::RegisterPeer {
             peer_id: peer_ip_port.clone(),
             tx: peer_session_tx,
@@ -3065,56 +3065,55 @@ mod resource_tests {
         let timeout_duration = Duration::from_secs(30);
         const CHUNK_SIZE: u32 = 10;
         
-// --- REPLACE THE check_loop IN test_pipelined_download_two_thousand_blocks ---
-let check_loop = async {
-    let mut chunk_timestamps = vec![Instant::now()];
-    let mut next_chunk_target = 10;
-    
-    // 1. We accumulate the download volume manually
-    let mut accumulated_download: u64 = 0; 
+        let check_loop = async {
+            let mut chunk_timestamps = vec![Instant::now()];
+            let mut next_chunk_target = 10;
+            
+            // 1. We accumulate the download volume manually
+            let mut accumulated_download: u64 = 0; 
 
-    loop {
-        match timeout(Duration::from_secs(1), metrics_rx.recv()).await {
-            Ok(Ok(m)) => {
-                // 2. Add the bytes from this tick to our total
-                accumulated_download += m.bytes_downloaded_this_tick;
+            loop {
+                match timeout(Duration::from_secs(1), metrics_rx.recv()).await {
+                    Ok(Ok(m)) => {
+                        // 2. Add the bytes from this tick to our total
+                        accumulated_download += m.bytes_downloaded_this_tick;
 
-                // Print status occasionally
-                if m.number_of_pieces_completed % 10 == 0 {
-                     println!("STATUS: Completed {}/{} pieces. Acc DL: {}/{}", 
-                        m.number_of_pieces_completed, NUM_PIECES,
-                        accumulated_download, m.total_size);
-                }
+                        // Print status occasionally
+                        if m.number_of_pieces_completed % 10 == 0 {
+                             println!("STATUS: Completed {}/{} pieces. Acc DL: {}/{}", 
+                                m.number_of_pieces_completed, NUM_PIECES,
+                                accumulated_download, m.total_size);
+                        }
 
-                // 3. DETECT INFINITE LOOP
-                // If we downloaded 2x the file size but haven't finished, 
-                // it means writes are failing and we are re-downloading.
-                if accumulated_download > (m.total_size as u64 * 2) {
-                    panic!("CRITICAL: Downloaded {} bytes (accumulated), but file size is {}. We are looping (Write Failure)!", 
-                        accumulated_download, m.total_size);
-                }
+                        // 3. DETECT INFINITE LOOP
+                        // If we downloaded 2x the file size but haven't finished, 
+                        // it means writes are failing and we are re-downloading.
+                        if accumulated_download > (m.total_size as u64 * 2) {
+                            panic!("CRITICAL: Downloaded {} bytes (accumulated), but file size is {}. We are looping (Write Failure)!", 
+                                accumulated_download, m.total_size);
+                        }
 
-                // SUCCESS CONDITION
-                if m.number_of_pieces_completed >= NUM_PIECES as u32 {
-                    chunk_timestamps.push(Instant::now());
-                    break;
-                }
-                
-                // Track timestamps
-                if m.number_of_pieces_completed >= next_chunk_target {
-                    chunk_timestamps.push(Instant::now());
-                    next_chunk_target += 10;
+                        // SUCCESS CONDITION
+                        if m.number_of_pieces_completed >= NUM_PIECES as u32 {
+                            chunk_timestamps.push(Instant::now());
+                            break;
+                        }
+                        
+                        // Track timestamps
+                        if m.number_of_pieces_completed >= next_chunk_target {
+                            chunk_timestamps.push(Instant::now());
+                            next_chunk_target += 10;
+                        }
+                    }
+                    Ok(Err(_)) => break, // Channel closed
+                    Err(_) => {
+                        // Timeout fired
+                        println!("... No activity for 1s. Current Acc DL: {} ...", accumulated_download);
+                    }
                 }
             }
-            Ok(Err(_)) => break, // Channel closed
-            Err(_) => {
-                // Timeout fired
-                println!("... No activity for 1s. Current Acc DL: {} ...", accumulated_download);
-            }
-        }
-    }
-    chunk_timestamps
-};
+            chunk_timestamps
+        };
 
         let timestamps = match timeout(timeout_duration, check_loop).await {
             Ok(ts) => ts,

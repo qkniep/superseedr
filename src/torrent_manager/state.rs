@@ -591,115 +591,109 @@ impl TorrentState {
             }
 
             Action::AssignWork { peer_id } => {
-                // Guard 1: Status Check
-                if self.torrent_status == TorrentStatus::Validating {
-                    return vec![Effect::DoNothing];
-                }
-                if self.piece_manager.bitfield.is_empty() {
-                    return vec![Effect::DoNothing];
-                }
-                // Guard 2: Global Work Check
-                if self.piece_manager.need_queue.is_empty() && self.piece_manager.pending_queue.is_empty() {
-                    return vec![Effect::DoNothing];
-                }
-                if self.torrent.is_none() {
-                    return vec![Effect::DoNothing];
-                }
+                // --- GUARDS ---
+                if self.torrent_status == TorrentStatus::Validating { return vec![Effect::DoNothing]; }
+                if self.piece_manager.bitfield.is_empty() { return vec![Effect::DoNothing]; }
+                if self.piece_manager.need_queue.is_empty() && self.piece_manager.pending_queue.is_empty() { return vec![Effect::DoNothing]; }
+                if self.torrent.is_none() { return vec![Effect::DoNothing]; }
 
                 let mut effects = Vec::new();
                 let mut request_batch = Vec::new();
+                
+                // Safe separation: Get Peer Mutably, but don't hold it while accessing self methods if possible.
+                // However, we only access self.piece_manager fields which are distinct from self.peers.
+                // Rust splitting borrows usually handles this, but we will be careful.
+                
+                let peer_opt = self.peers.get_mut(&peer_id);
+                if peer_opt.is_none() { return effects; }
+                let peer = peer_opt.unwrap();
 
-                if let Some(peer) = self.peers.get_mut(&peer_id) {
+                // --- 1. INTEREST LOGIC ---
+                let has_needed_pieces = !peer.bitfield.is_empty() && 
+                    (self.piece_manager.need_queue.iter().any(|&p| peer.bitfield.get(p as usize) == Some(&true)) ||
+                     self.piece_manager.pending_queue.keys().any(|&p| peer.bitfield.get(p as usize) == Some(&true)));
+                
+                let has_pending_requests = !peer.pending_requests.is_empty();
+                let should_be_interested = has_needed_pieces || has_pending_requests;
 
-                    // --- INSERT THIS LOG ---
-                    if peer.inflight_requests == 0 && !self.piece_manager.need_queue.is_empty() {
-                        // We have work needed, and peer is idle. Why aren't we assigning?
-                        let choked = peer.peer_choking == ChokeStatus::Choke;
-                        let interested = peer.am_interested;
-                        // This log will flood if normal, so check if we actually generate requests later
-                        if choked {
-                             // Trace is fine here
-                             // event!(Level::TRACE, "Peer {} is idle because they choked us", peer_id);
-                        }
-                    }
+                if should_be_interested && !peer.am_interested {
+                    peer.am_interested = true;
+                    effects.push(Effect::SendToPeer { peer_id: peer_id.clone(), cmd: Box::new(TorrentCommand::ClientInterested) });
+                } else if !should_be_interested && peer.am_interested {
+                    peer.am_interested = false;
+                    effects.push(Effect::SendToPeer { peer_id: peer_id.clone(), cmd: Box::new(TorrentCommand::NotInterested) });
+                }
+
+                if peer.peer_choking == ChokeStatus::Choke { return effects; }
+                if peer.bitfield.is_empty() { return effects; }
+
+                // --- 2. PIPELINE CAPACITY ---
+                let current_inflight = peer.inflight_requests;
+                let max_depth = MAX_PIPELINE_DEPTH;
+                
+                if current_inflight >= max_depth { return effects; }
+                let mut available_slots = max_depth - current_inflight;
+
+                // --- 3. PHASE 1: FILL FROM BACKLOG (Pending Requests) ---
+                // We inline the logic here to avoid E0502
+                let mut pending_pieces: Vec<u32> = peer.pending_requests.iter().cloned().collect();
+                pending_pieces.sort(); 
+
+                for piece_index in pending_pieces {
+                    if available_slots == 0 { break; }
                     
-                    if peer.inflight_requests == 0 && !peer.active_blocks.is_empty() {
-                        event!(Level::WARN, "HEALING: Found {} zombie blocks for {} with 0 inflight. Clearing.", peer.active_blocks.len(), peer_id);
-                        peer.active_blocks.clear();
-                    }
+                    // -- INLINED REQUEST GENERATION --
+                    let (start, end) = self.piece_manager.block_manager.get_block_range(piece_index);
+                    let assembler_mask = self.piece_manager.block_manager.legacy_buffers
+                        .get(&piece_index)
+                        .map(|a| a.mask.clone());
 
-                    // --- Interest Logic ---
-                    let has_needed_pieces = !peer.bitfield.is_empty()
-                        && self.piece_manager.need_queue.iter().any(|&p| peer.bitfield.get(p as usize) == Some(&true));
+                    for global_block_idx in start..end {
+                        if available_slots == 0 { break; }
 
-                    let has_pending_requests = !peer.pending_requests.is_empty();
-                    let should_be_interested = has_needed_pieces || has_pending_requests;
-
-                    if should_be_interested && !peer.am_interested {
-                        peer.am_interested = true;
-                        effects.push(Effect::SendToPeer { peer_id: peer_id.clone(), cmd: Box::new(TorrentCommand::ClientInterested) });
-                    } else if !should_be_interested && peer.am_interested {
-                        peer.am_interested = false;
-                        effects.push(Effect::SendToPeer { peer_id: peer_id.clone(), cmd: Box::new(TorrentCommand::NotInterested) });
-                    }
-
-                    // Guard 3: Choke Check
-                    if peer.peer_choking == ChokeStatus::Choke { return effects; }
-                    if peer.bitfield.is_empty() { return effects; }
-
-                    // Guard 4: Capacity Check
-                    if peer.inflight_requests >= MAX_PIPELINE_DEPTH { return effects; }
-
-
-                    // PHASE 1: Fill pipeline with currently pending pieces
-                    let mut pending_pieces: Vec<u32> = peer.pending_requests.iter().cloned().collect();
-                    pending_pieces.sort(); // Ensure deterministic order for tests
-                    
-                    for piece_index in pending_pieces {
-                        if peer.inflight_requests >= MAX_PIPELINE_DEPTH { break; }
-
-                        let (start, end) = self.piece_manager.block_manager.get_block_range(piece_index);
-                        let assembler_mask = self.piece_manager.block_manager.legacy_buffers
-                            .get(&piece_index)
-                            .map(|a| a.mask.clone());
-
-                        for global_block_idx in start..end {
-                            if peer.inflight_requests >= MAX_PIPELINE_DEPTH { break; }
-
-                            if self.piece_manager.block_manager.block_bitfield.get(global_block_idx as usize) == Some(&true) { continue; }
-                            
-                            let local_block_idx = global_block_idx - start;
-                            if let Some(mask) = &assembler_mask {
-                                if mask.get(local_block_idx as usize) == Some(&true) { continue; }
-                            }
-
-                            let addr = self.piece_manager.block_manager.inflate_address(global_block_idx);
-
-                            if peer.active_blocks.contains(&(addr.piece_index, addr.byte_offset, addr.length)) {
-                                continue;
-                            }
-
-                            peer.active_blocks.insert((addr.piece_index, addr.byte_offset, addr.length));
-                            peer.inflight_requests += 1;
-                            request_batch.push((addr.piece_index, addr.byte_offset, addr.length));
+                        // Is it globally done?
+                        if self.piece_manager.block_manager.block_bitfield.get(global_block_idx as usize) == Some(&true) { continue; }
+                        
+                        // Is it buffered?
+                        let local_block_idx = global_block_idx - start;
+                        if let Some(mask) = &assembler_mask {
+                            if mask.get(local_block_idx as usize) == Some(&true) { continue; }
                         }
+
+                        let addr = self.piece_manager.block_manager.inflate_address(global_block_idx);
+                        
+                        // Is peer already working on it?
+                        if peer.active_blocks.contains(&(addr.piece_index, addr.byte_offset, addr.length)) { continue; }
+                        
+                        request_batch.push((addr.piece_index, addr.byte_offset, addr.length));
+                        peer.active_blocks.insert((addr.piece_index, addr.byte_offset, addr.length));
+                        available_slots -= 1;
                     }
+                    // -- END INLINED LOGIC --
+                }
 
-                    // PHASE 2: If pipeline still has room, pick NEW pieces
-                    while peer.inflight_requests < MAX_PIPELINE_DEPTH {
-                        let piece_to_assign = self.piece_manager.choose_piece_for_peer(
-                            &peer.bitfield,
-                            &peer.pending_requests,
-                            &self.torrent_status,
-                        );
+                // --- 4. PHASE 2: FILL FROM NEW PIECES ---
+                while available_slots > 0 {
+                    // Step A: Immutable Borrow (Choose)
+                    let choice = self.piece_manager.choose_piece_for_peer(
+                        &peer.bitfield,
+                        &peer.pending_requests,
+                        &self.torrent_status
+                    );
 
-                        if let Some(piece_index) = piece_to_assign {
+                    match choice {
+                        Some(piece_index) => {
+                            // Step B: Mutable Borrow (Mark Pending) - Safe because Step A is done
                             self.piece_manager.mark_as_pending(piece_index, peer_id.clone());
                             peer.pending_requests.insert(piece_index);
-
+                            
                             if self.piece_manager.need_queue.is_empty() && self.torrent_status != TorrentStatus::Endgame {
                                 self.torrent_status = TorrentStatus::Endgame;
                             }
+
+                            // Step C: Immutable Borrow (Block Manager) - Safe because Step B is done
+                            // We capture length to detect 0-request loops
+                            let initial_batch_len = request_batch.len();
 
                             let (start, end) = self.piece_manager.block_manager.get_block_range(piece_index);
                             let assembler_mask = self.piece_manager.block_manager.legacy_buffers
@@ -707,51 +701,42 @@ impl TorrentState {
                                 .map(|a| a.mask.clone());
 
                             for global_block_idx in start..end {
-                                if peer.inflight_requests >= MAX_PIPELINE_DEPTH { break; }
+                                if available_slots == 0 { break; }
 
                                 if self.piece_manager.block_manager.block_bitfield.get(global_block_idx as usize) == Some(&true) { continue; }
+
                                 let local_block_idx = global_block_idx - start;
                                 if let Some(mask) = &assembler_mask {
                                     if mask.get(local_block_idx as usize) == Some(&true) { continue; }
                                 }
 
                                 let addr = self.piece_manager.block_manager.inflate_address(global_block_idx);
+                                if peer.active_blocks.contains(&(addr.piece_index, addr.byte_offset, addr.length)) { continue; }
 
-                                if peer.active_blocks.contains(&(addr.piece_index, addr.byte_offset, addr.length)) {
-                                    continue;
-                                }
-
-                                peer.active_blocks.insert((addr.piece_index, addr.byte_offset, addr.length));
-                                peer.inflight_requests += 1;
                                 request_batch.push((addr.piece_index, addr.byte_offset, addr.length));
+                                peer.active_blocks.insert((addr.piece_index, addr.byte_offset, addr.length));
+                                available_slots -= 1;
                             }
-                        } else {
-                            break;
+
+                            // INFINITE LOOP PROTECTION:
+                            // If we picked a piece but generated NO requests (e.g. piece was active but 0 blocks needed),
+                            // we must break. Otherwise we'd loop infinitely because 'available_slots' wouldn't decrease
+                            // and 'choose_piece_for_peer' might pick the same piece again (depending on implementation).
+                            if request_batch.len() == initial_batch_len {
+                                break;
+                            }
                         }
+                        None => break, // No more pieces
                     }
                 }
 
+                // --- 5. COMMIT ---
                 if !request_batch.is_empty() {
+                    peer.inflight_requests += request_batch.len();
                     effects.push(Effect::SendToPeer {
                         peer_id: peer_id.clone(),
-                        cmd: Box::new(TorrentCommand::BulkRequest(request_batch.clone())),
+                        cmd: Box::new(TorrentCommand::BulkRequest(request_batch)),
                     });
-                }
-
-
-                if let Some(peer) = self.peers.get_mut(&peer_id) {
-
-                    if request_batch.clone().is_empty() 
-                       && peer.inflight_requests == 0 
-                       && !self.piece_manager.need_queue.is_empty() 
-                       && peer.peer_choking == ChokeStatus::Unchoke 
-                    {
-                         tracing::event!(
-                            Level::ERROR, 
-                            "STALL DETECTED: Peer {} is Unchoked, Idle, and we Need pieces, but AssignWork produced NO requests. Check Bitfield overlap!", 
-                            peer_id
-                         );
-                    }
                 }
 
                 effects
@@ -922,45 +907,42 @@ impl TorrentState {
 
                 let mut effects = Vec::new();
                 let len = data.len() as u64;
+                
+                // Determine if this block is actually needed (not redundant).
+                // We perform accounting only for useful blocks to prevent metric inflation.
+                let is_piece_done = self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done);
 
-                // 2. Global Metrics Updates
-                self.bytes_downloaded_in_interval =
-                    self.bytes_downloaded_in_interval.saturating_add(len);
-                self.session_total_downloaded = self.session_total_downloaded.saturating_add(len);
+                // 2. Global Metrics Updates (Conditional)
+                if !is_piece_done {
+                    self.bytes_downloaded_in_interval =
+                        self.bytes_downloaded_in_interval.saturating_add(len);
+                    self.session_total_downloaded = self.session_total_downloaded.saturating_add(len);
+                }
 
-                // 3. Peer State Updates (CRITICAL FIX)
-                // We MUST perform this accounting before checking if the piece is Done.
-                // If we return early, 'inflight_requests' will leak (remain high), 
-                // eventually stopping 'AssignWork' from triggering.
+                // 3. Peer State Updates
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
-                    peer.bytes_downloaded_from_peer += len;
-                    peer.bytes_downloaded_in_tick += len;
-                    peer.total_bytes_downloaded += len;
-                    
-                    // Decrement inflight requests for every block received
+                    // CRITICAL: Always decrement inflight requests, even for redundant blocks.
+                    // If we don't, the pipeline counts never decrease, causing a stall.
                     peer.inflight_requests = peer.inflight_requests.saturating_sub(1);
 
                     let block_len = data.len() as u32;
                     peer.active_blocks.remove(&(piece_index, block_offset, block_len));
+
+                    // Only credit the peer if the block was useful
+                    if !is_piece_done {
+                        peer.bytes_downloaded_from_peer += len;
+                        peer.bytes_downloaded_in_tick += len;
+                        peer.total_bytes_downloaded += len;
+                    }
                 }
                 
                 effects.push(Effect::EmitManagerEvent(ManagerEvent::BlockReceived {
                     info_hash: self.info_hash.clone(),
                 }));
 
-                // 4. Refill Pipeline (Work Assignment)
-                // We check the low water mark immediately to keep the pipe saturated.
-                if let Some(peer) = self.peers.get(&peer_id) {
-                    let low_water_mark = MAX_PIPELINE_DEPTH / 2;
-                    if peer.inflight_requests <= low_water_mark {
-                         effects.extend(self.update(Action::AssignWork { peer_id: peer_id.clone() }));
-                    }
-                }
 
                 // 5. Early Exit: Piece already Done?
-                // Now that we've updated metrics and inflight counts, it is safe to return.
-                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done)
-                {
+                if is_piece_done {
                     return effects;
                 }
 
@@ -983,6 +965,16 @@ impl TorrentState {
                         piece_index,
                         data: complete_data,
                     });
+                }
+
+
+                // 4. Refill Pipeline (Work Assignment)
+                if let Some(peer) = self.peers.get(&peer_id) {
+                    let low_water_mark = MAX_PIPELINE_DEPTH / 2;
+                    if peer.inflight_requests <= low_water_mark {
+                        //event!(Level::INFO, "PEER REFILLING WORK: {}", peer_id);
+                         effects.extend(self.update(Action::AssignWork { peer_id: peer_id.clone() }));
+                    }
                 }
 
                 effects
