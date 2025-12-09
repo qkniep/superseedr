@@ -80,7 +80,6 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::watch;
-use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
