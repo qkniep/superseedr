@@ -47,8 +47,6 @@ impl TokenBucket {
         }
     }
 
-
-
     pub fn set_rate(&self, new_fill_rate: f64) {
         let rate = new_fill_rate.max(0.0);
         let infinite = !rate.is_finite() || rate == 0.0;

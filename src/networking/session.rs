@@ -95,8 +95,6 @@ pub struct PeerSession {
     block_tracker: Arc<Mutex<HashSet<BlockInfo>>>,
     block_request_limit_semaphore: Arc<Semaphore>,
 
-
-
     peer_extended_id_mappings: HashMap<String, u8>,
     peer_extended_handshake_payload: Option<ExtendedHandshakePayload>,
     peer_torrent_metadata_piece_count: usize,
@@ -846,7 +844,9 @@ mod tests {
         tokio::spawn(async move {
             let mut am_choking = true;
 
-            while let Ok(Ok(msg)) = timeout(Duration::from_secs(5), parse_message(&mut peer_read)).await {
+            while let Ok(Ok(msg)) =
+                timeout(Duration::from_secs(5), parse_message(&mut peer_read)).await
+            {
                 match msg {
                     Message::Interested => {
                         if am_choking {
@@ -1097,12 +1097,9 @@ mod tests {
                     }
                     Message::Request(index, begin, _len) => {
                         if !am_choking {
-                            let piece_msg = generate_message(Message::Piece(
-                                index,
-                                begin,
-                                dummy_data.clone(),
-                            ))
-                            .unwrap();
+                            let piece_msg =
+                                generate_message(Message::Piece(index, begin, dummy_data.clone()))
+                                    .unwrap();
                             if peer_write.write_all(&piece_msg).await.is_err() {
                                 break;
                             }

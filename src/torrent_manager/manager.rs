@@ -148,8 +148,6 @@ pub struct TorrentManager {
 
     global_dl_bucket: Arc<TokenBucket>,
     global_ul_bucket: Arc<TokenBucket>,
-
-
 }
 
 impl TorrentManager {
@@ -264,7 +262,6 @@ impl TorrentManager {
             resource_manager,
             global_dl_bucket,
             global_ul_bucket,
-
         })
     }
 
@@ -378,7 +375,6 @@ impl TorrentManager {
             resource_manager,
             global_dl_bucket,
             global_ul_bucket,
-
         })
     }
 
@@ -3104,7 +3100,6 @@ mod resource_tests {
         // --- 4. Wait for Completion & Measure Performance ---
         let start = Instant::now();
         let timeout_duration = Duration::from_secs(30);
-
 
         let check_loop = async {
             let mut chunk_timestamps = vec![Instant::now()];

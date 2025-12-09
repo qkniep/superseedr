@@ -23,7 +23,6 @@ use tracing::{event, Level};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-
 #[derive(Debug)]
 pub enum MessageGenerationError {
     PayloadTooLarge(String),
@@ -97,7 +96,6 @@ pub struct ExtendedHandshakePayload {
     pub metadata_size: Option<i64>,
 }
 
-
 #[derive(Debug, PartialEq, Clone)]
 pub enum Message {
     Handshake(Vec<u8>, Vec<u8>),
@@ -123,7 +121,6 @@ pub struct BlockInfo {
     pub offset: u32,
     pub length: u32,
 }
-
 
 pub async fn writer_task<W>(
     mut stream_write_half: W,
