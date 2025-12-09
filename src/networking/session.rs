@@ -5,7 +5,7 @@ use crate::torrent_file::Info;
 use crate::torrent_file::Torrent;
 
 use super::protocol::{
-    parse_message, writer_task, BlockInfo, ClientExtendedId,
+     writer_task, reader_task, BlockInfo, ClientExtendedId,
     ExtendedHandshakePayload, Message, MessageSummary, MetadataMessage,
 };
 
@@ -83,8 +83,8 @@ pub struct PeerSessionParameters {
     pub torrent_manager_tx: Sender<TorrentCommand>,
     pub peer_ip_port: String,
     pub client_id: Vec<u8>,
-    pub global_dl_bucket: Arc<Mutex<TokenBucket>>,
-    pub global_ul_bucket: Arc<Mutex<TokenBucket>>,
+    pub global_dl_bucket: Arc<TokenBucket>,
+    pub global_ul_bucket: Arc<TokenBucket>,
     pub shutdown_tx: broadcast::Sender<()>,
 }
 
@@ -111,8 +111,8 @@ pub struct PeerSession {
     peer_torrent_metadata_piece_count: usize,
     peer_torrent_metadata_pieces: Vec<u8>,
 
-    global_dl_bucket: Arc<Mutex<TokenBucket>>,
-    global_ul_bucket: Arc<Mutex<TokenBucket>>,
+    global_dl_bucket: Arc<TokenBucket>,
+    global_ul_bucket: Arc<TokenBucket>,
 
     shutdown_tx: broadcast::Sender<()>,
 }
@@ -133,7 +133,6 @@ impl PeerSession {
             peer_ip_port: params.peer_ip_port,
             writer_rx: Some(writer_rx),
             writer_tx,
-            // PEER_BLOCK_IN_FLIGHT_LIMIT is 8
             block_tracker: Arc::new(Mutex::new(HashSet::new())),
             block_request_limit_semaphore: Arc::new(Semaphore::new(PEER_BLOCK_IN_FLIGHT_LIMIT)),
             block_upload_limit_semaphore: Arc::new(Semaphore::new(PEER_BLOCK_IN_FLIGHT_LIMIT)),
@@ -220,31 +219,15 @@ impl PeerSession {
             let _ = self.torrent_manager_tx.try_send(TorrentCommand::SuccessfullyConnected(self.peer_ip_port.clone()));
         }
 
-        // This task owns the read half and never gets cancelled by timers/manager events.
         let (peer_msg_tx, mut peer_msg_rx) = mpsc::channel::<Message>(100);
-        let mut reader_shutdown = self.shutdown_tx.subscribe();
-        
-        let reader_handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    result = parse_message(&mut stream_read_half) => {
-                        match result {
-                            Ok(msg) => {
-                                if peer_msg_tx.send(msg).await.is_err() {
-                                    break; // Main loop dropped receiver
-                                }
-                            }
-                            Err(e) => {
-                                // Socket error or EOF
-                                tracing::event!(Level::DEBUG, "Reader Error: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                    _ = reader_shutdown.recv() => break,
-                }
-            }
-        });
+        let reader_shutdown = self.shutdown_tx.subscribe();
+        let dl_bucket = self.global_dl_bucket.clone();
+        let reader_handle = tokio::spawn(reader_task(
+            stream_read_half,
+            peer_msg_tx,
+            dl_bucket,
+            reader_shutdown,
+        ));
         let _reader_abort_guard = AbortOnDrop(reader_handle);
 
         // 5. Main Event Loop
@@ -423,7 +406,7 @@ impl PeerSession {
                                     if t.remove(&info_clone) {
                                         // 1. Reclaim Permit
                                         sem_clone.add_permits(1);
-                                        tracing::event!(Level::ERROR, "💀 ZOMBIE REAPER: Peer {} timed out on block {}@{}. Disconnecting.", peer_ip_clone, info_clone.piece_index, info_clone.offset);
+                                        tracing::event!(Level::DEBUG, "ZOMBIE REAPER: Peer {} timed out on block {}@{}. Disconnecting.", peer_ip_clone, info_clone.piece_index, info_clone.offset);
                                         // 2. Kill Session to release blocks back to Manager
                                         let _ = manager_tx_clone.send(TorrentCommand::Disconnect(peer_ip_clone)).await;
                                     }

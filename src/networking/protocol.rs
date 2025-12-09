@@ -4,19 +4,20 @@
 use crate::token_bucket::consume_tokens;
 use crate::token_bucket::TokenBucket;
 
-use tokio::sync::Mutex;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::error::Error as StdError;
-use std::io::{Error, ErrorKind};
 use std::sync::Arc;
+use std::io::{Error, ErrorKind, Read};
+
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
+use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 
 use serde::{Deserialize, Serialize};
 
@@ -173,7 +174,7 @@ pub async fn writer_task<W>(
     mut stream_write_half: W,
     mut write_rx: Receiver<Message>,
     error_tx: oneshot::Sender<Box<dyn StdError + Send + Sync>>,
-    _global_ul_bucket: Arc<Mutex<TokenBucket>>,
+    global_ul_bucket: Arc<TokenBucket>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) where
     W: AsyncWriteExt + Unpin + Send + 'static,
@@ -228,6 +229,10 @@ pub async fn writer_task<W>(
 
                         // 3. Flush the batch to the socket
                         if !batch_buffer.is_empty() {
+
+                            let len = batch_buffer.len();
+                            consume_tokens(&global_ul_bucket, len as f64).await;
+
                             if let Err(e) = stream_write_half.write_all(&batch_buffer).await {
                                 let _ = error_tx.send(e.into());
                                 break;
@@ -238,6 +243,75 @@ pub async fn writer_task<W>(
                         event!(Level::TRACE, "Writer channel closed.");
                         break;
                     }
+                }
+            }
+        }
+    }
+}
+
+pub async fn reader_task<R>(
+    mut stream_read_half: R,
+    mut session_tx: mpsc::Sender<Message>,
+    global_dl_bucket: Arc<TokenBucket>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) 
+where
+    R: AsyncReadExt + Unpin + Send + 'static,
+{
+    // 16KB + overhead buffer for socket reads
+    let mut socket_buf = vec![0u8; 16384 + 1024]; 
+    // Buffer to hold partial messages across reads
+    let mut processing_buf = Vec::with_capacity(65536);
+
+    loop {
+        tokio::select! {
+            // Priority: Shutdown
+            _ = shutdown_rx.recv() => {
+                event!(Level::TRACE, "Reader task shutting down.");
+                break;
+            }
+
+            // Read from socket
+            read_result = stream_read_half.read(&mut socket_buf) => {
+                match read_result {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        // A. THROTTLE DOWNLOAD
+                        // We "pay" for the bytes before processing them.
+                        consume_tokens(&global_dl_bucket, n as f64).await;
+
+                        // B. BUFFER
+                        processing_buf.extend_from_slice(&socket_buf[..n]);
+
+                        // C. PARSE LOOP
+                        loop {
+                            // Use cursor to read without consuming if incomplete
+                            let mut cursor = std::io::Cursor::new(&processing_buf);
+                            
+                            match parse_message_from_bytes(&mut cursor) {
+                                Ok(msg) => {
+                                    let consumed = cursor.position() as usize;
+                                    
+                                    // Send to Session
+                                    if session_tx.send(msg).await.is_err() {
+                                        return; // Session died
+                                    }
+                                    
+                                    // Remove processed bytes
+                                    processing_buf.drain(0..consumed);
+                                }
+                                Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                                    // Need more data
+                                    break;
+                                }
+                                Err(e) => {
+                                    event!(Level::ERROR, "Protocol error: {}", e);
+                                    return; // Disconnect on corrupt stream
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => break, // Socket error
                 }
             }
         }
@@ -350,110 +424,133 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
     }
 }
 
-pub async fn parse_message(
-    socket: &mut (impl AsyncReadExt + Unpin),
+pub fn parse_message_from_bytes(
+    cursor: &mut std::io::Cursor<&Vec<u8>>,
 ) -> Result<Message, std::io::Error> {
-    let mut buffer_message_len = [0u8; 4];
-    let _ = socket.read_exact(&mut buffer_message_len).await?;
-    let message_len = u32::from_be_bytes(buffer_message_len);
+    // 1. Read Length Prefix (4 bytes)
+    let mut len_buf = [0u8; 4];
+    
+    if std::io::Read::read_exact(cursor, &mut len_buf).is_err() {
+        // Not enough bytes for length
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+    }
+    let message_len = u32::from_be_bytes(len_buf);
 
+    // KeepAlive (Len 0)
     if message_len == 0 {
         return Ok(Message::KeepAlive);
     }
 
-    let mut buffer_message_id = [0u8; 1];
-    let _ = socket.read_exact(&mut buffer_message_id).await?;
-    let message_id: usize = u8::from_be_bytes(buffer_message_id).into();
+    // 2. Check if we have the full message payload
+    let current_pos = cursor.position();
+    let available_bytes = cursor.get_ref().len() as u64 - current_pos;
 
+    if available_bytes < message_len as u64 {
+        // Not enough bytes for the payload yet.
+        // Rewind to the start of the length prefix so we can retry later.
+        cursor.set_position(current_pos - 4);
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+    }
+
+    // 3. Read Message ID (1 byte)
+    let mut id_buf = [0u8; 1];
+    
+    // FIX: Disambiguate explicitly
+    std::io::Read::read_exact(cursor, &mut id_buf)?;
+    
+    let message_id = id_buf[0];
+
+    // 4. Read Payload (Len - 1 bytes)
+    let payload_len = message_len as usize - 1;
+    let mut payload = vec![0u8; payload_len];
+    
+    // FIX: Disambiguate explicitly
+    std::io::Read::read_exact(cursor, &mut payload)?;
+
+    // 5. Decode Message
     match message_id {
+        // ... (rest of the function remains the same)
         0 => Ok(Message::Choke),
         1 => Ok(Message::Unchoke),
         2 => Ok(Message::Interested),
         3 => Ok(Message::NotInterested),
         4 => {
-            let mut message_payload: Vec<u8> = vec![0; (message_len - 1) as usize];
-            let _ = socket.read_exact(&mut message_payload).await?;
-            let byte_array: [u8; 4] = message_payload.try_into().map_err(|_| {
-                Error::new(
-                    ErrorKind::InvalidData,
-                    "Incorrect payload size for HAVE message",
-                )
-            })?;
-            Ok(Message::Have(u32::from_be_bytes(byte_array)))
+            // Have
+            if payload.len() != 4 {
+                return Err(Error::new(ErrorKind::InvalidData, "Invalid payload size for Have"));
+            }
+            let idx_bytes: [u8; 4] = payload.try_into().unwrap();
+            Ok(Message::Have(u32::from_be_bytes(idx_bytes)))
         }
         5 => {
-            let mut message_payload: Vec<u8> = vec![0; (message_len - 1) as usize];
-            let _ = socket.read_exact(&mut message_payload).await?;
-            Ok(Message::Bitfield(message_payload))
+            // Bitfield
+            Ok(Message::Bitfield(payload))
         }
         6 => {
-            let mut buffer_message_index = [0u8; 4];
-            let mut buffer_message_begin = [0u8; 4];
-            let mut buffer_message_len = [0u8; 4];
-
-            let _ = socket.read_exact(&mut buffer_message_index).await?;
-            let _ = socket.read_exact(&mut buffer_message_begin).await?;
-            let _ = socket.read_exact(&mut buffer_message_len).await?;
-
+            // Request
+            if payload.len() != 12 {
+                return Err(Error::new(ErrorKind::InvalidData, "Invalid payload size for Request"));
+            }
+            let (i, rest) = payload.split_at(4);
+            let (b, l) = rest.split_at(4);
             Ok(Message::Request(
-                u32::from_be_bytes(buffer_message_index),
-                u32::from_be_bytes(buffer_message_begin),
-                u32::from_be_bytes(buffer_message_len),
+                u32::from_be_bytes(i.try_into().unwrap()),
+                u32::from_be_bytes(b.try_into().unwrap()),
+                u32::from_be_bytes(l.try_into().unwrap()),
             ))
         }
         7 => {
-            let mut buffer_message_index = [0u8; 4];
-            let mut buffer_message_begin = [0u8; 4];
-
-            let _ = socket.read_exact(&mut buffer_message_index).await?;
-            let _ = socket.read_exact(&mut buffer_message_begin).await?;
-
-            let mut message_payload: Vec<u8> = vec![0; (message_len - 9) as usize];
-            let _ = socket.read_exact(&mut message_payload).await?;
-
+            // Piece
+            if payload.len() < 8 {
+                return Err(Error::new(ErrorKind::InvalidData, "Invalid payload size for Piece"));
+            }
+            let (i, rest) = payload.split_at(4);
+            let (b, data) = rest.split_at(4);
             Ok(Message::Piece(
-                u32::from_be_bytes(buffer_message_index),
-                u32::from_be_bytes(buffer_message_begin),
-                message_payload,
+                u32::from_be_bytes(i.try_into().unwrap()),
+                u32::from_be_bytes(b.try_into().unwrap()),
+                data.to_vec(),
             ))
         }
         8 => {
-            let mut buffer_message_index = [0u8; 4];
-            let mut buffer_message_begin = [0u8; 4];
-            let mut buffer_message_len = [0u8; 4];
-
-            let _ = socket.read_exact(&mut buffer_message_index).await?;
-            let _ = socket.read_exact(&mut buffer_message_begin).await?;
-            let _ = socket.read_exact(&mut buffer_message_len).await?;
-
+            // Cancel
+            if payload.len() != 12 {
+                return Err(Error::new(ErrorKind::InvalidData, "Invalid payload size for Cancel"));
+            }
+            let (i, rest) = payload.split_at(4);
+            let (b, l) = rest.split_at(4);
             Ok(Message::Cancel(
-                u32::from_be_bytes(buffer_message_index),
-                u32::from_be_bytes(buffer_message_begin),
-                u32::from_be_bytes(buffer_message_len),
+                u32::from_be_bytes(i.try_into().unwrap()),
+                u32::from_be_bytes(b.try_into().unwrap()),
+                u32::from_be_bytes(l.try_into().unwrap()),
             ))
         }
         9 => {
-            let mut buffer_message_port = [0u8; 4];
-            let _ = socket.read_exact(&mut buffer_message_port).await?;
-            Ok(Message::Port(u32::from_be_bytes(buffer_message_port)))
+            // Port
+            if payload.len() != 4 {
+                return Err(Error::new(ErrorKind::InvalidData, "Invalid payload size for Port"));
+            }
+            let port_bytes: [u8; 4] = payload.try_into().unwrap();
+            Ok(Message::Port(u32::from_be_bytes(port_bytes)))
         }
         20 => {
-            let mut extended_id_buf = [0u8; 1];
-            socket.read_exact(&mut extended_id_buf).await?;
-            let extended_id = extended_id_buf[0];
-
-            let payload_len = message_len - 2;
-            let mut payload = vec![0u8; payload_len as usize];
-            socket.read_exact(&mut payload).await?;
-
-            Ok(Message::Extended(extended_id, payload))
+            // Extended
+            if payload.is_empty() {
+                return Err(Error::new(ErrorKind::InvalidData, "Empty payload for Extended message"));
+            }
+            let extended_id = payload[0];
+            let extended_payload = payload[1..].to_vec();
+            Ok(Message::Extended(extended_id, extended_payload))
         }
         _ => {
-            let error_message = format!("Invalid message ID received from peer: {}", message_id);
-            Err(Error::new(ErrorKind::InvalidData, error_message))
+            // Unknown ID
+            let msg = format!("Unknown message ID: {}", message_id);
+            Err(Error::new(ErrorKind::InvalidData, msg))
         }
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {

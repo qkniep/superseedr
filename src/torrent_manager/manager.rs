@@ -147,8 +147,8 @@ pub struct TorrentManager {
     settings: Arc<Settings>,
     resource_manager: ResourceManagerClient,
 
-    global_dl_bucket: Arc<Mutex<TokenBucket>>,
-    global_ul_bucket: Arc<Mutex<TokenBucket>>,
+    global_dl_bucket: Arc<TokenBucket>,
+    global_ul_bucket: Arc<TokenBucket>,
 
     verification_semaphore: Arc<Semaphore>,
 }
