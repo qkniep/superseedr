@@ -47,10 +47,7 @@ impl TokenBucket {
         }
     }
 
-    pub fn get_rate(&self) -> f64 {
-        let guard = self.inner.lock().unwrap();
-        guard.fill_rate
-    }
+
 
     pub fn set_rate(&self, new_fill_rate: f64) {
         let rate = new_fill_rate.max(0.0);
@@ -84,6 +81,11 @@ impl TokenBucket {
     #[cfg(test)]
     pub fn set_tokens(&self, val: f64) {
         self.inner.lock().unwrap().tokens = val;
+    }
+
+    #[cfg(test)]
+    fn get_fill_rate(&self) -> f64 {
+        self.inner.lock().unwrap().fill_rate
     }
 }
 
@@ -170,7 +172,7 @@ mod tests {
     fn test_token_bucket_new() {
         let bucket = TokenBucket::new(100.0, 10.0);
         assert!((bucket.get_capacity() - 100.0).abs() < TOLERANCE);
-        assert!((bucket.get_rate() - 10.0).abs() < TOLERANCE);
+        assert!((bucket.get_fill_rate() - 10.0).abs() < TOLERANCE);
         assert!((bucket.get_tokens() - 100.0).abs() < TOLERANCE);
     }
 
@@ -178,7 +180,7 @@ mod tests {
     fn test_token_bucket_new_zero_rate() {
         let bucket = TokenBucket::new(100.0, 0.0);
         assert!(bucket.get_capacity().is_infinite());
-        assert!(bucket.get_rate() == 0.0);
+        assert!(bucket.get_fill_rate() == 0.0);
         assert!(bucket.get_tokens().is_infinite());
         assert!(bucket.is_infinite.load(Ordering::Relaxed));
     }
@@ -222,7 +224,7 @@ mod tests {
         let bucket = TokenBucket::new(100.0, 10.0);
         bucket.set_tokens(50.0);
         bucket.set_rate(200.0);
-        assert!((bucket.get_rate() - 200.0).abs() < TOLERANCE);
+        assert!((bucket.get_fill_rate() - 200.0).abs() < TOLERANCE);
         assert!((bucket.get_capacity() - 200.0).abs() < TOLERANCE);
         assert!((bucket.get_tokens() - 200.0).abs() < TOLERANCE);
         assert!(!bucket.is_infinite.load(Ordering::Relaxed));
@@ -233,7 +235,7 @@ mod tests {
         let bucket = TokenBucket::new(100.0, 10.0);
         bucket.set_tokens(50.0);
         bucket.set_rate(0.0);
-        assert!(bucket.get_rate() == 0.0);
+        assert!(bucket.get_fill_rate() == 0.0);
         assert!(bucket.get_capacity().is_infinite());
         assert!(bucket.get_tokens().is_infinite());
         assert!(bucket.is_infinite.load(Ordering::Relaxed));

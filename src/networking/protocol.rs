@@ -4,20 +4,16 @@
 use crate::token_bucket::consume_tokens;
 use crate::token_bucket::TokenBucket;
 
-
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::error::Error as StdError;
+use std::io::{Error, ErrorKind};
 use std::sync::Arc;
-use std::io::{Error, ErrorKind, Read};
-
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
-use tokio::sync::mpsc;
 
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +23,6 @@ use tracing::{event, Level};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-const STANDARD_BLOCK_SIZE: u32 = 16384;
 
 #[derive(Debug)]
 pub enum MessageGenerationError {
@@ -102,28 +97,6 @@ pub struct ExtendedHandshakePayload {
     pub metadata_size: Option<i64>,
 }
 
-pub struct MessageSummary<'a>(pub &'a Message);
-impl fmt::Debug for MessageSummary<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Message::Bitfield(bitfield) => {
-                write!(f, "BITFIELD(len: {})", bitfield.len())
-            }
-            Message::Piece(index, begin, data) => {
-                write!(
-                    f,
-                    "PIECE(index: {}, begin: {}, len: {})",
-                    index,
-                    begin,
-                    data.len()
-                )
-            }
-
-            Message::Handshake(_, _) => write!(f, "HANDSHAKE(...)"),
-            other => write!(f, "{:?}", other),
-        }
-    }
-}
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Message {
@@ -151,24 +124,6 @@ pub struct BlockInfo {
     pub length: u32,
 }
 
-pub fn calculate_blocks_for_piece(piece_index: u32, piece_size: u32) -> HashSet<BlockInfo> {
-    let mut blocks = HashSet::new();
-
-    let mut current_offset = 0;
-    while current_offset < piece_size {
-        let block_length = std::cmp::min(STANDARD_BLOCK_SIZE, piece_size - current_offset);
-
-        blocks.insert(BlockInfo {
-            piece_index,
-            offset: current_offset,
-            length: block_length,
-        });
-
-        current_offset += block_length;
-    }
-
-    blocks
-}
 
 pub async fn writer_task<W>(
     mut stream_write_half: W,
@@ -254,12 +209,11 @@ pub async fn reader_task<R>(
     session_tx: mpsc::Sender<Message>,
     global_dl_bucket: Arc<TokenBucket>,
     mut shutdown_rx: broadcast::Receiver<()>,
-) 
-where
+) where
     R: AsyncReadExt + Unpin + Send + 'static,
 {
     // 16KB + overhead buffer for socket reads
-    let mut socket_buf = vec![0u8; 16384 + 1024]; 
+    let mut socket_buf = vec![0u8; 16384 + 1024];
     // Buffer to hold partial messages across reads
     let mut processing_buf = Vec::with_capacity(65536);
 
@@ -287,16 +241,16 @@ where
                         loop {
                             // Use cursor to read without consuming if incomplete
                             let mut cursor = std::io::Cursor::new(&processing_buf);
-                            
+
                             match parse_message_from_bytes(&mut cursor) {
                                 Ok(msg) => {
                                     let consumed = cursor.position() as usize;
-                                    
+
                                     // Send to Session
                                     if session_tx.send(msg).await.is_err() {
                                         return; // Session died
                                     }
-                                    
+
                                     // Remove processed bytes
                                     processing_buf.drain(0..consumed);
                                 }
@@ -429,7 +383,7 @@ pub fn parse_message_from_bytes(
 ) -> Result<Message, std::io::Error> {
     // 1. Read Length Prefix (4 bytes)
     let mut len_buf = [0u8; 4];
-    
+
     if std::io::Read::read_exact(cursor, &mut len_buf).is_err() {
         // Not enough bytes for length
         return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
@@ -454,16 +408,16 @@ pub fn parse_message_from_bytes(
 
     // 3. Read Message ID (1 byte)
     let mut id_buf = [0u8; 1];
-    
+
     // FIX: Disambiguate explicitly
     std::io::Read::read_exact(cursor, &mut id_buf)?;
-    
+
     let message_id = id_buf[0];
 
     // 4. Read Payload (Len - 1 bytes)
     let payload_len = message_len as usize - 1;
     let mut payload = vec![0u8; payload_len];
-    
+
     // FIX: Disambiguate explicitly
     std::io::Read::read_exact(cursor, &mut payload)?;
 
@@ -477,7 +431,10 @@ pub fn parse_message_from_bytes(
         4 => {
             // Have
             if payload.len() != 4 {
-                return Err(Error::new(ErrorKind::InvalidData, "Invalid payload size for Have"));
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid payload size for Have",
+                ));
             }
             let idx_bytes: [u8; 4] = payload.try_into().unwrap();
             Ok(Message::Have(u32::from_be_bytes(idx_bytes)))
@@ -489,7 +446,10 @@ pub fn parse_message_from_bytes(
         6 => {
             // Request
             if payload.len() != 12 {
-                return Err(Error::new(ErrorKind::InvalidData, "Invalid payload size for Request"));
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid payload size for Request",
+                ));
             }
             let (i, rest) = payload.split_at(4);
             let (b, l) = rest.split_at(4);
@@ -502,7 +462,10 @@ pub fn parse_message_from_bytes(
         7 => {
             // Piece
             if payload.len() < 8 {
-                return Err(Error::new(ErrorKind::InvalidData, "Invalid payload size for Piece"));
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid payload size for Piece",
+                ));
             }
             let (i, rest) = payload.split_at(4);
             let (b, data) = rest.split_at(4);
@@ -515,7 +478,10 @@ pub fn parse_message_from_bytes(
         8 => {
             // Cancel
             if payload.len() != 12 {
-                return Err(Error::new(ErrorKind::InvalidData, "Invalid payload size for Cancel"));
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid payload size for Cancel",
+                ));
             }
             let (i, rest) = payload.split_at(4);
             let (b, l) = rest.split_at(4);
@@ -528,7 +494,10 @@ pub fn parse_message_from_bytes(
         9 => {
             // Port
             if payload.len() != 4 {
-                return Err(Error::new(ErrorKind::InvalidData, "Invalid payload size for Port"));
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid payload size for Port",
+                ));
             }
             let port_bytes: [u8; 4] = payload.try_into().unwrap();
             Ok(Message::Port(u32::from_be_bytes(port_bytes)))
@@ -536,7 +505,10 @@ pub fn parse_message_from_bytes(
         20 => {
             // Extended
             if payload.is_empty() {
-                return Err(Error::new(ErrorKind::InvalidData, "Empty payload for Extended message"));
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Empty payload for Extended message",
+                ));
             }
             let extended_id = payload[0];
             let extended_payload = payload[1..].to_vec();
@@ -549,8 +521,6 @@ pub fn parse_message_from_bytes(
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

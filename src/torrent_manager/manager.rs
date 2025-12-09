@@ -73,7 +73,6 @@ use urlencoding::decode;
 use data_encoding::BASE32;
 
 use sha1::{Digest, Sha1};
-use tokio::sync::Semaphore;
 use tokio::fs;
 use tokio::net::TcpStream;
 use tokio::signal;
@@ -81,6 +80,7 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::watch;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
@@ -149,7 +149,7 @@ pub struct TorrentManager {
     global_dl_bucket: Arc<TokenBucket>,
     global_ul_bucket: Arc<TokenBucket>,
 
-    verification_semaphore: Arc<Semaphore>,
+
 }
 
 impl TorrentManager {
@@ -233,7 +233,6 @@ impl TorrentManager {
         )
         .map_err(|e| format!("Failed to initialize file manager: {}", e))?;
 
-
         let parallel_limit = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -270,7 +269,7 @@ impl TorrentManager {
             resource_manager,
             global_dl_bucket,
             global_ul_bucket,
-            verification_semaphore,
+
         })
     }
 
@@ -389,7 +388,7 @@ impl TorrentManager {
             resource_manager,
             global_dl_bucket,
             global_ul_bucket,
-            verification_semaphore,
+
         })
     }
 
@@ -417,17 +416,17 @@ impl TorrentManager {
             Effect::SendToPeer { peer_id, cmd } => {
                 if let Some(peer) = self.state.peers.get(&peer_id) {
                     let tx = peer.peer_tx.clone();
-                    let command = *cmd; 
+                    let command = *cmd;
                     let pid = peer_id.clone();
-                    
+
                     // 1. Get a shutdown listener for this specific task
                     let mut shutdown_rx = self.shutdown_tx.subscribe();
 
                     let capacity = tx.capacity();
                     let max_cap = tx.max_capacity();
                     if capacity == 0 {
-                         event!(
-                            Level::WARN, 
+                        event!(
+                            Level::WARN,
                             "⚠️  PEER CHANNEL FULL: Peer {} - Capacity {}/{} - {:?} is blocked or slow to process commands.", 
                             pid,
                             capacity,
@@ -1982,12 +1981,12 @@ impl TorrentManager {
                         }
                     }
 
-                    let cmd_len = self.torrent_manager_rx.len();
-                    let cmd_cap = self.torrent_manager_rx.capacity();
-                    let write_tasks = self.in_flight_writes.len();
-                    let upload_tasks = self.in_flight_uploads.len();
-                    let pending_pieces = self.state.piece_manager.pending_queue.len();
-                    let need_pieces = self.state.piece_manager.need_queue.len();
+                    let _cmd_len = self.torrent_manager_rx.len();
+                    let _cmd_cap = self.torrent_manager_rx.capacity();
+                    let _write_tasks = self.in_flight_writes.len();
+                    let _upload_tasks = self.in_flight_uploads.len();
+                    let _pending_pieces = self.state.piece_manager.pending_queue.len();
+                    let _need_pieces = self.state.piece_manager.need_queue.len();
 
                     self.apply_action(Action::Tick { dt_ms: actual_ms });
                 }
@@ -2655,34 +2654,44 @@ mod resource_tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         // --- 1. Setup Environment ---
-        let temp_dir = std::env::temp_dir().join(format!("superseedr_test_{}", rand::random::<u32>()));
-        let _ = std::fs::remove_dir_all(&temp_dir); 
+        let temp_dir =
+            std::env::temp_dir().join(format!("superseedr_test_{}", rand::random::<u32>()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         const BLOCK_SIZE: usize = 16_384;
-        
+
         // Setup channels
         let (_incoming_tx, incoming_rx) = mpsc::channel(10);
         let (cmd_tx, cmd_rx) = mpsc::channel(10);
-        
+
         // CRITICAL: Drain event channel to prevent manager internal deadlock
         let (event_tx, mut event_rx) = mpsc::channel(100);
-        tokio::spawn(async move {
-            while event_rx.recv().await.is_some() {}
-        });
+        tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
 
         let (metrics_tx, mut metrics_rx) = broadcast::channel(100);
         let (shutdown_tx, _) = broadcast::channel(1);
-        
-        let mut settings_val = Settings::default();
-        settings_val.client_id = "-SS0001-123456789012".to_string(); // Exactly 20 bytes
+
+        let settings_val = Settings {
+            client_id: "-SS0001-123456789012".to_string(), // Exactly 20 bytes
+            ..Default::default()
+        };
         let settings = Arc::new(settings_val);
 
         // Resources
         let mut limits = HashMap::new();
-        limits.insert(crate::resource_manager::ResourceType::PeerConnection, (1000, 1000));
-        limits.insert(crate::resource_manager::ResourceType::DiskRead, (1000, 1000));
-        limits.insert(crate::resource_manager::ResourceType::DiskWrite, (1000, 1000));
+        limits.insert(
+            crate::resource_manager::ResourceType::PeerConnection,
+            (1000, 1000),
+        );
+        limits.insert(
+            crate::resource_manager::ResourceType::DiskRead,
+            (1000, 1000),
+        );
+        limits.insert(
+            crate::resource_manager::ResourceType::DiskWrite,
+            (1000, 1000),
+        );
         limits.insert(crate::resource_manager::ResourceType::Reserve, (0, 0));
         let (resource_manager, rm_client) = ResourceManager::new(limits, shutdown_tx.clone());
         tokio::spawn(resource_manager.run());
@@ -2692,7 +2701,7 @@ mod resource_tests {
         let ul_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
 
         // Create Torrent (1 Piece of 0xAA)
-        let piece_hash = sha1::Sha1::digest(&vec![0xAA; BLOCK_SIZE]).to_vec();
+        let piece_hash = sha1::Sha1::digest(vec![0xAA; BLOCK_SIZE]).to_vec();
         let torrent = Torrent {
             announce: None,
             announce_list: None,
@@ -2706,7 +2715,7 @@ mod resource_tests {
                 private: None,
                 md5sum: None,
             },
-            info_dict_bencode: vec![0u8; 20], 
+            info_dict_bencode: vec![0u8; 20],
             created_by: None,
             creation_date: None,
             encoding: None,
@@ -2715,8 +2724,14 @@ mod resource_tests {
 
         let params = TorrentParameters {
             dht_handle: {
-                #[cfg(feature = "dht")] { mainline::Dht::builder().port(0).build().unwrap().as_async() }
-                #[cfg(not(feature = "dht"))] { () }
+                #[cfg(feature = "dht")]
+                {
+                    mainline::Dht::builder().port(0).build().unwrap().as_async()
+                }
+                #[cfg(not(feature = "dht"))]
+                {
+                    ()
+                }
             },
             incoming_peer_rx: incoming_rx,
             metrics_tx,
@@ -2746,7 +2761,9 @@ mod resource_tests {
             let (tx, mut rx) = mpsc::channel::<Vec<u8>>(100);
             tokio::spawn(async move {
                 while let Some(data) = rx.recv().await {
-                    if wr.write_all(&data).await.is_err() { break; }
+                    if wr.write_all(&data).await.is_err() {
+                        break;
+                    }
                 }
             });
 
@@ -2772,13 +2789,15 @@ mod resource_tests {
                     let mut h_resp = vec![0u8; 68];
                     h_resp[0] = 19;
                     h_resp[1..20].copy_from_slice(b"BitTorrent protocol");
-                    h_resp[20..28].copy_from_slice(&[0; 8]); 
+                    h_resp[20..28].copy_from_slice(&[0; 8]);
                     h_resp[28..48].copy_from_slice(&buffer[28..48]); // Echo InfoHash
-                    for i in 48..68 { h_resp[i] = 1; } // Dummy PeerID
+                    for item in h_resp.iter_mut().take(68).skip(48) {
+                        *item = 1;
+                    } // Dummy PeerID
                     tx.send(h_resp).await.unwrap();
 
                     // B. Send Bitfield (0x80 = Piece 0 available)
-                    let bitfield = vec![0x80u8]; 
+                    let bitfield = vec![0x80u8];
                     let mut msg = Vec::new();
                     msg.extend_from_slice(&(1 + bitfield.len() as u32).to_be_bytes());
                     msg.push(5);
@@ -2791,12 +2810,15 @@ mod resource_tests {
                 // 2. Process Messages
                 while handshake_received && buffer.len() >= 4 {
                     let len = u32::from_be_bytes(buffer[0..4].try_into().unwrap()) as usize;
-                    if buffer.len() < 4 + len { break; }
+                    if buffer.len() < 4 + len {
+                        break;
+                    }
 
-                    let msg_frame = &buffer[4..4+len];
+                    let msg_frame = &buffer[4..4 + len];
                     if !msg_frame.is_empty() {
                         match msg_frame[0] {
-                            2 => { // Interested
+                            2 => {
+                                // Interested
                                 println!("[MockPeer] Client is Interested");
                                 if am_choking {
                                     println!("[MockPeer] Unchoking Client...");
@@ -2804,12 +2826,15 @@ mod resource_tests {
                                     am_choking = false;
                                 }
                             }
-                            6 => { // Request
+                            6 => {
+                                // Request
                                 println!("[MockPeer] Client Requested Piece 0");
                                 if msg_frame.len() >= 13 {
-                                    let index = u32::from_be_bytes(msg_frame[1..5].try_into().unwrap());
-                                    let begin = u32::from_be_bytes(msg_frame[5..9].try_into().unwrap());
-                                    
+                                    let index =
+                                        u32::from_be_bytes(msg_frame[1..5].try_into().unwrap());
+                                    let begin =
+                                        u32::from_be_bytes(msg_frame[5..9].try_into().unwrap());
+
                                     // Send 0xAA data
                                     let data = vec![0xAA; BLOCK_SIZE];
                                     let total_len = 9 + data.len() as u32;
@@ -2819,7 +2844,7 @@ mod resource_tests {
                                     resp.extend_from_slice(&index.to_be_bytes());
                                     resp.extend_from_slice(&begin.to_be_bytes());
                                     resp.extend_from_slice(&data);
-                                    
+
                                     let _ = tx.send(resp).await;
                                     println!("[MockPeer] Sent Block Data");
                                 }
@@ -2827,13 +2852,15 @@ mod resource_tests {
                             _ => {}
                         }
                     }
-                    buffer.drain(0..4+len);
+                    buffer.drain(0..4 + len);
                 }
             }
         });
 
         // --- 3. Run Manager ---
-        manager.connect_to_peer(peer_addr.ip().to_string(), peer_addr.port()).await;
+        manager
+            .connect_to_peer(peer_addr.ip().to_string(), peer_addr.port())
+            .await;
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
         });
@@ -2841,7 +2868,7 @@ mod resource_tests {
         // --- 4. Wait for Completion ---
         let start = Instant::now();
         let timeout_duration = Duration::from_secs(10);
-        
+
         let check_loop = async {
             loop {
                 if let Ok(m) = metrics_rx.recv().await {
@@ -2870,7 +2897,8 @@ mod resource_tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         // --- 1. Setup Environment ---
-        let temp_dir = std::env::temp_dir().join(format!("superseedr_test_{}", rand::random::<u32>()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("superseedr_test_{}", rand::random::<u32>()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
@@ -2882,24 +2910,33 @@ mod resource_tests {
         // Setup channels
         let (_incoming_tx, incoming_rx) = mpsc::channel(10);
         let (cmd_tx, cmd_rx) = mpsc::channel(10);
-        
+
         let (event_tx, mut event_rx) = mpsc::channel(100);
-        tokio::spawn(async move {
-            while event_rx.recv().await.is_some() {}
-        });
+        tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
 
         let (metrics_tx, mut metrics_rx) = broadcast::channel(100);
         let (shutdown_tx, _) = broadcast::channel(1);
-        
-        let mut settings_val = Settings::default();
-        settings_val.client_id = "-SS0001-123456789012".to_string();
+
+        let settings_val = Settings {
+            client_id: "-SS0001-123456789012".to_string(),
+            ..Default::default()
+        };
         let settings = Arc::new(settings_val);
 
         // Resources
         let mut limits = HashMap::new();
-        limits.insert(crate::resource_manager::ResourceType::PeerConnection, (100_000, 100_000));
-        limits.insert(crate::resource_manager::ResourceType::DiskRead, (100_000, 100_000));
-        limits.insert(crate::resource_manager::ResourceType::DiskWrite, (100_000, 100_000));
+        limits.insert(
+            crate::resource_manager::ResourceType::PeerConnection,
+            (100_000, 100_000),
+        );
+        limits.insert(
+            crate::resource_manager::ResourceType::DiskRead,
+            (100_000, 100_000),
+        );
+        limits.insert(
+            crate::resource_manager::ResourceType::DiskWrite,
+            (100_000, 100_000),
+        );
         limits.insert(crate::resource_manager::ResourceType::Reserve, (0, 0));
         let (resource_manager, rm_client) = ResourceManager::new(limits, shutdown_tx.clone());
         tokio::spawn(resource_manager.run());
@@ -2912,7 +2949,7 @@ mod resource_tests {
         let mut all_piece_hashes = Vec::new();
         let piece_data: Vec<u8> = (0..PIECE_SIZE).map(|i| (i % 256) as u8).collect();
         for _ in 0..NUM_PIECES {
-            all_piece_hashes.extend_from_slice(&sha1::Sha1::digest(&piece_data).to_vec());
+            all_piece_hashes.extend_from_slice(&sha1::Sha1::digest(&piece_data));
         }
 
         let torrent = Torrent {
@@ -2928,7 +2965,7 @@ mod resource_tests {
                 private: None,
                 md5sum: None,
             },
-            info_dict_bencode: vec![0u8; 20], 
+            info_dict_bencode: vec![0u8; 20],
             created_by: None,
             creation_date: None,
             encoding: None,
@@ -2937,8 +2974,14 @@ mod resource_tests {
 
         let params = TorrentParameters {
             dht_handle: {
-                #[cfg(feature = "dht")] { mainline::Dht::builder().port(0).build().unwrap().as_async() }
-                #[cfg(not(feature = "dht"))] { () }
+                #[cfg(feature = "dht")]
+                {
+                    mainline::Dht::builder().port(0).build().unwrap().as_async()
+                }
+                #[cfg(not(feature = "dht"))]
+                {
+                    ()
+                }
             },
             incoming_peer_rx: incoming_rx,
             metrics_tx,
@@ -2953,12 +2996,11 @@ mod resource_tests {
         };
 
         let mut manager = TorrentManager::from_torrent(params, torrent.clone()).unwrap();
-        let info_hash = {
+        let _info_hash = {
             let mut hasher = Sha1::new();
             hasher.update(&torrent.info_dict_bencode);
             hasher.finalize().to_vec()
         };
-
 
         // --- 2. Setup Mock Peer ---
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2967,11 +3009,13 @@ mod resource_tests {
         tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let (mut rd, mut wr) = socket.into_split();
-            
+
             let (tx, mut rx) = mpsc::channel::<Vec<u8>>(10_000); // Increased channel size for pipelining
             tokio::spawn(async move {
                 while let Some(data) = rx.recv().await {
-                    if wr.write_all(&data).await.is_err() { break; }
+                    if wr.write_all(&data).await.is_err() {
+                        break;
+                    }
                 }
             });
 
@@ -2998,7 +3042,7 @@ mod resource_tests {
                     h_resp[48..68].copy_from_slice(b"-TR2940-k8x1y2z3b4c5");
                     tx.send(h_resp).await.unwrap();
 
-                    let bitfield = vec![0xFF; (NUM_PIECES + 7) / 8];
+                    let bitfield = vec![0xFF; NUM_PIECES.div_ceil(8)];
                     let mut msg = Vec::new();
                     msg.extend_from_slice(&(1 + bitfield.len() as u32).to_be_bytes());
                     msg.push(5);
@@ -3010,24 +3054,33 @@ mod resource_tests {
 
                 while handshake_received && buffer.len() >= 4 {
                     let len = u32::from_be_bytes(buffer[0..4].try_into().unwrap()) as usize;
-                    if buffer.len() < 4 + len { break; }
+                    if buffer.len() < 4 + len {
+                        break;
+                    }
 
-                    let msg_frame = &buffer[4..4+len];
+                    let msg_frame = &buffer[4..4 + len];
                     if !msg_frame.is_empty() {
                         match msg_frame[0] {
-                            2 => { // Interested
+                            2 => {
+                                // Interested
                                 if am_choking {
                                     let _ = tx.send(vec![0, 0, 0, 1, 1]).await; // Unchoke
                                     am_choking = false;
                                 }
                             }
-                            6 => { // Request
+                            6 => {
+                                // Request
                                 if msg_frame.len() >= 13 {
-                                    let index = u32::from_be_bytes(msg_frame[1..5].try_into().unwrap());
-                                    let begin = u32::from_be_bytes(msg_frame[5..9].try_into().unwrap());
-                                    let length = u32::from_be_bytes(msg_frame[9..13].try_into().unwrap());
-                                    
-                                    let data: Vec<u8> = (0..length as usize).map(|i| ((begin as usize + i) % 256) as u8).collect();
+                                    let index =
+                                        u32::from_be_bytes(msg_frame[1..5].try_into().unwrap());
+                                    let begin =
+                                        u32::from_be_bytes(msg_frame[5..9].try_into().unwrap());
+                                    let length =
+                                        u32::from_be_bytes(msg_frame[9..13].try_into().unwrap());
+
+                                    let data: Vec<u8> = (0..length as usize)
+                                        .map(|i| ((begin as usize + i) % 256) as u8)
+                                        .collect();
 
                                     let total_len = 9 + data.len() as u32;
                                     let mut resp = Vec::with_capacity(total_len as usize + 4);
@@ -3036,20 +3089,22 @@ mod resource_tests {
                                     resp.extend_from_slice(&index.to_be_bytes());
                                     resp.extend_from_slice(&begin.to_be_bytes());
                                     resp.extend_from_slice(&data);
-                                    
+
                                     let _ = tx.send(resp).await;
                                 }
                             }
                             _ => {}
                         }
                     }
-                    buffer.drain(0..4+len);
+                    buffer.drain(0..4 + len);
                 }
             }
         });
-        
+
         // --- 3. Run Manager ---
-        manager.connect_to_peer(peer_addr.ip().to_string(), peer_addr.port()).await;
+        manager
+            .connect_to_peer(peer_addr.ip().to_string(), peer_addr.port())
+            .await;
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
         });
@@ -3059,14 +3114,14 @@ mod resource_tests {
         // --- 4. Wait for Completion & Measure Performance ---
         let start = Instant::now();
         let timeout_duration = Duration::from_secs(30);
-        const CHUNK_SIZE: u32 = 10;
-        
+
+
         let check_loop = async {
             let mut chunk_timestamps = vec![Instant::now()];
             let mut next_chunk_target = 10;
-            
+
             // 1. We accumulate the download volume manually
-            let mut accumulated_download: u64 = 0; 
+            let mut accumulated_download: u64 = 0;
 
             loop {
                 match timeout(Duration::from_secs(1), metrics_rx.recv()).await {
@@ -3076,9 +3131,13 @@ mod resource_tests {
 
                         // Print status occasionally
                         if m.number_of_pieces_completed % 10 == 0 {
-                             println!("STATUS: Completed {}/{} pieces. Acc DL: {}/{}", 
-                                m.number_of_pieces_completed, NUM_PIECES,
-                                accumulated_download, m.total_size);
+                            println!(
+                                "STATUS: Completed {}/{} pieces. Acc DL: {}/{}",
+                                m.number_of_pieces_completed,
+                                NUM_PIECES,
+                                accumulated_download,
+                                m.total_size
+                            );
                         }
 
                         // [FIX] Use 'while' instead of 'if' to handle metric skips (e.g. jumping from 80 -> 100)
@@ -3100,7 +3159,10 @@ mod resource_tests {
                     Ok(Err(_)) => break, // Channel closed
                     Err(_) => {
                         // Timeout fired
-                        println!("... No activity for 1s. Current Acc DL: {} ...", accumulated_download);
+                        println!(
+                            "... No activity for 1s. Current Acc DL: {} ...",
+                            accumulated_download
+                        );
                     }
                 }
             }
@@ -3109,10 +3171,18 @@ mod resource_tests {
 
         let timestamps = match timeout(timeout_duration, check_loop).await {
             Ok(ts) => ts,
-            Err(_) => panic!("Test Failed: Timeout waiting for download of {} pieces.", NUM_PIECES),
+            Err(_) => panic!(
+                "Test Failed: Timeout waiting for download of {} pieces.",
+                NUM_PIECES
+            ),
         };
 
-        println!("SUCCESS: Downloaded {} pieces ({} blocks) in {:?}", NUM_PIECES, TOTAL_BLOCKS, start.elapsed());
+        println!(
+            "SUCCESS: Downloaded {} pieces ({} blocks) in {:?}",
+            NUM_PIECES,
+            TOTAL_BLOCKS,
+            start.elapsed()
+        );
 
         // --- 5. Performance Analysis ---
         let chunk_durations: Vec<_> = timestamps.windows(2).map(|w| w[1] - w[0]).collect();
@@ -3122,26 +3192,35 @@ mod resource_tests {
         let total_duration: Duration = chunk_durations.iter().sum();
         let avg_duration = total_duration / chunk_durations.len() as u32;
 
-        println!("Chunk Durations ({} chunks): {:?}", chunk_durations.len(), chunk_durations);
+        println!(
+            "Chunk Durations ({} chunks): {:?}",
+            chunk_durations.len(),
+            chunk_durations
+        );
         println!("Average Chunk Duration: {:?}", avg_duration);
 
         for (i, &duration) in chunk_durations.iter().enumerate() {
             // [FIX] Increased tolerance from 4x to 8x to account for Disk I/O flushes or GC pauses in CI environments.
             // As long as the average throughput (checked below) is good, individual jitters are acceptable.
             assert!(
-                duration.as_nanos() < avg_duration.as_nanos() * 8, 
+                duration.as_nanos() < avg_duration.as_nanos() * 8,
                 "Chunk {} was too slow ({:?}), indicating choppy pipelining. Average was {:?}",
-                i, duration, avg_duration
+                i,
+                duration,
+                avg_duration
             );
         }
-
 
         let total_bytes = (PIECE_SIZE * NUM_PIECES) as f64;
         let total_seconds = total_duration.as_secs_f64();
         if total_seconds > 0.0 {
             let throughput_mbps = (total_bytes / 1_048_576.0) / total_seconds;
             println!("Average throughput: {:.2} MB/s", throughput_mbps);
-            assert!(throughput_mbps > 5.0, "Throughput {:.2} MB/s is below the 50 MB/s threshold", throughput_mbps);
+            assert!(
+                throughput_mbps > 5.0,
+                "Throughput {:.2} MB/s is below the 50 MB/s threshold",
+                throughput_mbps
+            );
         }
 
         // --- 6. Verify file contents ---
@@ -3155,7 +3234,12 @@ mod resource_tests {
             let end = start + PIECE_SIZE;
             let piece_slice = &downloaded_data[start..end];
             let expected_data: Vec<u8> = (0..PIECE_SIZE).map(|i| (i % 256) as u8).collect();
-            assert_eq!(piece_slice, expected_data.as_slice(), "Piece {} data mismatch", piece_idx);
+            assert_eq!(
+                piece_slice,
+                expected_data.as_slice(),
+                "Piece {} data mismatch",
+                piece_idx
+            );
         }
         println!("File content verification successful!");
 

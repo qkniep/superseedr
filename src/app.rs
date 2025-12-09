@@ -39,7 +39,6 @@ use tokio::io::AsyncReadExt;
 use tokio::signal;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::Mutex;
 
 use std::sync::Arc;
 use std::time::Instant;

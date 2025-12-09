@@ -100,16 +100,18 @@ pub async fn web_seed_worker(
                                     }
                                     Ok(None) => {
                                         // End of stream. Send the accumulated block.
-                                        if !buffer.is_empty() {
-                                            if manager_tx.send(TorrentCommand::Block(
-                                                peer_id.clone(),
-                                                index,
-                                                begin,
-                                                buffer,
-                                            )).await.is_err() {
-                                                break 'outer;
-                                            }
-                                        }
+                                                                                if !buffer.is_empty()
+                                                                                    && manager_tx.send(TorrentCommand::Block(
+                                                                                        peer_id.clone(),
+                                                                                        index,
+                                                                                        begin,
+                                                                                        buffer,
+                                                                                    ))
+                                                                                    .await
+                                                                                    .is_err()
+                                                                                {
+                                                                                    break 'outer;
+                                                                                }
                                         break; // Finished this request, move to next in batch
                                     }
                                     Err(e) => {
@@ -121,17 +123,17 @@ pub async fn web_seed_worker(
                             }
                         }
                     }
-                    
+
                     // FIX: Handle BulkCancel (No-op for HTTP usually, or close connection)
                     Some(TorrentCommand::BulkCancel(_)) => {
-                        // HTTP requests are synchronous in this loop; we can't easily cancel 
+                        // HTTP requests are synchronous in this loop; we can't easily cancel
                         // one in the middle of a batch without dropping the connection.
                         // For now, we ignore it. The Manager will discard the data if we send it.
                     }
 
                     Some(TorrentCommand::Disconnect(_)) => break 'outer,
-                    Some(_) => {} 
-                    None => break 'outer, 
+                    Some(_) => {}
+                    None => break 'outer,
                 }
             }
         }

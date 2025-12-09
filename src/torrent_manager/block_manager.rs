@@ -320,7 +320,10 @@ impl BlockManager {
 
         // If it's now complete, remove it and return the data.
         if assembler.received_blocks == assembler.total_blocks {
-            return self.legacy_buffers.remove(&addr.piece_index).map(|a| a.buffer);
+            return self
+                .legacy_buffers
+                .remove(&addr.piece_index)
+                .map(|a| a.buffer);
         }
 
         None
@@ -666,7 +669,7 @@ mod tests {
     fn test_endgame_duplicate_completion_suppression() {
         // 1. Setup a BlockManager with 1 piece consisting of 2 blocks (32KB total)
         let mut bm = BlockManager::new();
-        let piece_len = 32768; 
+        let piece_len = 32768;
         let total_len = 32768;
         // v1_hashes and v2_file_info can be empty for this logic test
         bm.set_geometry(piece_len, total_len, vec![], vec![], false);
@@ -676,8 +679,12 @@ mod tests {
         let data_block_1 = vec![2u8; block_size];
 
         // Create addresses for Block 0 and Block 1
-        let addr_0 = bm.inflate_address_from_overlay(0, 0, block_size as u32).unwrap();
-        let addr_1 = bm.inflate_address_from_overlay(0, block_size as u32, block_size as u32).unwrap();
+        let addr_0 = bm
+            .inflate_address_from_overlay(0, 0, block_size as u32)
+            .unwrap();
+        let addr_1 = bm
+            .inflate_address_from_overlay(0, block_size as u32, block_size as u32)
+            .unwrap();
 
         // 2. Receive Block 0 (Piece Incomplete)
         let res1 = bm.handle_v1_block_buffering(addr_0, &data_block_0);
@@ -685,7 +692,10 @@ mod tests {
 
         // 3. Receive Block 1 (Piece Completes)
         let res2 = bm.handle_v1_block_buffering(addr_1, &data_block_1);
-        assert!(res2.is_some(), "Second block SHOULD trigger completion and return data");
+        assert!(
+            res2.is_some(),
+            "Second block SHOULD trigger completion and return data"
+        );
 
         // 4. SIMULATE THE BUG: Receive Block 1 again (Duplicate from another peer)
         // In the old code, this would return Some(data) again, triggering a verification storm.
@@ -693,7 +703,7 @@ mod tests {
 
         // 5. ASSERT THE FIX
         assert!(
-            res3.is_none(), 
+            res3.is_none(),
             "Duplicate block received after completion MUST return None to prevent double-verification"
         );
     }

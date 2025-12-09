@@ -4,6 +4,9 @@
 ### Performance
 - Optimized bandwidth management with a new "Token Wallet" system, reducing global lock contention.
 
+### Refactoring
+- Applied mechanical code cleanups (formatting, unused imports, clippy suggestions).
+
 ### Testing
 - Added comprehensive performance tests for the peer session, including pipeline saturation and token wallet behavior.
 - Added a high-throughput event loop test for the torrent manager.
