@@ -5102,7 +5102,7 @@ mod prop_tests {
 mod integration_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::sync::{broadcast, mpsc, Mutex};
+    use tokio::sync::{broadcast, mpsc};
     use std::sync::Arc;
     use std::collections::HashMap;
     use sha1::{Digest, Sha1};
@@ -5143,7 +5143,7 @@ mod integration_tests {
         let (resource_manager, rm_client) = ResourceManager::new(limits, shutdown_tx.clone());
         tokio::spawn(resource_manager.run());
 
-        let bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+        let bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
 
         let single_piece_hash = Sha1::digest(&vec![0xAA; piece_size]).to_vec();
         let mut all_hashes = Vec::new();

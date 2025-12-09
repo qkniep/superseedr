@@ -81,7 +81,6 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::watch;
-use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
@@ -2342,8 +2341,8 @@ mod tests {
         tokio::spawn(resource_manager.run());
 
         // 3. Setup Buckets (Infinite Speed)
-        let dl_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
-        let ul_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+        let dl_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
+        let ul_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
 
         // 4. Handle DHT Dependency (Bind port 0 for test if feature enabled)
         let dht_handle = {
@@ -2458,7 +2457,7 @@ mod resource_tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use tokio::sync::{broadcast, mpsc, Mutex};
+    use tokio::sync::{broadcast, mpsc};
 
     // --- Helper to spawn a manager quickly ---
     fn setup_test_harness() -> (
@@ -2484,8 +2483,8 @@ mod resource_tests {
 
         let (resource_manager, rm_client) = ResourceManager::new(limits, shutdown_tx.clone());
 
-        let dl_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
-        let ul_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+        let dl_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
+        let ul_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
 
         let magnet =
             Magnet::new("magnet:?xt=urn:btih:0000000000000000000000000000000000000000").unwrap();
@@ -2687,8 +2686,8 @@ mod resource_tests {
         tokio::spawn(resource_manager.run());
 
         // Infinite Buckets
-        let dl_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
-        let ul_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+        let dl_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
+        let ul_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
 
         // Create Torrent (1 Piece of 0xAA)
         let piece_hash = sha1::Sha1::digest(&vec![0xAA; BLOCK_SIZE]).to_vec();
@@ -2904,8 +2903,8 @@ mod resource_tests {
         tokio::spawn(resource_manager.run());
 
         // Infinite Buckets
-        let dl_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
-        let ul_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+        let dl_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
+        let ul_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
 
         // --- Create Torrent ---
         let mut all_piece_hashes = Vec::new();

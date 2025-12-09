@@ -251,7 +251,7 @@ pub async fn writer_task<W>(
 
 pub async fn reader_task<R>(
     mut stream_read_half: R,
-    mut session_tx: mpsc::Sender<Message>,
+    session_tx: mpsc::Sender<Message>,
     global_dl_bucket: Arc<TokenBucket>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) 
@@ -559,6 +559,30 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Import traits for read_exact/write_all
     use tokio::net::{TcpListener, TcpStream}; // Import networking components
+
+    async fn parse_message<R>(stream: &mut R) -> Result<Message, std::io::Error>
+    where
+        R: AsyncReadExt + Unpin,
+    {
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await?;
+        let message_len = u32::from_be_bytes(len_buf);
+
+        let mut message_buf = if message_len > 0 {
+            let payload_len = message_len as usize;
+            let mut temp_buf = vec![0; payload_len];
+            stream.read_exact(&mut temp_buf).await?;
+            temp_buf
+        } else {
+            vec![]
+        };
+
+        let mut full_message = len_buf.to_vec();
+        full_message.append(&mut message_buf);
+
+        let mut cursor = std::io::Cursor::new(&full_message);
+        parse_message_from_bytes(&mut cursor)
+    }
 
     #[test]
     fn test_generate_handshake() {

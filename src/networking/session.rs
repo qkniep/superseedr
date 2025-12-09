@@ -565,11 +565,35 @@ impl PeerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::networking::protocol::{generate_message, parse_message, Message};
+    use crate::networking::protocol::{generate_message, Message};
     use std::collections::HashSet;
     use std::sync::Arc;
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
-    use tokio::sync::{broadcast, mpsc, Mutex};
+    use tokio::sync::{broadcast, mpsc};
+
+    async fn parse_message<R>(stream: &mut R) -> Result<Message, std::io::Error>
+    where
+        R: AsyncReadExt + Unpin,
+    {
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await?;
+        let message_len = u32::from_be_bytes(len_buf);
+
+        let mut message_buf = if message_len > 0 {
+            let payload_len = message_len as usize;
+            let mut temp_buf = vec![0; payload_len];
+            stream.read_exact(&mut temp_buf).await?;
+            temp_buf
+        } else {
+            vec![]
+        };
+
+        let mut full_message = len_buf.to_vec();
+        full_message.append(&mut message_buf);
+
+        let mut cursor = std::io::Cursor::new(&full_message);
+        crate::networking::protocol::parse_message_from_bytes(&mut cursor)
+    }
 
     // --- Helper: Setup a Session with a Virtual Pipe ---
     async fn spawn_test_session() -> (
@@ -578,7 +602,7 @@ mod tests {
         mpsc::Receiver<TorrentCommand>, // Channel to receive events from Client (Session -> Manager)
     ) {
         let (client_socket, mock_peer_socket) = duplex(64 * 1024 * 1024);
-        let infinite_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+        let infinite_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
         let (manager_tx, manager_rx) = mpsc::channel(1000);
         let (cmd_tx, cmd_rx) = mpsc::channel(1000);
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -890,7 +914,7 @@ mod tests {
     ) {
         // Use a large buffer to prevent blocking
         let (client_socket, mock_peer_socket) = duplex(64 * 1024 * 1024);
-        let infinite_bucket = Arc::new(Mutex::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)));
+        let infinite_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
         let (manager_tx, manager_rx) = mpsc::channel(1000);
         let (cmd_tx, cmd_rx) = mpsc::channel(1000);
         let (shutdown_tx, _) = broadcast::channel(1);
