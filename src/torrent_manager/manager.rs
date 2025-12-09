@@ -233,11 +233,6 @@ impl TorrentManager {
         )
         .map_err(|e| format!("Failed to initialize file manager: {}", e))?;
 
-        let parallel_limit = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        let verification_semaphore = Arc::new(Semaphore::new(parallel_limit));
-
         let state = TorrentState::new(
             info_hash.to_vec(),
             Some(torrent),
@@ -351,11 +346,6 @@ impl TorrentManager {
         let (dht_trigger_tx, _) = watch::channel(());
         #[cfg(not(feature = "dht"))]
         let dht_trigger_tx = ();
-
-        let parallel_limit = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        let verification_semaphore = Arc::new(Semaphore::new(parallel_limit));
 
         let state = TorrentState::new(
             info_hash,
