@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tokio::io::split;
 use tokio::io::AsyncRead;
@@ -41,8 +41,10 @@ use tracing::{event, instrument, Level};
 
 use crate::torrent_manager::state::MAX_PIPELINE_DEPTH;
 
+
+
+
 const PEER_BLOCK_IN_FLIGHT_LIMIT: usize = 8;
-const MIN_WINDOW: usize = PEER_BLOCK_IN_FLIGHT_LIMIT;
 const MAX_WINDOW: usize = MAX_PIPELINE_DEPTH;
 
 struct DisconnectGuard {
@@ -109,7 +111,7 @@ pub struct PeerSession {
     global_ul_bucket: Arc<TokenBucket>,
 
     shutdown_tx: broadcast::Sender<()>,
-    
+
     current_window_size: usize,
     blocks_received_interval: usize,
     prev_speed: f64,
@@ -294,7 +296,7 @@ impl PeerSession {
 
                                 if self.pending_window_shrink > 0 {
                                     self.pending_window_shrink -= 1;
-                                    // We do NOT call add_permits(1). 
+                                    // We do NOT call add_permits(1).
                                     // This effectively destroys the permit associated with this block,
                                     // realizing the window shrinkage.
                                 } else {
@@ -331,8 +333,8 @@ impl PeerSession {
                             self.block_tracker.lock().await.clear();
 
                             self.pending_window_shrink = 0;
-                            
-                            self.current_window_size = PEER_BLOCK_IN_FLIGHT_LIMIT; 
+
+                            self.current_window_size = PEER_BLOCK_IN_FLIGHT_LIMIT;
 
                             #[cfg(test)]
                             if let Some(monitor) = &self.testing_window_monitor {
@@ -340,10 +342,10 @@ impl PeerSession {
                             }
 
                             let current = self.block_request_limit_semaphore.available_permits();
-                            if current < self.current_window_size { 
-                                self.block_request_limit_semaphore.add_permits(self.current_window_size - current); 
+                            if current < self.current_window_size {
+                                self.block_request_limit_semaphore.add_permits(self.current_window_size - current);
                             }
-                            
+
                             let _ = self.torrent_manager_tx.try_send(TorrentCommand::Choke(self.peer_ip_port.clone()));
                         }
                         Message::Unchoke => { let _ = self.torrent_manager_tx.try_send(TorrentCommand::Unchoke(self.peer_ip_port.clone())); }
@@ -356,7 +358,7 @@ impl PeerSession {
                                 self.peer_upload_queue_len += 1;
                                 let _ = self.torrent_manager_tx.try_send(
                                     TorrentCommand::RequestUpload(self.peer_ip_port.clone(), i, b, l)
-                                ); 
+                                );
                             } else {
                                 // Drop the request if they are flooding us
                                 tracing::warn!("Peer {} upload queue full. Dropping request.", self.peer_ip_port);
@@ -422,9 +424,7 @@ impl PeerSession {
                 let tracker = self.block_tracker.clone();
                 let mut shutdown = self.shutdown_tx.subscribe();
 
-                // Capture context for reaper
-                let manager_tx = self.torrent_manager_tx.clone();
-                let peer_ip = self.peer_ip_port.clone();
+
 
                 tokio::spawn(async move {
                     for (index, begin, length) in requests {
@@ -498,11 +498,11 @@ impl PeerSession {
             }
 
             TorrentCommand::Upload(index, begin, data) => {
-                    if self.peer_upload_queue_len > 0 {
-                        self.peer_upload_queue_len -= 1;
-                    }
-                    let _ = self.writer_tx.try_send(Message::Piece(index, begin, data));
+                if self.peer_upload_queue_len > 0 {
+                    self.peer_upload_queue_len -= 1;
                 }
+                let _ = self.writer_tx.try_send(Message::Piece(index, begin, data));
+            }
             TorrentCommand::PeerBitfield(_, bf) => {
                 let _ = self.writer_tx.try_send(Message::Bitfield(bf));
             }
@@ -669,11 +669,13 @@ impl PeerSession {
 
         if in_flight > 0 && self.last_piece_received.elapsed() > Duration::from_secs(20) {
             tracing::error!(
-                "Peer {} stalled ({} blocks in flight, no data for 20s). Disconnecting.", 
-                self.peer_ip_port, 
+                "Peer {} stalled ({} blocks in flight, no data for 20s). Disconnecting.",
+                self.peer_ip_port,
                 in_flight
             );
-            let _ = self.torrent_manager_tx.try_send(TorrentCommand::Disconnect(self.peer_ip_port.clone()));
+            let _ = self
+                .torrent_manager_tx
+                .try_send(TorrentCommand::Disconnect(self.peer_ip_port.clone()));
             return;
         }
 
@@ -686,20 +688,20 @@ impl PeerSession {
                 if self.current_window_size < MAX_WINDOW {
                     self.current_window_size += 1;
                     self.block_request_limit_semaphore.add_permits(1);
-                    
+
                     tracing::debug!(
-                        "Speed Up: Peer {} -> {:.2} blocks/s (was {:.2}). Window: {}", 
-                        self.peer_ip_port, speed, self.prev_speed, self.current_window_size
+                        "Speed Up: Peer {} -> {:.2} blocks/s (was {:.2}). Window: {}",
+                        self.peer_ip_port,
+                        speed,
+                        self.prev_speed,
+                        self.current_window_size
                     );
                 }
-            } 
-            else if speed < self.prev_speed * 0.9 {
+            } else if speed < self.prev_speed * 0.9 {
                 self.shrink_window();
             }
-        } else {
-            if available_permits > (self.current_window_size / 2) {
-                 self.shrink_window();
-            }
+        } else if available_permits > (self.current_window_size / 2) {
+            self.shrink_window();
         }
 
         #[cfg(test)]
@@ -720,10 +722,11 @@ impl PeerSession {
             } else {
                 self.pending_window_shrink += 1;
             }
-            
+
             tracing::debug!(
-                "Shrinking: Peer {} Limit reduced to {}", 
-                self.peer_ip_port, self.current_window_size
+                "Shrinking: Peer {} Limit reduced to {}",
+                self.peer_ip_port,
+                self.current_window_size
             );
         }
     }
@@ -733,19 +736,18 @@ impl PeerSession {
         self.testing_window_monitor = Some(monitor);
         self
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::networking::protocol::{generate_message, Message};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
     use tokio::sync::{broadcast, mpsc};
-    use crate::torrent_manager::state::MAX_PIPELINE_DEPTH;
 
     async fn parse_message<R>(stream: &mut R) -> Result<Message, std::io::Error>
     where
@@ -803,7 +805,7 @@ mod tests {
         tokio::spawn(async move {
             // Inject monitor using the builder pattern
             let session = PeerSession::new(params).with_window_monitor(monitor_clone);
-            
+
             if let Err(e) = session.run(client_socket, vec![], Some(vec![])).await {
                 eprintln!("Test Session ended: {:?}", e);
             }
@@ -822,7 +824,6 @@ mod tests {
         response[20..28].copy_from_slice(&[0, 0, 0, 0, 0, 0x10, 0, 0]);
         network.write_all(&response).await.unwrap();
     }
-
 
     #[tokio::test]
     async fn test_pipeline_saturation_with_virtual_time() {
@@ -1395,7 +1396,7 @@ mod tests {
         // Blast Data
         let mut completed = 0;
         let mut inflight = 0;
-        
+
         // We need enough duration/blocks for the 3s timer to tick multiple times
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(10) && completed < 1000 {
@@ -1414,7 +1415,9 @@ mod tests {
                 timeout(Duration::from_millis(100), manager_event_rx.recv()).await
             {
                 completed += 1;
-                if inflight > 0 { inflight -= 1; }
+                if inflight > 0 {
+                    inflight = inflight.saturating_sub(1);
+                }
             }
         }
 
@@ -1424,7 +1427,8 @@ mod tests {
         assert!(
             final_window > PEER_BLOCK_IN_FLIGHT_LIMIT,
             "Window should have grown (Current: {}, Start: {})",
-            final_window, PEER_BLOCK_IN_FLIGHT_LIMIT
+            final_window,
+            PEER_BLOCK_IN_FLIGHT_LIMIT
         );
     }
 
@@ -1482,48 +1486,55 @@ mod tests {
         // We must run for at least >3s to allow the adjustment timer to tick.
         let start = Instant::now();
         let mut request_id = 0;
-        let mut inflight = 0;
-        
+        let mut inflight: usize = 0;
+
         while start.elapsed() < Duration::from_secs(5) {
             // Keep pipe full to ensure saturation logic triggers
-            while inflight < 150 { 
+            while inflight < 150 {
                 let _ = client_cmd_tx
                     .send(TorrentCommand::BulkRequest(vec![(request_id, 0, 16384)]))
                     .await;
                 request_id += 1;
                 inflight += 1;
             }
-            
+
             // Consume blocks as they come in
-            if let Ok(Some(TorrentCommand::Block(..))) = 
-                timeout(Duration::from_millis(50), manager_event_rx.recv()).await 
+            if let Ok(Some(TorrentCommand::Block(..))) =
+                timeout(Duration::from_millis(50), manager_event_rx.recv()).await
             {
-                if inflight > 0 { inflight -= 1; }
+                if inflight > 0 {
+                    inflight = inflight.saturating_sub(1);
+                }
             }
         }
 
         let peak_window = window_monitor.load(Ordering::Relaxed);
         println!("Phase 1 Peak Window: {}", peak_window);
-        assert!(peak_window > PEER_BLOCK_IN_FLIGHT_LIMIT, "Window failed to grow");
+        assert!(
+            peak_window > PEER_BLOCK_IN_FLIGHT_LIMIT,
+            "Window failed to grow"
+        );
 
         // PHASE 2: TRIGGER CONGESTION
         is_congested.store(true, Ordering::Relaxed);
-        
+
         // Run for another 5 seconds to allow reaction
         let start_p2 = Instant::now();
         while start_p2.elapsed() < Duration::from_secs(5) {
-             while inflight < 150 { 
+            while inflight < 150 {
                 let _ = client_cmd_tx
                     .send(TorrentCommand::BulkRequest(vec![(request_id, 0, 16384)]))
                     .await;
                 request_id += 1;
                 inflight += 1;
             }
-            
-            if let Ok(Some(TorrentCommand::Block(..))) = 
-                timeout(Duration::from_millis(50), manager_event_rx.recv()).await 
+
+            if let Ok(Some(TorrentCommand::Block(..))) =
+                timeout(Duration::from_millis(50), manager_event_rx.recv()).await
             {
-                if inflight > 0 { inflight -= 1; }
+                if inflight > 0 {
+                    inflight -= 1;
+                }
             }
         }
 
@@ -1533,7 +1544,8 @@ mod tests {
         assert!(
             final_window < peak_window,
             "Window failed to shrink on congestion (Peak: {}, Final: {})",
-            peak_window, final_window
+            peak_window,
+            final_window
         );
     }
 
@@ -1584,26 +1596,34 @@ mod tests {
         let mut inflight = 0;
         let start = Instant::now();
 
-        // Process ~400 blocks (should take ~4 seconds minimum purely by delay, likely more)
-        while completed < 400 {
-            // Keep pipe full
-            while inflight < 100 { 
-                let _ = client_cmd_tx
-                    .send(TorrentCommand::BulkRequest(vec![(completed + inflight, 0, 16384)]))
-                    .await;
-                inflight += 1;
-            }
-            
-            if let Some(TorrentCommand::Block(..)) = manager_event_rx.recv().await {
-                 completed += 1;
-                 if inflight > 0 { inflight -= 1; }
-            }
-        }
+                // Process ~400 blocks (should take ~4 seconds minimum purely by delay, likely more)
+                while completed < 400 {
+                    // Keep pipe full
+                    while inflight < 100 {
+                        let _ = client_cmd_tx
+                            .send(TorrentCommand::BulkRequest(vec![(
+                                completed + inflight,
+                                0,
+                                16384,
+                            )]))
+                            .await;
+                        inflight += 1;
+                    }
         
+                    if let Some(TorrentCommand::Block(..)) = manager_event_rx.recv().await {
+                         completed += 1;
+                         if inflight > 0 {
+                             inflight = inflight.saturating_sub(1);
+                         }
+                    }
+                }
         let final_window = window_monitor.load(Ordering::Relaxed);
         println!("Steady State Window: {}", final_window);
 
-        assert!(final_window >= PEER_BLOCK_IN_FLIGHT_LIMIT, "Window collapsed unexpectedly");
+        assert!(
+            final_window >= PEER_BLOCK_IN_FLIGHT_LIMIT,
+            "Window collapsed unexpectedly"
+        );
         assert!(final_window < 255, "Window overflowed");
     }
 
@@ -1633,7 +1653,7 @@ mod tests {
                     am_choking = true;
                     // We stay choked for a bit to let the test verify
                     tokio::time::sleep(Duration::from_millis(500)).await;
-                    
+
                     // Then we Unchoke
                     let unchoke_msg = generate_message(Message::Unchoke).unwrap();
                     let _ = peer_write.write_all(&unchoke_msg).await;
@@ -1677,31 +1697,38 @@ mod tests {
         let mut completed = 0;
         let mut inflight = 0;
         let start = Instant::now();
-        
+
         // Pump blocks for 4 seconds to trigger growth
         while start.elapsed() < Duration::from_secs(4) {
             while inflight < 100 {
                 let _ = client_cmd_tx
-                    .send(TorrentCommand::BulkRequest(vec![(completed + inflight, 0, 16384)]))
+                    .send(TorrentCommand::BulkRequest(vec![(
+                        completed + inflight,
+                        0,
+                        16384,
+                    )]))
                     .await;
                 inflight += 1;
             }
 
-            if let Ok(Some(TorrentCommand::Block(..))) = 
-                timeout(Duration::from_millis(50), manager_event_rx.recv()).await 
+            if let Ok(Some(TorrentCommand::Block(..))) =
+                timeout(Duration::from_millis(50), manager_event_rx.recv()).await
             {
-                if inflight > 0 { inflight -= 1; }
+                if inflight > 0 {
+                    inflight -= 1;
+                }
                 completed += 1;
             }
         }
 
         let peak_window = window_monitor.load(Ordering::Relaxed);
         println!("Peak Window before Choke: {}", peak_window);
-        
+
         assert!(
-            peak_window > PEER_BLOCK_IN_FLIGHT_LIMIT, 
-            "Window did not grow enough to test reset (Got {}, want > {})", 
-            peak_window, PEER_BLOCK_IN_FLIGHT_LIMIT
+            peak_window > PEER_BLOCK_IN_FLIGHT_LIMIT,
+            "Window did not grow enough to test reset (Got {}, want > {})",
+            peak_window,
+            PEER_BLOCK_IN_FLIGHT_LIMIT
         );
 
         // 3. Trigger Choke
@@ -1736,7 +1763,7 @@ mod tests {
                 _ => panic!("Did not receive Unchoke command"),
             }
         }
-        
+
         println!("Received Unchoke, test passed.");
     }
 }
