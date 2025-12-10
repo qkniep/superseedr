@@ -19,8 +19,10 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::io::split;
 use tokio::io::AsyncRead;
@@ -40,9 +42,6 @@ use tokio::time::Instant;
 use tracing::{event, instrument, Level};
 
 use crate::torrent_manager::state::MAX_PIPELINE_DEPTH;
-
-
-
 
 const PEER_BLOCK_IN_FLIGHT_LIMIT: usize = 8;
 const MAX_WINDOW: usize = MAX_PIPELINE_DEPTH;
@@ -423,8 +422,6 @@ impl PeerSession {
                 let sem = self.block_request_limit_semaphore.clone();
                 let tracker = self.block_tracker.clone();
                 let mut shutdown = self.shutdown_tx.subscribe();
-
-
 
                 tokio::spawn(async move {
                     for (index, begin, length) in requests {
@@ -1533,7 +1530,7 @@ mod tests {
                 timeout(Duration::from_millis(50), manager_event_rx.recv()).await
             {
                 if inflight > 0 {
-                    inflight -= 1;
+                    inflight = inflight.saturating_sub(1);
                 }
             }
         }
@@ -1594,29 +1591,28 @@ mod tests {
         // Run for a longer duration to check stability
         let mut completed = 0;
         let mut inflight = 0;
-        let start = Instant::now();
 
-                // Process ~400 blocks (should take ~4 seconds minimum purely by delay, likely more)
-                while completed < 400 {
-                    // Keep pipe full
-                    while inflight < 100 {
-                        let _ = client_cmd_tx
-                            .send(TorrentCommand::BulkRequest(vec![(
-                                completed + inflight,
-                                0,
-                                16384,
-                            )]))
-                            .await;
-                        inflight += 1;
-                    }
-        
-                    if let Some(TorrentCommand::Block(..)) = manager_event_rx.recv().await {
-                         completed += 1;
-                         if inflight > 0 {
-                             inflight = inflight.saturating_sub(1);
-                         }
-                    }
+        // Process ~400 blocks (should take ~4 seconds minimum purely by delay, likely more)
+        while completed < 400 {
+            // Keep pipe full
+            while inflight < 100 {
+                let _ = client_cmd_tx
+                    .send(TorrentCommand::BulkRequest(vec![(
+                        completed + inflight,
+                        0,
+                        16384,
+                    )]))
+                    .await;
+                inflight += 1;
+            }
+
+            if let Some(TorrentCommand::Block(..)) = manager_event_rx.recv().await {
+                completed += 1;
+                if inflight > 0 {
+                    inflight = inflight.saturating_sub(1);
                 }
+            }
+        }
         let final_window = window_monitor.load(Ordering::Relaxed);
         println!("Steady State Window: {}", final_window);
 
@@ -1650,7 +1646,6 @@ mod tests {
                 if should_choke_clone.load(Ordering::Relaxed) && !am_choking {
                     let choke_msg = generate_message(Message::Choke).unwrap();
                     let _ = peer_write.write_all(&choke_msg).await;
-                    am_choking = true;
                     // We stay choked for a bit to let the test verify
                     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -1715,7 +1710,7 @@ mod tests {
                 timeout(Duration::from_millis(50), manager_event_rx.recv()).await
             {
                 if inflight > 0 {
-                    inflight -= 1;
+                    inflight = inflight.saturating_sub(1);
                 }
                 completed += 1;
             }
