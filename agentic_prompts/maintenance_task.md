@@ -1,4 +1,4 @@
-I am preparing to commit my changes. Please perform the following 4 tasks sequentially, strictly adhering to the constraints below:
+I am preparing to merge my branch to main. Please perform the following 4 tasks sequentially, strictly adhering to the constraints below:
 
 1. **Security Scan:**
    - Scan the changed files for any hardcoded secrets, API keys, or sensitive credentials.
