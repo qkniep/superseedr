@@ -1,17 +1,7 @@
 # Changelog
 
 ## Release v0.9.28 
-### Performance
-- Optimized bandwidth management with a new "Token Wallet" system, reducing global lock contention.
 
-### Refactoring
-- Applied mechanical code cleanups (formatting, unused imports, clippy suggestions).
-
-### Testing
-- Added comprehensive performance tests for the peer session, including pipeline saturation and token wallet behavior.
-- Added a high-throughput event loop test for the torrent manager.
-- Added resource management tests for CPU hashing and disk backpressure.
-- Introduced property-based testing with `proptest` for the token wallet.
 
 ## Release v0.9.27
 ### Features
