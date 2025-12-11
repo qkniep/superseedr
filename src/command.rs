@@ -39,7 +39,10 @@ pub enum TorrentCommand {
 
     Disconnect(String),
 
+    #[cfg(feature = "pex")]
     AddPexPeers(String, Vec<(String, u16)>),
+
+    #[cfg(feature = "pex")]
     SendPexPeers(Vec<String>),
 
     DhtTorrent(Torrent, i64),

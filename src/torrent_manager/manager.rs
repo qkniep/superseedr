@@ -21,7 +21,6 @@ use crate::torrent_manager::piece_manager::PieceStatus;
 use crate::torrent_manager::state::Action;
 use crate::torrent_manager::state::ChokeStatus;
 use crate::torrent_manager::state::Effect;
-use crate::torrent_manager::state::PeerState;
 use crate::torrent_manager::state::TorrentActivity;
 use crate::torrent_manager::state::TorrentState;
 
@@ -79,17 +78,24 @@ use tokio::signal;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::watch;
+
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
+
+#[cfg(feature = "dht")]
+use tokio::sync::watch;
+
+#[cfg(feature = "dht")]
 use tokio_stream::StreamExt;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::net::SocketAddrV4;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+#[cfg(feature = "dht")]
+use std::net::SocketAddrV4;
 
 use crate::torrent_manager::TorrentParameters;
 
@@ -114,6 +120,7 @@ pub struct TorrentManager {
     #[cfg(feature = "dht")]
     dht_tx: Sender<Vec<SocketAddrV4>>,
     #[cfg(not(feature = "dht"))]
+    #[allow(dead_code)]
     dht_tx: Sender<()>,
 
     metrics_tx: broadcast::Sender<TorrentMetrics>,
@@ -123,6 +130,7 @@ pub struct TorrentManager {
     #[cfg(feature = "dht")]
     dht_rx: Receiver<Vec<SocketAddrV4>>,
     #[cfg(not(feature = "dht"))]
+    #[allow(dead_code)]
     dht_rx: Receiver<()>,
 
     incoming_peer_rx: Receiver<(TcpStream, Vec<u8>)>,
@@ -132,15 +140,20 @@ pub struct TorrentManager {
     in_flight_writes: HashMap<u32, Vec<JoinHandle<()>>>,
 
     #[cfg(feature = "dht")]
+    #[allow(dead_code)]
     dht_trigger_tx: watch::Sender<()>,
     #[cfg(feature = "dht")]
+    #[allow(dead_code)]
     dht_task_handle: Option<JoinHandle<()>>,
 
     #[cfg(not(feature = "dht"))]
+    #[allow(dead_code)]
     dht_trigger_tx: (),
     #[cfg(not(feature = "dht"))]
+    #[allow(dead_code)]
     dht_task_handle: (),
 
+    #[allow(dead_code)]
     dht_handle: AsyncDht,
     settings: Arc<Settings>,
     resource_manager: ResourceManagerClient,
@@ -722,70 +735,7 @@ impl TorrentManager {
             }
 
             Effect::ConnectToPeer { ip, port } => {
-                let peer_ip_port = format!("{}:{}", ip, port);
-
-                if self.state.peers.contains_key(&peer_ip_port) {
-                    return;
-                }
-
-                let manager_tx = self.torrent_manager_tx.clone();
-                let rm = self.resource_manager.clone();
-                let dl_bucket = self.global_dl_bucket.clone();
-                let ul_bucket = self.global_ul_bucket.clone();
-                let info_hash = self.state.info_hash.clone();
-                let meta_len = self.state.torrent_metadata_length;
-                let client_id = self.settings.client_id.clone();
-                let shutdown_tx = self.shutdown_tx.clone();
-                let mut shutdown_rx = self.shutdown_tx.subscribe();
-
-                let (peer_tx, peer_rx) = mpsc::channel(10_000);
-                self.state.peers.insert(
-                    peer_ip_port.clone(),
-                    PeerState::new(peer_ip_port.clone(), peer_tx, Instant::now()),
-                );
-
-                let bitfield = if self.state.torrent.is_some() {
-                    Some(self.generate_bitfield())
-                } else {
-                    None
-                };
-
-                tokio::spawn(async move {
-                    let permit = tokio::select! {
-                        biased;
-                        _ = shutdown_rx.recv() => None,
-                        res = rm.acquire_peer_connection() => res.ok()
-                    };
-
-                    if let Some(p) = permit {
-                        if let Ok(Ok(stream)) =
-                            timeout(Duration::from_secs(2), TcpStream::connect(&peer_ip_port)).await
-                        {
-                            let _held = p;
-                            let session = PeerSession::new(PeerSessionParameters {
-                                info_hash,
-                                torrent_metadata_length: meta_len,
-                                connection_type: ConnectionType::Outgoing,
-                                torrent_manager_rx: peer_rx,
-                                torrent_manager_tx: manager_tx.clone(),
-                                peer_ip_port: peer_ip_port.clone(),
-                                client_id: client_id.into(),
-                                global_dl_bucket: dl_bucket,
-                                global_ul_bucket: ul_bucket,
-                                shutdown_tx,
-                            });
-
-                            let _ = session.run(stream, Vec::new(), bitfield).await;
-                        } else {
-                            let _ = manager_tx
-                                .send(TorrentCommand::UnresponsivePeer(peer_ip_port.clone()))
-                                .await;
-                        }
-                    }
-                    let _ = manager_tx
-                        .send(TorrentCommand::Disconnect(peer_ip_port))
-                        .await;
-                });
+                self.connect_to_peer(ip, port);
             }
 
             Effect::InitializeStorage => {
@@ -1532,7 +1482,7 @@ impl TorrentManager {
         bitfield_bytes
     }
 
-    pub async fn connect_to_peer(&mut self, peer_ip: String, peer_port: u16) {
+    pub fn connect_to_peer(&mut self, peer_ip: String, peer_port: u16) {
         let _ = self
             .manager_event_tx
             .try_send(ManagerEvent::PeerDiscovered {
@@ -1939,8 +1889,9 @@ impl TorrentManager {
         let mut last_tick_time = Instant::now();
 
         let mut cleanup_timer = tokio::time::interval(Duration::from_secs(3));
-        let mut pex_timer = tokio::time::interval(Duration::from_secs(75));
         let mut choke_timer = tokio::time::interval(Duration::from_secs(10));
+
+        let mut pex_timer = tokio::time::interval(Duration::from_secs(75));
         loop {
             tokio::select! {
                 biased;
@@ -1990,13 +1941,16 @@ impl TorrentManager {
                     });
                 }
 
+
                 _ = pex_timer.tick(), if !self.state.is_paused => {
                     if self.state.peers.len() < 2 {
                         continue;
                     }
 
+                    #[cfg(feature = "pex")]
                     let all_peer_ips: Vec<String> = self.state.peers.keys().cloned().collect();
 
+                    #[cfg(feature = "pex")]
                     for peer_state in self.state.peers.values() {
                         let peer_tx = peer_state.peer_tx.clone();
                         let peers_list = all_peer_ips.clone();
@@ -2044,7 +1998,7 @@ impl TorrentManager {
                     }
                 }
 
-                maybe_peers = async {
+                _maybe_peers = async {
                     #[cfg(feature = "dht")]
                     {
                         self.dht_rx.recv().await
@@ -2056,11 +2010,11 @@ impl TorrentManager {
                 }, if !self.state.is_paused => {
                     #[cfg(feature = "dht")]
                     {
-                        if let Some(peers) = maybe_peers {
+                        if let Some(peers) = _maybe_peers {
                             self.state.last_activity = TorrentActivity::SearchingDht;
                             for peer in peers {
                                 event!(Level::DEBUG, "PEER FROM DHT {}", peer);
-                                self.connect_to_peer(peer.ip().to_string(), peer.port()).await;
+                                self.connect_to_peer(peer.ip().to_string(), peer.port());
                             }
                         } else {
                             event!(Level::WARN, "DHT channel closed. No longer receiving DHT peers.");
@@ -2161,9 +2115,11 @@ impl TorrentManager {
                     match command {
                         TorrentCommand::SuccessfullyConnected(peer_id) => self.apply_action(Action::PeerSuccessfullyConnected { peer_id }),
                         TorrentCommand::PeerId(addr, id) => self.apply_action(Action::UpdatePeerId { peer_addr: addr, new_id: id }),
+
+                        #[cfg(feature = "pex")]
                         TorrentCommand::AddPexPeers(_peer_id, new_peers) => {
                             for peer_tuple in new_peers {
-                                self.connect_to_peer(peer_tuple.0, peer_tuple.1).await;
+                                self.connect_to_peer(peer_tuple.0, peer_tuple.1);
                             }
                         },
                         TorrentCommand::PeerBitfield(pid, bf) => self.apply_action(Action::PeerBitfieldReceived { peer_id: pid, bitfield: bf }),
@@ -2844,8 +2800,7 @@ mod resource_tests {
 
         // --- 3. Run Manager ---
         manager
-            .connect_to_peer(peer_addr.ip().to_string(), peer_addr.port())
-            .await;
+            .connect_to_peer(peer_addr.ip().to_string(), peer_addr.port());
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
         });
@@ -3088,8 +3043,7 @@ mod resource_tests {
 
         // --- 3. Run Manager ---
         manager
-            .connect_to_peer(peer_addr.ip().to_string(), peer_addr.port())
-            .await;
+            .connect_to_peer(peer_addr.ip().to_string(), peer_addr.port());
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
         });

@@ -18,8 +18,10 @@ use crate::command::TorrentCommand;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::error::Error as StdError;
-use std::net::Ipv4Addr;
 use std::sync::Arc;
+
+#[cfg(feature = "pex")]
+use std::net::Ipv4Addr;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
