@@ -40,10 +40,13 @@ Superseedr brings the BitTorrent into the modern termnial environment, focusing 
 
 ## Installation
 
+[![Packaging status](https://repology.org/badge/vertical-allrepos/superseedr.svg)](https://repology.org/project/superseedr/versions)
+
 Download the latest release for your platform:
 - Windows (.msi)
 - macOS (.pkg)
 - Debian (.deb)
+- Arch Linux (pkgbuild) from [AUR](https://aur.archlinux.org/packages/superseedr)
 
 👉 Available on the [releases page](https://github.com/Jagalite/superseedr/releases).
 
