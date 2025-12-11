@@ -1,4 +1,3 @@
-
 ## Roadmap to V1.0
 - **Testing:** Ongoing testing across various platforms and terminals.
 - **Unit Testing:** Expansion of unit test coverage.
