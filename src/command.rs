@@ -29,17 +29,20 @@ pub enum TorrentCommand {
 
     PeerBitfield(String, Vec<u8>),
 
-    RequestDownload(u32, i64, i64),
+    BulkRequest(Vec<(u32, u32, u32)>),
+    BulkCancel(Vec<(u32, u32, u32)>),
 
     RequestUpload(String, u32, u32, u32),
     Upload(u32, u32, Vec<u8>),
 
     CancelUpload(String, u32, u32, u32),
-    Cancel(u32),
 
     Disconnect(String),
 
+    #[cfg(feature = "pex")]
     AddPexPeers(String, Vec<(String, u16)>),
+
+    #[cfg(feature = "pex")]
     SendPexPeers(Vec<String>),
 
     DhtTorrent(Torrent, i64),

@@ -1,5 +1,21 @@
 # Changelog
 
+## Release v0.9.28 
+### Performance
+- Implemented a dynamic request window size in `PeerSession` to improve download throughput.
+- Optimized `TokenBucket` to reduce lock contention for unlimited rates.
+- Improved network writer performance by batching messages to reduce syscalls.
+
+### Refactoring
+- Replaced single block requests with a `BulkRequest` system for better pipelining.
+- Updated `web_seed_worker` to use the new bulk request system.
+- Refactored `TorrentManager` and its state machine to support bulk commands.
+
+### Testing
+- Added extensive tests for the new dynamic window sizing logic in `PeerSession`.
+- Added a proptest regression file to save and re-run failure cases.
+
+
 ## Release v0.9.27
 ### Features
 - Added block manager to improve download performance.

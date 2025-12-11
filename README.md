@@ -20,7 +20,7 @@ Superseedr is a modern Rust BitTorrent client featuring a high-performance termi
 
 ### 🎯 Why Superseedr?
 
-Superseedr brings the BitTorrent into the modern termnial environment, focusing on speed, visibility, and reliability.
+Superseedr brings the BitTorrent into the modern terminal environment, focusing on speed, visibility, and reliability.
 
 * **Deep Swarm Analytics:** Moves beyond simple progress bars by providing high performance real-time heatmaps, peer metrics, and network graphs for complete swarm observability.
 * **Modern Rust Engine:** Leverages Rust and Model-Based Testing to ensure memory safety, high performance, and unparalleled reliability.

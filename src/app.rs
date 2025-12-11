@@ -39,7 +39,6 @@ use tokio::io::AsyncReadExt;
 use tokio::signal;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::Mutex;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -125,7 +124,6 @@ impl DataRate {
         }
     }
 
-    /// Returns the human-readable string for the UI.
     pub fn to_string(self) -> &'static str {
         match self {
             DataRate::RateQuarter => "0.25 FPS",
@@ -488,8 +486,8 @@ pub struct App {
     pub torrent_manager_command_txs: HashMap<Vec<u8>, Sender<ManagerCommand>>,
     pub distributed_hash_table: AsyncDht,
     pub resource_manager: ResourceManagerClient,
-    pub global_dl_bucket: Arc<Mutex<TokenBucket>>,
-    pub global_ul_bucket: Arc<Mutex<TokenBucket>>,
+    pub global_dl_bucket: Arc<TokenBucket>,
+    pub global_ul_bucket: Arc<TokenBucket>,
 
     pub torrent_tx: broadcast::Sender<TorrentMetrics>,
     pub torrent_rx: broadcast::Receiver<TorrentMetrics>,
@@ -559,8 +557,8 @@ impl App {
 
         let dl_limit = client_configs.global_download_limit_bps as f64;
         let ul_limit = client_configs.global_upload_limit_bps as f64;
-        let global_dl_bucket = Arc::new(Mutex::new(TokenBucket::new(dl_limit, dl_limit)));
-        let global_ul_bucket = Arc::new(Mutex::new(TokenBucket::new(ul_limit, ul_limit)));
+        let global_dl_bucket = Arc::new(TokenBucket::new(dl_limit, dl_limit));
+        let global_ul_bucket = Arc::new(TokenBucket::new(ul_limit, ul_limit));
 
         let app_state = AppState {
             system_warning,

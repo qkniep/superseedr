@@ -1099,10 +1099,39 @@ fn draw_right_pane(
                 detail_rows[1],
             );
 
+            let total_pieces = state.number_of_pieces_total as usize;
+            let (seeds, leeches) = state
+                .peers
+                .iter()
+                .filter(|p| p.last_action != "Connecting...")
+                .fold((0, 0), |(s, l), peer| {
+                    if total_pieces > 0 {
+                        let pieces_have = peer
+                            .bitfield
+                            .iter()
+                            .take(total_pieces)
+                            .filter(|&&b| b)
+                            .count();
+                        if pieces_have == total_pieces {
+                            (s + 1, l)
+                        } else {
+                            (s, l + 1)
+                        }
+                    } else {
+                        (s, l + 1)
+                    }
+                });
             f.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled("Peers:    ", Style::default().fg(theme::TEXT)),
-                    Span::raw(state.number_of_successfully_connected_peers.to_string()),
+                    Span::raw(format!(
+                        "{} (",
+                        state.number_of_successfully_connected_peers
+                    )),
+                    Span::styled(format!("{}", seeds), Style::default().fg(theme::GREEN)),
+                    Span::raw(" / "),
+                    Span::styled(format!("{}", leeches), Style::default().fg(theme::RED)),
+                    Span::raw(")"),
                 ])),
                 detail_rows[2],
             );
@@ -1424,18 +1453,18 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
         .split(footer_chunk);
 
     let client_id_chunk = footer_layout[0];
-    let current_dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
-    let current_ul_speed = *app_state.avg_upload_history.last().unwrap_or(&0);
+    let _current_dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
+    let _current_ul_speed = *app_state.avg_upload_history.last().unwrap_or(&0);
 
     #[cfg(all(feature = "dht", feature = "pex"))]
     let client_display_line = Line::from(vec![
         Span::styled(
             "super",
-            speed_to_style(current_dl_speed).add_modifier(Modifier::BOLD),
+            speed_to_style(_current_dl_speed).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             "seedr",
-            speed_to_style(current_ul_speed).add_modifier(Modifier::BOLD),
+            speed_to_style(_current_ul_speed).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" v{}", APP_VERSION),
@@ -1461,6 +1490,11 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
         Span::styled(
             format!(" v{}", APP_VERSION),
             Style::default().fg(theme::SUBTEXT1),
+        ),
+        Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+        Span::styled(
+            app_state.data_rate.to_string(),
+            Style::default().fg(theme::YELLOW).bold(),
         ),
     ]);
 

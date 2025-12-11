@@ -19,7 +19,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 
 use tokio::sync::broadcast;
 
@@ -40,8 +39,8 @@ pub struct TorrentParameters {
     pub manager_event_tx: Sender<ManagerEvent>,
     pub settings: Arc<Settings>,
     pub resource_manager: ResourceManagerClient,
-    pub global_dl_bucket: Arc<Mutex<TokenBucket>>,
-    pub global_ul_bucket: Arc<Mutex<TokenBucket>>,
+    pub global_dl_bucket: Arc<TokenBucket>,
+    pub global_ul_bucket: Arc<TokenBucket>,
 }
 
 #[derive(Debug, Clone, Copy)]
