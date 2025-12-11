@@ -7,6 +7,7 @@ on:
       - 'v*'
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -421,7 +422,7 @@ jobs:
 
   build_and_push_docker: 
     name: Docker (${{ matrix.flavor }})
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -458,7 +459,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          push: true
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
@@ -468,7 +469,7 @@ jobs:
             PRIVATE_BUILD=${{ matrix.flavor == 'private' }}
 
       - name: Update Docker Hub Description
-        if: matrix.flavor == 'normal'
+        if: matrix.flavor == 'normal' && startsWith(github.ref, 'refs/tags/')
         uses: peter-evans/dockerhub-description@v5
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
