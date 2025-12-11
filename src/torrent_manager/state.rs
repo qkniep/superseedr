@@ -5413,9 +5413,7 @@ mod integration_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let peer_addr = listener.local_addr().unwrap();
 
-        manager
-            .connect_to_peer(peer_addr.ip().to_string(), peer_addr.port())
-            .await;
+        manager.connect_to_peer(peer_addr.ip().to_string(), peer_addr.port());
 
         let (tx_events, rx_events) = mpsc::channel(100);
         let (tx_ctrl, mut rx_ctrl) = mpsc::channel(1);

@@ -2799,8 +2799,7 @@ mod resource_tests {
         });
 
         // --- 3. Run Manager ---
-        manager
-            .connect_to_peer(peer_addr.ip().to_string(), peer_addr.port());
+        manager.connect_to_peer(peer_addr.ip().to_string(), peer_addr.port());
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
         });
@@ -3042,8 +3041,7 @@ mod resource_tests {
         });
 
         // --- 3. Run Manager ---
-        manager
-            .connect_to_peer(peer_addr.ip().to_string(), peer_addr.port());
+        manager.connect_to_peer(peer_addr.ip().to_string(), peer_addr.port());
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
         });
