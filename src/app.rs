@@ -124,7 +124,7 @@ impl DataRate {
         }
     }
 
-    /// Returns the human-readable string for the UI.
+
     pub fn to_string(self) -> &'static str {
         match self {
             DataRate::RateQuarter => "0.25 FPS",
