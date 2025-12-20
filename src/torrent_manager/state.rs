@@ -1405,6 +1405,7 @@ impl TorrentState {
                         length: torrent.info.length,
                         path: vec![torrent.info.name.clone()],
                         md5sum: None,
+                        attr: None,
                     }]
                 } else {
                     torrent.info.files.clone()
