@@ -3623,6 +3623,87 @@ mod tests {
         let triggered = effects_proof.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { root_hash, .. } if root_hash == &root_target));
         assert!(triggered, "Arrival of proof should trigger verification of buffered data");
     }
+
+    #[test]
+    fn test_v2_verification_failure() {
+        let mut state = create_empty_state();
+        // Setup simple 1-piece torrent
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 1024;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.set_geometry(1024, 1024, false);
+
+        let root_hash = vec![0xAA; 32];
+        state.piece_to_roots.insert(0, vec![(0, root_hash.clone())]);
+        
+        // Proof arrives first
+        state.v2_proofs.insert(0, vec![0xFF; 32]);
+
+        // Incoming block with "bad" data
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0x00; 1024], // Junk data
+        });
+
+        // Effect should be VerifyPieceV2
+        assert!(effects.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { .. })));
+
+        // Simulate the CPU worker returning "valid: false"
+        let verify_effects = state.update(Action::PieceVerified {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            valid: false, // <--- FAILURE
+            data: vec![],
+        });
+
+        // Expect disconnection or punishment
+        let disconnected = verify_effects.iter().any(|e| matches!(e, Effect::DisconnectPeer { .. }));
+        assert!(disconnected, "Peer should be disconnected on V2 verification failure");
+    }
+
+    #[test]
+    fn test_v2_state_cleanup_after_success() {
+        let mut state = create_empty_state();
+        // Setup...
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 4;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.set_geometry(4, 4, false);
+
+        state.piece_to_roots.insert(0, vec![(0, vec![0xAA; 32])]);
+
+        // 1. Buffer Data
+        state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![1, 2, 3, 4],
+        });
+
+        // 2. Buffer Proof (Triggers Verification)
+        state.update(Action::MerkleProofReceived {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            proof: vec![0xBB; 32],
+        });
+
+        // 3. Complete Verification
+        state.update(Action::PieceVerified {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            valid: true,
+            data: vec![1, 2, 3, 4],
+        });
+
+        // ASSERT: Maps should be empty
+        // Note: You might need to add a cleanup method in `PieceVerified` handler if this fails
+        assert!(state.v2_pending_data.get(&0).is_none(), "Pending data should be removed after verification");
+        // v2_proofs might be kept for re-verification or cleared depending on your implementation strategy
+    }
 }
 
 #[cfg(test)]
