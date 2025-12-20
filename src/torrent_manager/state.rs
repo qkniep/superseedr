@@ -3908,6 +3908,172 @@ mod tests {
             "Cleanup should verify that 3 items exceeds the calculated limit for 500MB pieces (limit=2), and clear the buffer");
     }
 
+    #[test]
+    fn test_hybrid_v1_v2_interop() {
+        // GIVEN: A State with 2 pieces
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 1024;
+        state.torrent = Some(torrent);
+        
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.set_geometry(1024, 2048, false);
+
+        // CONFIGURATION: Hybrid Setup
+        // Piece 0: Has a V2 Root (V2 Logic)
+        let root = vec![0xAA; 32];
+        state.piece_to_roots.insert(0, vec![(0, root.clone())]);
+        
+        // Piece 1: NO Root (V1 Logic) - We intentionally do not insert it into piece_to_roots.
+
+        let peer_id = "hybrid_peer".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // --- STEP 1: Test V2 Path (Piece 0) ---
+        // Action: Send Data for Piece 0
+        let effects_v2_data = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![1u8; 1024],
+        });
+
+        // Check: Should be BUFFERED (waiting for proof), NOT Verified yet
+        assert!(state.v2_pending_data.contains_key(&0), "Piece 0 (V2) should buffer data pending proof");
+        assert!(!effects_v2_data.iter().any(|e| matches!(e, Effect::VerifyPiece { .. } | Effect::VerifyPieceV2 { .. })), 
+            "Piece 0 should not verify immediately");
+
+        // Action: Send Proof for Piece 0
+        let effects_v2_proof = state.update(Action::MerkleProofReceived {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            proof: vec![0xFF; 32],
+        });
+
+        // Check: NOW it should verify using V2
+        let verified_v2 = effects_v2_proof.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { .. }));
+        assert!(verified_v2, "Piece 0 should verify via V2 path after proof arrives");
+
+
+        // --- STEP 2: Test V1 Path (Piece 1) ---
+        // Action: Send Data for Piece 1 (which has no roots)
+        let effects_v1 = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 1,
+            block_offset: 0,
+            data: vec![2u8; 1024],
+        });
+
+        // Check: Should Verify IMMEDIATELY (Standard V1 behavior)
+        // It must use Effect::VerifyPiece, NOT VerifyPieceV2
+        let verified_v1 = effects_v1.iter().any(|e| matches!(e, Effect::VerifyPiece { .. }));
+        assert!(verified_v1, "Piece 1 (V1-only) should verify immediately via standard SHA1 path");
+        
+        // Check: Should NOT buffer
+        assert!(!state.v2_pending_data.contains_key(&1), "Piece 1 should not use V2 buffer");
+    }
+
+    #[test]
+    fn test_hybrid_swarm_interop() {
+        // GIVEN: A Hybrid Torrent with 4 pieces
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(4);
+        torrent.info.piece_length = 1024;
+        state.torrent = Some(torrent);
+        
+        state.piece_manager.set_initial_fields(4, false);
+        state.piece_manager.set_geometry(1024, 4096, false);
+
+        // CONFIGURATION:
+        // Piece 0 & 2: V2 (Has Root)
+        // Piece 1 & 3: V1 (No Root)
+        let root = vec![0xAA; 32];
+        state.piece_to_roots.insert(0, vec![(0, root.clone())]);
+        state.piece_to_roots.insert(2, vec![(2048, root.clone())]);
+
+        // SETUP PEERS:
+        // Peer A: V2-Capable (Modern)
+        let peer_a = "v2_peer_A".to_string();
+        add_peer(&mut state, &peer_a);
+
+        // Peer B: V1-Only (Legacy)
+        let peer_b = "v1_peer_B".to_string();
+        add_peer(&mut state, &peer_b);
+
+
+        // --- CASE 1: V2 Peer -> V2 Piece (Standard V2) ---
+        // Peer A sends data + proof for Piece 0.
+        state.update(Action::IncomingBlock {
+            peer_id: peer_a.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![1u8; 1024],
+        });
+        let effects_1 = state.update(Action::MerkleProofReceived {
+            peer_id: peer_a.clone(),
+            piece_index: 0,
+            proof: vec![0xFF; 32],
+        });
+        
+        assert!(effects_1.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { .. })), 
+            "Case 1 Fail: V2 Peer sending V2 Piece should trigger VerifyPieceV2");
+
+
+        // --- CASE 2: V2 Peer -> V1 Piece (Backward Compatibility) ---
+        // Peer A sends data for Piece 1 (which has no V2 root).
+        let effects_2 = state.update(Action::IncomingBlock {
+            peer_id: peer_a.clone(),
+            piece_index: 1,
+            block_offset: 0,
+            data: vec![2u8; 1024],
+        });
+
+        assert!(effects_2.iter().any(|e| matches!(e, Effect::VerifyPiece { .. })), 
+            "Case 2 Fail: V2 Peer sending V1 Piece should fallback to VerifyPiece (SHA1)");
+
+
+        // --- CASE 3: V1 Peer -> V1 Piece (Standard V1) ---
+        // Peer B sends data for Piece 3.
+        let effects_3 = state.update(Action::IncomingBlock {
+            peer_id: peer_b.clone(),
+            piece_index: 3,
+            block_offset: 0,
+            data: vec![3u8; 1024],
+        });
+
+        assert!(effects_3.iter().any(|e| matches!(e, Effect::VerifyPiece { .. })), 
+            "Case 3 Fail: V1 Peer sending V1 Piece should use VerifyPiece (SHA1)");
+
+
+        // --- CASE 4: V1 Peer -> V2 Piece (The "Cooperative" Case) ---
+        // Peer B (Legacy) sends data for Piece 2 (V2).
+        // It CANNOT send a proof.
+        let effects_4_data = state.update(Action::IncomingBlock {
+            peer_id: peer_b.clone(),
+            piece_index: 2,
+            block_offset: 0,
+            data: vec![4u8; 1024],
+        });
+
+        // 1. Check data is buffered (because it's a V2 piece)
+        assert!(state.v2_pending_data.contains_key(&2), "Case 4: Data from V1 peer must be buffered waiting for proof");
+        assert!(!effects_4_data.iter().any(|e| matches!(e, Effect::VerifyPiece { .. } | Effect::VerifyPieceV2 { .. })), 
+            "Case 4: Should NOT verify yet (missing proof)");
+
+        // 2. Peer A (Modern) sends the PROOF for Piece 2.
+        // This simulates us fetching the proof from a different peer to unlock the data.
+        let effects_4_proof = state.update(Action::MerkleProofReceived {
+            peer_id: peer_a.clone(),
+            piece_index: 2,
+            proof: vec![0xEE; 32],
+        });
+
+        // 3. Check Verification triggers now
+        let verified_hybrid = effects_4_proof.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { .. }));
+        assert!(verified_hybrid, 
+            "Case 4 Fail: Data from V1 Peer + Proof from V2 Peer should successfully trigger verification!");
+    }
+
 }
 
 #[cfg(test)]
