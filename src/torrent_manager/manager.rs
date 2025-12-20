@@ -72,6 +72,7 @@ use urlencoding::decode;
 use data_encoding::BASE32;
 
 use sha1::{Digest, Sha1};
+use sha2::{ Sha256};
 use tokio::fs;
 use tokio::net::TcpStream;
 use tokio::signal;
@@ -557,6 +558,32 @@ impl TorrentManager {
                                 .await;
                         }
                     }
+                });
+            }
+
+
+            Effect::VerifyPieceV2 { peer_id, piece_index, proof, data, root_hash } => {
+                let tx = self.torrent_manager_tx.clone();
+                let peer_id_clone = peer_id.clone();
+                
+                // Spawn blocking task for SHA-256 Merkle hashing
+                tokio::task::spawn_blocking(move || {
+                    let is_valid = verify_merkle_proof(
+                        &root_hash, 
+                        &data, 
+                        piece_index, 
+                        &proof
+                    );
+
+                    let result = if is_valid { Ok(data) } else { Err(()) };
+
+                    // Reuse existing PieceVerified command!
+                    // This loops back to Action::PieceVerified, which handles disk writes.
+                    let _ = tx.blocking_send(TorrentCommand::PieceVerified {
+                        piece_index,
+                        peer_id: peer_id_clone,
+                        verification_result: result,
+                    });
                 });
             }
 
@@ -2116,6 +2143,14 @@ impl TorrentManager {
                         TorrentCommand::SuccessfullyConnected(peer_id) => self.apply_action(Action::PeerSuccessfullyConnected { peer_id }),
                         TorrentCommand::PeerId(addr, id) => self.apply_action(Action::UpdatePeerId { peer_addr: addr, new_id: id }),
 
+                        TorrentCommand::MerkleHashData { peer_id, piece_index, base_layer, length, proof } => {
+                            self.apply_action(Action::MerkleProofReceived {
+                                peer_id,
+                                piece_index,
+                                proof,
+                            });
+                        },
+
                         #[cfg(feature = "pex")]
                         TorrentCommand::AddPexPeers(_peer_id, new_peers) => {
                             for peer_tuple in new_peers {
@@ -2239,6 +2274,44 @@ impl TorrentManager {
         }
     }
 }
+
+fn verify_merkle_proof(
+    root_hash: &[u8],
+    piece_data: &[u8],
+    piece_index: u32,
+    proof: &[u8],
+) -> bool {
+    if proof.len() % 32 != 0 { return false; }
+
+    // 1. Hash the leaf (Piece Data)
+    let mut current_hash: [u8; 32] = Sha256::digest(piece_data).into();
+
+    let mut current_index = piece_index;
+
+    // 2. Climb the tree
+    for sibling in proof.chunks(32) {
+        let mut hasher = Sha256::new();
+        
+        // v2 Tree Logic: 
+        // If index is even, we are Left, sibling is Right.
+        // If index is odd, we are Right, sibling is Left.
+        if current_index % 2 == 0 {
+            hasher.update(current_hash);
+            hasher.update(sibling);
+        } else {
+            hasher.update(sibling);
+            hasher.update(current_hash);
+        }
+
+        current_hash = hasher.finalize().into();
+        current_index /= 2;
+    }
+
+    // 3. Verify Root
+    current_hash.as_slice() == root_hash
+}
+
+
 
 #[cfg(test)]
 mod tests {

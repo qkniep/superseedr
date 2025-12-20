@@ -58,6 +58,13 @@ pub enum TorrentCommand {
         proof: Vec<u8>,
     },
 
+    RequestHash {
+        piece_index: u32,
+        base_layer: u32,
+        length: u32,
+        proof_layers: u32,
+    },
+
     PieceVerified {
         piece_index: u32,
         peer_id: String,

@@ -118,6 +118,11 @@ pub enum Action {
         torrent: Box<Torrent>,
         metadata_length: i64,
     },
+    MerkleProofReceived {
+        peer_id: String,
+        piece_index: u32,
+        proof: Vec<u8>,
+    },
     ValidationComplete {
         completed_pieces: Vec<u32>,
     },
@@ -171,6 +176,13 @@ pub enum Effect {
         peer_id: String,
         piece_index: u32,
         data: Vec<u8>,
+    },
+    VerifyPieceV2 {
+        peer_id: String,
+        piece_index: u32,
+        proof: Vec<u8>,
+        data: Vec<u8>,
+        root_hash: Vec<u8>,
     },
     WriteToDisk {
         peer_id: String,
@@ -280,6 +292,10 @@ pub struct TorrentState {
     pub validation_pieces_found: u32,
     pub now: Instant,
     pub has_started_announce_sent: bool,
+    pub v2_proofs: HashMap<u32, Vec<u8>>,       // Proofs waiting for data
+    pub v2_pending_data: HashMap<u32, Vec<u8>>, // Data waiting for proofs
+    pub piece_to_root: HashMap<u32, Vec<u8>>,   // Piece Index -> Root Hash
+
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -308,6 +324,9 @@ impl Default for TorrentState {
             validation_pieces_found: 0,
             now: Instant::now(),
             has_started_announce_sent: false,
+            v2_proofs: HashMap::new(),
+            v2_pending_data: HashMap::new(),
+            piece_to_root: HashMap::new(),
         }
     }
 }
@@ -1037,17 +1056,36 @@ impl TorrentState {
 
                 // 7. Process the Block
                 let piece_size = self.get_piece_size(piece_index);
-                if let Some(complete_data) =
-                    self.piece_manager
-                        .handle_block(piece_index, block_offset, &data, piece_size)
-                {
-                    self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
-                    effects.push(Effect::VerifyPiece {
-                        peer_id: peer_id.clone(),
-                        piece_index,
-                        data: complete_data,
-                    });
+                if let Some(complete_data) = self.piece_manager.handle_block(piece_index, block_offset, &data, piece_size) {
+                    
+                    // Check if this is a v2 piece (has a root hash)
+                    if let Some(root) = self.piece_to_root.get(&piece_index) {
+                        // It is v2. Do we have the proof?
+                        if let Some(proof) = self.v2_proofs.get(&piece_index) {
+                            // Yes! Verify immediately.
+                            self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
+                            effects.push(Effect::VerifyPieceV2 {
+                                peer_id: peer_id.clone(),
+                                piece_index,
+                                proof: proof.clone(),
+                                data: complete_data,
+                                root_hash: root.clone(),
+                            });
+                        } else {
+                            // No proof yet. Buffer the data and wait.
+                            self.v2_pending_data.insert(piece_index, complete_data);
+                        }
+                    } else {
+                        // Standard v1 behavior
+                        self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
+                        effects.push(Effect::VerifyPiece {
+                            peer_id: peer_id.clone(),
+                            piece_index,
+                            data: complete_data,
+                        });
+                    }
                 }
+
 
                 // 4. Refill Pipeline (Work Assignment)
                 if let Some(peer) = self.peers.get(&peer_id) {
@@ -1061,6 +1099,25 @@ impl TorrentState {
                 }
 
                 effects
+            }
+
+
+            Action::MerkleProofReceived { peer_id, piece_index, proof } => {
+                self.v2_proofs.insert(piece_index, proof.clone());
+
+                // CHECK: Do we already have the data waiting?
+                if let Some(data) = self.v2_pending_data.remove(&piece_index) {
+                    if let Some(root) = self.piece_to_root.get(&piece_index) {
+                        return vec![Effect::VerifyPieceV2 {
+                            peer_id,
+                            piece_index,
+                            proof,
+                            data,
+                            root_hash: root.clone(),
+                        }];
+                    }
+                }
+                vec![Effect::DoNothing]
             }
 
             Action::PieceVerified {
@@ -1301,6 +1358,34 @@ impl TorrentState {
 
                 self.torrent = Some(*torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
+
+                // We map every piece index to the Merkle Root of the file it belongs to.
+                let v2_roots = torrent.get_v2_roots(); // Returns Vec<(PathString, RootHash)>
+                let roots_map: HashMap<String, Vec<u8>> = v2_roots.into_iter().collect();
+                let piece_length = torrent.info.piece_length as u64;
+                let mut current_byte_offset = 0;
+                let files_list = if torrent.info.files.is_empty() {
+                    vec![crate::torrent_file::InfoFile {
+                        length: torrent.info.length,
+                        path: vec![torrent.info.name.clone()],
+                        md5sum: None,
+                    }]
+                } else {
+                    torrent.info.files.clone()
+                };
+                for file in files_list {
+                    let path_key = file.path.join("/"); 
+                    
+                    if let Some(root_hash) = roots_map.get(&path_key) {
+                        let start_piece = current_byte_offset / piece_length;
+                        let end_byte = current_byte_offset + file.length as u64;
+                        let end_piece = (end_byte + piece_length - 1) / piece_length;
+                        for idx in start_piece..end_piece {
+                            self.piece_to_root.insert(idx as u32, root_hash.clone());
+                        }
+                    }
+                    current_byte_offset += file.length as u64;
+                }
 
                 let num_pieces = torrent.info.pieces.len() / 20;
                 self.piece_manager = PieceManager::new();
@@ -1676,6 +1761,7 @@ impl TorrentState {
         }
     }
 }
+
 
 #[derive(Debug, Clone)]
 pub struct PeerState {
