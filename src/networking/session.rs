@@ -372,6 +372,26 @@ impl PeerSession {
                         Message::Port(_) => {}
                         Message::Handshake(..) => {}
                         Message::ExtendedHandshake(_) => {}
+                        Message::HashPiece(index, base, _offset, data) => {
+                            let _ = self.torrent_manager_tx.try_send(
+                                TorrentCommand::MerkleHashData {
+                                    peer_id: self.peer_ip_port.clone(),
+                                    piece_index: index,
+                                    base_layer: base,
+                                    length: data.len() as u32,
+                                    proof: data,
+                                }
+                            );
+                        }
+                        Message::HashReject(index, ..) => {
+                            tracing::debug!("Peer {} rejected hash request for piece {}", self.peer_ip_port, index);
+                        }
+                        Message::HashRequest(..) => {
+                            // We are currently just downloading (leeching) v2, not seeding v2 yet.
+                            // Send a Reject for now to be polite.
+                            // (Implementation of sending Reject left as exercise or can be ignored)
+                            // TODO: SEEDING v2
+                        }
                     }
                 },
 

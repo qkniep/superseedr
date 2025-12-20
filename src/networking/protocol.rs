@@ -113,6 +113,11 @@ pub enum Message {
 
     ExtendedHandshake(Option<i64>),
     Extended(u8, Vec<u8>),
+
+    // --- BEP 52 (BitTorrent v2) ---
+    HashRequest(u32, u32, u32, u32), // index, base, offset, length
+    HashReject(u32, u32, u32, u32),  // index, base, offset, length
+    HashPiece(u32, u32, u32, Vec<u8>), // index, base, offset, proof_data
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -372,6 +377,41 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
             message_bytes.extend(payload);
             Ok(message_bytes)
         }
+
+        Message::HashRequest(index, base, offset, length) => {
+            let mut buffer = Vec::new();
+            let len = 1 + 4 + 4 + 4 + 4; // ID (1) + 4x u32 (16)
+            buffer.extend_from_slice(&(len as u32).to_be_bytes());
+            buffer.push(21);
+            buffer.extend_from_slice(&index.to_be_bytes());
+            buffer.extend_from_slice(&base.to_be_bytes());
+            buffer.extend_from_slice(&offset.to_be_bytes());
+            buffer.extend_from_slice(&length.to_be_bytes());
+            Ok(buffer)
+        }
+        Message::HashReject(index, base, offset, length) => {
+            let mut buffer = Vec::new();
+            let len = 1 + 4 + 4 + 4 + 4;
+            buffer.extend_from_slice(&(len as u32).to_be_bytes());
+            buffer.push(22);
+            buffer.extend_from_slice(&index.to_be_bytes());
+            buffer.extend_from_slice(&base.to_be_bytes());
+            buffer.extend_from_slice(&offset.to_be_bytes());
+            buffer.extend_from_slice(&length.to_be_bytes());
+            Ok(buffer)
+        }
+        Message::HashPiece(index, base, offset, data) => {
+            let mut buffer = Vec::new();
+            let len = 1 + 4 + 4 + 4 + data.len();
+            buffer.extend_from_slice(&(len as u32).to_be_bytes());
+            buffer.push(23);
+            buffer.extend_from_slice(&index.to_be_bytes());
+            buffer.extend_from_slice(&base.to_be_bytes());
+            buffer.extend_from_slice(&offset.to_be_bytes());
+            buffer.extend_from_slice(&data);
+            Ok(buffer)
+        }
+
     }
 }
 
@@ -406,7 +446,6 @@ pub fn parse_message_from_bytes(
     // 3. Read Message ID (1 byte)
     let mut id_buf = [0u8; 1];
 
-    // FIX: Disambiguate explicitly
     std::io::Read::read_exact(cursor, &mut id_buf)?;
 
     let message_id = id_buf[0];
@@ -415,7 +454,6 @@ pub fn parse_message_from_bytes(
     let payload_len = message_len as usize - 1;
     let mut payload = vec![0u8; payload_len];
 
-    // FIX: Disambiguate explicitly
     std::io::Read::read_exact(cursor, &mut payload)?;
 
     // 5. Decode Message
@@ -511,12 +549,46 @@ pub fn parse_message_from_bytes(
             let extended_payload = payload[1..].to_vec();
             Ok(Message::Extended(extended_id, extended_payload))
         }
+        21 => {
+            if payload.len() != 16 { return Err(Error::new(ErrorKind::InvalidData, "Invalid HashRequest length")); }
+            let index = read_be_u32(&payload, 0)?;
+            let base = read_be_u32(&payload, 4)?;
+            let offset = read_be_u32(&payload, 8)?;
+            let length = read_be_u32(&payload, 12)?;
+            Ok(Message::HashRequest(index, base, offset, length))
+        }
+        22 => {
+            if payload.len() != 16 { return Err(Error::new(ErrorKind::InvalidData, "Invalid HashReject length")); }
+            let index = read_be_u32(&payload, 0)?;
+            let base = read_be_u32(&payload, 4)?;
+            let offset = read_be_u32(&payload, 8)?;
+            let length = read_be_u32(&payload, 12)?;
+            Ok(Message::HashReject(index, base, offset, length))
+        }
+        23 => {
+            if payload.len() < 12 { return Err(Error::new(ErrorKind::InvalidData, "Invalid HashPiece length")); }
+            let index = read_be_u32(&payload, 0)?;
+            let base = read_be_u32(&payload, 4)?;
+            let offset = read_be_u32(&payload, 8)?;
+            let data = payload[12..].to_vec();
+            Ok(Message::HashPiece(index, base, offset, data))
+        }
         _ => {
             // Unknown ID
             let msg = format!("Unknown message ID: {}", message_id);
             Err(Error::new(ErrorKind::InvalidData, msg))
         }
     }
+}
+
+// Helper to read a u32 from a byte slice at a specific offset
+fn read_be_u32(slice: &[u8], offset: usize) -> Result<u32, std::io::Error> {
+    if offset + 4 > slice.len() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Payload too short"));
+    }
+    // We strictly use try_into() to grab exactly 4 bytes
+    let bytes: [u8; 4] = slice[offset..offset+4].try_into().unwrap();
+    Ok(u32::from_be_bytes(bytes))
 }
 
 #[cfg(test)]

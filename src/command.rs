@@ -50,6 +50,14 @@ pub enum TorrentCommand {
     AnnounceResponse(String, TrackerResponse),
     AnnounceFailed(String, String),
 
+    MerkleHashData {
+        peer_id: String,
+        piece_index: u32,
+        base_layer: u32,
+        length: u32,
+        proof: Vec<u8>,
+    },
+
     PieceVerified {
         piece_index: u32,
         peer_id: String,
