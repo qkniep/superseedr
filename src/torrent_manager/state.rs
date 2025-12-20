@@ -3823,6 +3823,91 @@ mod tests {
         // Logic: If last_activity is VerifyingPiece, IncomingBlock usually returns DoNothing or ignores.
         // We just assert it didn't panic and logic held.
     }
+
+    #[test]
+    fn test_v2_scale_1000_deferred_blocks() {
+        // GIVEN: A torrent with 1000 V2 pieces
+        let mut state = create_empty_state();
+        let num_pieces = 1000;
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = 1024; // Small size for fast test
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(num_pieces, false);
+        state.piece_manager.set_geometry(1024, 1024 * num_pieces as u64, false);
+
+        // Map all pieces to a dummy root
+        let root = vec![0xAA; 32];
+        for i in 0..num_pieces {
+            state.piece_to_roots.insert(i as u32, vec![(0, root.clone())]);
+        }
+
+        let peer_id = "worker_peer".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // 1. PHASE 1: FLOOD DATA (No Proofs)
+        // We simulate a peer sending 1000 blocks rapidly.
+        for i in 0..num_pieces {
+            state.update(Action::IncomingBlock {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                block_offset: 0,
+                data: vec![0u8; 1024],
+            });
+        }
+
+        // CHECK: We should have 1000 items pending in memory
+        assert_eq!(state.v2_pending_data.len(), 1000, "Should buffer 1000 pieces awaiting proofs");
+
+        // 2. PHASE 2: FLOOD PROOFS
+        // Now the proofs arrive. This tests if the system can drain the queue efficiently.
+        let mut verify_count = 0;
+        for i in 0..num_pieces {
+            let effects = state.update(Action::MerkleProofReceived {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                proof: vec![0xFF; 32],
+            });
+            
+            if effects.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { .. })) {
+                verify_count += 1;
+            }
+        }
+
+        // CHECK: All 1000 should have triggered verification
+        assert_eq!(verify_count, 1000, "All 1000 pieces should trigger verification after proofs arrive");
+        
+        // CHECK: Buffer should be empty (moved to verification)
+        assert!(state.v2_pending_data.is_empty(), "Pending buffer should be drained");
+    }
+
+    #[test]
+    fn test_v2_memory_cap_enforcement() {
+        let mut state = create_empty_state();
+        
+        // GIVEN: A torrent with HUGE pieces (500 MB)
+        // This tricks the cleanup logic into setting a very small item limit.
+        // Limit = 1GB / 500MB = 2 items allowed.
+        let mut torrent = create_dummy_torrent(10);
+        torrent.info.piece_length = 500 * 1024 * 1024; // 500 MB
+        state.torrent = Some(torrent);
+
+        // 1. Insert 3 small items (mocking large pieces)
+        // We use small data vectors so we don't actually crash the test runner,
+        // but the state machine counts them as "full pieces".
+        for i in 0..3 {
+            state.v2_pending_data.insert(i, (0, vec![0u8; 10]));
+        }
+
+        assert_eq!(state.v2_pending_data.len(), 3, "Sanity check: 3 items inserted");
+
+        // 2. Trigger Cleanup
+        state.update(Action::Cleanup);
+
+        // THEN: The buffer should be cleared because 3 > 2 (Limit)
+        assert!(state.v2_pending_data.is_empty(), 
+            "Cleanup should verify that 3 items exceeds the calculated limit for 500MB pieces (limit=2), and clear the buffer");
+    }
+
 }
 
 #[cfg(test)]
