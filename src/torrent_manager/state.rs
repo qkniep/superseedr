@@ -1578,6 +1578,16 @@ impl TorrentState {
                 self.timed_out_peers
                     .retain(|_, (retry_count, _)| *retry_count < MAX_TIMEOUT_COUNT);
 
+                // --- NEW DYNAMIC V2 CLEANUP (1 GB LIMIT) ---
+                let max_ram_usage = 1024 * 1024 * 1024; // 1 GB in bytes
+                let piece_len = self.torrent.as_ref()
+                    .map(|t| t.info.piece_length as usize)
+                    .unwrap_or(16_384);
+                let max_pending_items = max_ram_usage / piece_len;
+                if self.v2_pending_data.len() > max_pending_items {
+                     self.v2_pending_data.clear();
+                }
+
                 let mut stuck_peers = Vec::new();
                 for (id, peer) in &self.peers {
                     if peer.peer_id.is_empty()
@@ -1706,6 +1716,10 @@ impl TorrentState {
                 self.peers.clear();
                 self.last_known_peers.clear();
                 self.timed_out_peers.clear();
+
+                self.v2_proofs.clear();
+                self.v2_pending_data.clear();
+                self.piece_to_roots.clear();
 
                 let num_pieces = self.piece_manager.bitfield.len();
                 self.piece_manager = PieceManager::new();
