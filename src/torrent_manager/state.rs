@@ -293,9 +293,8 @@ pub struct TorrentState {
     pub now: Instant,
     pub has_started_announce_sent: bool,
     pub v2_proofs: HashMap<u32, Vec<u8>>,       // Proofs waiting for data
-    pub v2_pending_data: HashMap<u32, Vec<u8>>, // Data waiting for proofs
-    pub piece_to_root: HashMap<u32, Vec<u8>>,   // Piece Index -> Root Hash
-
+    pub v2_pending_data: HashMap<u32, (u32, Vec<u8>)>,
+    pub piece_to_roots: HashMap<u32, Vec<(u64, Vec<u8>)>>,
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -326,7 +325,7 @@ impl Default for TorrentState {
             has_started_announce_sent: false,
             v2_proofs: HashMap::new(),
             v2_pending_data: HashMap::new(),
-            piece_to_root: HashMap::new(),
+            piece_to_roots: HashMap::new(),
         }
     }
 }
@@ -1056,27 +1055,44 @@ impl TorrentState {
 
                 // 7. Process the Block
                 let piece_size = self.get_piece_size(piece_index);
+
                 if let Some(complete_data) = self.piece_manager.handle_block(piece_index, block_offset, &data, piece_size) {
                     
-                    // Check if this is a v2 piece (has a root hash)
-                    if let Some(root) = self.piece_to_root.get(&piece_index) {
-                        // It is v2. Do we have the proof?
-                        if let Some(proof) = self.v2_proofs.get(&piece_index) {
-                            // Yes! Verify immediately.
-                            self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
-                            effects.push(Effect::VerifyPieceV2 {
-                                peer_id: peer_id.clone(),
-                                piece_index,
-                                proof: proof.clone(),
-                                data: complete_data,
-                                root_hash: root.clone(),
-                            });
+                    // 1. Check if this piece has associated v2 roots
+                    if let Some(roots) = self.piece_to_roots.get(&piece_index) {
+                        
+                        // 2. Calculate Global Offset of this block
+                        let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(0);
+                        let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
+
+                        // 3. Find the root for the file that contains this offset
+                        // We look for the file with the largest start_offset that is <= our global_offset
+                        let matching_root = roots.iter()
+                            .filter(|(start, _)| *start <= global_offset)
+                            .max_by_key(|(start, _)| *start)
+                            .map(|(_, root)| root);
+
+                        if let Some(root) = matching_root {
+                            // It is v2. Do we have the proof?
+                            if let Some(proof) = self.v2_proofs.get(&piece_index) {
+                                self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
+                                effects.push(Effect::VerifyPieceV2 {
+                                    peer_id: peer_id.clone(),
+                                    piece_index,
+                                    proof: proof.clone(),
+                                    data: complete_data,
+                                    root_hash: root.clone(),
+                                });
+                            } else {
+                                // Buffer data AND offset so we can verify later
+                                self.v2_pending_data.insert(piece_index, (block_offset, complete_data));
+                            }
                         } else {
-                            // No proof yet. Buffer the data and wait.
-                            self.v2_pending_data.insert(piece_index, complete_data);
+                            // Fallback (Shouldn't happen if metadata is correct)
+                            // Or maybe it's a padding file without a root?
                         }
                     } else {
-                        // Standard v1 behavior
+                        // Standard v1 behavior (No roots found for this piece)
                         self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                         effects.push(Effect::VerifyPiece {
                             peer_id: peer_id.clone(),
@@ -1102,19 +1118,32 @@ impl TorrentState {
             }
 
 
+
             Action::MerkleProofReceived { peer_id, piece_index, proof } => {
                 self.v2_proofs.insert(piece_index, proof.clone());
 
-                // CHECK: Do we already have the data waiting?
-                if let Some(data) = self.v2_pending_data.remove(&piece_index) {
-                    if let Some(root) = self.piece_to_root.get(&piece_index) {
-                        return vec![Effect::VerifyPieceV2 {
-                            peer_id,
-                            piece_index,
-                            proof,
-                            data,
-                            root_hash: root.clone(),
-                        }];
+                // Retrieve data AND offset
+                if let Some((block_offset, data)) = self.v2_pending_data.remove(&piece_index) {
+                    
+                    // REPEAT LOOKUP LOGIC
+                    if let Some(roots) = self.piece_to_roots.get(&piece_index) {
+                        let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(0);
+                        let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
+
+                        let matching_root = roots.iter()
+                            .filter(|(start, _)| *start <= global_offset)
+                            .max_by_key(|(start, _)| *start)
+                            .map(|(_, root)| root);
+
+                        if let Some(root) = matching_root {
+                            return vec![Effect::VerifyPieceV2 {
+                                peer_id,
+                                piece_index,
+                                proof,
+                                data,
+                                root_hash: root.clone(),
+                            }];
+                        }
                     }
                 }
                 vec![Effect::DoNothing]
@@ -1381,7 +1410,10 @@ impl TorrentState {
                         let end_byte = current_byte_offset + file.length as u64;
                         let end_piece = (end_byte + piece_length - 1) / piece_length;
                         for idx in start_piece..end_piece {
-                            self.piece_to_root.insert(idx as u32, root_hash.clone());
+                            self.piece_to_roots
+                                .entry(idx as u32)
+                                .or_default()
+                                .push((current_byte_offset, root_hash.clone()));
                         }
                     }
                     current_byte_offset += file.length as u64;
