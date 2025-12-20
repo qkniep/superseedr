@@ -3500,6 +3500,129 @@ mod tests {
 
         println!("SUCCESS: Pipeline saturated at 50 requests with sequential ordering.");
     }
+
+    // -------------------------------------------------------------------------
+    // V2 / HYBRID LOGIC TESTS
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_v2_hybrid_boundary_routing() {
+        let mut state = create_empty_state();
+
+        // Setup: Piece 0, Length 32768 (Spans 2 Files of 16384 each)
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 32768; 
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.set_geometry(32768, 32768, false);
+
+        let root_a = vec![0xAA; 32]; // File A (0-16384)
+        let root_b = vec![0xBB; 32]; // File B (16384-32768)
+
+        state.piece_to_roots.insert(0, vec![
+            (0, root_a.clone()),      
+            (16384, root_b.clone())   
+        ]);
+        state.v2_proofs.insert(0, vec![0xFF; 32]); // Proof ready
+
+        // --- SCENARIO 1: Complete via Offset 16384 (Should match Root B) ---
+        
+        // 1. Fill First Half (0..16384) - Incomplete
+        state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0u8; 16384],
+        });
+
+        // 2. Fill Second Half (16384..32768) - Complete!
+        let effects_b = state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 16384,
+            data: vec![0u8; 16384],
+        });
+
+        let verified_b = effects_b.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { root_hash, .. } if root_hash == &root_b));
+        assert!(verified_b, "Completion at offset 16384 should verify against Root B");
+
+
+        // --- SCENARIO 2: Complete via Offset 0 (Should match Root A) ---
+        
+        // Reset State for clean run
+        state.piece_manager = PieceManager::new();
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.set_geometry(32768, 32768, false);
+
+        // 1. Fill Second Half (16384..32768) - Incomplete
+        state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 16384,
+            data: vec![0u8; 16384],
+        });
+
+        // 2. Fill First Half (0..16384) - Complete!
+        let effects_a = state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0u8; 16384],
+        });
+
+        let verified_a = effects_a.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { root_hash, .. } if root_hash == &root_a));
+        assert!(verified_a, "Completion at offset 0 should verify against Root A");
+    }
+
+    #[test]
+    fn test_v2_deferred_verification_with_offset() {
+        // GIVEN: A v2 piece where we DO NOT have the proof yet.
+        let mut state = create_empty_state();
+
+        // FIX: Initialize Torrent so 'get_piece_size' works.
+        // We use a small piece size (4 bytes) to make sending a "full piece" easy.
+        let mut torrent = create_dummy_torrent(10);
+        torrent.info.piece_length = 4; 
+        state.torrent = Some(torrent);
+        
+        state.piece_manager.set_initial_fields(10, false);
+        state.piece_manager.set_geometry(4, 40, false);
+
+        let root_target = vec![0xCC; 32];
+        
+        // This piece corresponds to a file starting at offset 0
+        state.piece_to_roots.insert(5, vec![(0, root_target.clone())]);
+
+        // WHEN: Data arrives (Block 0). We send 4 bytes to complete the piece.
+        let effects_data = state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 5,
+            block_offset: 0,
+            data: vec![1, 2, 3, 4],
+        });
+
+        // THEN: No verification effect yet (waiting for proof).
+        // FIX: We must specifically check that VerifyPieceV2 is NOT present.
+        // (We cannot use .is_empty() because 'IncomingBlock' always emits 'ManagerEvent::BlockReceived')
+        let verification_triggered = effects_data.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { .. } | Effect::VerifyPiece { .. }));
+        assert!(!verification_triggered, "Should NOT trigger verification before proof arrives");
+        
+        // CHECK INTERNAL STATE: Data should be buffered WITH offset (0)
+        let buffered = state.v2_pending_data.get(&5);
+        assert!(buffered.is_some());
+        assert_eq!(buffered.unwrap().0, 0, "Should store block offset 0");
+
+        // WHEN: Proof arrives later
+        let effects_proof = state.update(Action::MerkleProofReceived {
+            peer_id: "peer1".into(),
+            piece_index: 5,
+            proof: vec![0xEE; 32],
+        });
+
+        // THEN: Verification triggers immediately using the correct root
+        let triggered = effects_proof.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { root_hash, .. } if root_hash == &root_target));
+        assert!(triggered, "Arrival of proof should trigger verification of buffered data");
+    }
 }
 
 #[cfg(test)]
