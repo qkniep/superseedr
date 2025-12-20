@@ -2655,12 +2655,15 @@ mod resource_tests {
                 files: vec![],
                 private: None,
                 md5sum: None,
+                meta_version: None,
+                file_tree: None,
             },
             info_dict_bencode: vec![0u8; 20],
             created_by: None,
             creation_date: None,
             encoding: None,
             comment: None,
+            piece_layers: None,
         };
 
         let params = TorrentParameters {
@@ -2903,12 +2906,15 @@ mod resource_tests {
                 files: vec![],
                 private: None,
                 md5sum: None,
+                meta_version: None,
+                file_tree: None,
             },
             info_dict_bencode: vec![0u8; 20],
             created_by: None,
             creation_date: None,
             encoding: None,
             comment: None,
+            piece_layers: None,
         };
 
         let params = TorrentParameters {

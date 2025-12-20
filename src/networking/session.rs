@@ -637,6 +637,7 @@ impl PeerSession {
                                             comment: None,
                                             created_by: None,
                                             encoding: None,
+                                            piece_layers: None,
                                         },
                                         torrent_metadata_len,
                                     ));
