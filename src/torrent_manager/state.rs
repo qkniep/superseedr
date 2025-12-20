@@ -3974,6 +3974,87 @@ mod tests {
     }
 
     #[test]
+    fn test_v2_full_completion_lifecycle() {
+        // GIVEN: A V2 Torrent with 4 Pieces
+        let mut state = create_empty_state();
+        let num_pieces = 4;
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = 1024;
+        state.torrent = Some(torrent);
+        
+        state.piece_manager.set_initial_fields(num_pieces, false);
+        state.piece_manager.set_geometry(1024, 1024 * num_pieces as u64, false);
+        state.torrent_status = TorrentStatus::Standard; // Start in leeching mode
+
+        // Setup V2 Roots for all pieces
+        let root = vec![0xAA; 32];
+        for i in 0..num_pieces {
+            state.piece_to_roots.insert(i as u32, vec![(0, root.clone())]);
+        }
+
+        let peer_id = "seeder".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // 1. RECEIVE ALL DATA + PROOFS (The Network Phase)
+        for i in 0..num_pieces {
+            // Send Data (Buffers it)
+            state.update(Action::IncomingBlock {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                block_offset: 0,
+                data: vec![1u8; 1024],
+            });
+            
+            // Send Proof (Triggers Verification Effect)
+            let effects = state.update(Action::MerkleProofReceived {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                proof: vec![0xFF; 32],
+            });
+            
+            // Verify verification was requested
+            assert!(effects.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { .. })));
+        }
+
+        // 2. SIMULATE WORKER RESPONSES (The CPU/Disk Phase)
+        // In a real app, the Effect::VerifyPieceV2 would go to a thread pool, 
+        // which returns Action::PieceVerified. We simulate that here.
+        for i in 0..num_pieces {
+            // A. Verification Success
+            let verify_effects = state.update(Action::PieceVerified {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                valid: true,
+                data: vec![1u8; 1024],
+            });
+            
+            // Should trigger WriteToDisk
+            assert!(verify_effects.iter().any(|e| matches!(e, Effect::WriteToDisk { .. })));
+
+            // B. Disk Write Success
+            state.update(Action::PieceWrittenToDisk {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+            });
+        }
+
+        // 3. ASSERT COMPLETION
+        // The last WriteToDisk should have triggered CheckCompletion automatically.
+        
+        // Check 1: All pieces marked Done in manager
+        let all_done = state.piece_manager.bitfield.iter().all(|s| *s == crate::torrent_manager::piece_manager::PieceStatus::Done);
+        assert!(all_done, "All pieces should be marked Done");
+
+        // Check 2: Global Status Transitioned to Done
+        assert_eq!(state.torrent_status, TorrentStatus::Done, "Torrent Status should transition to Done upon completion");
+
+        // Check 3: Cleanup Happened (V2 buffers empty)
+        assert!(state.v2_pending_data.is_empty(), "Pending data buffer should be empty after completion");
+        // Note: v2_proofs is cleaned up in PieceVerified, so it should also be empty if you added the fix.
+        assert!(state.v2_proofs.is_empty(), "Proofs buffer should be empty after completion");
+    }
+
+    #[test]
     fn test_hybrid_swarm_interop() {
         // GIVEN: A Hybrid Torrent with 4 pieces
         let mut state = create_empty_state();
