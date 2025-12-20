@@ -1120,6 +1120,10 @@ impl TorrentState {
 
 
             Action::MerkleProofReceived { peer_id, piece_index, proof } => {
+                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
+                     return vec![Effect::DoNothing];
+                }
+
                 self.v2_proofs.insert(piece_index, proof.clone());
 
                 // Retrieve data AND offset
@@ -1162,6 +1166,7 @@ impl TorrentState {
                 }
 
                 self.v2_proofs.remove(&piece_index);
+                self.v2_pending_data.remove(&piece_index);
 
                 if valid {
                     if self.piece_manager.bitfield.get(piece_index as usize)
@@ -4053,6 +4058,95 @@ mod tests {
         // Note: v2_proofs is cleaned up in PieceVerified, so it should also be empty if you added the fix.
         assert!(state.v2_proofs.is_empty(), "Proofs buffer should be empty after completion");
     }
+
+    #[test]
+    fn test_v2_cleanup_on_completion_race() {
+        // GIVEN: A torrent with Piece 0
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 1024;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.set_geometry(1024, 1024, false);
+        
+        // V2 Setup
+        state.piece_to_roots.insert(0, vec![(0, vec![0xAA; 32])]);
+        let peer_id = "racer".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // 1. SETUP: Buffer Data (State is waiting for proof)
+        state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![1u8; 1024],
+        });
+        assert!(state.v2_pending_data.contains_key(&0), "Sanity: Data buffered");
+
+        // 2. RACE: The piece completes (simulating worker returning success)
+        state.update(Action::PieceVerified {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            valid: true,
+            data: vec![1u8; 1024],
+        });
+        
+        // Manually mark as done in bitfield to simulate WriteToDisk completion
+        state.piece_manager.bitfield[0] = crate::torrent_manager::piece_manager::PieceStatus::Done;
+
+        // CHECK 1: Did we clean up the pending data?
+        assert!(state.v2_pending_data.get(&0).is_none(), 
+            "Leak: Pending data should be removed immediately upon verification");
+
+        // 3. RACE: A wild Proof appears! (Late arrival after completion)
+        state.update(Action::MerkleProofReceived {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            proof: vec![0xFF; 32],
+        });
+
+        // CHECK 2: Did we ignore the late proof?
+        assert!(state.v2_proofs.get(&0).is_none(), 
+            "Leak: Late proofs for Done pieces should be ignored, not cached");
+    }
+
+    #[test]
+    fn test_v2_cleanup_on_failure() {
+        // GIVEN: A torrent with buffered data
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 1024;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.set_geometry(1024, 1024, false);
+        state.piece_to_roots.insert(0, vec![(0, vec![0xAA; 32])]);
+
+        let peer_id = "bad_actor".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // 1. Buffer Data
+        state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![1u8; 1024],
+        });
+
+        // 2. Fail Verification (Simulate bad data)
+        state.update(Action::PieceVerified {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            valid: false, // <--- FAILURE
+            data: vec![],
+        });
+
+        // CHECK: Memory should be freed immediately
+        assert!(state.v2_pending_data.get(&0).is_none(), 
+            "Cleanup: Pending data must be removed even if verification fails");
+        assert!(state.v2_proofs.get(&0).is_none(), 
+            "Cleanup: Proofs must be removed even if verification fails");
+    }
+
 
     #[test]
     fn test_hybrid_swarm_interop() {
