@@ -2196,6 +2196,76 @@ impl TorrentManager {
                             self.apply_action(Action::PieceWriteFailed { piece_index });
                         },
                         TorrentCommand::RequestUpload(peer_id, piece_index, block_offset, block_length) => self.apply_action(Action::RequestUpload { peer_id, piece_index, block_offset, length: block_length }),
+
+                        TorrentCommand::GetHashes {
+                            peer_id,
+                            file_root: _,
+                            base_layer,
+                            index,
+                            length,
+                            proof_layers: _,
+                        } => {
+                            let mut rejected = true;
+
+                            if let Some(torrent) = &self.state.torrent {
+                                // 1. RESOLVE ROOT: Find the root that covers this piece index
+                                if let Some(roots) = self.state.piece_to_roots.get(&index) {
+                                    // A piece might map to multiple files (boundary piece).
+                                    // We iterate to find the one that actually contains the data we want to serve.
+                                    // (Simplification: We take the first match that has valid bounds).
+                                    
+                                    for (file_start_byte_offset, resolved_root) in roots {
+                                        if let Some(layer_bytes) = torrent.get_layer_hashes(resolved_root) {
+                                            
+                                            // 1. Get Global Start Piece for this file
+                                            let piece_len = torrent.info.piece_length as u64;
+                                            let file_start_piece = (*file_start_byte_offset as u32) / (piece_len as u32);
+
+                                            // 2. Convert Global 'index' to File-Relative index
+                                            // e.g. Requesting Piece 105. File starts at 100. Relative index is 5.
+                                            if index < file_start_piece { continue; } 
+                                            let relative_start_idx = (index - file_start_piece) as usize;
+                                            let relative_end_idx = relative_start_idx + length as usize;
+
+                                            // 3. Check Bounds against the FILE'S hash layer
+                                            let total_hashes = layer_bytes.len() / 32;
+
+                                            if relative_end_idx <= total_hashes {
+                                                let start_byte = relative_start_idx * 32;
+                                                let end_byte = relative_end_idx * 32;
+                                                let proof_data = layer_bytes[start_byte..end_byte].to_vec();
+
+                                                if let Some(peer) = self.state.peers.get(&peer_id) {
+                                                    let _ = peer.peer_tx.try_send(TorrentCommand::SendHashPiece {
+                                                        peer_id: peer_id.clone(),
+                                                        root: resolved_root.clone(),
+                                                        base_layer,
+                                                        index, // Protocol expects Global Index to correlate response
+                                                        proof: proof_data,
+                                                    });
+                                                    rejected = false;
+                                                    break; // Found the file and sent data
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if rejected {
+                                if let Some(peer) = self.state.peers.get(&peer_id) {
+                                    let _ = peer.peer_tx.try_send(TorrentCommand::SendHashReject {
+                                        peer_id,
+                                        root: vec![],
+                                        base_layer,
+                                        index,
+                                        length,
+                                    });
+                                }
+                            }
+                        },
+
+
                         TorrentCommand::CancelUpload(peer_id, piece_index, block_offset, block_length) => {
                             self.apply_action(Action::CancelUpload {
                                 peer_id,
@@ -2473,6 +2543,33 @@ mod resource_tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::{broadcast, mpsc};
+
+    fn create_dummy_torrent(piece_count: usize) -> Torrent {
+        use crate::torrent_file::Info;
+        Torrent {
+            announce: Some("http://tracker.test".to_string()),
+            announce_list: None,
+            url_list: None,
+            info: Info {
+                name: "test_torrent".to_string(),
+                piece_length: 16384,                 // 16KB
+                pieces: vec![0u8; 20 * piece_count], // 20 bytes per piece hash
+                length: (16384 * piece_count) as i64,
+                files: vec![],
+                private: None,
+                md5sum: None,
+                meta_version: None,
+                file_tree: None,
+            },
+            info_dict_bencode: vec![],
+            created_by: None,
+            creation_date: None,
+            encoding: None,
+            comment: None,
+            piece_layers: None,
+        }
+    }
+
 
     // --- Helper to spawn a manager quickly ---
     fn setup_test_harness() -> (
@@ -3251,4 +3348,256 @@ mod resource_tests {
         let _ = manager_handle.await;
         let _ = std::fs::remove_dir_all(temp_dir);
     }
+
+    #[tokio::test]
+    async fn test_v2_seeding_relative_offset_logic() {
+        // GOAL: Verify that requesting a hash for a file that starts at offset > 0
+        // correctly calculates the relative index into that file's piece layer.
+
+        // 1. Setup Environment
+        let (mut manager, _, _, _, _) = setup_test_harness();
+        
+        // 2. Construct a V2-style Torrent with 2 Files
+        // Global Piece 0 -> File A
+        // Global Piece 1 -> File B
+        let piece_len = 16384;
+        
+        // Mock Roots & Hashes (32 bytes each)
+        let root_a = vec![0xAA; 32]; 
+        let layer_a = vec![0x11; 32]; // Data for File A (Index 0)
+
+        let root_b = vec![0xBB; 32];
+        let layer_b = vec![0x22; 32]; // Data for File B (Index 0)
+
+        // 3. Manually Inject State
+        // Map Global Piece 0 -> Root A
+        manager.state.piece_to_roots.insert(0, vec![(0, root_a.clone())]);
+        // Map Global Piece 1 -> Root B (File starts at byte 16384)
+        manager.state.piece_to_roots.insert(1, vec![(16384, root_b.clone())]);
+
+        // Inject the piece_layers into the Torrent struct
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = piece_len as i64;
+        
+        // FIX: Construct the HashMap correctly for serde_bencode::value::Value::Dict
+        // Keys must be Vec<u8>, Values must be serde_bencode::value::Value
+        let mut layer_map = std::collections::HashMap::new();
+        
+        layer_map.insert(
+            root_a.clone(), // Key is raw bytes
+            serde_bencode::value::Value::Bytes(layer_a.clone()) // Value is wrapped
+        );
+        layer_map.insert(
+            root_b.clone(), 
+            serde_bencode::value::Value::Bytes(layer_b.clone())
+        );
+        
+        torrent.piece_layers = Some(serde_bencode::value::Value::Dict(layer_map));
+        
+        manager.state.torrent = Some(torrent);
+
+        // 4. Register a Mock Peer
+        let peer_id = "v2_tester".to_string();
+        let (peer_tx, mut peer_rx) = mpsc::channel(10);
+        manager.apply_action(Action::RegisterPeer {
+            peer_id: peer_id.clone(),
+            tx: peer_tx,
+        });
+
+        // 5. Spawn Manager
+        let manager_tx = manager.torrent_manager_tx.clone();
+        tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        // 6. ACTION: Request Global Piece 1
+        // This is the CRITICAL step. Piece 1 is the 2nd piece globally,
+        // but it is the 1st piece (Index 0) of File B.
+        let cmd = TorrentCommand::GetHashes {
+            peer_id: peer_id.clone(),
+            file_root: vec![], // Ignored by manager (it looks it up)
+            base_layer: 0,
+            index: 1, // GLOBAL Index 1
+            length: 1,
+            proof_layers: 0,
+        };
+
+        manager_tx.send(cmd).await.unwrap();
+
+        // 7. ASSERTION
+        let response = tokio::time::timeout(Duration::from_secs(1), peer_rx.recv()).await
+            .expect("Timed out waiting for Hash response")
+            .expect("Channel closed");
+
+        if let TorrentCommand::SendHashPiece { root, proof, index, .. } = response {
+            // Check A: Did it resolve to Root B?
+            assert_eq!(root, root_b, "Manager failed to resolve correct file root for Global Piece 1");
+            
+            // Check B: Did it send the correct data?
+            // It MUST return 'layer_b' (which corresponds to File B, Relative Index 0).
+            assert_eq!(proof, layer_b, "Manager sent wrong proof data. Relative indexing logic failed.");
+            
+            // Check C: The response must echo the Global Index (1) so the peer knows what piece this is for.
+            assert_eq!(index, 1, "Response should echo the requested global index");
+        } else {
+            panic!("Expected SendHashPiece, got {:?}. (Did logic reject valid request?)", response);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_v2_seeding_rejects_out_of_bounds() {
+        // GOAL: Verify that requesting a range extending beyond the file limits
+        // results in a HashReject message, preventing buffer overflows or panics.
+
+        // 1. Setup
+        let (mut manager, _, _, _, _) = setup_test_harness();
+        
+        // Single file, 10 pieces long (16KB * 10)
+        let piece_len = 16384;
+        let root = vec![0xAA; 32];
+        
+        // Layer has 10 hashes (320 bytes)
+        let layer_data = vec![0xFF; 32 * 10]; 
+
+        // Map it
+        manager.state.piece_to_roots.insert(0, vec![(0, root.clone())]);
+        
+        let mut torrent = create_dummy_torrent(10);
+        torrent.info.piece_length = piece_len as i64;
+        
+        let mut layer_map = std::collections::HashMap::new();
+        layer_map.insert(
+            root.clone(), 
+            serde_bencode::value::Value::Bytes(layer_data.clone())
+        );
+        torrent.piece_layers = Some(serde_bencode::value::Value::Dict(layer_map));
+        manager.state.torrent = Some(torrent);
+
+        // Register Peer
+        let peer_id = "attacker".to_string();
+        let (peer_tx, mut peer_rx) = mpsc::channel(10);
+        manager.apply_action(Action::RegisterPeer {
+            peer_id: peer_id.clone(),
+            tx: peer_tx,
+        });
+
+        // Spawn
+        let manager_tx = manager.torrent_manager_tx.clone();
+        tokio::spawn(async move { let _ = manager.run(false).await; });
+
+        // 2. ACTION: Request Valid Start (Index 8) but Invalid Length (5)
+        // File has 10 pieces (Indices 0-9).
+        // Requesting 8..13 (8 + 5) goes past the end (9).
+        let cmd = TorrentCommand::GetHashes {
+            peer_id: peer_id.clone(),
+            file_root: vec![], 
+            base_layer: 0,
+            index: 8,
+            length: 5, // <--- EXCEEDS TOTAL (8+5 = 13 > 10)
+            proof_layers: 0,
+        };
+
+        manager_tx.send(cmd).await.unwrap();
+
+        // 3. ASSERTION: Must Receive REJECT
+        let response = tokio::time::timeout(Duration::from_secs(1), peer_rx.recv()).await
+            .expect("Timed out")
+            .expect("Channel closed");
+
+        if let TorrentCommand::SendHashReject { index, length, .. } = response {
+            assert_eq!(index, 8);
+            assert_eq!(length, 5);
+            // Pass!
+        } else {
+            panic!("Security Fail: Manager accepted an out-of-bounds hash request! Got: {:?}", response);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_v2_seeding_boundary_edge_cases() {
+        // GOAL: Precise boundary testing.
+        // 1. Verify we can fetch the EXACT last hash (Valid).
+        // 2. Verify fetching 1 hash past the end fails (Invalid).
+
+        let (mut manager, _, _, _, _) = setup_test_harness();
+        
+        // Setup: File with exactly 5 pieces.
+        let piece_len = 16384;
+        let root = vec![0xCC; 32];
+        let layer_data = vec![0x11; 32 * 5]; // 5 Hashes (Indices 0, 1, 2, 3, 4)
+
+        // FIX: Populate piece_to_roots for ALL pieces in the file (0..5)
+        // The manager looks up the specific piece index requested.
+        for i in 0..5 {
+            manager.state.piece_to_roots.insert(i, vec![(0, root.clone())]);
+        }
+        
+        let mut torrent = create_dummy_torrent(5);
+        torrent.info.piece_length = piece_len as i64;
+        
+        let mut layer_map = std::collections::HashMap::new();
+        layer_map.insert(
+            root.clone(), 
+            serde_bencode::value::Value::Bytes(layer_data.clone())
+        );
+        torrent.piece_layers = Some(serde_bencode::value::Value::Dict(layer_map));
+        manager.state.torrent = Some(torrent);
+
+        let peer_id = "edge_tester".to_string();
+        let (peer_tx, mut peer_rx) = mpsc::channel(10);
+        manager.apply_action(Action::RegisterPeer {
+            peer_id: peer_id.clone(),
+            tx: peer_tx,
+        });
+
+        let manager_tx = manager.torrent_manager_tx.clone();
+        tokio::spawn(async move { let _ = manager.run(false).await; });
+
+        // --- CASE 1: Valid Boundary Request ---
+        // Request Index 4 (The 5th and last piece). Length 1.
+        // Range: 4..5. This is valid.
+        let valid_cmd = TorrentCommand::GetHashes {
+            peer_id: peer_id.clone(),
+            file_root: vec![],
+            base_layer: 0,
+            index: 4, 
+            length: 1,
+            proof_layers: 0,
+        };
+        manager_tx.send(valid_cmd).await.unwrap();
+
+        let resp1 = tokio::time::timeout(Duration::from_secs(1), peer_rx.recv()).await
+            .expect("Timeout on valid boundary request")
+            .expect("Channel closed");
+
+        if let TorrentCommand::SendHashPiece { index, .. } = resp1 {
+            assert_eq!(index, 4, "Should successfully return the last hash");
+        } else {
+            panic!("Failed to retrieve exact last piece! Got: {:?}", resp1);
+        }
+
+        // --- CASE 2: Invalid Boundary Request (Off-by-one) ---
+        // Request Index 5. (File only has 0..4).
+        // This should fail.
+        let invalid_cmd = TorrentCommand::GetHashes {
+            peer_id: peer_id.clone(),
+            file_root: vec![],
+            base_layer: 0,
+            index: 5, 
+            length: 1,
+            proof_layers: 0,
+        };
+        manager_tx.send(invalid_cmd).await.unwrap();
+
+        let resp2 = tokio::time::timeout(Duration::from_secs(1), peer_rx.recv()).await
+            .expect("Timeout on invalid boundary request")
+            .expect("Channel closed");
+
+        if let TorrentCommand::SendHashReject { index, .. } = resp2 {
+            assert_eq!(index, 5, "Should reject request starting past the end");
+        } else {
+            panic!("Security Fail: Manager accepted out-of-bounds request index 5! Got: {:?}", resp2);
+        }
+    }
+
 }

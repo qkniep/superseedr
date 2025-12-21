@@ -65,6 +65,29 @@ pub enum TorrentCommand {
         proof_layers: u32,
     },
 
+    GetHashes {
+        peer_id: String,
+        file_root: Vec<u8>,
+        base_layer: u32,
+        index: u32,
+        length: u32,
+        proof_layers: u32,
+    },
+    SendHashPiece {
+        peer_id: String,
+        root: Vec<u8>,
+        base_layer: u32,
+        index: u32,
+        proof: Vec<u8>,
+    },
+    SendHashReject {
+        peer_id: String,
+        root: Vec<u8>,
+        base_layer: u32,
+        index: u32,
+        length: u32,
+    },
+
     PieceVerified {
         piece_index: u32,
         peer_id: String,
