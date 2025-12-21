@@ -297,8 +297,6 @@ impl TorrentManager {
         torrent_parameters: TorrentParameters,
         magnet: Magnet,
     ) -> Result<Self, String> {
-        assert_eq!(magnet.hash_type(), Some("btih"));
-
         let TorrentParameters {
             dht_handle,
             incoming_peer_rx,
@@ -314,33 +312,40 @@ impl TorrentManager {
         } = torrent_parameters;
 
         // 1. Extract Hash Type and String
+        // We support both 'btih' (v1) and 'btmh' (v2)
         let hash_type = magnet.hash_type().ok_or("Magnet link missing 'xt' (hash type)")?;
         let hash_string = magnet.hash().ok_or("Magnet link missing hash value")?;
 
-        // 2. Decode based on Type (v1 vs v2)
+        // 2. Decode based on Type
         let info_hash = if hash_type == "btmh" {
-            // V2: Multihash (SHA2-256). Format: 1220<32-byte-hash>
-            // We support both Hex and Base32 representations of the multihash
+            // --- V2: Multihash (SHA2-256) ---
+            // Format: <varint_code><varint_len><digest>
+            // For SHA2-256, this is 0x12 (code) 0x20 (length) followed by 32 bytes.
+            // Total length: 34 bytes.
+            
+            // Decode string (Handle both Hex and Base32 representations)
             let bytes = if hash_string.len() > 50 {
-                // Hex Encoded
+                // Hex Encoded (34 bytes * 2 = 68 chars)
                 hex::decode(hash_string).map_err(|e| format!("Invalid v2 hex: {}", e))?
             } else {
-                // Base32 Encoded
+                // Base32 Encoded (Standard for some magnet generators)
                 BASE32.decode(hash_string.to_uppercase().as_bytes())
                     .map_err(|e| format!("Invalid v2 base32: {}", e))?
             };
 
-            // Verify Multihash Prefix (0x12 = SHA2-256, 0x20 = 32 bytes length)
+            // Verify Multihash Prefix
             if bytes.len() != 34 || bytes[0] != 0x12 || bytes[1] != 0x20 {
                 return Err(format!("Unsupported multihash format: {:?}. Only SHA2-256 (0x12 0x20) is supported.", bytes));
             }
 
-            // BEP 52: Truncate SHA-256 to 20 bytes for the primary ID/DHT lookups
+            // BEP 52: The info-hash for V2 is the first 20 bytes of the SHA-256 hash.
+            // The multihash structure is [0x12, 0x20, ...32 bytes of hash...].
+            // So we skip the first 2 bytes, then take the next 20.
             event!(Level::INFO, "Initialized from V2 Magnet (btmh).");
             bytes[2..22].to_vec()
 
         } else if hash_type == "btih" {
-            // V1: SHA-1
+            // --- V1: SHA-1 ---
             event!(Level::INFO, "Initialized from V1 Magnet (btih).");
             if hash_string.len() == 40 {
                 hex::decode(hash_string).map_err(|e| e.to_string())?
@@ -355,8 +360,9 @@ impl TorrentManager {
             return Err(format!("Unsupported magnet hash type 'xt=urn:{}'", hash_type));
         };
 
-        event!(Level::DEBUG, "INFO HASH {:?}", info_hash);
+        event!(Level::DEBUG, "Active INFO HASH: {:?}", hex::encode(&info_hash));
 
+        // 3. Extract Trackers
         let trackers_set: HashSet<String> = magnet
             .trackers()
             .iter()
