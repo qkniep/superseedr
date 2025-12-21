@@ -313,19 +313,48 @@ impl TorrentManager {
             global_ul_bucket,
         } = torrent_parameters;
 
-        let hash_string = magnet
-            .hash()
-            .ok_or_else(|| "Magnet link does not contain info hash".to_string())?;
+        // 1. Extract Hash Type and String
+        let hash_type = magnet.hash_type().ok_or("Magnet link missing 'xt' (hash type)")?;
+        let hash_string = magnet.hash().ok_or("Magnet link missing hash value")?;
 
-        let info_hash = if hash_string.len() == 40 {
-            hex::decode(hash_string).map_err(|e| e.to_string())
-        } else if hash_string.len() == 32 {
-            BASE32
-                .decode(hash_string.to_uppercase().as_bytes())
-                .map_err(|e| e.to_string())
+        // 2. Decode based on Type (v1 vs v2)
+        let info_hash = if hash_type == "btmh" {
+            // V2: Multihash (SHA2-256). Format: 1220<32-byte-hash>
+            // We support both Hex and Base32 representations of the multihash
+            let bytes = if hash_string.len() > 50 {
+                // Hex Encoded
+                hex::decode(hash_string).map_err(|e| format!("Invalid v2 hex: {}", e))?
+            } else {
+                // Base32 Encoded
+                BASE32.decode(hash_string.to_uppercase().as_bytes())
+                    .map_err(|e| format!("Invalid v2 base32: {}", e))?
+            };
+
+            // Verify Multihash Prefix (0x12 = SHA2-256, 0x20 = 32 bytes length)
+            if bytes.len() != 34 || bytes[0] != 0x12 || bytes[1] != 0x20 {
+                return Err(format!("Unsupported multihash format: {:?}. Only SHA2-256 (0x12 0x20) is supported.", bytes));
+            }
+
+            // BEP 52: Truncate SHA-256 to 20 bytes for the primary ID/DHT lookups
+            event!(Level::INFO, "Initialized from V2 Magnet (btmh).");
+            bytes[2..22].to_vec()
+
+        } else if hash_type == "btih" {
+            // V1: SHA-1
+            event!(Level::INFO, "Initialized from V1 Magnet (btih).");
+            if hash_string.len() == 40 {
+                hex::decode(hash_string).map_err(|e| e.to_string())?
+            } else if hash_string.len() == 32 {
+                BASE32
+                    .decode(hash_string.to_uppercase().as_bytes())
+                    .map_err(|e| e.to_string())?
+            } else {
+                return Err(format!("Invalid v1 info_hash length: {}", hash_string.len()));
+            }
         } else {
-            Err(format!("Invalid info_hash length: {}", hash_string.len()))
-        }?;
+            return Err(format!("Unsupported magnet hash type 'xt=urn:{}'", hash_type));
+        };
+
         event!(Level::DEBUG, "INFO HASH {:?}", info_hash);
 
         let trackers_set: HashSet<String> = magnet

@@ -2555,17 +2555,31 @@ fn make_random_adjustment(mut limits: CalculatedLimits) -> (CalculatedLimits, St
 }
 
 pub fn decode_info_hash(hash_string: &str) -> Result<Vec<u8>, String> {
-    if hash_string.len() == 40 {
-        // It's Hex encoded
-        hex::decode(hash_string).map_err(|e| e.to_string())
-    } else if hash_string.len() == 32 {
-        // It's Base32 encoded
-        BASE32
-            .decode(hash_string.to_uppercase().as_bytes())
-            .map_err(|e| e.to_string())
-    } else {
-        Err(format!("Invalid info_hash length: {}", hash_string.len()))
+    // Try Hex Decoding (Handles standard V1 and Hex-encoded V2 Multihash)
+    if let Ok(bytes) = hex::decode(hash_string) {
+        // V1: 20 bytes (SHA-1)
+        if bytes.len() == 20 {
+            return Ok(bytes);
+        }
+        // V2: 34 bytes (Multihash: 2 byte prefix + 32 byte SHA-256)
+        // Prefix 0x12 (SHA2-256) + 0x20 (32 bytes)
+        if bytes.len() == 34 && bytes[0] == 0x12 && bytes[1] == 0x20 {
+            // Return truncated 20 bytes for internal ID
+            return Ok(bytes[2..22].to_vec());
+        }
     }
+
+    // Try Base32 Decoding (Handles Base32-encoded V1 and V2)
+    if let Ok(bytes) = BASE32.decode(hash_string.to_uppercase().as_bytes()) {
+        if bytes.len() == 20 {
+            return Ok(bytes);
+        }
+        if bytes.len() == 34 && bytes[0] == 0x12 && bytes[1] == 0x20 {
+            return Ok(bytes[2..22].to_vec());
+        }
+    }
+
+    Err(format!("Invalid info_hash format/length: {}", hash_string))
 }
 
 fn aggregate_peers_to_availability(peers: &[PeerInfo], total_pieces: usize) -> Vec<u32> {
