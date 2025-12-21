@@ -94,6 +94,9 @@ pub struct ExtendedHandshakePayload {
 
     #[serde(default)]
     pub metadata_size: Option<i64>,
+    
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lt_v2: Option<u8>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -356,7 +359,11 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
                 .filter(|&variant| variant != ClientExtendedId::Handshake) // Exclude the special handshake ID
                 .map(|variant| (variant.as_str().to_string(), variant.id()))
                 .collect();
-            let payload = ExtendedHandshakePayload { m, metadata_size };
+            let payload = ExtendedHandshakePayload {
+                m,
+                metadata_size: metadata_size,
+                lt_v2: Some(1),
+            };
             let bencoded_payload =
                 serde_bencode::to_bytes(&payload).map_err(MessageGenerationError::BencodeError)?;
 

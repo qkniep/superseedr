@@ -373,30 +373,35 @@ impl PeerSession {
                         Message::Handshake(..) => {}
                         Message::ExtendedHandshake(_) => {}
 
-                        Message::HashRequest(base, index, length, proof_layers) => {
+                        Message::HashRequest(root_idx, base, offset, length) => {
                             let _ = self.torrent_manager_tx.try_send(TorrentCommand::GetHashes {
                                 peer_id: self.peer_ip_port.clone(),
-                                file_root: vec![], 
+                                file_root: vec![], // Manager resolves this
                                 base_layer: base,
-                                index,
+                                index: offset,     // 'offset' is the start index they want
                                 length,
-                                proof_layers,
+                                proof_layers: 0,   // Not provided in basic request
                             });
+                            // We log the root_idx so it's not unused
+                            tracing::trace!("Peer requested hashes for RootID: {}", root_idx);
                         }
                         
-                        Message::HashPiece(index, base, offset, proof) => {
+                        Message::HashPiece(root_idx, base, offset, proof) => {
                             let _ = self.torrent_manager_tx.try_send(
                                 TorrentCommand::MerkleHashData {
                                     peer_id: self.peer_ip_port.clone(),
-                                    piece_index: index, 
+                                    file_index: root_idx,
+                                    piece_index: offset, 
                                     base_layer: base,
                                     length: proof.len() as u32 / 32,
                                     proof,
                                 }
                             );
+                            tracing::trace!("Received HashPiece for RootID: {}", root_idx);
                         }
-                        Message::HashReject(index, ..) => {
-                            tracing::debug!("Peer {} rejected hash request for piece {}", self.peer_ip_port, index);
+
+                        Message::HashReject(root_idx, _, offset, _) => {
+                            tracing::debug!("Peer {} rejected hash request for RootID {} @ Offset {}", self.peer_ip_port, root_idx, offset);
                         }
                     }
                 },

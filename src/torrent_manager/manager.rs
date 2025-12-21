@@ -201,9 +201,24 @@ impl TorrentManager {
             );
         }
 
-        let mut info_dict_hasher = Sha1::new();
-        info_dict_hasher.update(&torrent.info_dict_bencode);
-        let info_hash = info_dict_hasher.finalize();
+        let info_hash = if torrent.info.meta_version == Some(2) {
+            // Check if Hybrid (Has V1 fields) -> Primary is V1
+            if !torrent.info.files.is_empty() || torrent.info.length > 0 {
+                let mut hasher = Sha1::new();
+                hasher.update(&torrent.info_dict_bencode);
+                hasher.finalize().to_vec()
+            } else {
+                // Pure V2 -> Primary is V2
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(&torrent.info_dict_bencode);
+                hasher.finalize()[0..20].to_vec()
+            }
+        } else {
+            // V1
+            let mut hasher = Sha1::new();
+            hasher.update(&torrent.info_dict_bencode);
+            hasher.finalize().to_vec()
+        };
 
         let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(1000);
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -2054,6 +2069,46 @@ impl TorrentManager {
                     if let Ok(peer_addr) = stream.peer_addr() {
 
                         let peer_ip_port = peer_addr.to_string();
+                        let incoming_hash = &handshake_response[28..48];
+                        
+                        // --- DYNAMIC DUAL SWARM VALIDATION ---
+                        // 1. Check Primary (Fastest, covers 99% of cases)
+                        let matches_primary = self.state.info_hash == incoming_hash;
+                        
+                        // 2. Check Secondary (Calculate on-demand if needed)
+                        let mut matches_secondary = false;
+                        let mut calculated_v2_hash = Vec::new();
+
+                        if !matches_primary {
+                            // Only check secondary if we have metadata and it is V2-capable
+                            if let Some(torrent) = &self.state.torrent {
+                                if torrent.info.meta_version == Some(2) {
+                                    // Calculate V2 hash (SHA256 truncated) from the stored info_dict
+                                    let mut hasher = sha2::Sha256::new();
+                                    hasher.update(&torrent.info_dict_bencode);
+                                    let v2_hash = hasher.finalize()[0..20].to_vec();
+                                    
+                                    if v2_hash == incoming_hash {
+                                        matches_secondary = true;
+                                        calculated_v2_hash = v2_hash;
+                                    }
+                                }
+                            }
+                        }
+
+                        if !matches_primary && !matches_secondary {
+                            event!(Level::WARN, "Peer {} info_hash mismatch. Dropping.", peer_ip_port);
+                            continue;
+                        }
+
+                        // 3. Select Active Hash
+                        let active_info_hash = if matches_secondary {
+                            calculated_v2_hash
+                        } else {
+                            self.state.info_hash.clone()
+                        };
+                        // -------------------------------------
+
                         event!(Level::DEBUG, peer_addr = %peer_ip_port, "NEW INCOMING PEER CONNECTION");
                         let torrent_manager_tx_clone = self.torrent_manager_tx.clone();
                         let (peer_session_tx, peer_session_rx) = mpsc::channel::<TorrentCommand>(10_000);
@@ -2072,7 +2127,10 @@ impl TorrentManager {
                             None => None,
                             _ => Some(self.generate_bitfield())
                         };
-                        let info_hash_clone = self.state.info_hash.clone();
+                        
+                        // Use the SELECTED hash, not just the default state hash
+                        let session_info_hash = active_info_hash; 
+                        
                         let torrent_metadata_length_clone = self.state.torrent_metadata_length;
                         let global_dl_bucket_clone = self.global_dl_bucket.clone();
                         let global_ul_bucket_clone = self.global_ul_bucket.clone();
@@ -2083,7 +2141,7 @@ impl TorrentManager {
                         let _ = self.manager_event_tx.try_send(ManagerEvent::PeerConnected { info_hash: self.state.info_hash.clone() });
                         tokio::spawn(async move {
                             let session = PeerSession::new(PeerSessionParameters {
-                                info_hash: info_hash_clone,
+                                info_hash: session_info_hash, // <--- Corrected Hash passed here
                                 torrent_metadata_length: torrent_metadata_length_clone,
                                 connection_type: ConnectionType::Incoming,
                                 torrent_manager_rx: peer_session_rx,
@@ -2143,10 +2201,49 @@ impl TorrentManager {
                         TorrentCommand::SuccessfullyConnected(peer_id) => self.apply_action(Action::PeerSuccessfullyConnected { peer_id }),
                         TorrentCommand::PeerId(addr, id) => self.apply_action(Action::UpdatePeerId { peer_addr: addr, new_id: id }),
 
-                        TorrentCommand::MerkleHashData { peer_id, piece_index, base_layer, length, proof } => {
+                        TorrentCommand::MerkleHashData { peer_id, file_index, piece_index, base_layer, length, proof } => {
+
+                            if base_layer != 0 {
+                                event!(Level::WARN, "Peer {} sent hash proof with base_layer={} (expected 0). Ignoring.", peer_id, base_layer);
+                                continue; 
+                            }
+
+                            // 2. Check Length Consistency
+                            // The protocol says 'length' is the count of hashes.
+                            let actual_count = (proof.len() / 32) as u32;
+                            if length != actual_count {
+                                event!(Level::WARN, "Peer {} sent malformed hash proof: Header says len={}, Payload has len={}", peer_id, length, actual_count);
+                                // We can proceed using the actual proof length, but this is suspicious.
+                            }
+
+                            // 1. Resolve Global Piece Index
+                            let calculated_global_index = if let Some(torrent) = &self.state.torrent {
+                                let piece_len = torrent.info.piece_length as u64;
+                                
+                                // Calculate byte offset where this file starts
+                                let file_start_bytes = if !torrent.info.files.is_empty() {
+                                    // Multi-file: Sum lengths of all preceding files
+                                    torrent.info.files.iter()
+                                        .take(file_index as usize)
+                                        .map(|f| f.length as u64)
+                                        .sum::<u64>()
+                                } else {
+                                    // Single-file: Start is always 0
+                                    0
+                                };
+
+                                // Global Index = (File Start / Piece Len) + Relative Offset
+                                let start_piece = (file_start_bytes / piece_len) as u32;
+                                start_piece + piece_index
+                            } else {
+                                piece_index // Fallback (shouldn't happen without metadata)
+                            };
+
+                            event!(Level::TRACE, "Verifying V2 Proof: File={} RelOffset={} -> GlobalPiece={}", file_index, piece_index, calculated_global_index);
+                            
                             self.apply_action(Action::MerkleProofReceived {
                                 peer_id,
-                                piece_index,
+                                piece_index: calculated_global_index, // <--- Pass CORRECTED Global Index
                                 proof,
                             });
                         },
