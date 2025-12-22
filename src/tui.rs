@@ -350,11 +350,6 @@ fn draw_left_pane(f: &mut Frame, app_state: &AppState, area: Rect) {
         table_state.select(Some(app_state.selected_torrent_index));
     }
 
-    // Simple responsive check: hide columns if very narrow
-    let width = area.width;
-    let show_speeds = width > 50;
-    let show_upload = width > 70;
-
     let has_unfinished_torrents = app_state.torrents.values().any(|t| {
         let state = &t.latest_state;
         state.number_of_pieces_total > 0
@@ -367,18 +362,16 @@ fn draw_left_pane(f: &mut Frame, app_state: &AppState, area: Rect) {
         constraints.push(Constraint::Length(7)); // Progress
     }
     constraints.push(Constraint::Fill(1)); // Name (Fills remaining)
-    if show_speeds {
-        constraints.push(Constraint::Length(10)); // DL
-    }
-    if show_speeds && show_upload {
-        constraints.push(Constraint::Length(10)); // UL
-    }
+    
+    // Always show Speed columns
+    constraints.push(Constraint::Length(10)); // DL
+    constraints.push(Constraint::Length(10)); // UL
 
     // 2. Build Headers (Inline Logic)
     let mut header_cells = Vec::new();
     let (sort_col, sort_dir) = app_state.torrent_sort;
 
-    // FIX: Changed label type to &'static str and removed 'mut' from closure definition
+    // Helper closure to generate header cells
     let make_header = |label: &'static str, col_type: TorrentSortColumn, col_idx: usize| {
         let is_selected = app_state.selected_header == SelectedHeader::Torrent(col_idx);
         let is_sorting = sort_col == col_type;
@@ -410,15 +403,12 @@ fn draw_left_pane(f: &mut Frame, app_state: &AppState, area: Rect) {
     let name_col_idx = if has_unfinished_torrents { 1 } else { 0 };
     header_cells.push(make_header("Name", TorrentSortColumn::Name, name_col_idx));
 
-    if show_speeds {
-        let dl_col_idx = if has_unfinished_torrents { 2 } else { 1 };
-        header_cells.push(make_header("DL", TorrentSortColumn::Down, dl_col_idx));
-    }
+    // Always add DL/UL headers
+    let dl_col_idx = if has_unfinished_torrents { 2 } else { 1 };
+    header_cells.push(make_header("DL", TorrentSortColumn::Down, dl_col_idx));
 
-    if show_speeds && show_upload {
-        let ul_col_idx = if has_unfinished_torrents { 3 } else { 2 };
-        header_cells.push(make_header("UL", TorrentSortColumn::Up, ul_col_idx));
-    }
+    let ul_col_idx = if has_unfinished_torrents { 3 } else { 2 };
+    header_cells.push(make_header("UL", TorrentSortColumn::Up, ul_col_idx));
 
     let header = Row::new(header_cells).height(1);
 
@@ -460,15 +450,12 @@ fn draw_left_pane(f: &mut Frame, app_state: &AppState, area: Rect) {
                 }
                 cells.push(name_cell);
 
-                // Speeds
-                if show_speeds {
-                    cells.push(Cell::from(format_speed(torrent.smoothed_download_speed_bps))
-                        .style(speed_to_style(torrent.smoothed_download_speed_bps)));
-                }
-                if show_speeds && show_upload {
-                    cells.push(Cell::from(format_speed(torrent.smoothed_upload_speed_bps))
-                        .style(speed_to_style(torrent.smoothed_upload_speed_bps)));
-                }
+                // Speeds (Always added)
+                cells.push(Cell::from(format_speed(torrent.smoothed_download_speed_bps))
+                    .style(speed_to_style(torrent.smoothed_download_speed_bps)));
+                
+                cells.push(Cell::from(format_speed(torrent.smoothed_upload_speed_bps))
+                    .style(speed_to_style(torrent.smoothed_upload_speed_bps)));
 
                 Row::new(cells).style(row_style)
             }
@@ -495,7 +482,6 @@ fn draw_left_pane(f: &mut Frame, app_state: &AppState, area: Rect) {
         if let Some(info_hash) = app_state.torrent_list_order.get(app_state.selected_torrent_index) {
             if let Some(torrent) = app_state.torrents.get(info_hash) {
                 let name = if app_state.anonymize_torrent_names { "Torrent..." } else { &torrent.latest_state.torrent_name };
-                // Simple truncate logic
                 let avail_width = area.width.saturating_sub(10) as usize;
                 let display_name = truncate_with_ellipsis(name, avail_width);
                 title_spans.push(Span::styled(display_name, Style::default().fg(theme::YELLOW)));
