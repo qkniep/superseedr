@@ -30,67 +30,45 @@ pub const SECONDS_HISTORY_MAX: usize = 3600; // 1 hour of per-second data
 pub const MINUTES_HISTORY_MAX: usize = 48 * 60; // 48 hours of per-minute data
 
 pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
+    let area = f.area();
+
+    // --- 1. SAFETY CHECK: Tiny Screens ---
+    if area.width < 40 || area.height < 10 {
+        draw_tiny_layout(f, app_state, area);
+        return;
+    }
+
+    // --- 2. OVERLAYS ---
     if app_state.show_help {
         draw_help_popup(f, app_state, &app_state.mode);
         return;
     }
 
+    // ... (Keep existing AppMode matches for Welcome, Config, etc.) ...
     match &app_state.mode {
-        AppMode::Welcome => {
-            draw_welcome_screen(f);
-            return;
-        }
-        AppMode::PowerSaving => {
-            draw_power_saving_screen(f, app_state, settings);
-            return;
-        }
-        AppMode::ConfigPathPicker {
-            file_explorer,
-            for_item,
-            ..
-        } => {
+        AppMode::Welcome => { draw_welcome_screen(f); return; }
+        AppMode::PowerSaving => { draw_power_saving_screen(f, app_state, settings); return; }
+        AppMode::ConfigPathPicker { file_explorer, for_item, .. } => {
+            // ... (keep existing picker code) ...
             let area = centered_rect(80, 70, f.area());
             f.render_widget(Clear, area);
             let block = Block::default()
-                .title(Span::styled(
-                    format!("Select a Folder - {:?}", for_item),
-                    Style::default().fg(theme::MAUVE),
-                ))
+                .title(Span::styled(format!("Select a Folder - {:?}", for_item), Style::default().fg(theme::MAUVE)))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::SURFACE2));
-
             let inner_area = block.inner(area);
-
-            let chunks =
-                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner_area);
-
-            let explorer_area = chunks[0];
-            let footer_area = chunks[1];
-
+            let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner_area);
             let footer_text = Line::from(vec![
-                Span::styled("[Tab]", Style::default().fg(theme::GREEN)),
-                Span::raw(" Confirm | "),
-                Span::styled("[Esc]", Style::default().fg(theme::RED)),
-                Span::raw(" Cancel | "),
-                Span::styled("←→↑↓", Style::default().fg(theme::BLUE)),
-                Span::raw(" Navigate"),
-            ])
-            .alignment(Alignment::Center);
-
-            let footer_paragraph =
-                Paragraph::new(footer_text).style(Style::default().fg(theme::SUBTEXT1));
-
+                Span::styled("[Tab]", Style::default().fg(theme::GREEN)), Span::raw(" Confirm | "),
+                Span::styled("[Esc]", Style::default().fg(theme::RED)), Span::raw(" Cancel | "),
+                Span::styled("←→↑↓", Style::default().fg(theme::BLUE)), Span::raw(" Navigate"),
+            ]).alignment(Alignment::Center);
             f.render_widget(block, area);
-            f.render_widget(&file_explorer.widget(), explorer_area);
-            f.render_widget(footer_paragraph, footer_area);
+            f.render_widget(&file_explorer.widget(), chunks[0]);
+            f.render_widget(Paragraph::new(footer_text).style(Style::default().fg(theme::SUBTEXT1)), chunks[1]);
             return;
         }
-        AppMode::Config {
-            settings_edit,
-            selected_index,
-            items,
-            editing,
-        } => {
+        AppMode::Config { settings_edit, selected_index, items, editing } => {
             draw_config_screen(f, settings_edit, *selected_index, items, editing);
             return;
         }
@@ -99,117 +77,57 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
             return;
         }
         AppMode::DownloadPathPicker(file_explorer) => {
+            // ... (keep existing picker code) ...
             let area = centered_rect(80, 70, f.area());
             f.render_widget(Clear, area);
-
             let block = Block::default()
-                .title(Span::styled(
-                    "Select Download Folder",
-                    Style::default().fg(theme::MAUVE),
-                ))
+                .title(Span::styled("Select Download Folder", Style::default().fg(theme::MAUVE)))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::SURFACE2));
-
             let inner_area = block.inner(area);
-
-            let chunks =
-                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner_area);
-
-            let explorer_area = chunks[0];
-            let footer_area = chunks[1];
-
+            let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner_area);
             let footer_text = Line::from(vec![
-                Span::styled("[Tab]", Style::default().fg(theme::GREEN)), // Use Enter
-                Span::raw(" Confirm | "),
-                Span::styled("[Esc]", Style::default().fg(theme::RED)),
-                Span::raw(" Cancel | "),
-                Span::styled("←→↑↓", Style::default().fg(theme::BLUE)),
-                Span::raw(" Navigate"),
-            ])
-            .alignment(Alignment::Center);
-
-            let footer_paragraph =
-                Paragraph::new(footer_text).style(Style::default().fg(theme::SUBTEXT1));
-
+                Span::styled("[Tab]", Style::default().fg(theme::GREEN)), Span::raw(" Confirm | "),
+                Span::styled("[Esc]", Style::default().fg(theme::RED)), Span::raw(" Cancel | "),
+                Span::styled("←→↑↓", Style::default().fg(theme::BLUE)), Span::raw(" Navigate"),
+            ]).alignment(Alignment::Center);
             f.render_widget(block, area);
-            f.render_widget(&file_explorer.widget(), explorer_area);
-            f.render_widget(footer_paragraph, footer_area);
+            f.render_widget(&file_explorer.widget(), chunks[0]);
+            f.render_widget(Paragraph::new(footer_text).style(Style::default().fg(theme::SUBTEXT1)), chunks[1]);
             return;
         }
         _ => {}
     }
 
-    let main_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(10),
-            Constraint::Length(27),
-            Constraint::Length(1),
-        ])
-        .split(f.area());
+    // --- 3. LAYOUT DETERMINATION (CORRECTED) ---
 
-    let top_chunk = main_layout[0];
-    let bottom_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(77), Constraint::Percentage(23)])
-        .split(main_layout[1]); // Split the original bottom chunk
+    // 1. Force Portrait if Width is < 100 columns.
+    //    Ideally, side-by-side needs ~40 cols (Left) + ~60 cols (Right) to look good.
+    //    If we don't have that, stack them.
+    let is_narrow_width = area.width < 100;
 
-    let chart_chunk = bottom_chunks[0];
-    let stats_chunk = bottom_chunks[1];
-    let footer_chunk = main_layout[2];
+    // 2. Aspect Ratio Check
+    //    Terminal fonts are ~1:2 ratio. A physically square window is roughly `rows = cols / 2`.
+    //    If `rows > cols * 0.6`, the window is taller than a standard 16:9 landscape terminal.
+    //    Example from your screenshot: Likely ~85 cols, ~70 rows.
+    //    70 > (85 * 0.6) -> 70 > 51 -> TRUE (Portrait)
+    let is_vertical_aspect = area.height as f32 > (area.width as f32 * 0.6);
 
-    let top_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(top_chunk);
+    // 3. Compact Height Check
+    let is_short_height = area.height < 30;
 
-    let left_pane = top_chunks[0]; // The entire left pane
-    let right_pane = top_chunks[1]; // The entire right pane
+    if is_short_height {
+        // Not enough height for charts, regardless of width.
+        draw_compact_layout(f, app_state, settings);
+    } else if is_narrow_width || is_vertical_aspect {
+        // If it's narrow OR tall, use the vertical stack.
+        draw_portrait_layout(f, app_state, settings);
+    } else {
+        // Only use Landscape if we have width > 100 AND it's a wide rectangle.
+        draw_landscape_layout(f, app_state, settings);
+    }
 
-    // --- Right Pane Layout ---
-    let right_pane_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(9), // Top area
-            Constraint::Min(0),    // Bottom area (Peers table)
-        ])
-        .split(right_pane);
-
-    let details_area_chunk = right_pane_chunks[0]; // The whole top-right area
-    let peers_chunk = right_pane_chunks[1]; // Bottom-right
-
-    // Split the top-right area to make room for the chart
-    let details_chunks = Layout::horizontal([
-        Constraint::Percentage(20), // Left side for Details text
-        Constraint::Percentage(80), // Right side for Global Peer Chart
-    ])
-    .split(details_area_chunk);
-
-    let details_text_chunk = details_chunks[0]; // Top-right-left
-    let peer_chart_chunk = details_chunks[1]; // Top-right-right (NEW)
-
-    // draw_left_pane handles its own internal layout now
-    draw_left_pane(f, app_state, left_pane);
-
-    // Pass the new, smaller text chunk
-    draw_right_pane(f, app_state, details_text_chunk, peers_chunk);
-
-    draw_network_chart(f, app_state, chart_chunk);
-
-    draw_stats_panel(f, app_state, settings, stats_chunk);
-
-    let stats_and_stream_chunk = bottom_chunks[1];
-    let stats_layout = Layout::horizontal([Constraint::Min(0), Constraint::Length(14)])
-        .split(stats_and_stream_chunk);
-    let stats_chunk = stats_layout[0];
-    let vertical_block_stream_chunk = stats_layout[1];
-    draw_stats_panel(f, app_state, settings, stats_chunk);
-    draw_vertical_block_stream(f, app_state, vertical_block_stream_chunk);
-
-    draw_peer_stream(f, app_state, peer_chart_chunk);
-
-    draw_footer(f, app_state, settings, footer_chunk);
-
+    // --- 4. GLOBAL POPUPS ---
     if let Some(error_text) = &app_state.system_error {
         draw_status_error_popup(f, error_text);
     }
@@ -217,6 +135,131 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     if app_state.should_quit {
         draw_shutdown_screen(f, app_state);
     }
+}
+
+fn draw_landscape_layout(f: &mut Frame, app_state: &AppState, settings: &Settings) {
+    let area = f.area();
+    
+    let main_layout = Layout::vertical([
+        Constraint::Min(10),
+        Constraint::Length(27),
+        Constraint::Length(1),
+    ]).split(area);
+
+    let top_area = main_layout[0];
+    let bottom_area = main_layout[1];
+    let footer_area = main_layout[2];
+
+    let top_chunks = Layout::horizontal([
+        Constraint::Percentage(35), 
+        Constraint::Percentage(65)
+    ]).split(top_area);
+
+    // --- LEFT PANE SPLIT: List vs Sparklines ---
+    let left_split = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(5)
+    ]).split(top_chunks[0]);
+
+    draw_left_pane(f, app_state, left_split[0]);       // Draw List
+    draw_torrent_sparklines(f, app_state, left_split[1]); // Draw Sparklines
+
+    // Right Pane & Bottom Logic (Unchanged)
+    let right_pane_chunks = Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).split(top_chunks[1]);
+    let details_header_split = Layout::horizontal([Constraint::Percentage(20), Constraint::Percentage(80)]).split(right_pane_chunks[0]);
+
+    draw_right_pane(f, app_state, details_header_split[0], right_pane_chunks[1]);
+    draw_peer_stream(f, app_state, details_header_split[1]); 
+
+    let bottom_chunks = Layout::horizontal([Constraint::Percentage(77), Constraint::Percentage(23)]).split(bottom_area);
+    draw_network_chart(f, app_state, bottom_chunks[0]);
+    
+    let stats_layout = Layout::horizontal([Constraint::Min(0), Constraint::Length(14)]).split(bottom_chunks[1]);
+    draw_stats_panel(f, app_state, settings, stats_layout[0]);
+    draw_vertical_block_stream(f, app_state, stats_layout[1]);
+
+    draw_footer(f, app_state, settings, footer_area);
+}
+
+fn draw_portrait_layout(f: &mut Frame, app_state: &AppState, settings: &Settings) {
+    let area = f.area();
+
+    // 1. Vertical Stack Layout
+    let vertical_chunks = Layout::vertical([
+        Constraint::Fill(1),        // List + Stream
+        Constraint::Length(12),     // Chart
+        Constraint::Length(27),     // Info Row (Details | Stats)
+        Constraint::Fill(1),        // Peers
+        Constraint::Length(1),      // Footer
+    ]).split(area);
+
+    let top_section = vertical_chunks[0];
+    let chart_area = vertical_chunks[1];
+    let info_row_area = vertical_chunks[2];
+    let peers_area = vertical_chunks[3];
+    let footer_area = vertical_chunks[4];
+
+    // --- TOP SECTION SPLIT: List vs Peer Stream ---
+    // We give the Peer Stream 8 rows so it's clearly visible.
+    let top_split = Layout::vertical([
+        Constraint::Min(0),    // List takes remaining height
+        Constraint::Length(8), // Peer Stream
+    ]).split(top_section);
+
+    draw_left_pane(f, app_state, top_split[0]); // Draw List
+    draw_peer_stream(f, app_state, top_split[1]); // Draw Peer Stream (REPLACEMENT)
+
+    // 2. Network Chart
+    draw_network_chart(f, app_state, chart_area);
+
+    // 3. Info Row
+    let info_columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(info_row_area);
+    draw_right_pane(f, app_state, info_columns[0], peers_area); // Details + Peers
+    draw_stats_panel(f, app_state, settings, info_columns[1]);  // Stats
+
+    // 4. Footer
+    draw_footer(f, app_state, settings, footer_area);
+}
+
+fn draw_compact_layout(f: &mut Frame, app_state: &AppState, settings: &Settings) {
+    let area = f.area();
+
+    let main_layout = Layout::vertical([
+        Constraint::Min(5),    
+        Constraint::Length(12), 
+        Constraint::Length(1),  
+    ]).split(area);
+
+    // Split List vs Sparklines
+    let list_split = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(5)
+    ]).split(main_layout[0]);
+
+    draw_left_pane(f, app_state, list_split[0]);
+    draw_torrent_sparklines(f, app_state, list_split[1]);
+
+    // ... rest of compact layout ...
+    let bottom_columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(main_layout[1]);
+    draw_stats_panel(f, app_state, settings, bottom_columns[0]);
+    
+    let details_chunks = Layout::vertical([Constraint::Length(9), Constraint::Length(0)]).split(bottom_columns[1]);
+    draw_right_pane(f, app_state, details_chunks[0], details_chunks[1]);
+
+    draw_footer(f, app_state, settings, main_layout[2]);
+}
+
+fn draw_tiny_layout(f: &mut Frame, app_state: &AppState, area: Rect) {
+    let layout = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    
+    // Only draw the list
+    draw_left_pane(f, app_state, layout[0]);
+    
+    f.render_widget(
+        Paragraph::new("Window too small")
+            .style(Style::default().fg(theme::RED).bg(theme::SURFACE0)), 
+        layout[1]
+    );
 }
 
 fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
@@ -301,20 +344,16 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
     }
 }
 
-fn draw_left_pane(f: &mut Frame, app_state: &AppState, left_pane: Rect) {
-    let left_pane_chunks = Layout::vertical([
-        Constraint::Min(0),    // Torrent list
-        Constraint::Length(5), // Torrent UL/DL Sparklines
-    ])
-    .split(left_pane); // Split the incoming area
-
-    let torrent_list_chunk = left_pane_chunks[0];
-    let torrent_sparkline_chunk = left_pane_chunks[1];
-
+fn draw_left_pane(f: &mut Frame, app_state: &AppState, area: Rect) {
     let mut table_state = TableState::default();
     if matches!(app_state.selected_header, SelectedHeader::Torrent(_)) {
         table_state.select(Some(app_state.selected_torrent_index));
     }
+
+    // Simple responsive check: hide columns if very narrow
+    let width = area.width;
+    let show_speeds = width > 50;
+    let show_upload = width > 70;
 
     let has_unfinished_torrents = app_state.torrents.values().any(|t| {
         let state = &t.latest_state;
@@ -322,254 +361,159 @@ fn draw_left_pane(f: &mut Frame, app_state: &AppState, left_pane: Rect) {
             && state.number_of_pieces_completed < state.number_of_pieces_total
     });
 
-    let (widths, name_column_index): (Vec<Constraint>, usize) = if has_unfinished_torrents {
-        (
-            vec![
-                Constraint::Length(7),      // Progress
-                Constraint::Percentage(68), // Name
-                Constraint::Percentage(13), // DL
-                Constraint::Percentage(12), // UL
-            ],
-            1,
-        )
-    } else {
-        (
-            vec![
-                Constraint::Percentage(80), // Name (Increased from 70)
-                Constraint::Percentage(10), // DL (Reduced from 15)
-                Constraint::Percentage(10), // UL (Reduced from 15)
-            ],
-            0,
-        )
-    };
+    // 1. Build Constraints
+    let mut constraints = Vec::new();
+    if has_unfinished_torrents {
+        constraints.push(Constraint::Length(7)); // Progress
+    }
+    constraints.push(Constraint::Fill(1)); // Name (Fills remaining)
+    if show_speeds {
+        constraints.push(Constraint::Length(10)); // DL
+    }
+    if show_speeds && show_upload {
+        constraints.push(Constraint::Length(10)); // UL
+    }
 
-    let table_block = Block::default().borders(Borders::ALL);
-    let table_inner_area = table_block.inner(torrent_list_chunk);
-    let column_spacing = 1; // This is ratatui's default.
-    let total_spacing = (widths.len().saturating_sub(1) * column_spacing as usize) as u16;
-    let content_width = table_inner_area.width.saturating_sub(total_spacing);
-    let temp_layout_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(widths.clone())
-        .split(Rect::new(0, 0, content_width, 1)); // A dummy rect of the correct width
-    let name_column_width = temp_layout_chunks[name_column_index].width as usize;
+    // 2. Build Headers (Inline Logic)
+    let mut header_cells = Vec::new();
+    let (sort_col, sort_dir) = app_state.torrent_sort;
 
-    let header_cells: Vec<Cell> = {
-        let mut cells: Vec<Cell> = TorrentSortColumn::iter()
-            .enumerate()
-            .map(|(i, h)| {
-                let is_selected = app_state.selected_header == SelectedHeader::Torrent(i);
-                let (sort_col, sort_dir) = app_state.torrent_sort;
-                let is_sorting_by_this = sort_col == h;
-                let text = match h {
-                    TorrentSortColumn::Name => "Name",
-                    TorrentSortColumn::Down => "DL",
-                    TorrentSortColumn::Up => "UL",
-                };
-                let mut text_with_indicator = text.to_string();
-                let mut style = Style::default().fg(theme::YELLOW);
-                if is_sorting_by_this {
-                    style = style.fg(theme::MAUVE);
-                    let indicator = if sort_dir == SortDirection::Ascending {
-                        " ▲"
-                    } else {
-                        " ▼"
-                    };
-                    text_with_indicator.push_str(indicator);
-                }
-                let mut text_span = Span::styled(text, style);
-                if is_selected {
-                    text_span = text_span.underlined().bold();
-                }
-                let mut spans = vec![text_span];
-                if is_sorting_by_this {
-                    let indicator = if sort_dir == SortDirection::Ascending {
-                        " ▲"
-                    } else {
-                        " ▼"
-                    };
-                    spans.push(Span::styled(indicator, style));
-                }
-                Cell::from(Line::from(spans))
-            })
-            .collect();
-        if has_unfinished_torrents {
-            cells.insert(
-                0,
-                Cell::from(Span::styled("Done", Style::default().fg(theme::YELLOW))),
-            );
+    // FIX: Changed label type to &'static str and removed 'mut' from closure definition
+    let make_header = |label: &'static str, col_type: TorrentSortColumn, col_idx: usize| {
+        let is_selected = app_state.selected_header == SelectedHeader::Torrent(col_idx);
+        let is_sorting = sort_col == col_type;
+        
+        let mut style = Style::default().fg(theme::YELLOW);
+        if is_sorting {
+            style = style.fg(theme::MAUVE);
         }
-        cells
+
+        let mut spans = vec![];
+        let mut text_span = Span::styled(label, style);
+        if is_selected {
+            text_span = text_span.underlined().bold();
+        }
+        spans.push(text_span);
+
+        if is_sorting {
+            let arrow = if sort_dir == SortDirection::Ascending { " ▲" } else { " ▼" };
+            spans.push(Span::styled(arrow, style));
+        }
+        Cell::from(Line::from(spans))
     };
+
+    // Construct the actual header row
+    if has_unfinished_torrents {
+        header_cells.push(Cell::from(Span::styled("Done", Style::default().fg(theme::YELLOW))));
+    }
+
+    let name_col_idx = if has_unfinished_torrents { 1 } else { 0 };
+    header_cells.push(make_header("Name", TorrentSortColumn::Name, name_col_idx));
+
+    if show_speeds {
+        let dl_col_idx = if has_unfinished_torrents { 2 } else { 1 };
+        header_cells.push(make_header("DL", TorrentSortColumn::Down, dl_col_idx));
+    }
+
+    if show_speeds && show_upload {
+        let ul_col_idx = if has_unfinished_torrents { 3 } else { 2 };
+        header_cells.push(make_header("UL", TorrentSortColumn::Up, ul_col_idx));
+    }
+
     let header = Row::new(header_cells).height(1);
 
-    let rows =
-        app_state
-            .torrent_list_order
-            .iter()
-            .enumerate()
-            .map(|(i, info_hash)| match app_state.torrents.get(info_hash) {
-                Some(torrent) => {
-                    let state = &torrent.latest_state;
-                    let progress = if state.number_of_pieces_total > 0 {
-                        (state.number_of_pieces_completed as f64
-                            / state.number_of_pieces_total as f64)
-                            * 100.0
-                    } else {
-                        0.0
-                    };
-                    let progress_style = Style::default().fg(theme::TEXT);
+    // 3. Build Rows
+    let rows = app_state.torrent_list_order.iter().enumerate().map(|(i, info_hash)| {
+        match app_state.torrents.get(info_hash) {
+            Some(torrent) => {
+                let state = &torrent.latest_state;
+                let is_selected = i == app_state.selected_torrent_index;
 
-                    let is_selected = i == app_state.selected_torrent_index;
-
-                    let mut row_style = match state.torrent_control_state {
-                        TorrentControlState::Running => Style::default().fg(theme::TEXT),
-                        TorrentControlState::Paused => Style::default().fg(theme::SURFACE1),
-                        TorrentControlState::Deleting => Style::default().fg(theme::RED),
-                    };
-                    row_style = if state.torrent_control_state == TorrentControlState::Deleting {
-                        row_style.fg(theme::OVERLAY0)
-                    } else {
-                        row_style
-                    };
-
-                    let name_to_display = if app_state.anonymize_torrent_names {
-                        format!("Torrent {}", i + 1)
-                    } else {
-                        state.torrent_name.clone()
-                    };
-
-                    let mut name_cell =
-                        Cell::from(truncate_with_ellipsis(&name_to_display, name_column_width));
-                    if is_selected {
-                        name_cell = name_cell.style(Style::default().fg(theme::YELLOW));
-                        row_style = row_style.add_modifier(Modifier::BOLD);
-                    }
-
-                    let mut row_cells = vec![
-                        name_cell,
-                        Cell::from(format_speed(torrent.smoothed_upload_speed_bps))
-                            .style(speed_to_style(torrent.smoothed_upload_speed_bps)),
-                        Cell::from(format_speed(torrent.smoothed_download_speed_bps))
-                            .style(speed_to_style(torrent.smoothed_download_speed_bps)),
-                    ];
-
-                    if has_unfinished_torrents {
-                        row_cells.insert(
-                            0,
-                            Cell::from(format!("{:.1}%", progress)).style(progress_style),
-                        );
-                    }
-
-                    Row::new(row_cells).style(row_style)
+                let mut row_style = match state.torrent_control_state {
+                    TorrentControlState::Running => Style::default().fg(theme::TEXT),
+                    TorrentControlState::Paused => Style::default().fg(theme::SURFACE1),
+                    TorrentControlState::Deleting => Style::default().fg(theme::RED),
+                };
+                if is_selected {
+                    row_style = row_style.add_modifier(Modifier::BOLD);
                 }
-                None => Row::new(vec![
-                    Cell::from(""),
-                    Cell::from("Missing torrent data..."),
-                    Cell::from(""),
-                    Cell::from(""),
-                    Cell::from(""),
-                ]),
-            });
 
+                let mut cells = Vec::new();
+
+                // Progress
+                if has_unfinished_torrents {
+                    let progress = if state.number_of_pieces_total > 0 {
+                        (state.number_of_pieces_completed as f64 / state.number_of_pieces_total as f64) * 100.0
+                    } else { 0.0 };
+                    cells.push(Cell::from(format!("{:.1}%", progress)));
+                }
+
+                // Name
+                let name_to_display = if app_state.anonymize_torrent_names {
+                    format!("Torrent {}", i + 1)
+                } else {
+                    state.torrent_name.clone()
+                };
+                let mut name_cell = Cell::from(name_to_display);
+                if is_selected {
+                    name_cell = name_cell.style(Style::default().fg(theme::YELLOW));
+                }
+                cells.push(name_cell);
+
+                // Speeds
+                if show_speeds {
+                    cells.push(Cell::from(format_speed(torrent.smoothed_download_speed_bps))
+                        .style(speed_to_style(torrent.smoothed_download_speed_bps)));
+                }
+                if show_speeds && show_upload {
+                    cells.push(Cell::from(format_speed(torrent.smoothed_upload_speed_bps))
+                        .style(speed_to_style(torrent.smoothed_upload_speed_bps)));
+                }
+
+                Row::new(cells).style(row_style)
+            }
+            None => Row::new(vec![Cell::from("Error retrieving data")]),
+        }
+    });
+
+    // 4. Block Title
     let border_style = if matches!(app_state.selected_header, SelectedHeader::Torrent(_)) {
-        Style::default().fg(theme::MAUVE) // Active color
+        Style::default().fg(theme::MAUVE)
     } else {
-        Style::default().fg(theme::SURFACE2) // Inactive color
+        Style::default().fg(theme::SURFACE2)
     };
 
     let mut title_spans = Vec::new();
     if app_state.is_searching {
         title_spans.push(Span::raw("Search: /"));
-        title_spans.push(Span::styled(
-            app_state.search_query.clone(),
-            Style::default().fg(theme::YELLOW),
-        ));
-        title_spans.push(Span::raw(" "));
+        title_spans.push(Span::styled(&app_state.search_query, Style::default().fg(theme::YELLOW)));
     } else if !app_state.search_query.is_empty() {
-        title_spans.push(Span::styled("[", Style::default().fg(theme::SUBTEXT1)));
-        title_spans.push(Span::styled(
-            app_state.search_query.clone(),
-            Style::default()
-                .fg(theme::SUBTEXT1)
-                .add_modifier(Modifier::ITALIC),
-        ));
-        title_spans.push(Span::styled("]", Style::default().fg(theme::SUBTEXT1)));
+        title_spans.push(Span::styled(format!("[{}] ", app_state.search_query), Style::default().fg(theme::SUBTEXT1).add_modifier(Modifier::ITALIC)));
     }
-
-    if let Some(info_hash) = app_state
-        .torrent_list_order
-        .get(app_state.selected_torrent_index)
-    {
-        if let Some(torrent) = app_state.torrents.get(info_hash) {
-            let name_to_display = if app_state.anonymize_torrent_names {
-                format!("Torrent {}", app_state.selected_torrent_index + 1)
-            } else {
-                torrent.latest_state.torrent_name.clone()
-            };
-
-            let current_title_len: usize = title_spans.iter().map(|s| s.width()).sum();
-            let available_width = torrent_list_chunk
-                .width
-                .saturating_sub(current_title_len as u16)
-                .saturating_sub(5);
-
-            let truncated_name = truncate_with_ellipsis(&name_to_display, available_width as usize);
-
-            title_spans.push(Span::styled(
-                truncated_name,
-                Style::default().fg(theme::YELLOW),
-            ));
+    
+    if !app_state.is_searching {
+        if let Some(info_hash) = app_state.torrent_list_order.get(app_state.selected_torrent_index) {
+            if let Some(torrent) = app_state.torrents.get(info_hash) {
+                let name = if app_state.anonymize_torrent_names { "Torrent..." } else { &torrent.latest_state.torrent_name };
+                // Simple truncate logic
+                let avail_width = area.width.saturating_sub(10) as usize;
+                let display_name = truncate_with_ellipsis(name, avail_width);
+                title_spans.push(Span::styled(display_name, Style::default().fg(theme::YELLOW)));
+            }
         }
     }
 
-    let title_content = Line::from(title_spans);
-
-    let mut block = Block::default()
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(title_content);
+        .title(Line::from(title_spans));
 
-    if let Some(info_hash) = app_state
-        .torrent_list_order
-        .get(app_state.selected_torrent_index)
-    {
-        if let Some(torrent) = app_state.torrents.get(info_hash) {
-            let footer_width = torrent_list_chunk.width.saturating_sub(4) as usize;
-
-            let path_to_display = if app_state.anonymize_torrent_names {
-                "/download/path/for/torrents".to_string()
-            } else {
-                torrent
-                    .latest_state
-                    .download_path
-                    .to_string_lossy()
-                    .to_string()
-            };
-
-            let truncated_path = truncate_with_ellipsis(&path_to_display, footer_width);
-
-            block = block.title_bottom(Span::styled(
-                truncated_path,
-                Style::default().fg(theme::SUBTEXT0),
-            ));
-        }
-    }
-
-    let table = Table::new(rows, widths)
+    let table = Table::new(rows, constraints)
         .header(header)
         .block(block)
         .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
-    if app_state.is_searching {
-        f.set_cursor_position(Position {
-            x: torrent_list_chunk.x + 10 + app_state.search_query.len() as u16,
-            y: torrent_list_chunk.y,
-        });
-    }
-
-    f.render_stateful_widget(table, torrent_list_chunk, &mut table_state);
-    draw_torrent_sparklines(f, app_state, torrent_sparkline_chunk);
+    f.render_stateful_widget(table, area, &mut table_state);
 }
 
 fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
@@ -1234,17 +1178,13 @@ fn draw_right_pane(
                     PeerSortColumn::DL => {
                         a.download_speed_bps
                             .cmp(&b.download_speed_bps)
-                            // Secondary: Invert sort (b.cmp(a)) to push active uploaders to the bottom
                             .then(b.upload_speed_bps.cmp(&a.upload_speed_bps))
-                            // Tertiary: Standard sort for total downloaded
                             .then(a.total_downloaded.cmp(&b.total_downloaded))
                     }
                     PeerSortColumn::UL => {
                         a.upload_speed_bps
                             .cmp(&b.upload_speed_bps)
-                            // Secondary: Invert sort (b.cmp(a)) to push active downloaders to the bottom
                             .then(b.download_speed_bps.cmp(&a.download_speed_bps))
-                            // Tertiary: Standard sort for total uploaded
                             .then(a.total_uploaded.cmp(&b.total_uploaded))
                     }
                 };
@@ -1366,10 +1306,18 @@ fn draw_right_pane(
                     } else {
                         0.0
                     };
+
+                    // --- ANONYMIZATION LOGIC ---
+                    let display_address = if app_state.anonymize_torrent_names {
+                         "xxx.xxx.xxx.xxx".to_string()
+                    } else {
+                        peer.address.clone()
+                    };
+
                     Row::new(vec![
                         Cell::from(flags_spans),
                         Cell::from(format!("{:.1}%", percentage)),
-                        Cell::from(peer.address.clone()),
+                        Cell::from(display_address), // Use the possibly censored address
                         Cell::from(parse_peer_id(&peer.peer_id)),
                         Cell::from(peer.last_action.clone()),
                         Cell::from(format!(
@@ -1388,12 +1336,12 @@ fn draw_right_pane(
 
                 let peer_widths = [
                     Constraint::Length(5),      // Flags
-                    Constraint::Percentage(5),  // Done % (Moved here)
+                    Constraint::Percentage(5),  // Done % 
                     Constraint::Percentage(15), // Address
                     Constraint::Percentage(15), // Client
-                    Constraint::Percentage(20), // Action (Increased space)
-                    Constraint::Percentage(20), // UL (Reduced)
-                    Constraint::Percentage(20), // DL (Reduced)
+                    Constraint::Percentage(20), // Action 
+                    Constraint::Percentage(20), // UL 
+                    Constraint::Percentage(20), // DL 
                 ];
 
                 let peers_table = Table::new(peer_rows, peer_widths)
