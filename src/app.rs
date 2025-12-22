@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::tui;
-
 use std::fs;
 use std::io::Stdout;
 
@@ -19,11 +17,13 @@ use crate::torrent_manager::DiskIoOperation;
 use crate::config::{PeerSortColumn, Settings, SortDirection, TorrentSettings, TorrentSortColumn};
 use crate::token_bucket::TokenBucket;
 
-use crate::tui_events;
+use crate::tui::tui::draw;
+use crate::tui::tui_events;
 
 use crate::config::get_watch_path;
 
 use crate::resource_manager::ResourceType;
+
 
 use crate::torrent_file::parser::from_bytes;
 use crate::torrent_manager::ManagerCommand;
@@ -702,7 +702,7 @@ impl App {
                 _ = draw_interval.tick() => {
                     if self.app_state.ui_needs_redraw {
                         terminal.draw(|f| {
-                            tui::draw(f, &self.app_state, &self.client_configs);
+                            draw(f, &self.app_state, &self.client_configs);
                         })?;
                         self.app_state.ui_needs_redraw = false;
                     }
@@ -782,7 +782,7 @@ impl App {
             self.app_state.shutdown_progress =
                 managers_shut_down as f64 / total_managers_to_shut_down as f64;
             let _ = terminal.draw(|f| {
-                tui::draw(f, &self.app_state, &self.client_configs);
+                draw(f, &self.app_state, &self.client_configs);
             });
 
             tokio::select! {

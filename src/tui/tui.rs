@@ -4,7 +4,7 @@
 use ratatui::symbols::Marker;
 use ratatui::{prelude::*, symbols, widgets::*};
 
-use crate::tui_formatters::*;
+use crate::tui::tui_formatters::*;
 
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;

@@ -14,8 +14,6 @@ mod torrent_file;
 mod torrent_manager;
 mod tracker;
 mod tui;
-mod tui_events;
-mod tui_formatters;
 
 use app::App;
 use rand::Rng;
