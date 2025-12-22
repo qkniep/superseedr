@@ -498,6 +498,7 @@ pub struct App {
     pub tui_event_tx: mpsc::Sender<CrosstermEvent>,
     pub tui_event_rx: mpsc::Receiver<CrosstermEvent>,
     pub shutdown_tx: broadcast::Sender<()>,
+    pub tui_task: Option<tokio::task::JoinHandle<()>>,
 }
 impl App {
     pub async fn new(client_configs: Settings) -> Result<Self, Box<dyn std::error::Error>> {
@@ -604,6 +605,7 @@ impl App {
             tui_event_tx,
             tui_event_rx,
             shutdown_tx,
+            tui_task: None,
         };
 
         let mut torrents_to_load = app.client_configs.torrents.clone();
@@ -717,46 +719,65 @@ impl App {
         Ok(())
     }
 
+
     fn startup_crossterm_event_listener(&mut self) {
         let tui_event_tx_clone = self.tui_event_tx.clone();
         let mut tui_shutdown_rx = self.shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = tui_shutdown_rx.recv() => break,
 
-                    result = tokio::task::spawn_blocking(|| -> std::io::Result<Option<CrosstermEvent>> {
-                        if event::poll(Duration::from_millis(250))? {
-                            return Ok(Some(event::read()?));
-                        }
-                        Ok(None)
-                    }) => {
-                        match result {
-                            Ok(Ok(Some(event))) => {
-                                if tui_event_tx_clone.send(event).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Ok(Ok(None)) => {
-                                // Timeout, loop continues to check shutdown_rx
-                            }
-                            Ok(Err(e)) => {
-                                tracing_event!(Level::ERROR, "Crossterm event poll error: {}", e);
-                                break;
-                            }
-                            Err(e) => {
-                                tracing_event!(Level::ERROR, "Blocking TUI read task panicked: {}", e);
-                                break;
-                            }
+        // Assign the handle to self.tui_task
+        self.tui_task = Some(tokio::spawn(async move {
+            loop {
+                // 1. Check for shutdown BEFORE polling
+                if tui_shutdown_rx.try_recv().is_ok() {
+                    break;
+                }
+
+                // 2. Run blocking poll to completion (do NOT use tokio::select!)
+                // This ensures we never abandon a thread that is reading from stdin
+                let event = tokio::task::spawn_blocking(|| -> std::io::Result<Option<CrosstermEvent>> {
+                    // Keep the timeout relatively short (250ms) so the app remains responsive to shutdown
+                    if event::poll(Duration::from_millis(250))? {
+                        return Ok(Some(event::read()?));
+                    }
+                    Ok(None)
+                }).await;
+
+                // 3. Handle the result
+                match event {
+                    Ok(Ok(Some(e))) => {
+                        if tui_event_tx_clone.send(e).await.is_err() {
+                            break;
                         }
                     }
+                    Ok(Ok(None)) => {} // Timeout (no event), loop again to check shutdown
+                    Ok(Err(e)) => {
+                        tracing::error!("Crossterm event error: {}", e);
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!("Blocking task join error: {}", e);
+                        break;
+                    }
+                }
+
+                // 4. Double check shutdown AFTER polling
+                if tui_shutdown_rx.try_recv().is_ok() {
+                    break;
                 }
             }
-        });
+        }));
     }
 
     async fn shutdown_sequence(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
         let _ = self.shutdown_tx.send(());
+
+        if let Some(handle) = self.tui_task.take() {
+            tracing::info!("Waiting for TUI event listener to finish...");
+            if let Err(e) = handle.await {
+                tracing::error!("Error joining TUI task: {}", e);
+            }
+        }
+
         let total_managers_to_shut_down = self.torrent_manager_command_txs.len();
         let mut managers_shut_down = 0;
 
@@ -784,6 +805,7 @@ impl App {
             let _ = terminal.draw(|f| {
                 draw(f, &self.app_state, &self.client_configs);
             });
+
 
             tokio::select! {
                 Some(event) = self.manager_event_rx.recv() => {
