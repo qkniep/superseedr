@@ -725,24 +725,31 @@ impl App {
                 tokio::select! {
                     _ = tui_shutdown_rx.recv() => break,
 
-                    result = tokio::task::spawn_blocking(event::read) => {
-                        let event = match result {
-                            Ok(Ok(e)) => e,
+                    result = tokio::task::spawn_blocking(|| -> std::io::Result<Option<CrosstermEvent>> {
+                        if event::poll(Duration::from_millis(250))? {
+                            return Ok(Some(event::read()?));
+                        }
+                        Ok(None)
+                    }) => {
+                        match result {
+                            Ok(Ok(Some(event))) => {
+                                if tui_event_tx_clone.send(event).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(Ok(None)) => {
+                                // Timeout, loop continues to check shutdown_rx
+                            }
                             Ok(Err(e)) => {
-                                tracing_event!(Level::ERROR, "Crossterm event read error: {}", e);
+                                tracing_event!(Level::ERROR, "Crossterm event poll error: {}", e);
                                 break;
                             }
                             Err(e) => {
                                 tracing_event!(Level::ERROR, "Blocking TUI read task panicked: {}", e);
                                 break;
                             }
-                        };
-
-                        if tui_event_tx_clone.send(event).await.is_err() {
-                            break;
                         }
                     }
-
                 }
             }
         });
