@@ -24,6 +24,12 @@ use directories::UserDirs;
 use clipboard::{ClipboardContext, ClipboardProvider};
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
+
+    if let CrosstermEvent::Resize(_, _) = &event {
+        app.app_state.ui_needs_redraw = true;
+        return;
+    }
+
     if let CrosstermEvent::Key(key) = event {
         if app.app_state.is_searching && key.kind == KeyEventKind::Press {
             match key.code {
