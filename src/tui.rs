@@ -187,8 +187,8 @@ fn draw_portrait_layout(f: &mut Frame, app_state: &AppState, settings: &Settings
     // 1. Vertical Stack Layout
     let vertical_chunks = Layout::vertical([
         Constraint::Fill(1),        // List + Stream
-        Constraint::Length(12),     // Chart
-        Constraint::Length(27),     // Info Row (Details | Stats)
+        Constraint::Length(14),     // Chart
+        Constraint::Length(20),     // Info Row (Details | Stats)
         Constraint::Fill(1),        // Peers
         Constraint::Length(1),      // Footer
     ]).split(area);
@@ -203,7 +203,7 @@ fn draw_portrait_layout(f: &mut Frame, app_state: &AppState, settings: &Settings
     // We give the Peer Stream 8 rows so it's clearly visible.
     let top_split = Layout::vertical([
         Constraint::Min(0),    // List takes remaining height
-        Constraint::Length(8), // Peer Stream
+        Constraint::Length(10), // Peer Stream
     ]).split(top_section);
 
     draw_left_pane(f, app_state, top_split[0]); // Draw List
@@ -212,10 +212,23 @@ fn draw_portrait_layout(f: &mut Frame, app_state: &AppState, settings: &Settings
     // 2. Network Chart
     draw_network_chart(f, app_state, chart_area);
 
-    // 3. Info Row
-    let info_columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(info_row_area);
-    draw_right_pane(f, app_state, info_columns[0], peers_area); // Details + Peers
-    draw_stats_panel(f, app_state, settings, info_columns[1]);  // Stats
+    // 3. Info Row (Details | Block Stream | Stats)
+    let info_columns = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(14),     // Block Stream (Fixed width)
+        Constraint::Fill(1)         // Stats (Flexible width)
+    ]).split(info_row_area);
+
+    // Left: Details Pane
+    // Note: We pass `peers_area` here because `draw_right_pane` handles drawing the
+    // swarm heatmap/peers list if the torrent has no active peers.
+    draw_right_pane(f, app_state, info_columns[0], peers_area);
+
+    // Center: Block Stream
+    draw_vertical_block_stream(f, app_state, info_columns[1]);
+
+    // Right: Stats Pane
+    draw_stats_panel(f, app_state, settings, info_columns[2]);
 
     // 4. Footer
     draw_footer(f, app_state, settings, footer_area);
@@ -953,7 +966,7 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
     let stats_paragraph = Paragraph::new(stats_text)
         .block(
             Block::default()
-                .title("Stats")
+                .title(Span::styled("Stats", Style::default().fg(Color::White)))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::SURFACE2)),
         )
@@ -2967,7 +2980,41 @@ fn draw_vertical_block_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let color_border = theme::SURFACE2;
     let color_empty = theme::SURFACE0;
 
+
+    let (total_in, total_out) = if let Some(t) = selected_torrent {
+        let in_sum: u64 = t.latest_state.blocks_in_history.iter().sum();
+        let out_sum: u64 = t.latest_state.blocks_out_history.iter().sum();
+        (in_sum, out_sum)
+    } else {
+        (0, 0)
+    };
+
+    let title_str = "Blocks";
+    let title_len = title_str.len();
+    let total_ops = total_in + total_out;
+
+    let title_spans: Vec<Span> = if total_ops == 0 {
+        // Default to all gray if no activity
+        vec![Span::styled(title_str, Style::default().fg(theme::SUBTEXT0))]
+    } else {
+        // Calculate how many chars should be blue (download)
+        let blue_ratio = total_in as f64 / total_ops as f64;
+        let blue_chars = (blue_ratio * title_len as f64).round() as usize;
+        
+        // Split string into two parts
+        let (blue_part, green_part) = title_str.split_at(blue_chars.min(title_len));
+        
+        let mut spans = Vec::new();
+        if !blue_part.is_empty() {
+            spans.push(Span::styled(blue_part, Style::default().fg(color_inflow)));
+        }
+        if !green_part.is_empty() {
+            spans.push(Span::styled(green_part, Style::default().fg(color_outflow)));
+        }
+        spans
+    };
     let block = Block::default()
+        .title(Line::from(title_spans))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(color_border));
 
