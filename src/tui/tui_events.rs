@@ -12,6 +12,8 @@ use crate::config::PeerSortColumn;
 use crate::config::SortDirection;
 use crate::config::TorrentSortColumn;
 
+use crate::tui::layout::get_torrent_columns;
+
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::style::{Color, Style};
 use ratatui_explorer::{FileExplorer, Theme};
@@ -221,26 +223,28 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 };
                             }
                         }
+
                         KeyCode::Char('s') => {
                             match app.app_state.selected_header {
                                 SelectedHeader::Torrent(i) => {
-                                    let Some(column) = TorrentSortColumn::iter().nth(i) else {
-                                        return;
-                                    };
-                                    if app.app_state.torrent_sort.0 == column {
-                                        app.app_state.torrent_sort.1 =
-                                            if app.app_state.torrent_sort.1
-                                                == SortDirection::Ascending
-                                            {
-                                                SortDirection::Descending
+                                    let cols = get_torrent_columns();
+                                    
+                                    if let Some(def) = cols.get(i) {
+                                        if let Some(column) = def.sort_enum {
+                                            if app.app_state.torrent_sort.0 == column {
+                                                app.app_state.torrent_sort.1 = 
+                                                    if app.app_state.torrent_sort.1 == SortDirection::Ascending {
+                                                        SortDirection::Descending
+                                                    } else {
+                                                        SortDirection::Ascending
+                                                    };
                                             } else {
-                                                SortDirection::Ascending
-                                            };
-                                    } else {
-                                        app.app_state.torrent_sort.0 = column;
-                                        app.app_state.torrent_sort.1 = SortDirection::Descending;
+                                                app.app_state.torrent_sort.0 = column;
+                                                app.app_state.torrent_sort.1 = SortDirection::Descending;
+                                            }
+                                            app.sort_and_filter_torrent_list();
+                                        }
                                     }
-                                    app.sort_and_filter_torrent_list();
                                 }
                                 SelectedHeader::Peer(i) => {
                                     let Some(column) = PeerSortColumn::iter().nth(i) else {
@@ -651,14 +655,17 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     let selected_torrent_peer_count =
         selected_torrent.map_or(0, |torrent| torrent.latest_state.peers.len());
 
+    // Get the true visual count (4 columns: Status, Name, DL, UL)
+    let torrent_cols = get_torrent_columns();
+    let max_torrent_col = torrent_cols.len(); 
+
     match key_code {
-        // --- UP/DOWN/J/K Navigation ---
+        // --- UP/DOWN/J/K Navigation (Unchanged) ---
         KeyCode::Up | KeyCode::Char('k') => {
             match app_state.selected_header {
                 SelectedHeader::Torrent(_) => {
                     app_state.selected_torrent_index =
                         app_state.selected_torrent_index.saturating_sub(1);
-                    // Reset peer index when changing torrents
                     app_state.selected_peer_index = 0;
                 }
                 SelectedHeader::Peer(_) => {
@@ -675,7 +682,6 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
                             app_state.selected_torrent_index = new_index;
                         }
                     }
-                    // Reset peer index when changing torrents
                     app_state.selected_peer_index = 0;
                 }
                 SelectedHeader::Peer(_) => {
@@ -689,7 +695,7 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
             }
         }
 
-        // --- LEFT/RIGHT/H/L Navigation ---
+        // --- LEFT/RIGHT/H/L Navigation (FIXED) ---
         KeyCode::Left | KeyCode::Char('h') => {
             app_state.selected_header = match app_state.selected_header {
                 SelectedHeader::Torrent(0) => {
@@ -700,15 +706,22 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
                     }
                 }
                 SelectedHeader::Torrent(i) => SelectedHeader::Torrent(i - 1),
-                SelectedHeader::Peer(0) => SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1),
+                
+                // CHANGE: Use max_torrent_col instead of TorrentSortColumn::COUNT
+                // This ensures we jump back to "UL" (Index 3), not "DL" (Index 2)
+                SelectedHeader::Peer(0) => SelectedHeader::Torrent(max_torrent_col - 1),
+                
                 SelectedHeader::Peer(i) => SelectedHeader::Peer(i - 1),
             };
         }
         KeyCode::Right | KeyCode::Char('l') => {
             app_state.selected_header = match app_state.selected_header {
-                SelectedHeader::Torrent(i) if i < TorrentSortColumn::COUNT - 1 => {
+                // CHANGE: Check i < max_torrent_col - 1 (i < 3)
+                // This allows moving from 2 (DL) -> 3 (UL)
+                SelectedHeader::Torrent(i) if i < max_torrent_col - 1 => {
                     SelectedHeader::Torrent(i + 1)
                 }
+                // If we are at the last column (UL), jump to Peers
                 SelectedHeader::Torrent(i) => {
                     if selected_torrent_has_peers {
                         SelectedHeader::Peer(0)
@@ -722,7 +735,7 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
                 SelectedHeader::Peer(_) => SelectedHeader::Torrent(0),
             };
         }
-        _ => {} // Ignore other keys
+        _ => {} 
     }
 }
 

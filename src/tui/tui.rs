@@ -5,6 +5,8 @@ use ratatui::symbols::Marker;
 use ratatui::{prelude::*, symbols, widgets::*};
 
 use crate::tui::tui_formatters::*;
+use crate::tui::layout::{get_torrent_columns, ColumnId};
+
 use crate::app::{AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState};
 use crate::app::PeerInfo;
 use crate::app::GraphDisplayMode;
@@ -135,65 +137,43 @@ fn draw_file_picker(f: &mut Frame, file_explorer: &ratatui_explorer::FileExplore
     f.render_widget(Paragraph::new(footer_text).style(Style::default().fg(theme::SUBTEXT1)), chunks[1]);
 }
 
-// --- REFACRORED SMART TABLE ---
 fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
     let mut table_state = TableState::default();
     if matches!(app_state.selected_header, SelectedHeader::Torrent(_)) {
         table_state.select(Some(app_state.selected_torrent_index));
     }
 
+    // 1. GET COLUMNS FROM SOURCE OF TRUTH
+    let all_cols = get_torrent_columns();
 
-    // 1. DEFINE COLUMNS
-    #[derive(Clone, Copy)]
-    enum ColId { Progress, Name, DL, UL }
+    // 2. Convert to SmartCol for the Layout Engine
+    let smart_cols: Vec<SmartCol> = all_cols.iter().map(|c| SmartCol {
+        header: c.header,
+        min_width: c.min_width,
+        priority: c.priority,
+        constraint: c.default_constraint,
+    }).collect();
 
-    let mut col_defs = Vec::new();
-    let mut col_ids = Vec::new();
+    // 3. Calculate Layout
+    let (constraints, visible_indices) = compute_smart_table_layout(&smart_cols, area.width, 1);
 
-    col_defs.push(SmartCol { 
-        header: "Done", min_width: 7, priority: 2, constraint: Constraint::Length(7) 
-    });
-    col_ids.push(ColId::Progress);
-
-    col_defs.push(SmartCol { 
-        header: "Name", min_width: 15, priority: 0, constraint: Constraint::Fill(1) 
-    });
-    col_ids.push(ColId::Name);
-
-    col_defs.push(SmartCol { 
-        header: "DL", min_width: 10, priority: 1, constraint: Constraint::Length(10) 
-    });
-    col_ids.push(ColId::DL);
-
-    col_defs.push(SmartCol { 
-        header: "UL", min_width: 10, priority: 1, constraint: Constraint::Length(10) 
-    });
-    col_ids.push(ColId::UL);
-
-    // 2. CALCULATE LAYOUT
-    let (constraints, visible_indices) = compute_smart_table_layout(&col_defs, area.width, 1);
-
-    // 3. BUILD HEADERS
+    // 4. Build Header
     let (sort_col, sort_dir) = app_state.torrent_sort;
-    
+
     let header_cells: Vec<Cell> = visible_indices.iter().enumerate().map(|(visual_idx, &real_idx)| {
-        let col_id = col_ids[real_idx];
+        let def = &all_cols[real_idx];
+        
+        // Highlight logic
         let is_selected = app_state.selected_header == SelectedHeader::Torrent(visual_idx);
         
-        let (label, sort_enum) = match col_id {
-            ColId::Progress => ("Done", None),
-            ColId::Name => ("Name", Some(TorrentSortColumn::Name)),
-            ColId::DL => ("DL", Some(TorrentSortColumn::Down)),
-            ColId::UL => ("UL", Some(TorrentSortColumn::Up)),
-        };
-
-        let is_sorting = sort_enum.map_or(false, |s| s == sort_col);
+        // Sorting Logic: Use the definition directly
+        let is_sorting = def.sort_enum.map_or(false, |s| s == sort_col);
 
         let mut style = Style::default().fg(theme::YELLOW);
         if is_sorting { style = style.fg(theme::MAUVE); }
 
         let mut spans = vec![];
-        let mut text_span = Span::styled(label, style);
+        let mut text_span = Span::styled(def.header, style);
         if is_selected { text_span = text_span.underlined().bold(); }
         spans.push(text_span);
 
@@ -206,7 +186,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
 
     let header = Row::new(header_cells).height(1);
 
-    // 4. BUILD ROWS
+    // 5. Build Rows
     let rows = app_state.torrent_list_order.iter().enumerate().map(|(i, info_hash)| {
         match app_state.torrents.get(info_hash) {
             Some(torrent) => {
@@ -222,16 +202,18 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                     row_style = row_style.add_modifier(Modifier::BOLD);
                 }
 
-                // Generate cells only for visible columns
+                // Map visible indices back to the data
                 let cells: Vec<Cell> = visible_indices.iter().map(|&real_idx| {
-                    match col_ids[real_idx] {
-                        ColId::Progress => {
+                    let def = &all_cols[real_idx];
+                    
+                    match def.id {
+                        ColumnId::Status => {
                             let p = if state.number_of_pieces_total > 0 {
                                 (state.number_of_pieces_completed as f64 / state.number_of_pieces_total as f64) * 100.0
                             } else { 0.0 };
                             Cell::from(format!("{:.1}%", p))
                         },
-                        ColId::Name => {
+                        ColumnId::Name => {
                              let name = if app_state.anonymize_torrent_names {
                                 format!("Torrent {}", i + 1)
                             } else {
@@ -241,11 +223,11 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                             if is_selected { c = c.style(Style::default().fg(theme::YELLOW)); }
                             c
                         },
-                        ColId::DL => {
+                        ColumnId::DownSpeed => {
                             Cell::from(format_speed(torrent.smoothed_download_speed_bps))
                                 .style(speed_to_style(torrent.smoothed_download_speed_bps))
                         },
-                        ColId::UL => {
+                        ColumnId::UpSpeed => {
                             Cell::from(format_speed(torrent.smoothed_upload_speed_bps))
                                 .style(speed_to_style(torrent.smoothed_upload_speed_bps))
                         },

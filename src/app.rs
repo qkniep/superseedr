@@ -1953,6 +1953,22 @@ impl App {
                 TorrentSortColumn::Up => b_torrent
                     .smoothed_upload_speed_bps
                     .cmp(&a_torrent.smoothed_upload_speed_bps),
+                TorrentSortColumn::Progress => {
+                    let calc_progress = |t: &TorrentDisplayState| -> f64 {
+                        if t.latest_state.number_of_pieces_total == 0 {
+                            0.0
+                        } else {
+                            t.latest_state.number_of_pieces_completed as f64
+                                / t.latest_state.number_of_pieces_total as f64
+                        }
+                    };
+                    
+                    let a_prog = calc_progress(a_torrent);
+                    let b_prog = calc_progress(b_torrent);
+                    
+                    // Standard float comparison
+                    a_prog.total_cmp(&b_prog)
+                }
             };
 
             let default_direction = match sort_by {

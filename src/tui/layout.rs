@@ -40,7 +40,7 @@ pub fn get_torrent_columns() -> Vec<ColumnDefinition> {
             min_width: 7,
             priority: 2, // Low priority (drops on small screens)
             default_constraint: Constraint::Length(7),
-            sort_enum: None, // Not sortable via keyboard 's' yet
+            sort_enum: Some(TorrentSortColumn::Progress),
         },
         ColumnDefinition {
             id: ColumnId::Name,
