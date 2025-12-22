@@ -260,10 +260,7 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         plan.footer = v_chunks[4];
 
     } else {
-// ... (Landscape mode remains unchanged)
-
         // --- LANDSCAPE MODE ---
-        // (Replicating draw_landscape_layout from tui.rs lines 140-182)
 
         let main = Layout::vertical([
             Constraint::Min(10),    // Top Area
@@ -290,38 +287,48 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         plan.sparklines = Some(left_v[1]);
 
         // Right Pane: Details Header vs Peers Table
-        // tui.rs: right_pane_chunks = Vertical [Length(9), Min(0)]
         let right_v = Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).split(top_h[1]);
         
-        // The "Header" area (right_v[0]) contains Details Text AND Peer Stream
-        // FIXED: Give details fixed 30 width so it doesn't get squashed
+        // The "Header" area contains Details Text AND Peer Stream
         let header_h = Layout::horizontal([
-            Constraint::Length(30), // Was Percentage(20)
-            Constraint::Min(0)      // Rest goes to Peer Stream
+            Constraint::Length(40), 
+            Constraint::Min(0)      
         ]).split(right_v[0]);
         
-        plan.details = header_h[0];     // Text Details
-        plan.peer_stream = Some(header_h[1]); // Peer Stream (Dots)
-        plan.peers = right_v[1];        // Peer Table (Bottom of right pane)
+        plan.details = header_h[0];
+        plan.peer_stream = Some(header_h[1]);
+        plan.peers = right_v[1];
 
-        // Bottom Area: Chart vs Stats/BlockStream
-        // FIXED: Give Stats/Block side slightly more room (30% instead of 23%)
-        let bottom_h = Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).split(bottom_area);
+        // --- BOTTOM AREA LOGIC ---
+        
+        // Decision: Do we have enough width to justify the Block Stream?
+        // We use a breakpoint of 135 columns. 
+        // > 135: Show Blocks + Stats (needs ~54 cols)
+        // < 135: Show Stats only (needs ~40 cols), giving 14 cols back to the Chart.
+        let show_block_stream = ctx.width > 135;
+        let right_pane_width = if show_block_stream { 54 } else { 40 };
+
+        let bottom_h = Layout::horizontal([
+            Constraint::Min(0),                 // Chart takes remaining space
+            Constraint::Length(right_pane_width) 
+        ]).split(bottom_area);
         
         plan.chart = Some(bottom_h[0]);
         let stats_area = bottom_h[1];
 
-        // Stats Area Split: Stats vs Block Stream
-        // FIXED: Smart collapse logic. If area is too narrow (< 45), hide Block Stream.
-        if stats_area.width < 45 {
-            // Panic/Narrow mode: Just show Stats, hide Blocks
-            plan.stats = Some(stats_area);
-            plan.block_stream = None; 
+        if show_block_stream {
+            // Normal mode: Block Stream (Left) | Stats (Right)
+            let stats_h = Layout::horizontal([
+                Constraint::Length(14), // Block Stream Fixed
+                Constraint::Min(0)      // Stats Fills remainder
+            ]).split(stats_area);
+            
+            plan.block_stream = Some(stats_h[0]);
+            plan.stats = Some(stats_h[1]);
         } else {
-            // Normal mode: Show both
-            let stats_h = Layout::horizontal([Constraint::Min(0), Constraint::Length(14)]).split(stats_area);
-            plan.stats = Some(stats_h[0]);
-            plan.block_stream = Some(stats_h[1]);
+            // Compact mode: Stats takes the whole slot
+            plan.stats = Some(stats_area);
+            plan.block_stream = None;
         }
     }
 

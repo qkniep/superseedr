@@ -1913,7 +1913,7 @@ fn draw_swarm_heatmap(f: &mut Frame, peers: &[PeerInfo], total_pieces: u32, area
         return;
     }
 
-    let max_avail_f64 = max_avail.max(1) as f64;
+    let max_avail_f64 = max_avail.max(5) as f64;
     let available_width = inner_area.width as usize;
     let available_height = inner_area.height as usize;
     let total_cells = (available_width * available_height) as u64;
