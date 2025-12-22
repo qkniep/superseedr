@@ -3,11 +3,71 @@
 
 use ratatui::prelude::*;
 use crate::app::AppState;
+use crate::config::TorrentSortColumn;
 
 // --- 1. SHARED CONSTANTS (The Contract) ---
 pub const MIN_SIDEBAR_WIDTH: u16 = 25;
 pub const MIN_CHART_HEIGHT: u16 = 8;
 pub const MIN_DETAILS_HEIGHT: u16 = 10;
+
+
+// 1. Define a robust ID enum that covers ALL columns, sortable or not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ColumnId {
+    Status,   // e.g. "Done" or Progress
+    Name,
+    DownSpeed,
+    UpSpeed,
+    // Add others easily later: Peers, ETA, etc.
+}
+
+// 2. Define the structure for a column definition
+pub struct ColumnDefinition {
+    pub id: ColumnId,
+    pub header: &'static str,
+    pub min_width: u16,
+    pub priority: u8,
+    pub default_constraint: Constraint,
+    pub sort_enum: Option<TorrentSortColumn>, // Link to config enum if sortable
+}
+
+// 3. The Single Source of Truth
+pub fn get_torrent_columns() -> Vec<ColumnDefinition> {
+    vec![
+        ColumnDefinition {
+            id: ColumnId::Status,
+            header: "Done",
+            min_width: 7,
+            priority: 2, // Low priority (drops on small screens)
+            default_constraint: Constraint::Length(7),
+            sort_enum: None, // Not sortable via keyboard 's' yet
+        },
+        ColumnDefinition {
+            id: ColumnId::Name,
+            header: "Name",
+            min_width: 15,
+            priority: 0, // High priority
+            default_constraint: Constraint::Fill(1),
+            sort_enum: Some(TorrentSortColumn::Name),
+        },
+        ColumnDefinition {
+            id: ColumnId::DownSpeed,
+            header: "DL",
+            min_width: 10,
+            priority: 1,
+            default_constraint: Constraint::Length(10),
+            sort_enum: Some(TorrentSortColumn::Down),
+        },
+        ColumnDefinition {
+            id: ColumnId::UpSpeed,
+            header: "UL",
+            min_width: 10,
+            priority: 1,
+            default_constraint: Constraint::Length(10),
+            sort_enum: Some(TorrentSortColumn::Up),
+        },
+    ]
+}
 
 // --- 2. SMART TABLE GENERATOR ---
 
