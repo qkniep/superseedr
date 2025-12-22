@@ -186,7 +186,6 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
 
     if is_short {
         // --- COMPACT MODE ---
-        // (Simplified from draw_compact_layout in tui.rs)
         let main = Layout::vertical([
             Constraint::Min(5),     // List/Sparklines
             Constraint::Length(12), // Details/Stats
@@ -209,26 +208,36 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
 
         plan.footer = main[2];
 
+
     } else if is_narrow || is_vertical_aspect {
         // --- PORTRAIT MODE ---
-        // (Replicating draw_portrait_layout from tui.rs lines 184-236)
+        // Fixed Vertical Costs: Chart (14) + Info (20) + Footer (1) = 35 rows
         
         let v_chunks = Layout::vertical([
-            Constraint::Fill(1),        // List + Peer Stream
+            Constraint::Fill(1),        // List (+ Optional Peer Stream)
             Constraint::Length(14),     // Chart
             Constraint::Length(20),     // Info Row (Details | BlockStream | Stats)
             Constraint::Fill(1),        // Peers Table (Bottom)
             Constraint::Length(1),      // Footer
         ]).split(area);
 
-        // 1. Top Section (List vs Peer Stream)
-        let top_split = Layout::vertical([
-            Constraint::Min(0),
-            Constraint::Length(10),
-        ]).split(v_chunks[0]);
-        
-        plan.list = top_split[0];
-        plan.peer_stream = Some(top_split[1]);
+        // 1. Top Section: Smartly toggle Peer Stream based on available height
+        // If height < 70, the top area is likely < 17 rows. 
+        // Subtracting 10 for Peer Stream would leave the List with < 7 rows.
+        if ctx.height < 70 {
+            // HEIGHT CONSTRAINED: Hide Peer Stream, maximize List
+            plan.list = v_chunks[0];
+            plan.peer_stream = None;
+        } else {
+            // HEIGHT SUFFICIENT: Show both
+            let top_split = Layout::vertical([
+                Constraint::Min(0),     // List takes remaining
+                Constraint::Length(10), // Peer Stream fixed height
+            ]).split(v_chunks[0]);
+            
+            plan.list = top_split[0];
+            plan.peer_stream = Some(top_split[1]);
+        }
 
         // 2. Chart
         plan.chart = Some(v_chunks[1]);
@@ -244,13 +253,15 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         plan.block_stream = Some(info_cols[1]);
         plan.stats = Some(info_cols[2]);
 
-        // 4. Peers Table (The large bottom area)
+        // 4. Peers Table
         plan.peers = v_chunks[3];
 
         // 5. Footer
         plan.footer = v_chunks[4];
 
     } else {
+// ... (Landscape mode remains unchanged)
+
         // --- LANDSCAPE MODE ---
         // (Replicating draw_landscape_layout from tui.rs lines 140-182)
 
@@ -283,21 +294,35 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         let right_v = Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).split(top_h[1]);
         
         // The "Header" area (right_v[0]) contains Details Text AND Peer Stream
-        let header_h = Layout::horizontal([Constraint::Percentage(20), Constraint::Percentage(80)]).split(right_v[0]);
+        // FIXED: Give details fixed 30 width so it doesn't get squashed
+        let header_h = Layout::horizontal([
+            Constraint::Length(30), // Was Percentage(20)
+            Constraint::Min(0)      // Rest goes to Peer Stream
+        ]).split(right_v[0]);
         
         plan.details = header_h[0];     // Text Details
         plan.peer_stream = Some(header_h[1]); // Peer Stream (Dots)
         plan.peers = right_v[1];        // Peer Table (Bottom of right pane)
 
         // Bottom Area: Chart vs Stats/BlockStream
-        let bottom_h = Layout::horizontal([Constraint::Percentage(77), Constraint::Percentage(23)]).split(bottom_area);
+        // FIXED: Give Stats/Block side slightly more room (30% instead of 23%)
+        let bottom_h = Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).split(bottom_area);
         
         plan.chart = Some(bottom_h[0]);
+        let stats_area = bottom_h[1];
 
         // Stats Area Split: Stats vs Block Stream
-        let stats_h = Layout::horizontal([Constraint::Min(0), Constraint::Length(14)]).split(bottom_h[1]);
-        plan.stats = Some(stats_h[0]);
-        plan.block_stream = Some(stats_h[1]);
+        // FIXED: Smart collapse logic. If area is too narrow (< 45), hide Block Stream.
+        if stats_area.width < 45 {
+            // Panic/Narrow mode: Just show Stats, hide Blocks
+            plan.stats = Some(stats_area);
+            plan.block_stream = None; 
+        } else {
+            // Normal mode: Show both
+            let stats_h = Layout::horizontal([Constraint::Min(0), Constraint::Length(14)]).split(stats_area);
+            plan.stats = Some(stats_h[0]);
+            plan.block_stream = Some(stats_h[1]);
+        }
     }
 
     plan
