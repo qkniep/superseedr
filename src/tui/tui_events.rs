@@ -13,11 +13,17 @@ use crate::config::SortDirection;
 use crate::config::TorrentSortColumn;
 
 use crate::tui::layout::get_torrent_columns;
- use crate::tui::layout::get_peer_columns;
+use crate::tui::layout::get_peer_columns;
+use crate::tui::layout::compute_smart_table_layout;
+use crate::tui::layout::calculate_layout;
+use crate::tui::layout::LayoutContext;
+use crate::tui::layout::SmartCol;
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::style::{Color, Style};
 use ratatui_explorer::{FileExplorer, Theme};
+use ratatui::prelude::Rect;
+
 use std::path::Path;
 use tracing::{event as tracing_event, Level};
 
@@ -28,7 +34,8 @@ use clipboard::{ClipboardContext, ClipboardProvider};
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 
-    if let CrosstermEvent::Resize(_, _) = &event {
+    if let CrosstermEvent::Resize(w, h) = &event {
+        app.app_state.screen_area = Rect::new(0, 0, *w, *h);
         app.app_state.ui_needs_redraw = true;
         return;
     }
@@ -661,12 +668,36 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     let selected_torrent_peer_count =
         selected_torrent.map_or(0, |torrent| torrent.latest_state.peers.len());
 
-    // Get the true visual count (4 columns: Status, Name, DL, UL)
-    let torrent_cols = get_torrent_columns();
-    let max_torrent_col = torrent_cols.len(); 
+    // --- DYNAMICALLY CALCULATE VISIBLE COLUMNS ---
+    // 1. Calculate layout to get list widths
+    let ctx = LayoutContext::new(app_state.screen_area, app_state, 35);
+    let layout_plan = calculate_layout(app_state.screen_area, &ctx);
+
+    // 2. Compute visible Torrent Columns
+    let t_cols = get_torrent_columns();
+    let smart_t_cols: Vec<SmartCol> = t_cols.iter().map(|c| SmartCol {
+        header: c.header,
+        min_width: c.min_width,
+        priority: c.priority,
+        constraint: c.default_constraint,
+    }).collect();
+    let (_, visible_t_indices) = compute_smart_table_layout(&smart_t_cols, layout_plan.list.width, 1);
+    let torrent_col_count = visible_t_indices.len();
+
+    // 3. Compute visible Peer Columns
+    let p_cols = get_peer_columns();
+    let smart_p_cols: Vec<SmartCol> = p_cols.iter().map(|c| SmartCol {
+        header: c.header,
+        min_width: c.min_width,
+        priority: c.priority,
+        constraint: c.default_constraint,
+    }).collect();
+    // Use peers width if available, otherwise assume 0 (which results in 0 columns)
+    let (_, visible_p_indices) = compute_smart_table_layout(&smart_p_cols, layout_plan.peers.width, 1);
+    let peer_col_count = visible_p_indices.len();
 
     match key_code {
-        // --- UP/DOWN/J/K Navigation (Unchanged) ---
+        // --- UP/DOWN/J/K Navigation (Rows) ---
         KeyCode::Up | KeyCode::Char('k') => {
             match app_state.selected_header {
                 SelectedHeader::Torrent(_) => {
@@ -701,44 +732,51 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
             }
         }
 
-        // --- LEFT/RIGHT/H/L Navigation (FIXED) ---
+        // --- LEFT/RIGHT/H/L Navigation (Columns) ---
         KeyCode::Left | KeyCode::Char('h') => {
             app_state.selected_header = match app_state.selected_header {
                 SelectedHeader::Torrent(0) => {
-                    if selected_torrent_has_peers {
-                        SelectedHeader::Peer(PeerSortColumn::COUNT - 1)
+                    // Wrap around to the last visible Peer column
+                    if selected_torrent_has_peers && peer_col_count > 0 {
+                        SelectedHeader::Peer(peer_col_count - 1)
                     } else {
                         SelectedHeader::Torrent(0)
                     }
                 }
                 SelectedHeader::Torrent(i) => SelectedHeader::Torrent(i - 1),
                 
-                // CHANGE: Use max_torrent_col instead of TorrentSortColumn::COUNT
-                // This ensures we jump back to "UL" (Index 3), not "DL" (Index 2)
-                SelectedHeader::Peer(0) => SelectedHeader::Torrent(max_torrent_col - 1),
+                SelectedHeader::Peer(0) => {
+                    // Jump back to the last visible Torrent column
+                    SelectedHeader::Torrent(torrent_col_count.saturating_sub(1))
+                },
                 
                 SelectedHeader::Peer(i) => SelectedHeader::Peer(i - 1),
             };
         }
         KeyCode::Right | KeyCode::Char('l') => {
             app_state.selected_header = match app_state.selected_header {
-                // CHANGE: Check i < max_torrent_col - 1 (i < 3)
-                // This allows moving from 2 (DL) -> 3 (UL)
-                SelectedHeader::Torrent(i) if i < max_torrent_col - 1 => {
-                    SelectedHeader::Torrent(i + 1)
-                }
-                // If we are at the last column (UL), jump to Peers
                 SelectedHeader::Torrent(i) => {
-                    if selected_torrent_has_peers {
-                        SelectedHeader::Peer(0)
+                    // If not at the last visible column, move right
+                    if i < torrent_col_count.saturating_sub(1) {
+                         SelectedHeader::Torrent(i + 1)
                     } else {
-                        SelectedHeader::Torrent(i)
+                        // At the last visible column, jump to Peer column 0 (if valid)
+                        if selected_torrent_has_peers && peer_col_count > 0 {
+                            SelectedHeader::Peer(0)
+                        } else {
+                            SelectedHeader::Torrent(i)
+                        }
                     }
                 }
-                SelectedHeader::Peer(i) if i < PeerSortColumn::COUNT - 1 => {
-                    SelectedHeader::Peer(i + 1)
+                SelectedHeader::Peer(i) => {
+                    // If not at the last visible peer column, move right
+                    if i < peer_col_count.saturating_sub(1) {
+                        SelectedHeader::Peer(i + 1)
+                    } else {
+                        // Wrap around to Torrent column 0
+                        SelectedHeader::Torrent(0)
+                    }
                 }
-                SelectedHeader::Peer(_) => SelectedHeader::Torrent(0),
             };
         }
         _ => {} 

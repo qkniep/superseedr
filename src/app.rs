@@ -58,6 +58,7 @@ use notify::{Config, Error as NotifyError, Event, RecommendedWatcher, RecursiveM
 
 use ratatui::{backend::CrosstermBackend, Terminal};
 use ratatui_explorer::FileExplorer;
+use ratatui::prelude::Rect;
 use std::cell::RefCell;
 use throbber_widgets_tui::ThrobberState;
 
@@ -393,6 +394,7 @@ pub struct AppState {
     pub system_error: Option<String>,
     pub limits: CalculatedLimits,
 
+    pub screen_area: Rect,
     pub mode: AppMode,
     pub show_help: bool,
     pub externally_accessable_port: bool,
@@ -647,6 +649,11 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+
+        if let Ok(size) = terminal.size() {
+            self.app_state.screen_area = Rect::new(0, 0, size.width, size.height);
+        }
+
         self.process_pending_commands().await;
 
         self.startup_crossterm_event_listener();

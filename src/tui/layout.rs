@@ -310,12 +310,24 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
 
     } else if is_narrow || is_vertical_aspect {
         // --- PORTRAIT MODE ---
-        // Fixed Vertical Costs: Chart (14) + Info (20) + Footer (1) = 35 rows
         
+        // DYNAMIC SIZING:
+        // If height is < 50, we compress the Chart and Info rows to ensure
+        // the Torrent List and Peers Table (the flexible Fill regions)
+        // don't collapse to 0 height.
+        // Total Fixed Cost (Compressed): 10 (Chart) + 10 (Info) + 1 (Footer) = 21 Rows.
+        // At height 30, this leaves 9 rows for List/Peers.
+        
+        let (chart_height, info_height) = if ctx.height < 50 {
+            (10, MIN_DETAILS_HEIGHT) // Height < 50: Compressed Chart (10) & Compact Details (10)
+        } else {
+            (14, 20) // Height >= 50: Full Chart (14) & Expanded Details (20)
+        };
+
         let v_chunks = Layout::vertical([
             Constraint::Fill(1),        // List
-            Constraint::Length(14),     // Chart
-            Constraint::Length(20),     // Info Row
+            Constraint::Length(chart_height), 
+            Constraint::Length(info_height),  
             Constraint::Fill(1),        // Peers Table
             Constraint::Length(1),      // Footer
         ]).split(area);
@@ -336,7 +348,7 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
             plan.peer_stream = Some(top_split[1]);
         }
 
-        // 2. Chart
+        // 2. Chart (Always shown, just compressed)
         plan.chart = Some(v_chunks[1]);
 
         // 3. Info Row (MODIFIED)
