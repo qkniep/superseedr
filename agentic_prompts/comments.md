@@ -1,4 +1,4 @@
-I am preparing to merge my branch to main. Analyze all new comments in this branch. Apply these rules:
+I am preparing to merge my branch to main. Analyze all new comments in this branch.
 
 Do not commit your new changes - also only review NEW comments, do not touch older comments.
 

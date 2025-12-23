@@ -32,7 +32,6 @@ pub const MINUTES_HISTORY_MAX: usize = 48 * 60;
 pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     let area = f.area();
 
-    // --- 1. OVERLAYS ---
     if app_state.show_help {
         draw_help_popup(f, app_state);
         return;
@@ -76,11 +75,9 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
         _ => {}
     }
 
-    // --- 2. CALCULATE LAYOUT ---
     let ctx = LayoutContext::new(area, app_state, 35);
     let plan = calculate_layout(area, &ctx);
 
-    // --- 3. RENDER ---
     draw_torrent_list(f, app_state, plan.list);
     draw_footer(f, app_state, settings, plan.footer);
     draw_details_panel(f, app_state, plan.details);
@@ -148,7 +145,6 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         table_state.select(Some(app_state.selected_torrent_index));
     }
 
-    // 1. Column Definitions
     let all_cols = get_torrent_columns();
     let smart_cols: Vec<SmartCol> = all_cols
         .iter()
@@ -159,10 +155,8 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         })
         .collect();
 
-    // 2. Smart Layout
     let (constraints, visible_indices) = compute_smart_table_layout(&smart_cols, area.width, 1);
 
-    // 3. Header
     let (sort_col, sort_dir) = app_state.torrent_sort;
     let header_cells: Vec<Cell> = visible_indices
         .iter()
@@ -197,7 +191,6 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         .collect();
     let header = Row::new(header_cells).height(1);
 
-    // 4. Rows
     let rows =
         app_state
             .torrent_list_order
@@ -990,13 +983,11 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                     state.peers.clone()
                 };
 
-                // --- 1. SORT DATA ---
-                // (Existing sort logic remains similar, simplified for brevity)
                 let (sort_by, sort_direction) = app_state.peer_sort;
                 peers_to_display.sort_by(|a, b| {
                     use crate::config::PeerSortColumn::*;
                     let ordering = match sort_by {
-                        Flags => a.peer_choking.cmp(&b.peer_choking), // Simplified flag sort
+                        Flags => a.peer_choking.cmp(&b.peer_choking),
                         Completed => {
                             let total = state.number_of_pieces_total as usize;
                             if total == 0 {
@@ -1020,8 +1011,6 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                     }
                 });
 
-                // --- 2. LAYOUT ENGINE ---
-                // Get strict definitions from layout.rs
                 let all_peer_cols = get_peer_columns();
                 let smart_cols: Vec<SmartCol> = all_peer_cols
                     .iter()
@@ -1045,7 +1034,6 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                 if peers_to_display.is_empty() {
                     draw_swarm_heatmap(f, &state.peers, state.number_of_pieces_total, peers_chunk);
                 } else {
-                    // --- 3. BUILD HEADER ---
                     let header_cells: Vec<Cell> = visible_indices
                         .iter()
                         .enumerate()
@@ -1080,7 +1068,6 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
 
                     let peer_header = Row::new(header_cells).height(1);
 
-                    // --- 4. BUILD ROWS ---
                     let peer_rows = peers_to_display.iter().map(|peer| {
                         let row_color =
                             if peer.download_speed_bps == 0 && peer.upload_speed_bps == 0 {
@@ -1156,7 +1143,6 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                                         };
                                         Cell::from(format!("{:.0}%", pct))
                                     }
-                                    // UPDATED: Show totals if width > 120
                                     PeerColumnId::DownSpeed => {
                                         if peers_chunk.width > 120 {
                                             Cell::from(format!(
@@ -1168,7 +1154,6 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                                             Cell::from(format_speed(peer.download_speed_bps))
                                         }
                                     }
-                                    // UPDATED: Show totals if width > 120
                                     PeerColumnId::UpSpeed => {
                                         if peers_chunk.width > 120 {
                                             Cell::from(format!(
@@ -1190,7 +1175,6 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                         .header(peer_header)
                         .block(Block::default());
 
-                    // Heatmap logic remains same
                     let table_rows_needed: u16 = 1 + peers_to_display.len() as u16;
                     let peer_block_height_needed: u16 = table_rows_needed + 1;
                     let remaining_height =

@@ -728,19 +728,17 @@ impl App {
         let tui_event_tx_clone = self.tui_event_tx.clone();
         let mut tui_shutdown_rx = self.shutdown_tx.subscribe();
 
-        // Assign the handle to self.tui_task
         self.tui_task = Some(tokio::spawn(async move {
             loop {
-                // 1. Check for shutdown BEFORE polling
                 if tui_shutdown_rx.try_recv().is_ok() {
                     break;
                 }
 
-                // 2. Run blocking poll to completion (do NOT use tokio::select!)
-                // This ensures we never abandon a thread that is reading from stdin
+                // Run blocking poll to completion (do NOT use tokio::select!)
+                // This ensures we never abandon a thread that is reading from stdin.
+                // Keep the timeout relatively short (250ms) so the app remains responsive to shutdown.
                 let event =
                     tokio::task::spawn_blocking(|| -> std::io::Result<Option<CrosstermEvent>> {
-                        // Keep the timeout relatively short (250ms) so the app remains responsive to shutdown
                         if event::poll(Duration::from_millis(250))? {
                             return Ok(Some(event::read()?));
                         }
@@ -748,14 +746,13 @@ impl App {
                     })
                     .await;
 
-                // 3. Handle the result
                 match event {
                     Ok(Ok(Some(e))) => {
                         if tui_event_tx_clone.send(e).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Ok(None)) => {} // Timeout (no event), loop again to check shutdown
+                    Ok(Ok(None)) => {}
                     Ok(Err(e)) => {
                         tracing::error!("Crossterm event error: {}", e);
                         break;
@@ -766,7 +763,6 @@ impl App {
                     }
                 }
 
-                // 4. Double check shutdown AFTER polling
                 if tui_shutdown_rx.try_recv().is_ok() {
                     break;
                 }

@@ -5,19 +5,15 @@ use crate::app::AppState;
 use crate::config::{PeerSortColumn, TorrentSortColumn};
 use ratatui::prelude::*;
 
-// --- 1. SHARED CONSTANTS (The Contract) ---
 pub const MIN_SIDEBAR_WIDTH: u16 = 25;
 pub const MIN_DETAILS_HEIGHT: u16 = 10;
 
-// --- TORRENT COLUMNS ---
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ColumnId {
-    Status, // e.g. "Done" or Progress
+    Status,
     Name,
     DownSpeed,
     UpSpeed,
-    // Add others easily later: Peers, ETA, etc.
 }
 
 pub struct ColumnDefinition {
@@ -35,7 +31,7 @@ pub fn get_torrent_columns() -> Vec<ColumnDefinition> {
             id: ColumnId::Status,
             header: "Done",
             min_width: 7,
-            priority: 2, // Low priority
+            priority: 2,
             default_constraint: Constraint::Length(7),
             sort_enum: Some(TorrentSortColumn::Progress),
         },
@@ -43,7 +39,7 @@ pub fn get_torrent_columns() -> Vec<ColumnDefinition> {
             id: ColumnId::Name,
             header: "Name",
             min_width: 15,
-            priority: 0, // Essential
+            priority: 0,
             default_constraint: Constraint::Fill(1),
             sort_enum: Some(TorrentSortColumn::Name),
         },
@@ -51,7 +47,7 @@ pub fn get_torrent_columns() -> Vec<ColumnDefinition> {
             id: ColumnId::UpSpeed,
             header: "UL",
             min_width: 10,
-            priority: 1, // Medium
+            priority: 1,
             default_constraint: Constraint::Length(10),
             sort_enum: Some(TorrentSortColumn::Up),
         },
@@ -59,14 +55,12 @@ pub fn get_torrent_columns() -> Vec<ColumnDefinition> {
             id: ColumnId::DownSpeed,
             header: "DL",
             min_width: 10,
-            priority: 1, // Medium
+            priority: 1,
             default_constraint: Constraint::Length(10),
             sort_enum: Some(TorrentSortColumn::Down),
         },
     ]
 }
-
-// --- PEER COLUMNS ---
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PeerColumnId {
@@ -112,7 +106,7 @@ pub fn get_peer_columns() -> Vec<PeerColumnDefinition> {
             id: PeerColumnId::Address,
             header: "Address",
             min_width: 16,
-            priority: 0, // Essential
+            priority: 0,
             default_constraint: Constraint::Fill(1),
             sort_enum: Some(PeerSortColumn::Address),
         },
@@ -120,7 +114,7 @@ pub fn get_peer_columns() -> Vec<PeerColumnDefinition> {
             id: PeerColumnId::UpSpeed,
             header: "Upload",
             min_width: 10,
-            priority: 1, // Keep speeds if possible
+            priority: 1,
             default_constraint: Constraint::Fill(1),
             sort_enum: Some(PeerSortColumn::UL),
         },
@@ -128,7 +122,7 @@ pub fn get_peer_columns() -> Vec<PeerColumnDefinition> {
             id: PeerColumnId::DownSpeed,
             header: "Download",
             min_width: 10,
-            priority: 1, // Keep speeds if possible
+            priority: 1,
             default_constraint: Constraint::Fill(1),
             sort_enum: Some(PeerSortColumn::DL),
         },
@@ -144,19 +138,17 @@ pub fn get_peer_columns() -> Vec<PeerColumnDefinition> {
             id: PeerColumnId::Action,
             header: "Action",
             min_width: 12,
-            priority: 5, // Drop early
+            priority: 5,
             default_constraint: Constraint::Fill(1),
             sort_enum: Some(PeerSortColumn::Action),
         },
     ]
 }
 
-// --- 2. SMART TABLE GENERATOR ---
-
 #[derive(Clone, Debug)]
 pub struct SmartCol {
     pub min_width: u16,
-    pub priority: u8, // 0 = Always show (Essential), 1+ = Optional
+    pub priority: u8,
     pub constraint: Constraint,
 }
 
@@ -174,24 +166,21 @@ pub fn compute_smart_table_layout(
 ) -> (Vec<Constraint>, Vec<usize>) {
     let mut indexed_cols: Vec<(usize, &SmartCol)> = columns.iter().enumerate().collect();
 
-    // Sort by Priority (Low numbers = High priority), then by original index
     indexed_cols.sort_by(|a, b| a.1.priority.cmp(&b.1.priority).then(a.0.cmp(&b.0)));
 
     let mut active_indices = Vec::new();
     let mut current_used_width = 0;
 
-    // Calculate an "Expansion Reserve".
-    // If the screen is narrow (<120), we demand that the Priority 0 column
-    // gets at least 20-30% extra space, effectively reducing the budget for optional columns.
+    // If the screen is narrow (<140), reserve extra space for the Priority 0 column
+    // effectively reducing the budget for optional columns so names aren't truncated.
     let expansion_reserve = if available_width < 80 {
-        15 // Very narrow: reserve modest space so names aren't 100% truncated
+        15
     } else if available_width < 140 {
-        25 // Standard narrow: ensure good readability for names
+        25
     } else {
-        0 // Wide screen: pack everything in
+        0
     };
 
-    // Greedily pick columns that fit
     for (idx, col) in indexed_cols {
         let spacing_cost = if active_indices.is_empty() {
             0
@@ -200,11 +189,9 @@ pub fn compute_smart_table_layout(
         };
 
         if col.priority == 0 {
-            // Essential: Always add it, but track its min cost
             active_indices.push(idx);
             current_used_width += col.min_width + spacing_cost;
         } else {
-            // Optional: Check fit against Adjusted Budget (Available - Reserve)
             let projected_width = current_used_width + col.min_width + spacing_cost;
             let effective_budget = available_width.saturating_sub(expansion_reserve);
 
@@ -224,8 +211,6 @@ pub fn compute_smart_table_layout(
 
     (final_constraints, active_indices)
 }
-
-// --- 3. LAYOUT PLAN DEFINITION ---
 
 #[derive(Default, Debug)]
 pub struct LayoutPlan {
@@ -257,12 +242,9 @@ impl LayoutContext {
     }
 }
 
-// --- 4. THE CALCULATOR FUNCTION ---
-
 pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
     let mut plan = LayoutPlan::default();
 
-    // 1. SAFETY CHECKS (Tiny Screens)
     if ctx.width < 40 || ctx.height < 10 {
         let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
         plan.list = chunks[0];
@@ -271,33 +253,28 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         return plan;
     }
 
-    // 2. ASPECT RATIO / MODE CHECK
     let is_narrow = ctx.width < 100;
     let is_vertical_aspect = ctx.height as f32 > (ctx.width as f32 * 0.6);
-    let is_short = ctx.height < 30; // Compact mode check
+    let is_short = ctx.height < 30;
 
     if is_short {
-        // --- COMPACT MODE ---
         let main = Layout::vertical([
-            Constraint::Min(5),     // List/Sparklines
-            Constraint::Length(12), // Details/Stats
-            Constraint::Length(1),  // Footer
+            Constraint::Min(5),
+            Constraint::Length(12),
+            Constraint::Length(1),
         ])
         .split(area);
 
-        // Top: List vs Sparklines
         let top_split =
             Layout::vertical([Constraint::Min(0), Constraint::Length(5)]).split(main[0]);
         plan.list = top_split[0];
         plan.sparklines = Some(top_split[1]);
 
-        // Bottom: Stats vs Details
         let bottom_cols =
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(main[1]);
         plan.stats = Some(bottom_cols[0]);
 
-        // Details column split
         let detail_chunks =
             Layout::vertical([Constraint::Length(9), Constraint::Length(0)]).split(bottom_cols[1]);
         plan.details = detail_chunks[0];
@@ -305,19 +282,12 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
 
         plan.footer = main[2];
     } else if is_narrow || is_vertical_aspect {
-        // --- PORTRAIT MODE ---
-
-        // DYNAMIC SIZING:
-        // If height is < 50, we compress the Chart and Info rows to ensure
-        // the Torrent List and Peers Table (the flexible Fill regions)
-        // don't collapse to 0 height.
-        // Total Fixed Cost (Compressed): 10 (Chart) + 10 (Info) + 1 (Footer) = 21 Rows.
-        // At height 30, this leaves 9 rows for List/Peers.
-
+        // If height is < 50, compress the Chart and Info rows to ensure
+        // the Torrent List and Peers Table don't collapse to 0 height.
         let (chart_height, info_height) = if ctx.height < 50 {
-            (10, MIN_DETAILS_HEIGHT) // Height < 50: Compressed Chart (10) & Compact Details (10)
+            (10, MIN_DETAILS_HEIGHT)
         } else {
-            (14, 20) // Height >= 50: Full Chart (14) & Expanded Details (20)
+            (14, 20)
         };
 
         let v_chunks = Layout::vertical([
@@ -329,13 +299,10 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         ])
         .split(area);
 
-        // 1. Top Section
         if ctx.height < 70 {
-            // HEIGHT CONSTRAINED: Hide Peer Stream
             plan.list = v_chunks[0];
             plan.peer_stream = None;
         } else {
-            // HEIGHT SUFFICIENT: Show both
             let top_split = Layout::vertical([
                 Constraint::Min(0),    // List
                 Constraint::Length(9), // Peer Stream
@@ -346,10 +313,8 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
             plan.peer_stream = Some(top_split[1]);
         }
 
-        // 2. Chart (Always shown, just compressed)
         plan.chart = Some(v_chunks[1]);
 
-        // 3. Info Row (MODIFIED)
         // If width is tight (< 90), stack Details & BlockStream vertically
         // to give Details more breathing room.
         if ctx.width < 90 {
@@ -359,10 +324,9 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
             ])
             .split(v_chunks[2]);
 
-            // Split Left Col vertically
             let left_v = Layout::vertical([
-                Constraint::Length(MIN_DETAILS_HEIGHT), // Details on top
-                Constraint::Min(0),                     // BlockStream below
+                Constraint::Length(MIN_DETAILS_HEIGHT),
+                Constraint::Min(0),
             ])
             .split(info_cols[0]);
 
@@ -370,7 +334,6 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
             plan.block_stream = Some(left_v[1]);
             plan.stats = Some(info_cols[1]);
         } else {
-            // Standard: 3 Columns side-by-side
             let info_cols = Layout::horizontal([
                 Constraint::Fill(1),    // Details Text
                 Constraint::Length(14), // Block Stream
@@ -383,14 +346,9 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
             plan.stats = Some(info_cols[2]);
         }
 
-        // 4. Peers Table
         plan.peers = v_chunks[3];
-
-        // 5. Footer
         plan.footer = v_chunks[4];
     } else {
-        // --- LANDSCAPE MODE ---
-
         let main = Layout::vertical([
             Constraint::Min(10),    // Top Area
             Constraint::Length(27), // Bottom Area
@@ -402,7 +360,6 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         let bottom_area = main[1];
         plan.footer = main[2];
 
-        // Top Horizontal Split
         let target_sidebar =
             (ctx.width as f32 * (ctx.settings_sidebar_percent as f32 / 100.0)) as u16;
         let sidebar_width = target_sidebar.max(MIN_SIDEBAR_WIDTH);
@@ -410,15 +367,12 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         let top_h = Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)])
             .split(top_area);
 
-        // Left Pane
         let left_v = Layout::vertical([Constraint::Min(0), Constraint::Length(5)]).split(top_h[0]);
         plan.list = left_v[0];
         plan.sparklines = Some(left_v[1]);
 
-        // Right Pane
         let right_v = Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).split(top_h[1]);
 
-        // Header
         let header_h =
             Layout::horizontal([Constraint::Length(40), Constraint::Min(0)]).split(right_v[0]);
 
@@ -426,7 +380,6 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         plan.peer_stream = Some(header_h[1]);
         plan.peers = right_v[1];
 
-        // --- BOTTOM AREA LOGIC ---
         let show_block_stream = ctx.width > 135;
         let right_pane_width = if show_block_stream { 54 } else { 40 };
 
