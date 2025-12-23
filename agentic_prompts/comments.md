@@ -1,4 +1,6 @@
-I am preparing to merge my branch to main. Analyze all new comments in this branch. Apply these rules - DO NOT COMMIT:
+I am preparing to merge my branch to main. Analyze all new comments in this branch. Apply these rules:
+
+Do not commit your new changes - also only review NEW comments, do not touch older comments.
 
 1. REMOVE: Comments that merely describe "what" the code is doing (e.g., "// increments i by 1").
 2. REMOVE: Commented-out code blocks (dead code).
