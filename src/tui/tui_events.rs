@@ -5,12 +5,9 @@ use crate::app::AppState;
 use crate::app::{App, AppMode, ConfigItem, SelectedHeader, TorrentControlState};
 use crate::torrent_manager::ManagerCommand;
 
-use strum::EnumCount;
 use strum::IntoEnumIterator;
 
-use crate::config::PeerSortColumn;
 use crate::config::SortDirection;
-use crate::config::TorrentSortColumn;
 
 use crate::tui::layout::calculate_layout;
 use crate::tui::layout::compute_smart_table_layout;
@@ -682,7 +679,6 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     let smart_t_cols: Vec<SmartCol> = t_cols
         .iter()
         .map(|c| SmartCol {
-            header: c.header,
             min_width: c.min_width,
             priority: c.priority,
             constraint: c.default_constraint,
@@ -697,7 +693,6 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     let smart_p_cols: Vec<SmartCol> = p_cols
         .iter()
         .map(|c| SmartCol {
-            header: c.header,
             min_width: c.min_width,
             priority: c.priority,
             constraint: c.default_constraint,
@@ -873,6 +868,7 @@ mod tests {
     use crate::app::{AppState, PeerInfo, SelectedHeader, TorrentDisplayState, TorrentMetrics};
     use crate::config::TorrentSortColumn;
     use ratatui::crossterm::event::KeyCode;
+    use strum::EnumCount;
 
     /// Creates a mock TorrentMetrics with a specific number of peers.
     fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
@@ -899,6 +895,7 @@ mod tests {
     /// Creates a mock AppState for testing navigation.
     fn create_test_app_state() -> AppState {
         let mut app_state = AppState::default();
+        app_state.screen_area = ratatui::prelude::Rect::new(0, 0, 200, 100);
 
         let torrent_a = create_mock_display_state(2); // Has 2 peers
         let torrent_b = create_mock_display_state(0); // Has 0 peers

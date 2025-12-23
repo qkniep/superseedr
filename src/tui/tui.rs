@@ -16,9 +16,8 @@ use crate::tui::layout::PeerColumnId;
 use crate::tui::layout::{calculate_layout, compute_smart_table_layout, LayoutContext, SmartCol};
 
 use crate::config::get_app_paths;
-use crate::config::{PeerSortColumn, Settings, SortDirection, TorrentSortColumn};
+use crate::config::{Settings, SortDirection};
 use crate::theme;
-use strum::IntoEnumIterator;
 use throbber_widgets_tui::Throbber;
 
 use rand::rngs::StdRng;
@@ -154,7 +153,6 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
     let smart_cols: Vec<SmartCol> = all_cols
         .iter()
         .map(|c| SmartCol {
-            header: c.header,
             min_width: c.min_width,
             priority: c.priority,
             constraint: c.default_constraint,
@@ -172,7 +170,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         .map(|(visual_idx, &real_idx)| {
             let def = &all_cols[real_idx];
             let is_selected = app_state.selected_header == SelectedHeader::Torrent(visual_idx);
-            let is_sorting = def.sort_enum.map_or(false, |s| s == sort_col);
+            let is_sorting = def.sort_enum == Some(sort_col);
 
             let mut style = Style::default().fg(theme::YELLOW);
             if is_sorting {
@@ -1028,7 +1026,6 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                 let smart_cols: Vec<SmartCol> = all_peer_cols
                     .iter()
                     .map(|c| SmartCol {
-                        header: c.header,
                         min_width: c.min_width,
                         priority: c.priority,
                         constraint: c.default_constraint,
@@ -1057,7 +1054,7 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
 
                             let is_selected =
                                 app_state.selected_header == SelectedHeader::Peer(visual_idx);
-                            let is_sorting = def.sort_enum.map_or(false, |s| s == sort_by);
+                            let is_sorting = def.sort_enum == Some(sort_by);
 
                             let mut style = Style::default().fg(theme::YELLOW);
                             if is_sorting {
@@ -1092,49 +1089,100 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                                 ip_to_color(&peer.address)
                             };
 
-                            let cells: Vec<Cell> = visible_indices.iter().map(|&real_idx| {
+                        let cells: Vec<Cell> = visible_indices
+                            .iter()
+                            .map(|&real_idx| {
                                 let def = &all_peer_cols[real_idx];
                                 match def.id {
-                                    PeerColumnId::Flags => {
-                                        Line::from(vec![
-                                            Span::styled("■", Style::default().fg(if peer.am_interested { theme::SAPPHIRE } else { theme::SURFACE1 })),
-                                            Span::styled("■", Style::default().fg(if peer.peer_choking { theme::MAROON } else { theme::SURFACE1 })),
-                                            Span::styled("■", Style::default().fg(if peer.peer_interested { theme::TEAL } else { theme::SURFACE1 })),
-                                            Span::styled("■", Style::default().fg(if peer.am_choking { theme::PEACH } else { theme::SURFACE1 })),
-                                        ]).into()
-                                    },
+                                    PeerColumnId::Flags => Line::from(vec![
+                                        Span::styled(
+                                            "■",
+                                            Style::default().fg(if peer.am_interested {
+                                                theme::SAPPHIRE
+                                            } else {
+                                                theme::SURFACE1
+                                            }),
+                                        ),
+                                        Span::styled(
+                                            "■",
+                                            Style::default().fg(if peer.peer_choking {
+                                                theme::MAROON
+                                            } else {
+                                                theme::SURFACE1
+                                            }),
+                                        ),
+                                        Span::styled(
+                                            "■",
+                                            Style::default().fg(if peer.peer_interested {
+                                                theme::TEAL
+                                            } else {
+                                                theme::SURFACE1
+                                            }),
+                                        ),
+                                        Span::styled(
+                                            "■",
+                                            Style::default().fg(if peer.am_choking {
+                                                theme::PEACH
+                                            } else {
+                                                theme::SURFACE1
+                                            }),
+                                        ),
+                                    ])
+                                    .into(),
                                     PeerColumnId::Address => {
-                                         let display = if app_state.anonymize_torrent_names { "xxx.xxx..." } else { &peer.address };
-                                         Cell::from(display.to_string())
-                                    },
-                                    PeerColumnId::Client => Cell::from(parse_peer_id(&peer.peer_id)),
+                                        let display = if app_state.anonymize_torrent_names {
+                                            "xxx.xxx..."
+                                        } else {
+                                            &peer.address
+                                        };
+                                        Cell::from(display.to_string())
+                                    }
+                                    PeerColumnId::Client => {
+                                        Cell::from(parse_peer_id(&peer.peer_id))
+                                    }
                                     PeerColumnId::Action => Cell::from(peer.last_action.clone()),
                                     PeerColumnId::Progress => {
                                         let total = state.number_of_pieces_total as usize;
                                         let pct = if total > 0 {
-                                            let c = peer.bitfield.iter().take(total).filter(|&&b| b).count();
+                                            let c = peer
+                                                .bitfield
+                                                .iter()
+                                                .take(total)
+                                                .filter(|&&b| b)
+                                                .count();
                                             (c as f64 / total as f64) * 100.0
-                                        } else { 0.0 };
+                                        } else {
+                                            0.0
+                                        };
                                         Cell::from(format!("{:.0}%", pct))
-                                    },
+                                    }
                                     // UPDATED: Show totals if width > 120
                                     PeerColumnId::DownSpeed => {
                                         if peers_chunk.width > 120 {
-                                            Cell::from(format!("{} ({})", format_speed(peer.download_speed_bps), format_bytes(peer.total_downloaded)))
+                                            Cell::from(format!(
+                                                "{} ({})",
+                                                format_speed(peer.download_speed_bps),
+                                                format_bytes(peer.total_downloaded)
+                                            ))
                                         } else {
                                             Cell::from(format_speed(peer.download_speed_bps))
                                         }
-                                    },
+                                    }
                                     // UPDATED: Show totals if width > 120
                                     PeerColumnId::UpSpeed => {
                                         if peers_chunk.width > 120 {
-                                            Cell::from(format!("{} ({})", format_speed(peer.upload_speed_bps), format_bytes(peer.total_uploaded)))
+                                            Cell::from(format!(
+                                                "{} ({})",
+                                                format_speed(peer.upload_speed_bps),
+                                                format_bytes(peer.total_uploaded)
+                                            ))
                                         } else {
                                             Cell::from(format_speed(peer.upload_speed_bps))
                                         }
-                                    },
+                                    }
                                 }
-                            }).collect();
+                            })
+                            .collect();
                         Row::new(cells).style(Style::default().fg(row_color))
                     });
 
@@ -2336,7 +2384,7 @@ fn draw_welcome_screen(f: &mut Frame) {
     f.render_widget(paragraph, horizontal_chunks_inner[1]);
 }
 
-fn draw_help_popup(f: &mut Frame, app_state: &AppState)  {
+fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
     let (settings_path_str, log_path_str) = if let Some((config_dir, data_dir)) = get_app_paths() {
         (
             config_dir
@@ -3044,7 +3092,7 @@ fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
     // XP needed for Level 1.
     // 5 MB Upload = Level 1. (Was 250KB, which was too trivial)
     const XP_FOR_LEVEL_1: f64 = 5_000_000.0;
-    
+
     // Power Curve Exponent.
     // 2.0 = Quadratic (Standard).
     // 2.6 = Steeper (Harder at high levels).

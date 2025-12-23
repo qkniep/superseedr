@@ -7,7 +7,6 @@ use ratatui::prelude::*;
 
 // --- 1. SHARED CONSTANTS (The Contract) ---
 pub const MIN_SIDEBAR_WIDTH: u16 = 25;
-pub const MIN_CHART_HEIGHT: u16 = 8;
 pub const MIN_DETAILS_HEIGHT: u16 = 10;
 
 // --- TORRENT COLUMNS ---
@@ -155,8 +154,7 @@ pub fn get_peer_columns() -> Vec<PeerColumnDefinition> {
 // --- 2. SMART TABLE GENERATOR ---
 
 #[derive(Clone, Debug)]
-pub struct SmartCol<'a> {
-    pub header: &'a str,
+pub struct SmartCol {
     pub min_width: u16,
     pub priority: u8, // 0 = Always show (Essential), 1+ = Optional
     pub constraint: Constraint,
@@ -247,17 +245,14 @@ pub struct LayoutContext {
     pub width: u16,
     pub height: u16,
     pub settings_sidebar_percent: u16,
-    pub has_chart_data: bool,
 }
 
 impl LayoutContext {
-    pub fn new(area: Rect, app_state: &AppState, sidebar_pct: u16) -> Self {
-        let has_data = !app_state.avg_download_history.is_empty();
+    pub fn new(area: Rect, _app_state: &AppState, sidebar_pct: u16) -> Self {
         Self {
             width: area.width,
             height: area.height,
             settings_sidebar_percent: sidebar_pct,
-            has_chart_data: has_data,
         }
     }
 }
