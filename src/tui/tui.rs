@@ -3039,27 +3039,16 @@ fn render_sparkles<'a>(
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Percentage((100 - percent_y) / 2),
-    ])
-    .split(r);
-
-    Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Percentage((100 - percent_x) / 2),
-    ])
-    .split(popup_layout[1])[1]
-}
-
 fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
     // --- 1. CONFIGURATION ---
     // XP needed for Level 1.
-    // 250KB Upload = Level 1.
-    const XP_FOR_LEVEL_1: f64 = 250_000.0;
+    // 5 MB Upload = Level 1. (Was 250KB, which was too trivial)
+    const XP_FOR_LEVEL_1: f64 = 5_000_000.0;
+    
+    // Power Curve Exponent.
+    // 2.0 = Quadratic (Standard).
+    // 2.6 = Steeper (Harder at high levels).
+    const LEVEL_EXPONENT: f64 = 2.6;
 
     // --- 2. CALCULATE PASSIVE XP (UPTIME + SIZE) ---
     // We count the total size of all torrents currently loaded/seeding.
@@ -3072,39 +3061,36 @@ fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
     // Convert to GB.
     let total_gb = (total_seeding_size_bytes as f64) / 1_073_741_824.0;
 
-    // Formula: (Sqrt(GB) * 20) per second.
-    // We drastically reduced this constant (was 200, now 20).
+    // Formula: (Sqrt(GB) * 50) per second.
+    // Increased from 20 to 50 to make large libraries feel more rewarding.
     //
-    // - 100 GB Library -> ~200 XP/sec
-    // - 1 TB Library   -> ~630 XP/sec
-    //
-    // This makes passive XP a "slow burn" background bonus rather than the main driver.
-    let passive_rate_per_sec = (total_gb + 1.0).powf(0.5) * 20.0;
+    // - 100 GB Library -> ~500 XP/sec (~1.8 MB/hr)
+    // - 1 TB Library   -> ~1500 XP/sec (~5.4 MB/hr)
+    let passive_rate_per_sec = (total_gb + 1.0).powf(0.5) * 50.0;
 
     // Calculate total passive XP generated over the session runtime.
     let passive_xp = passive_rate_per_sec * (app_state.run_time as f64);
 
     // --- 3. CALCULATE ACTIVE XP (PURE UPLOAD) ---
     // 1 Byte = 1 XP.
-    // No multipliers. No hidden math.
     let active_xp = app_state.session_total_uploaded as f64;
 
     // --- 4. TOTAL & LEVELING ---
     let total_xp = active_xp + passive_xp;
 
-    // Curve: Level = Sqrt(XP / Base)
+    // Curve: Level = (XP / Base) ^ (1 / Exponent)
+    // Inverse of: XP = Base * Level ^ Exponent
     //
-    // With 17MB Upload (17,000,000 XP) + negligible passive:
-    // 17,000,000 / 250,000 = 68.
-    // Sqrt(68) = Level 8.
-    //
-    // This is much more reasonable than Level 32.
-    let raw_level = (total_xp / XP_FOR_LEVEL_1).sqrt();
+    // L1   = 5 MB
+    // L10  = 5 MB * 10^2.6 ~= 2 GB
+    // L50  = 5 MB * 50^2.6 ~= 130 GB
+    // L100 = 5 MB * 100^2.6 ~= 800 GB
+    let raw_level = (total_xp / XP_FOR_LEVEL_1).powf(1.0 / LEVEL_EXPONENT);
     let current_level = raw_level.floor() as u32;
 
     // --- 5. PROGRESS BAR ---
-    let xp_current_level_start = XP_FOR_LEVEL_1 * (current_level as f64).powi(2);
-    let xp_next_level_start = XP_FOR_LEVEL_1 * ((current_level + 1) as f64).powi(2);
+    let xp_current_level_start = XP_FOR_LEVEL_1 * (current_level as f64).powf(LEVEL_EXPONENT);
+    let xp_next_level_start = XP_FOR_LEVEL_1 * ((current_level + 1) as f64).powf(LEVEL_EXPONENT);
 
     let range = xp_next_level_start - xp_current_level_start;
     let progress_into_level = total_xp - xp_current_level_start;
