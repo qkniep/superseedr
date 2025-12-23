@@ -894,8 +894,10 @@ mod tests {
 
     /// Creates a mock AppState for testing navigation.
     fn create_test_app_state() -> AppState {
-        let mut app_state = AppState::default();
-        app_state.screen_area = ratatui::prelude::Rect::new(0, 0, 200, 100);
+        let mut app_state = AppState {
+            screen_area: ratatui::layout::Rect::new(0, 0, 200, 100),
+            ..Default::default()
+        };
 
         let torrent_a = create_mock_display_state(2); // Has 2 peers
         let torrent_b = create_mock_display_state(0); // Has 0 peers

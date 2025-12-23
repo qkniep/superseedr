@@ -17,8 +17,8 @@ use crate::torrent_manager::DiskIoOperation;
 use crate::config::{PeerSortColumn, Settings, SortDirection, TorrentSettings, TorrentSortColumn};
 use crate::token_bucket::TokenBucket;
 
-use crate::tui::tui::draw;
-use crate::tui::tui_events;
+use crate::tui::events;
+use crate::tui::view::draw;
 
 use crate::config::get_watch_path;
 
@@ -690,7 +690,7 @@ impl App {
 
                 Some(event) = self.tui_event_rx.recv() => {
                     self.clamp_selected_indices();
-                    tui_events::handle_event(event, self).await;
+                    events::handle_event(event, self).await;
                 }
 
                 Some(result) = notify_rx.recv() => {

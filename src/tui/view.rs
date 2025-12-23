@@ -4,8 +4,8 @@
 use ratatui::symbols::Marker;
 use ratatui::{prelude::*, symbols, widgets::*};
 
+use crate::tui::formatters::*;
 use crate::tui::layout::{get_torrent_columns, ColumnId};
-use crate::tui::tui_formatters::*;
 
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
