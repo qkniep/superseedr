@@ -50,20 +50,20 @@ pub fn get_torrent_columns() -> Vec<ColumnDefinition> {
             sort_enum: Some(TorrentSortColumn::Name),
         },
         ColumnDefinition {
-            id: ColumnId::DownSpeed,
-            header: "DL",
-            min_width: 10,
-            priority: 1, // Medium
-            default_constraint: Constraint::Length(10),
-            sort_enum: Some(TorrentSortColumn::Down),
-        },
-        ColumnDefinition {
             id: ColumnId::UpSpeed,
             header: "UL",
             min_width: 10,
             priority: 1, // Medium
             default_constraint: Constraint::Length(10),
             sort_enum: Some(TorrentSortColumn::Up),
+        },
+        ColumnDefinition {
+            id: ColumnId::DownSpeed,
+            header: "DL",
+            min_width: 10,
+            priority: 1, // Medium
+            default_constraint: Constraint::Length(10),
+            sort_enum: Some(TorrentSortColumn::Down),
         },
     ]
 }
@@ -119,20 +119,20 @@ pub fn get_peer_columns() -> Vec<PeerColumnDefinition> {
             sort_enum: Some(PeerSortColumn::Address),
         },
         PeerColumnDefinition {
-            id: PeerColumnId::DownSpeed,
-            header: "Download",
-            min_width: 10,
-            priority: 1, // Keep speeds if possible
-            default_constraint: Constraint::Fill(1),
-            sort_enum: Some(PeerSortColumn::DL),
-        },
-        PeerColumnDefinition {
             id: PeerColumnId::UpSpeed,
             header: "Upload",
             min_width: 10,
             priority: 1, // Keep speeds if possible
             default_constraint: Constraint::Fill(1),
             sort_enum: Some(PeerSortColumn::UL),
+        },
+        PeerColumnDefinition {
+            id: PeerColumnId::DownSpeed,
+            header: "Download",
+            min_width: 10,
+            priority: 1, // Keep speeds if possible
+            default_constraint: Constraint::Fill(1),
+            sort_enum: Some(PeerSortColumn::DL),
         },
         PeerColumnDefinition {
             id: PeerColumnId::Client,
