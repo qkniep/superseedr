@@ -82,8 +82,6 @@ pub struct PeerColumnDefinition {
     pub sort_enum: Option<PeerSortColumn>,
 }
 
-/// Defines the layout for the Peers Table.
-/// Priorities are set to drop columns aggressively on small screens.
 pub fn get_peer_columns() -> Vec<PeerColumnDefinition> {
     vec![
         PeerColumnDefinition {
@@ -152,13 +150,6 @@ pub struct SmartCol {
     pub constraint: Constraint,
 }
 
-/// Calculates which columns fit into the given width.
-///
-/// **Aggressive Hiding Logic:**
-/// If a column is "Optional" (Priority > 0), we check if adding it would
-/// infringe on the "Breathing Room" of the main Priority 0 column.
-/// This ensures the 'Name' or 'Address' column always has room to expand
-/// beyond its minimum width.
 pub fn compute_smart_table_layout(
     columns: &[SmartCol],
     available_width: u16,
@@ -171,8 +162,6 @@ pub fn compute_smart_table_layout(
     let mut active_indices = Vec::new();
     let mut current_used_width = 0;
 
-    // If the screen is narrow (<140), reserve extra space for the Priority 0 column
-    // effectively reducing the budget for optional columns so names aren't truncated.
     let expansion_reserve = if available_width < 80 {
         15
     } else if available_width < 140 {
@@ -278,12 +267,10 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         let detail_chunks =
             Layout::vertical([Constraint::Length(9), Constraint::Length(0)]).split(bottom_cols[1]);
         plan.details = detail_chunks[0];
-        plan.peers = detail_chunks[1]; // Hidden in compact
+        plan.peers = detail_chunks[1];
 
         plan.footer = main[2];
     } else if is_narrow || is_vertical_aspect {
-        // If height is < 50, compress the Chart and Info rows to ensure
-        // the Torrent List and Peers Table don't collapse to 0 height.
         let (chart_height, info_height) = if ctx.height < 50 {
             (10, MIN_DETAILS_HEIGHT)
         } else {
@@ -291,11 +278,11 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         };
 
         let v_chunks = Layout::vertical([
-            Constraint::Fill(1), // List
+            Constraint::Fill(1),
             Constraint::Length(chart_height),
             Constraint::Length(info_height),
-            Constraint::Fill(1),   // Peers Table
-            Constraint::Length(1), // Footer
+            Constraint::Fill(1),
+            Constraint::Length(1),
         ])
         .split(area);
 
@@ -304,8 +291,8 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
             plan.peer_stream = None;
         } else {
             let top_split = Layout::vertical([
-                Constraint::Min(0),    // List
-                Constraint::Length(9), // Peer Stream
+                Constraint::Min(0),
+                Constraint::Length(9),
             ])
             .split(v_chunks[0]);
 
@@ -315,12 +302,10 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
 
         plan.chart = Some(v_chunks[1]);
 
-        // If width is tight (< 90), stack Details & BlockStream vertically
-        // to give Details more breathing room.
         if ctx.width < 90 {
             let info_cols = Layout::horizontal([
-                Constraint::Fill(1), // Left Col: Details + BlockStream
-                Constraint::Fill(1), // Right Col: Stats
+                Constraint::Fill(1),
+                Constraint::Fill(1),
             ])
             .split(v_chunks[2]);
 
@@ -335,9 +320,9 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
             plan.stats = Some(info_cols[1]);
         } else {
             let info_cols = Layout::horizontal([
-                Constraint::Fill(1),    // Details Text
-                Constraint::Length(14), // Block Stream
-                Constraint::Fill(1),    // Stats
+                Constraint::Fill(1),
+                Constraint::Length(14),
+                Constraint::Fill(1),
             ])
             .split(v_chunks[2]);
 
@@ -350,9 +335,9 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         plan.footer = v_chunks[4];
     } else {
         let main = Layout::vertical([
-            Constraint::Min(10),    // Top Area
-            Constraint::Length(27), // Bottom Area
-            Constraint::Length(1),  // Footer
+            Constraint::Min(10),
+            Constraint::Length(27),
+            Constraint::Length(1),
         ])
         .split(area);
 

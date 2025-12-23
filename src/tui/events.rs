@@ -40,24 +40,22 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         if app.app_state.is_searching && key.kind == KeyEventKind::Press {
             match key.code {
                 KeyCode::Esc => {
-                    // Exit search mode and clear the filter
                     app.app_state.is_searching = false;
                     app.app_state.search_query.clear();
                     app.sort_and_filter_torrent_list();
                     app.app_state.selected_torrent_index = 0;
                 }
                 KeyCode::Enter => {
-                    // Exit search mode, but keep the filter
                     app.app_state.is_searching = false;
                 }
                 KeyCode::Backspace => {
                     app.app_state.search_query.pop();
-                    app.sort_and_filter_torrent_list(); // Re-filter
+                    app.sort_and_filter_torrent_list();
                     app.app_state.selected_torrent_index = 0;
                 }
                 KeyCode::Char(c) => {
                     app.app_state.search_query.push(c);
-                    app.sort_and_filter_torrent_list(); // Re-filter
+                    app.sort_and_filter_torrent_list();
                     app.app_state.selected_torrent_index = 0;
                 }
                 _ => {} // Ignore other keys like Up/Down while typing
@@ -256,9 +254,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 SelectedHeader::Peer(i) => {
                                     let cols = get_peer_columns();
 
-                                    // 1. Get the column definition for index `i`
                                     if let Some(def) = cols.get(i) {
-                                        // 2. Check if this column has a sort_enum assigned
                                         if let Some(column) = def.sort_enum {
                                             if app.app_state.peer_sort.0 == column {
                                                 app.app_state.peer_sort.1 =
@@ -657,7 +653,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 }
 
 fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
-    // --- Get state needed for navigation ---
     let selected_torrent = app_state
         .torrent_list_order
         .get(app_state.selected_torrent_index)
@@ -669,12 +664,9 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     let selected_torrent_peer_count =
         selected_torrent.map_or(0, |torrent| torrent.latest_state.peers.len());
 
-    // --- DYNAMICALLY CALCULATE VISIBLE COLUMNS ---
-    // 1. Calculate layout to get list widths
     let ctx = LayoutContext::new(app_state.screen_area, app_state, 35);
     let layout_plan = calculate_layout(app_state.screen_area, &ctx);
 
-    // 2. Compute visible Torrent Columns
     let t_cols = get_torrent_columns();
     let smart_t_cols: Vec<SmartCol> = t_cols
         .iter()
@@ -688,7 +680,6 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
         compute_smart_table_layout(&smart_t_cols, layout_plan.list.width, 1);
     let torrent_col_count = visible_t_indices.len();
 
-    // 3. Compute visible Peer Columns
     let p_cols = get_peer_columns();
     let smart_p_cols: Vec<SmartCol> = p_cols
         .iter()
@@ -698,7 +689,6 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
             constraint: c.default_constraint,
         })
         .collect();
-    // Use peers width if available, otherwise assume 0 (which results in 0 columns)
     let (_, visible_p_indices) =
         compute_smart_table_layout(&smart_p_cols, layout_plan.peers.width, 1);
     let peer_col_count = visible_p_indices.len();
