@@ -290,11 +290,8 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
             plan.list = v_chunks[0];
             plan.peer_stream = None;
         } else {
-            let top_split = Layout::vertical([
-                Constraint::Min(0),
-                Constraint::Length(9),
-            ])
-            .split(v_chunks[0]);
+            let top_split =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(9)]).split(v_chunks[0]);
 
             plan.list = top_split[0];
             plan.peer_stream = Some(top_split[1]);
@@ -303,17 +300,12 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         plan.chart = Some(v_chunks[1]);
 
         if ctx.width < 90 {
-            let info_cols = Layout::horizontal([
-                Constraint::Fill(1),
-                Constraint::Fill(1),
-            ])
-            .split(v_chunks[2]);
+            let info_cols =
+                Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(v_chunks[2]);
 
-            let left_v = Layout::vertical([
-                Constraint::Length(MIN_DETAILS_HEIGHT),
-                Constraint::Min(0),
-            ])
-            .split(info_cols[0]);
+            let left_v =
+                Layout::vertical([Constraint::Length(MIN_DETAILS_HEIGHT), Constraint::Min(0)])
+                    .split(info_cols[0]);
 
             plan.details = left_v[0];
             plan.block_stream = Some(left_v[1]);

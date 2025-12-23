@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::theme; 
+use crate::theme;
 use ratatui::style::{Color, Style};
 use std::path::Path;
 use std::time::Duration;
