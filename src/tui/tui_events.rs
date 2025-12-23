@@ -13,6 +13,7 @@ use crate::config::SortDirection;
 use crate::config::TorrentSortColumn;
 
 use crate::tui::layout::get_torrent_columns;
+ use crate::tui::layout::get_peer_columns;
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::style::{Color, Style};
@@ -247,20 +248,25 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     }
                                 }
                                 SelectedHeader::Peer(i) => {
-                                    let Some(column) = PeerSortColumn::iter().nth(i) else {
-                                        return;
-                                    };
-                                    if app.app_state.peer_sort.0 == column {
-                                        app.app_state.peer_sort.1 = if app.app_state.peer_sort.1
-                                            == SortDirection::Ascending
-                                        {
-                                            SortDirection::Descending
-                                        } else {
-                                            SortDirection::Ascending
-                                        };
-                                    } else {
-                                        app.app_state.peer_sort.0 = column;
-                                        app.app_state.peer_sort.1 = SortDirection::Descending;
+                                    let cols = get_peer_columns();
+
+                                    // 1. Get the column definition for index `i`
+                                    if let Some(def) = cols.get(i) {
+                                        // 2. Check if this column has a sort_enum assigned
+                                        if let Some(column) = def.sort_enum {
+                                            if app.app_state.peer_sort.0 == column {
+                                                app.app_state.peer_sort.1 = if app.app_state.peer_sort.1
+                                                    == SortDirection::Ascending
+                                                {
+                                                    SortDirection::Descending
+                                                } else {
+                                                    SortDirection::Ascending
+                                                };
+                                            } else {
+                                                app.app_state.peer_sort.0 = column;
+                                                app.app_state.peer_sort.1 = SortDirection::Descending;
+                                            }
+                                        }
                                     }
                                 }
                             };
