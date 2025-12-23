@@ -1,21 +1,20 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use ratatui::prelude::*;
 use crate::app::AppState;
-use crate::config::{TorrentSortColumn, PeerSortColumn};
+use crate::config::{PeerSortColumn, TorrentSortColumn};
+use ratatui::prelude::*;
 
 // --- 1. SHARED CONSTANTS (The Contract) ---
 pub const MIN_SIDEBAR_WIDTH: u16 = 25;
 pub const MIN_CHART_HEIGHT: u16 = 8;
 pub const MIN_DETAILS_HEIGHT: u16 = 10;
 
-
 // --- TORRENT COLUMNS ---
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ColumnId {
-    Status,   // e.g. "Done" or Progress
+    Status, // e.g. "Done" or Progress
     Name,
     DownSpeed,
     UpSpeed,
@@ -28,7 +27,7 @@ pub struct ColumnDefinition {
     pub min_width: u16,
     pub priority: u8,
     pub default_constraint: Constraint,
-    pub sort_enum: Option<TorrentSortColumn>, 
+    pub sort_enum: Option<TorrentSortColumn>,
 }
 
 pub fn get_torrent_columns() -> Vec<ColumnDefinition> {
@@ -106,7 +105,7 @@ pub fn get_peer_columns() -> Vec<PeerColumnDefinition> {
             id: PeerColumnId::Progress,
             header: "Status",
             min_width: 6,
-            priority: 2, 
+            priority: 2,
             default_constraint: Constraint::Length(6),
             sort_enum: Some(PeerSortColumn::Completed),
         },
@@ -138,7 +137,7 @@ pub fn get_peer_columns() -> Vec<PeerColumnDefinition> {
             id: PeerColumnId::Client,
             header: "Client",
             min_width: 12,
-            priority: 3, 
+            priority: 3,
             default_constraint: Constraint::Fill(1),
             sort_enum: Some(PeerSortColumn::Client),
         },
@@ -153,7 +152,6 @@ pub fn get_peer_columns() -> Vec<PeerColumnDefinition> {
     ]
 }
 
-
 // --- 2. SMART TABLE GENERATOR ---
 
 #[derive(Clone, Debug)]
@@ -165,11 +163,11 @@ pub struct SmartCol<'a> {
 }
 
 /// Calculates which columns fit into the given width.
-/// 
+///
 /// **Aggressive Hiding Logic:**
-/// If a column is "Optional" (Priority > 0), we check if adding it would 
+/// If a column is "Optional" (Priority > 0), we check if adding it would
 /// infringe on the "Breathing Room" of the main Priority 0 column.
-/// This ensures the 'Name' or 'Address' column always has room to expand 
+/// This ensures the 'Name' or 'Address' column always has room to expand
 /// beyond its minimum width.
 pub fn compute_smart_table_layout(
     columns: &[SmartCol],
@@ -179,15 +177,13 @@ pub fn compute_smart_table_layout(
     let mut indexed_cols: Vec<(usize, &SmartCol)> = columns.iter().enumerate().collect();
 
     // Sort by Priority (Low numbers = High priority), then by original index
-    indexed_cols.sort_by(|a, b| {
-        a.1.priority.cmp(&b.1.priority).then(a.0.cmp(&b.0))
-    });
+    indexed_cols.sort_by(|a, b| a.1.priority.cmp(&b.1.priority).then(a.0.cmp(&b.0)));
 
     let mut active_indices = Vec::new();
     let mut current_used_width = 0;
 
-    // Calculate an "Expansion Reserve". 
-    // If the screen is narrow (<120), we demand that the Priority 0 column 
+    // Calculate an "Expansion Reserve".
+    // If the screen is narrow (<120), we demand that the Priority 0 column
     // gets at least 20-30% extra space, effectively reducing the budget for optional columns.
     let expansion_reserve = if available_width < 80 {
         15 // Very narrow: reserve modest space so names aren't 100% truncated
@@ -199,8 +195,12 @@ pub fn compute_smart_table_layout(
 
     // Greedily pick columns that fit
     for (idx, col) in indexed_cols {
-        let spacing_cost = if active_indices.is_empty() { 0 } else { horizontal_padding };
-        
+        let spacing_cost = if active_indices.is_empty() {
+            0
+        } else {
+            horizontal_padding
+        };
+
         if col.priority == 0 {
             // Essential: Always add it, but track its min cost
             active_indices.push(idx);
@@ -227,15 +227,14 @@ pub fn compute_smart_table_layout(
     (final_constraints, active_indices)
 }
 
-
 // --- 3. LAYOUT PLAN DEFINITION ---
 
 #[derive(Default, Debug)]
 pub struct LayoutPlan {
     pub list: Rect,
     pub footer: Rect,
-    pub details: Rect,      
-    pub peers: Rect,       
+    pub details: Rect,
+    pub peers: Rect,
     pub chart: Option<Rect>,
     pub sparklines: Option<Rect>,
     pub stats: Option<Rect>,
@@ -243,7 +242,6 @@ pub struct LayoutPlan {
     pub block_stream: Option<Rect>,
     pub warning_message: Option<String>,
 }
-
 
 pub struct LayoutContext {
     pub width: u16,
@@ -289,35 +287,38 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
             Constraint::Min(5),     // List/Sparklines
             Constraint::Length(12), // Details/Stats
             Constraint::Length(1),  // Footer
-        ]).split(area);
+        ])
+        .split(area);
 
         // Top: List vs Sparklines
-        let top_split = Layout::vertical([Constraint::Min(0), Constraint::Length(5)]).split(main[0]);
+        let top_split =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(5)]).split(main[0]);
         plan.list = top_split[0];
         plan.sparklines = Some(top_split[1]);
 
         // Bottom: Stats vs Details
-        let bottom_cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(main[1]);
+        let bottom_cols =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(main[1]);
         plan.stats = Some(bottom_cols[0]);
 
         // Details column split
-        let detail_chunks = Layout::vertical([Constraint::Length(9), Constraint::Length(0)]).split(bottom_cols[1]);
+        let detail_chunks =
+            Layout::vertical([Constraint::Length(9), Constraint::Length(0)]).split(bottom_cols[1]);
         plan.details = detail_chunks[0];
         plan.peers = detail_chunks[1]; // Hidden in compact
 
         plan.footer = main[2];
-
-
     } else if is_narrow || is_vertical_aspect {
         // --- PORTRAIT MODE ---
-        
+
         // DYNAMIC SIZING:
         // If height is < 50, we compress the Chart and Info rows to ensure
         // the Torrent List and Peers Table (the flexible Fill regions)
         // don't collapse to 0 height.
         // Total Fixed Cost (Compressed): 10 (Chart) + 10 (Info) + 1 (Footer) = 21 Rows.
         // At height 30, this leaves 9 rows for List/Peers.
-        
+
         let (chart_height, info_height) = if ctx.height < 50 {
             (10, MIN_DETAILS_HEIGHT) // Height < 50: Compressed Chart (10) & Compact Details (10)
         } else {
@@ -325,12 +326,13 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         };
 
         let v_chunks = Layout::vertical([
-            Constraint::Fill(1),        // List
-            Constraint::Length(chart_height), 
-            Constraint::Length(info_height),  
-            Constraint::Fill(1),        // Peers Table
-            Constraint::Length(1),      // Footer
-        ]).split(area);
+            Constraint::Fill(1), // List
+            Constraint::Length(chart_height),
+            Constraint::Length(info_height),
+            Constraint::Fill(1),   // Peers Table
+            Constraint::Length(1), // Footer
+        ])
+        .split(area);
 
         // 1. Top Section
         if ctx.height < 70 {
@@ -340,10 +342,11 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         } else {
             // HEIGHT SUFFICIENT: Show both
             let top_split = Layout::vertical([
-                Constraint::Min(0),     // List
+                Constraint::Min(0),    // List
                 Constraint::Length(9), // Peer Stream
-            ]).split(v_chunks[0]);
-            
+            ])
+            .split(v_chunks[0]);
+
             plan.list = top_split[0];
             plan.peer_stream = Some(top_split[1]);
         }
@@ -352,31 +355,33 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         plan.chart = Some(v_chunks[1]);
 
         // 3. Info Row (MODIFIED)
-        // If width is tight (< 90), stack Details & BlockStream vertically 
+        // If width is tight (< 90), stack Details & BlockStream vertically
         // to give Details more breathing room.
         if ctx.width < 90 {
             let info_cols = Layout::horizontal([
-                Constraint::Fill(1),    // Left Col: Details + BlockStream
-                Constraint::Fill(1),    // Right Col: Stats
-            ]).split(v_chunks[2]);
+                Constraint::Fill(1), // Left Col: Details + BlockStream
+                Constraint::Fill(1), // Right Col: Stats
+            ])
+            .split(v_chunks[2]);
 
             // Split Left Col vertically
             let left_v = Layout::vertical([
                 Constraint::Length(MIN_DETAILS_HEIGHT), // Details on top
                 Constraint::Min(0),                     // BlockStream below
-            ]).split(info_cols[0]);
+            ])
+            .split(info_cols[0]);
 
             plan.details = left_v[0];
             plan.block_stream = Some(left_v[1]);
             plan.stats = Some(info_cols[1]);
-
         } else {
             // Standard: 3 Columns side-by-side
             let info_cols = Layout::horizontal([
-                Constraint::Fill(1),        // Details Text
-                Constraint::Length(14),     // Block Stream
-                Constraint::Fill(1),        // Stats
-            ]).split(v_chunks[2]);
+                Constraint::Fill(1),    // Details Text
+                Constraint::Length(14), // Block Stream
+                Constraint::Fill(1),    // Stats
+            ])
+            .split(v_chunks[2]);
 
             plan.details = info_cols[0];
             plan.block_stream = Some(info_cols[1]);
@@ -388,7 +393,6 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
 
         // 5. Footer
         plan.footer = v_chunks[4];
-
     } else {
         // --- LANDSCAPE MODE ---
 
@@ -396,20 +400,20 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
             Constraint::Min(10),    // Top Area
             Constraint::Length(27), // Bottom Area
             Constraint::Length(1),  // Footer
-        ]).split(area);
+        ])
+        .split(area);
 
         let top_area = main[0];
         let bottom_area = main[1];
         plan.footer = main[2];
 
         // Top Horizontal Split
-        let target_sidebar = (ctx.width as f32 * (ctx.settings_sidebar_percent as f32 / 100.0)) as u16;
+        let target_sidebar =
+            (ctx.width as f32 * (ctx.settings_sidebar_percent as f32 / 100.0)) as u16;
         let sidebar_width = target_sidebar.max(MIN_SIDEBAR_WIDTH);
-        
-        let top_h = Layout::horizontal([
-            Constraint::Length(sidebar_width),
-            Constraint::Min(0)
-        ]).split(top_area);
+
+        let top_h = Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)])
+            .split(top_area);
 
         // Left Pane
         let left_v = Layout::vertical([Constraint::Min(0), Constraint::Length(5)]).split(top_h[0]);
@@ -418,13 +422,11 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
 
         // Right Pane
         let right_v = Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).split(top_h[1]);
-        
+
         // Header
-        let header_h = Layout::horizontal([
-            Constraint::Length(40), 
-            Constraint::Min(0)      
-        ]).split(right_v[0]);
-        
+        let header_h =
+            Layout::horizontal([Constraint::Length(40), Constraint::Min(0)]).split(right_v[0]);
+
         plan.details = header_h[0];
         plan.peer_stream = Some(header_h[1]);
         plan.peers = right_v[1];
@@ -433,20 +435,17 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         let show_block_stream = ctx.width > 135;
         let right_pane_width = if show_block_stream { 54 } else { 40 };
 
-        let bottom_h = Layout::horizontal([
-            Constraint::Min(0),                 
-            Constraint::Length(right_pane_width) 
-        ]).split(bottom_area);
-        
+        let bottom_h =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(right_pane_width)])
+                .split(bottom_area);
+
         plan.chart = Some(bottom_h[0]);
         let stats_area = bottom_h[1];
 
         if show_block_stream {
-            let stats_h = Layout::horizontal([
-                Constraint::Length(14), 
-                Constraint::Min(0)      
-            ]).split(stats_area);
-            
+            let stats_h =
+                Layout::horizontal([Constraint::Length(14), Constraint::Min(0)]).split(stats_area);
+
             plan.block_stream = Some(stats_h[0]);
             plan.stats = Some(stats_h[1]);
         } else {

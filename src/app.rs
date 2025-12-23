@@ -24,7 +24,6 @@ use crate::config::get_watch_path;
 
 use crate::resource_manager::ResourceType;
 
-
 use crate::torrent_file::parser::from_bytes;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
@@ -56,9 +55,9 @@ use std::time::Duration;
 
 use notify::{Config, Error as NotifyError, Event, RecommendedWatcher, RecursiveMode, Watcher};
 
+use ratatui::prelude::Rect;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use ratatui_explorer::FileExplorer;
-use ratatui::prelude::Rect;
 use std::cell::RefCell;
 use throbber_widgets_tui::ThrobberState;
 
@@ -649,7 +648,6 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-
         if let Ok(size) = terminal.size() {
             self.app_state.screen_area = Rect::new(0, 0, size.width, size.height);
         }
@@ -726,7 +724,6 @@ impl App {
         Ok(())
     }
 
-
     fn startup_crossterm_event_listener(&mut self) {
         let tui_event_tx_clone = self.tui_event_tx.clone();
         let mut tui_shutdown_rx = self.shutdown_tx.subscribe();
@@ -741,13 +738,15 @@ impl App {
 
                 // 2. Run blocking poll to completion (do NOT use tokio::select!)
                 // This ensures we never abandon a thread that is reading from stdin
-                let event = tokio::task::spawn_blocking(|| -> std::io::Result<Option<CrosstermEvent>> {
-                    // Keep the timeout relatively short (250ms) so the app remains responsive to shutdown
-                    if event::poll(Duration::from_millis(250))? {
-                        return Ok(Some(event::read()?));
-                    }
-                    Ok(None)
-                }).await;
+                let event =
+                    tokio::task::spawn_blocking(|| -> std::io::Result<Option<CrosstermEvent>> {
+                        // Keep the timeout relatively short (250ms) so the app remains responsive to shutdown
+                        if event::poll(Duration::from_millis(250))? {
+                            return Ok(Some(event::read()?));
+                        }
+                        Ok(None)
+                    })
+                    .await;
 
                 // 3. Handle the result
                 match event {
@@ -812,7 +811,6 @@ impl App {
             let _ = terminal.draw(|f| {
                 draw(f, &self.app_state, &self.client_configs);
             });
-
 
             tokio::select! {
                 Some(event) = self.manager_event_rx.recv() => {
@@ -1991,10 +1989,10 @@ impl App {
                                 / t.latest_state.number_of_pieces_total as f64
                         }
                     };
-                    
+
                     let a_prog = calc_progress(a_torrent);
                     let b_prog = calc_progress(b_torrent);
-                    
+
                     // Standard float comparison
                     a_prog.total_cmp(&b_prog)
                 }

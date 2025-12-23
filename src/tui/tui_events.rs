@@ -12,17 +12,17 @@ use crate::config::PeerSortColumn;
 use crate::config::SortDirection;
 use crate::config::TorrentSortColumn;
 
-use crate::tui::layout::get_torrent_columns;
-use crate::tui::layout::get_peer_columns;
-use crate::tui::layout::compute_smart_table_layout;
 use crate::tui::layout::calculate_layout;
+use crate::tui::layout::compute_smart_table_layout;
+use crate::tui::layout::get_peer_columns;
+use crate::tui::layout::get_torrent_columns;
 use crate::tui::layout::LayoutContext;
 use crate::tui::layout::SmartCol;
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
+use ratatui::prelude::Rect;
 use ratatui::style::{Color, Style};
 use ratatui_explorer::{FileExplorer, Theme};
-use ratatui::prelude::Rect;
 
 use std::path::Path;
 use tracing::{event as tracing_event, Level};
@@ -33,7 +33,6 @@ use directories::UserDirs;
 use clipboard::{ClipboardContext, ClipboardProvider};
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
-
     if let CrosstermEvent::Resize(w, h) = &event {
         app.app_state.screen_area = Rect::new(0, 0, *w, *h);
         app.app_state.ui_needs_redraw = true;
@@ -236,19 +235,22 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             match app.app_state.selected_header {
                                 SelectedHeader::Torrent(i) => {
                                     let cols = get_torrent_columns();
-                                    
+
                                     if let Some(def) = cols.get(i) {
                                         if let Some(column) = def.sort_enum {
                                             if app.app_state.torrent_sort.0 == column {
-                                                app.app_state.torrent_sort.1 = 
-                                                    if app.app_state.torrent_sort.1 == SortDirection::Ascending {
+                                                app.app_state.torrent_sort.1 =
+                                                    if app.app_state.torrent_sort.1
+                                                        == SortDirection::Ascending
+                                                    {
                                                         SortDirection::Descending
                                                     } else {
                                                         SortDirection::Ascending
                                                     };
                                             } else {
                                                 app.app_state.torrent_sort.0 = column;
-                                                app.app_state.torrent_sort.1 = SortDirection::Descending;
+                                                app.app_state.torrent_sort.1 =
+                                                    SortDirection::Descending;
                                             }
                                             app.sort_and_filter_torrent_list();
                                         }
@@ -262,16 +264,18 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                         // 2. Check if this column has a sort_enum assigned
                                         if let Some(column) = def.sort_enum {
                                             if app.app_state.peer_sort.0 == column {
-                                                app.app_state.peer_sort.1 = if app.app_state.peer_sort.1
-                                                    == SortDirection::Ascending
-                                                {
-                                                    SortDirection::Descending
-                                                } else {
-                                                    SortDirection::Ascending
-                                                };
+                                                app.app_state.peer_sort.1 =
+                                                    if app.app_state.peer_sort.1
+                                                        == SortDirection::Ascending
+                                                    {
+                                                        SortDirection::Descending
+                                                    } else {
+                                                        SortDirection::Ascending
+                                                    };
                                             } else {
                                                 app.app_state.peer_sort.0 = column;
-                                                app.app_state.peer_sort.1 = SortDirection::Descending;
+                                                app.app_state.peer_sort.1 =
+                                                    SortDirection::Descending;
                                             }
                                         }
                                     }
@@ -675,62 +679,66 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
 
     // 2. Compute visible Torrent Columns
     let t_cols = get_torrent_columns();
-    let smart_t_cols: Vec<SmartCol> = t_cols.iter().map(|c| SmartCol {
-        header: c.header,
-        min_width: c.min_width,
-        priority: c.priority,
-        constraint: c.default_constraint,
-    }).collect();
-    let (_, visible_t_indices) = compute_smart_table_layout(&smart_t_cols, layout_plan.list.width, 1);
+    let smart_t_cols: Vec<SmartCol> = t_cols
+        .iter()
+        .map(|c| SmartCol {
+            header: c.header,
+            min_width: c.min_width,
+            priority: c.priority,
+            constraint: c.default_constraint,
+        })
+        .collect();
+    let (_, visible_t_indices) =
+        compute_smart_table_layout(&smart_t_cols, layout_plan.list.width, 1);
     let torrent_col_count = visible_t_indices.len();
 
     // 3. Compute visible Peer Columns
     let p_cols = get_peer_columns();
-    let smart_p_cols: Vec<SmartCol> = p_cols.iter().map(|c| SmartCol {
-        header: c.header,
-        min_width: c.min_width,
-        priority: c.priority,
-        constraint: c.default_constraint,
-    }).collect();
+    let smart_p_cols: Vec<SmartCol> = p_cols
+        .iter()
+        .map(|c| SmartCol {
+            header: c.header,
+            min_width: c.min_width,
+            priority: c.priority,
+            constraint: c.default_constraint,
+        })
+        .collect();
     // Use peers width if available, otherwise assume 0 (which results in 0 columns)
-    let (_, visible_p_indices) = compute_smart_table_layout(&smart_p_cols, layout_plan.peers.width, 1);
+    let (_, visible_p_indices) =
+        compute_smart_table_layout(&smart_p_cols, layout_plan.peers.width, 1);
     let peer_col_count = visible_p_indices.len();
 
     match key_code {
         // --- UP/DOWN/J/K Navigation (Rows) ---
-        KeyCode::Up | KeyCode::Char('k') => {
-            match app_state.selected_header {
-                SelectedHeader::Torrent(_) => {
-                    app_state.selected_torrent_index =
-                        app_state.selected_torrent_index.saturating_sub(1);
-                    app_state.selected_peer_index = 0;
-                }
-                SelectedHeader::Peer(_) => {
-                    app_state.selected_peer_index = app_state.selected_peer_index.saturating_sub(1);
-                }
+        KeyCode::Up | KeyCode::Char('k') => match app_state.selected_header {
+            SelectedHeader::Torrent(_) => {
+                app_state.selected_torrent_index =
+                    app_state.selected_torrent_index.saturating_sub(1);
+                app_state.selected_peer_index = 0;
             }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            match app_state.selected_header {
-                SelectedHeader::Torrent(_) => {
-                    if !app_state.torrent_list_order.is_empty() {
-                        let new_index = app_state.selected_torrent_index.saturating_add(1);
-                        if new_index < app_state.torrent_list_order.len() {
-                            app_state.selected_torrent_index = new_index;
-                        }
+            SelectedHeader::Peer(_) => {
+                app_state.selected_peer_index = app_state.selected_peer_index.saturating_sub(1);
+            }
+        },
+        KeyCode::Down | KeyCode::Char('j') => match app_state.selected_header {
+            SelectedHeader::Torrent(_) => {
+                if !app_state.torrent_list_order.is_empty() {
+                    let new_index = app_state.selected_torrent_index.saturating_add(1);
+                    if new_index < app_state.torrent_list_order.len() {
+                        app_state.selected_torrent_index = new_index;
                     }
-                    app_state.selected_peer_index = 0;
                 }
-                SelectedHeader::Peer(_) => {
-                    if selected_torrent_peer_count > 0 {
-                        let new_index = app_state.selected_peer_index.saturating_add(1);
-                        if new_index < selected_torrent_peer_count {
-                            app_state.selected_peer_index = new_index;
-                        }
+                app_state.selected_peer_index = 0;
+            }
+            SelectedHeader::Peer(_) => {
+                if selected_torrent_peer_count > 0 {
+                    let new_index = app_state.selected_peer_index.saturating_add(1);
+                    if new_index < selected_torrent_peer_count {
+                        app_state.selected_peer_index = new_index;
                     }
                 }
             }
-        }
+        },
 
         // --- LEFT/RIGHT/H/L Navigation (Columns) ---
         KeyCode::Left | KeyCode::Char('h') => {
@@ -744,12 +752,12 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
                     }
                 }
                 SelectedHeader::Torrent(i) => SelectedHeader::Torrent(i - 1),
-                
+
                 SelectedHeader::Peer(0) => {
                     // Jump back to the last visible Torrent column
                     SelectedHeader::Torrent(torrent_col_count.saturating_sub(1))
-                },
-                
+                }
+
                 SelectedHeader::Peer(i) => SelectedHeader::Peer(i - 1),
             };
         }
@@ -758,7 +766,7 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
                 SelectedHeader::Torrent(i) => {
                     // If not at the last visible column, move right
                     if i < torrent_col_count.saturating_sub(1) {
-                         SelectedHeader::Torrent(i + 1)
+                        SelectedHeader::Torrent(i + 1)
                     } else {
                         // At the last visible column, jump to Peer column 0 (if valid)
                         if selected_torrent_has_peers && peer_col_count > 0 {
@@ -779,7 +787,7 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
                 }
             };
         }
-        _ => {} 
+        _ => {}
     }
 }
 
