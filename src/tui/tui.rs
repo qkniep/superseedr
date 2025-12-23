@@ -435,27 +435,24 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
         .map(|t| t.latest_state.number_of_successfully_connected_peers)
         .sum::<usize>();
 
+    let total_library_size: u64 = app_state
+        .torrents
+        .values()
+        .map(|t| t.latest_state.total_size)
+        .sum();
+
     let dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
     let dl_limit = settings.global_download_limit_bps;
 
     let mut dl_spans = vec![
         Span::styled("DL Speed: ", Style::default().fg(theme::SKY).bold()),
-        Span::styled(
-            format_speed(dl_speed),
-            Style::default().fg(theme::SKY).bold(),
-        ),
+        Span::styled(format_speed(dl_speed), Style::default().fg(theme::SKY).bold()),
         Span::raw(" / "),
     ];
     if dl_limit > 0 && dl_speed >= dl_limit {
-        dl_spans.push(Span::styled(
-            format_limit_bps(dl_limit),
-            Style::default().fg(theme::RED),
-        ));
+        dl_spans.push(Span::styled(format_limit_bps(dl_limit), Style::default().fg(theme::RED)));
     } else {
-        dl_spans.push(Span::styled(
-            format_limit_bps(dl_limit),
-            Style::default().fg(theme::SUBTEXT0),
-        ));
+        dl_spans.push(Span::styled(format_limit_bps(dl_limit), Style::default().fg(theme::SUBTEXT0)));
     }
 
     let ul_speed = *app_state.avg_upload_history.last().unwrap_or(&0);
@@ -463,28 +460,18 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
 
     let mut ul_spans = vec![
         Span::styled("UL Speed: ", Style::default().fg(theme::GREEN).bold()),
-        Span::styled(
-            format_speed(ul_speed),
-            Style::default().fg(theme::GREEN).bold(),
-        ),
+        Span::styled(format_speed(ul_speed), Style::default().fg(theme::GREEN).bold()),
         Span::raw(" / "),
     ];
 
     if ul_limit > 0 && ul_speed >= ul_limit {
-        ul_spans.push(Span::styled(
-            format_limit_bps(ul_limit),
-            Style::default().fg(theme::RED),
-        ));
+        ul_spans.push(Span::styled(format_limit_bps(ul_limit), Style::default().fg(theme::RED)));
     } else {
-        ul_spans.push(Span::styled(
-            format_limit_bps(ul_limit),
-            Style::default().fg(theme::SUBTEXT0),
-        ));
+        ul_spans.push(Span::styled(format_limit_bps(ul_limit), Style::default().fg(theme::SUBTEXT0)));
     }
 
     let thrash_text: String;
     let thrash_style: Style;
-
     let baseline_val = app_state.adaptive_max_scpb;
     let thrash_score_val = app_state.global_disk_thrash_score;
     let thrash_score_str = format!("{:.0}", thrash_score_val);
@@ -519,9 +506,14 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
             Span::styled("Run Time: ", Style::default().fg(theme::TEAL)),
             Span::raw(format_time(app_state.run_time)),
         ]),
+        // --- UPDATED: Torrents Line with Size ---
         Line::from(vec![
             Span::styled("Torrents: ", Style::default().fg(theme::PEACH)),
-            Span::raw(app_state.torrents.len().to_string()),
+            Span::raw(format!(
+                "{} ({})", 
+                app_state.torrents.len(), 
+                format_bytes(total_library_size)
+            )),
         ]),
         Line::from(""),
         Line::from(dl_spans),
@@ -563,57 +555,30 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
         Line::from(vec![
             Span::styled("Disk    ", Style::default().fg(theme::TEXT)),
             Span::styled("↑ ", Style::default().fg(theme::GREEN)), 
-            Span::styled(
-                format!("{:<12}", format_speed(app_state.avg_disk_read_bps)),
-                Style::default().fg(theme::GREEN),
-            ),
+            Span::styled(format!("{:<12}", format_speed(app_state.avg_disk_read_bps)), Style::default().fg(theme::GREEN)),
             Span::styled("↓ ", Style::default().fg(theme::SKY)), 
-            Span::styled(
-                format_speed(app_state.avg_disk_write_bps),
-                Style::default().fg(theme::SKY),
-            ),
+            Span::styled(format_speed(app_state.avg_disk_write_bps), Style::default().fg(theme::SKY)),
         ]),
         Line::from(vec![
             Span::styled("Seek    ", Style::default().fg(theme::TEXT)),
             Span::styled("↑ ", Style::default().fg(theme::GREEN)), 
-            Span::styled(
-                format!(
-                    "{:<12}",
-                    format_bytes(app_state.global_disk_read_thrash_score)
-                ),
-                Style::default().fg(theme::GREEN),
-            ),
+            Span::styled(format!("{:<12}", format_bytes(app_state.global_disk_read_thrash_score)), Style::default().fg(theme::GREEN)),
             Span::styled("↓ ", Style::default().fg(theme::SKY)), 
-            Span::styled(
-                format_bytes(app_state.global_disk_write_thrash_score),
-                Style::default().fg(theme::SKY),
-            ),
+            Span::styled(format_bytes(app_state.global_disk_write_thrash_score), Style::default().fg(theme::SKY)),
         ]),
         Line::from(vec![
             Span::styled("Latency ", Style::default().fg(theme::TEXT)),
             Span::styled("↑ ", Style::default().fg(theme::GREEN)), 
-            Span::styled(
-                format!("{:<12}", format_latency(app_state.avg_disk_read_latency)),
-                Style::default().fg(theme::GREEN),
-            ),
+            Span::styled(format!("{:<12}", format_latency(app_state.avg_disk_read_latency)), Style::default().fg(theme::GREEN)),
             Span::styled("↓ ", Style::default().fg(theme::SKY)), 
-            Span::styled(
-                format_latency(app_state.avg_disk_write_latency),
-                Style::default().fg(theme::SKY),
-            ),
+            Span::styled(format_latency(app_state.avg_disk_write_latency), Style::default().fg(theme::SKY)),
         ]),
         Line::from(vec![
             Span::styled("IOPS    ", Style::default().fg(theme::TEXT)),
             Span::styled("↑ ", Style::default().fg(theme::GREEN)), 
-            Span::styled(
-                format!("{:<12}", format_iops(app_state.read_iops)),
-                Style::default().fg(theme::GREEN),
-            ),
+            Span::styled(format!("{:<12}", format_iops(app_state.read_iops)), Style::default().fg(theme::GREEN)),
             Span::styled("↓ ", Style::default().fg(theme::SKY)), 
-            Span::styled(
-                format_iops(app_state.write_iops),
-                Style::default().fg(theme::SKY),
-            ),
+            Span::styled(format_iops(app_state.write_iops), Style::default().fg(theme::SKY)),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -627,46 +592,64 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
         Line::from(vec![
             Span::styled("Reserve Pool:  ", Style::default().fg(theme::TEAL)), 
             Span::raw(app_state.limits.reserve_permits.to_string()),
-            format_limit_delta(
-                app_state.limits.reserve_permits,
-                app_state.last_tuning_limits.reserve_permits,
-            ),
+            format_limit_delta(app_state.limits.reserve_permits, app_state.last_tuning_limits.reserve_permits),
         ]),
         {
-            let mut spans = format_permits_spans(
-                "Peer Slots: ",
-                total_peers,
-                app_state.limits.max_connected_peers,
-                theme::MAUVE,
-            );
-            spans.push(format_limit_delta(
-                app_state.limits.max_connected_peers,
-                app_state.last_tuning_limits.max_connected_peers,
-            ));
+            let mut spans = format_permits_spans("Peer Slots: ", total_peers, app_state.limits.max_connected_peers, theme::MAUVE);
+            spans.push(format_limit_delta(app_state.limits.max_connected_peers, app_state.last_tuning_limits.max_connected_peers));
             Line::from(spans)
         },
         Line::from(vec![
             Span::styled("Disk Reads:    ", Style::default().fg(theme::GREEN)),
             Span::raw(app_state.limits.disk_read_permits.to_string()),
-            format_limit_delta(
-                app_state.limits.disk_read_permits,
-                app_state.last_tuning_limits.disk_read_permits,
-            ),
+            format_limit_delta(app_state.limits.disk_read_permits, app_state.last_tuning_limits.disk_read_permits),
         ]),
         Line::from(vec![
             Span::styled("Disk Writes:   ", Style::default().fg(theme::SKY)),
             Span::raw(app_state.limits.disk_write_permits.to_string()),
-            format_limit_delta(
-                app_state.limits.disk_write_permits,
-                app_state.last_tuning_limits.disk_write_permits,
-            ),
+            format_limit_delta(app_state.limits.disk_write_permits, app_state.last_tuning_limits.disk_write_permits),
         ]),
     ];
+
+    // --- GAME STATS TITLE LOGIC ---
+    let (lvl, progress) = calculate_player_stats(app_state);
+    
+    // Calculate available width for the dynamic parts.
+    // "Stats | Lvl 999 " is roughly 16 chars. Borders are 2. Total static overhead ~18.
+    let available_width = stats_chunk.width.saturating_sub(18) as usize;
+
+    // Logic: 
+    // 1. If we have > 25 spare chars, use a Wide Bar (20) + Text.
+    // 2. If we have > 15 spare chars, use a Standard Bar (10) + Text.
+    // 3. Otherwise, just use the Standard Bar (10) to prevent wrapping/cutting.
+    let (gauge_width, show_pct) = if available_width > 25 {
+        (20, true) 
+    } else if available_width > 15 {
+        (10, true)
+    } else {
+        (10, false)
+    };
+
+    let filled_len = (progress * gauge_width as f64).round() as usize;
+    let empty_len = gauge_width - filled_len;
+    let gauge_str = format!("[{}{}]", "=".repeat(filled_len), "-".repeat(empty_len));
+    
+    let mut title_spans = vec![
+        Span::styled("Stats", Style::default().fg(Color::White)),
+        Span::raw(" | "),
+        Span::styled(format!("Lvl {}", lvl), Style::default().fg(theme::YELLOW).bold()),
+        Span::raw(" "),
+        Span::styled(gauge_str, Style::default().fg(theme::GREEN)),
+    ];
+
+    if show_pct {
+        title_spans.push(Span::styled(format!(" {:.0}%", progress * 100.0), Style::default().fg(theme::SUBTEXT1)));
+    }
 
     let stats_paragraph = Paragraph::new(stats_text)
         .block(
             Block::default()
-                .title(Span::styled("Stats", Style::default().fg(Color::White)))
+                .title(Line::from(title_spans))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::SURFACE2)),
         )
@@ -986,75 +969,121 @@ fn draw_peers_table(
 }
 
 fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_chunk: Rect) {
-    let footer_layout = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(60),
-            Constraint::Percentage(15),
-        ])
-        .split(footer_chunk);
+    // 1. Layout: Use fixed widths for sides to maximize center space
+    // If screen is very narrow (<80), hide the "Superseedr" branding entirely
+    let show_branding = footer_chunk.width >= 80;
+    
+    let footer_layout = if show_branding {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(30), // Fixed space for Branding
+                Constraint::Min(0),     // Center takes all remaining space
+                Constraint::Length(18), // Fixed space for Port Status
+            ])
+            .split(footer_chunk)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(0),  // Hidden
+                Constraint::Min(0),     // Maximize center
+                Constraint::Length(18), // Keep Status
+            ])
+            .split(footer_chunk)
+    };
 
     let client_id_chunk = footer_layout[0];
-    let _current_dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
-    let _current_ul_speed = *app_state.avg_upload_history.last().unwrap_or(&0);
-
-    #[cfg(all(feature = "dht", feature = "pex"))]
-    let client_display_line = Line::from(vec![
-        Span::styled("super", speed_to_style(_current_dl_speed).add_modifier(Modifier::BOLD)),
-        Span::styled("seedr", speed_to_style(_current_ul_speed).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" v{}", APP_VERSION), Style::default().fg(theme::SUBTEXT1)),
-        Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-        Span::styled(app_state.data_rate.to_string(), Style::default().fg(theme::YELLOW).bold()),
-    ]);
-
-    #[cfg(not(all(feature = "dht", feature = "pex")))]
-    let client_display_line = Line::from(vec![
-        Span::styled("super", Style::default().fg(theme::SURFACE2)).add_modifier(Modifier::CROSSED_OUT),
-        Span::styled("seedr", Style::default().fg(theme::SURFACE2)).add_modifier(Modifier::CROSSED_OUT),
-        Span::styled(" [PRIVATE]", Style::default().fg(theme::RED).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" v{}", APP_VERSION), Style::default().fg(theme::SUBTEXT1)),
-        Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-        Span::styled(app_state.data_rate.to_string(), Style::default().fg(theme::YELLOW).bold()),
-    ]);
-
-    let client_id_paragraph = Paragraph::new(client_display_line)
-        .style(Style::default().fg(theme::SUBTEXT1))
-        .alignment(Alignment::Left);
-    f.render_widget(client_id_paragraph, client_id_chunk);
-
     let commands_chunk = footer_layout[1];
     let status_chunk = footer_layout[2];
 
-    let help_key = if app_state.system_warning.is_some() {
-        vec![
-            Span::styled("[m]", Style::default().fg(theme::TEAL)),
-            Span::styled("anual/help (warning)", Style::default().fg(theme::YELLOW)),
-        ]
-    } else {
-        vec![
-            Span::styled("[m]", Style::default().fg(theme::TEAL)),
-            Span::raw("anual/help"),
-        ]
-    };
-    let mut footer_spans = Line::from(vec![
-        Span::styled("↑↓", Style::default().fg(theme::BLUE)), Span::raw(" "),
-        Span::styled("←→", Style::default().fg(theme::BLUE)), Span::raw(" navigate | "),
-        Span::styled("[q]", Style::default().fg(theme::RED)), Span::raw("uit | "),
-        Span::styled("[v]", Style::default().fg(theme::TEAL)), Span::raw("paste | "),
-        Span::styled("[p]", Style::default().fg(theme::GREEN)), Span::raw("ause/resume | "),
-        Span::styled("[d]", Style::default().fg(theme::YELLOW)), Span::raw("elete | "),
-        Span::styled("[s]", Style::default().fg(theme::MAUVE)), Span::raw("ort | "),
-        Span::styled("[c]", Style::default().fg(theme::LAVENDER)), Span::raw("onfig | "),
-        Span::styled("[t]", Style::default().fg(theme::SAPPHIRE)), Span::raw("time | "),
-        Span::styled("[/]", Style::default().fg(theme::YELLOW)), Span::raw("search | "),
-    ]);
-    footer_spans.extend(help_key);
+    // --- LEFT: Branding ---
+    if show_branding {
+        let _current_dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
+        let _current_ul_speed = *app_state.avg_upload_history.last().unwrap_or(&0);
 
-    let footer_keys = footer_spans.alignment(Alignment::Center);
-    let footer_paragraph = Paragraph::new(footer_keys).style(Style::default().fg(theme::SUBTEXT1));
+        #[cfg(all(feature = "dht", feature = "pex"))]
+        let client_display_line = Line::from(vec![
+            Span::styled("super", speed_to_style(_current_dl_speed).add_modifier(Modifier::BOLD)),
+            Span::styled("seedr", speed_to_style(_current_ul_speed).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" v{}", APP_VERSION), Style::default().fg(theme::SUBTEXT1)),
+            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+            Span::styled(app_state.data_rate.to_string(), Style::default().fg(theme::YELLOW).bold()),
+        ]);
+
+        #[cfg(not(all(feature = "dht", feature = "pex")))]
+        let client_display_line = Line::from(vec![
+            Span::styled("super", Style::default().fg(theme::SURFACE2)).add_modifier(Modifier::CROSSED_OUT),
+            Span::styled("seedr", Style::default().fg(theme::SURFACE2)).add_modifier(Modifier::CROSSED_OUT),
+            Span::styled(" [PRIVATE]", Style::default().fg(theme::RED).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" v{}", APP_VERSION), Style::default().fg(theme::SUBTEXT1)),
+            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+            Span::styled(app_state.data_rate.to_string(), Style::default().fg(theme::YELLOW).bold()),
+        ]);
+
+        let client_id_paragraph = Paragraph::new(client_display_line)
+            .style(Style::default().fg(theme::SUBTEXT1))
+            .alignment(Alignment::Left);
+        f.render_widget(client_id_paragraph, client_id_chunk);
+    }
+
+    // --- CENTER: Size-Aware Commands ---
+    let width = commands_chunk.width;
+    let mut spans = Vec::new();
+
+    // Priority 4 (Lowest): Aux tools
+    if width > 110 {
+        spans.extend(vec![
+            Span::styled("[t]", Style::default().fg(theme::SAPPHIRE)), Span::raw("ime | "),
+            Span::styled("[/]", Style::default().fg(theme::YELLOW)), Span::raw("search | "),
+            Span::styled("[c]", Style::default().fg(theme::LAVENDER)), Span::raw("onfig | "),
+        ]);
+    }
+
+    // Priority 3: Management
+    if width > 90 {
+        spans.extend(vec![
+             Span::styled("[d]", Style::default().fg(theme::YELLOW)), Span::raw("elete | "),
+             Span::styled("[s]", Style::default().fg(theme::MAUVE)), Span::raw("ort | "),
+        ]);
+    }
+
+    // Priority 2: Actions
+    if width > 65 {
+         spans.extend(vec![
+            Span::styled("[v]", Style::default().fg(theme::TEAL)), Span::raw("paste | "),
+            Span::styled("[p]", Style::default().fg(theme::GREEN)), Span::raw("ause | "),
+        ]);
+    }
+
+    // Priority 1: Navigation & Quit
+    if width > 45 {
+         spans.extend(vec![
+            Span::styled("Arrows", Style::default().fg(theme::BLUE)), Span::raw(" nav | "),
+            Span::styled("[q]", Style::default().fg(theme::RED)), Span::raw("uit | "),
+        ]);
+    }
+
+    // Priority 0: Help (Always Shown)
+    if app_state.system_warning.is_some() {
+        spans.extend(vec![
+            Span::styled("[m]", Style::default().fg(theme::TEAL)),
+            Span::styled("anual (warning)", Style::default().fg(theme::YELLOW)),
+        ]);
+    } else {
+        spans.extend(vec![
+            Span::styled("[m]", Style::default().fg(theme::TEAL)),
+            Span::raw("anual"),
+        ]);
+    }
+
+    let footer_paragraph = Paragraph::new(Line::from(spans))
+        .alignment(Alignment::Center) // Center whatever commands fit
+        .style(Style::default().fg(theme::SUBTEXT1));
     f.render_widget(footer_paragraph, commands_chunk);
 
+
+    // --- RIGHT: Port Status ---
     let port_style = if app_state.externally_accessable_port { Style::default().fg(theme::GREEN) } else { Style::default().fg(theme::RED) };
     let port_text = if app_state.externally_accessable_port { "Open" } else { "Closed" };
 
@@ -1623,7 +1652,7 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState, mode: &AppMode) {
 
          let warning_paragraph = Paragraph::new(warning_text.as_str()).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme::RED))).style(Style::default().fg(theme::YELLOW));
          f.render_widget(warning_paragraph, chunks[0]);
-         draw_help_table(f, mode, chunks[1]);
+         draw_help_table(f, app_state, chunks[1]);
 
          let footer_block = Block::default().border_style(Style::default().fg(theme::SURFACE2));
          let footer_inner_area = footer_block.inner(chunks[2]);
@@ -1636,7 +1665,7 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState, mode: &AppMode) {
          f.render_widget(footer_paragraph, footer_inner_area);
     } else {
         let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
-        draw_help_table(f, mode, chunks[0]);
+        draw_help_table(f, app_state, chunks[0]);
         let footer_block = Block::default().border_style(Style::default().fg(theme::SURFACE2));
         let footer_inner_area = footer_block.inner(chunks[1]);
         f.render_widget(footer_block, chunks[1]);
@@ -1648,62 +1677,322 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState, mode: &AppMode) {
         f.render_widget(footer_paragraph, footer_inner_area);
     }
 }
+fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
+    let mode = &app_state.mode;
 
-fn draw_help_table(f: &mut Frame, mode: &AppMode, area: Rect) {
+    let (lvl, progress) = calculate_player_stats(app_state);
+    
+    // Bar styling
+    let gauge_width = 15; 
+    let filled_len = (progress * gauge_width as f64).round() as usize;
+    let empty_len = gauge_width - filled_len;
+    let gauge_str = format!("[{}{}]", "=".repeat(filled_len), "-".repeat(empty_len));
+    
+    // Text styling
+    let level_text = format!("Level {} ({:.0}%)", lvl, progress * 100.0);
+
     let (title, rows) = match mode {
         AppMode::Normal | AppMode::Welcome => (
             " Manual / Help ",
             vec![
-                Row::new(vec![Cell::from(Span::styled("Ctrl +", Style::default().fg(theme::TEAL))), Cell::from("Zoom in (increase font size)")]),
-                Row::new(vec![Cell::from(Span::styled("Ctrl -", Style::default().fg(theme::TEAL))), Cell::from("Zoom out (decrease font size)")]),
-                Row::new(vec![Cell::from(Span::styled("q", Style::default().fg(theme::RED))), Cell::from("Quit the application")]),
-                Row::new(vec![Cell::from(Span::styled("m", Style::default().fg(theme::MAUVE))), Cell::from("Toggle this help screen")]),
-                Row::new(vec![Cell::from(Span::styled("c", Style::default().fg(theme::PEACH))), Cell::from("Open Config screen")]),
-                Row::new(vec![Cell::from(Span::styled("z", Style::default().fg(theme::SUBTEXT0))), Cell::from("Toggle Zen/Power Saving mode")]),
+                Row::new(vec![Cell::from(Span::styled("General Controls", Style::default().fg(theme::YELLOW)))]),
+                Row::new(vec![
+                    Cell::from(Span::styled("Ctrl +", Style::default().fg(theme::TEAL))),
+                    Cell::from("Zoom in (increase font size)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("Ctrl -", Style::default().fg(theme::TEAL))),
+                    Cell::from("Zoom out (decrease font size)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("q", Style::default().fg(theme::RED))),
+                    Cell::from("Quit the application"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("m", Style::default().fg(theme::MAUVE))),
+                    Cell::from("Toggle this help screen"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("c", Style::default().fg(theme::PEACH))),
+                    Cell::from("Open Config screen"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("z", Style::default().fg(theme::SUBTEXT0))),
+                    Cell::from("Toggle Zen/Power Saving mode"),
+                ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
-                Row::new(vec![Cell::from(Span::styled("List Navigation", Style::default().fg(theme::YELLOW)))]),
-                Row::new(vec![Cell::from(Span::styled("↑ / ↓ / k / j", Style::default().fg(theme::BLUE))), Cell::from("Navigate torrents list")]),
-                Row::new(vec![Cell::from(Span::styled("← / → / h / l", Style::default().fg(theme::BLUE))), Cell::from("Navigate between header columns")]),
-                Row::new(vec![Cell::from(Span::styled("s", Style::default().fg(theme::GREEN))), Cell::from("Change sort order for the selected column")]),
+                
+                // --- List Navigation & Sorting ---
+                Row::new(vec![Cell::from(Span::styled(
+                    "List Navigation",
+                    Style::default().fg(theme::YELLOW),
+                ))]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "↑ / ↓ / k / j",
+                        Style::default().fg(theme::BLUE),
+                    )),
+                    Cell::from("Navigate torrents list"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "← / → / h / l",
+                        Style::default().fg(theme::BLUE),
+                    )),
+                    Cell::from("Navigate between header columns"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("s", Style::default().fg(theme::GREEN))),
+                    Cell::from("Change sort order for the selected column"),
+                ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
-                Row::new(vec![Cell::from(Span::styled("Torrent Actions", Style::default().fg(theme::YELLOW)))]),
-                Row::new(vec![Cell::from(Span::styled("p", Style::default().fg(theme::GREEN))), Cell::from("Pause / Resume selected torrent")]),
-                Row::new(vec![Cell::from(Span::styled("d / D", Style::default().fg(theme::RED))), Cell::from("Delete torrent (D includes downloaded files)")]),
+                // --- Torrent Management ---
+                Row::new(vec![Cell::from(Span::styled(
+                    "Torrent Actions",
+                    Style::default().fg(theme::YELLOW),
+                ))]),
+                Row::new(vec![
+                    Cell::from(Span::styled("p", Style::default().fg(theme::GREEN))),
+                    Cell::from("Pause / Resume selected torrent"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("d / D", Style::default().fg(theme::RED))),
+                    Cell::from("Delete torrent (D includes downloaded files)"),
+                ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
-                Row::new(vec![Cell::from(Span::styled("Adding Torrents", Style::default().fg(theme::YELLOW)))]),
-                Row::new(vec![Cell::from(Span::styled("Paste | v", Style::default().fg(theme::SAPPHIRE))), Cell::from("Paste a magnet link or local file path to add")]),
-                Row::new(vec![Cell::from(Span::styled("CLI", Style::default().fg(theme::SAPPHIRE))), Cell::from("Use `superseedr add ...` from another terminal")]),
+                // --- Adding Torrents ---
+                Row::new(vec![Cell::from(Span::styled(
+                    "Adding Torrents",
+                    Style::default().fg(theme::YELLOW),
+                ))]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Paste | v",
+                        Style::default().fg(theme::SAPPHIRE),
+                    )),
+                    Cell::from("Paste a magnet link or local file path to add"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("CLI", Style::default().fg(theme::SAPPHIRE))),
+                    Cell::from("Use `superseedr add ...` from another terminal"),
+                ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
-                Row::new(vec![Cell::from(Span::styled("Graph & Panes", Style::default().fg(theme::YELLOW)))]),
-                Row::new(vec![Cell::from(Span::styled("t / T", Style::default().fg(theme::TEAL))), Cell::from("Switch network graph time scale forward/backward")]),
-                Row::new(vec![Cell::from(Span::styled("[ / ]", Style::default().fg(theme::TEAL))), Cell::from("Change UI refresh rate (FPS)")]),
-                Row::new(vec![Cell::from(Span::styled("x", Style::default().fg(theme::TEAL))), Cell::from("Anonymize torrent names")]),
-            ]
+                // --- Graph Controls ---
+                Row::new(vec![Cell::from(Span::styled(
+                    "Graph & Panes",
+                    Style::default().fg(theme::YELLOW),
+                ))]),
+                Row::new(vec![
+                    Cell::from(Span::styled("t / T", Style::default().fg(theme::TEAL))),
+                    Cell::from("Switch network graph time scale forward/backward"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("[ / ]", Style::default().fg(theme::TEAL))),
+                    Cell::from("Change UI refresh rate (FPS)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("x", Style::default().fg(theme::TEAL))),
+                    Cell::from("Anonymize torrent names"),
+                ]),
+                Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
+
+                // --- Peer Flags Legend ---
+                Row::new(vec![
+                    // First Cell (for the first column)
+                    Cell::from(Span::styled(
+                        "Peer Flags Legend",
+                        Style::default().fg(theme::YELLOW),
+                    )),
+                    // Second Cell (for the second column)
+                    Cell::from(Line::from(vec![
+                        // Legend pairing: DL/UL status
+                        Span::raw("DL: (You "),
+                        Span::styled("■", Style::default().fg(theme::SAPPHIRE)), // Toned-Down Interested
+                        Span::styled("■", Style::default().fg(theme::MAROON)), // Toned-Down Choked
+                        Span::raw(") | UL: (Peer "),
+                        Span::styled("■", Style::default().fg(theme::TEAL)), // Toned-Down Interested
+                        Span::styled("■", Style::default().fg(theme::PEACH)), // Toned-Down Choking
+                        Span::raw(")"),
+                    ])),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("■", Style::default().fg(theme::SAPPHIRE))),
+                    Cell::from("You are interested (DL Potential)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("■", Style::default().fg(theme::MAROON))),
+                    Cell::from("Peer is choking you (DL Block)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("■", Style::default().fg(theme::TEAL))),
+                    Cell::from("Peer is interested (UL Opportunity)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("■", Style::default().fg(theme::PEACH))),
+                    Cell::from("You are choking peer (UL Restriction)"),
+                ]),
+                Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
+                Row::new(vec![Cell::from(Span::styled(
+                    "Disk Stats Legend",
+                    Style::default().fg(theme::YELLOW),
+                ))]),
+                Row::new(vec![
+                    Cell::from(Span::styled("↑ (Read)", Style::default().fg(theme::GREEN))),
+                    Cell::from("Data read from disk"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("↓ (Write)", Style::default().fg(theme::SKY))),
+                    Cell::from("Data written to disk"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("Seek", Style::default().fg(theme::TEXT))),
+                    Cell::from("Avg. distance between I/O ops (lower is better)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("Latency", Style::default().fg(theme::TEXT))),
+                    Cell::from("Time to complete one I/O op (lower is better)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("IOPS", Style::default().fg(theme::TEXT))),
+                    Cell::from("I/O Operations Per Second (total workload)"),
+                ]),
+                Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
+                Row::new(vec![Cell::from(Span::styled(
+                    "Self-Tuning Legend",
+                    Style::default().fg(theme::YELLOW),
+                ))]),
+                Row::new(vec![
+                    Cell::from(Span::styled("Best Score", Style::default().fg(theme::TEXT))),
+                    Cell::from(
+                        "Score measuring if randomized changes resulted in optimial speeds.",
+                    ),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Next seconds",
+                        Style::default().fg(theme::TEXT),
+                    )),
+                    Cell::from("Countdown to try a new random resource adjustment (file handles)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("(+/-)", Style::default().fg(theme::TEXT))),
+                    Cell::from("Random setting change between resources. (Green=Good, Red=Bad)"),
+                ]),
+                Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
+                Row::new(vec![Cell::from(Span::styled(
+                    "Build Features",
+                    Style::default().fg(theme::YELLOW),
+                ))]),
+                Row::new(vec![
+                    Cell::from(Span::styled("DHT", Style::default().fg(theme::TEXT))),
+                    Cell::from(Line::from(vec![
+                        #[cfg(feature = "dht")]
+                        Span::styled("ON", Style::default().fg(theme::GREEN)),
+                        #[cfg(not(feature = "dht"))]
+                        Span::styled(
+                            "Not included in this [PRIVATE] build of superseedr.",
+                            Style::default().fg(theme::RED),
+                        ),
+                    ])),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("Pex", Style::default().fg(theme::TEXT))),
+                    Cell::from(Line::from(vec![
+                        #[cfg(feature = "pex")]
+                        Span::styled("ON", Style::default().fg(theme::GREEN)),
+                        #[cfg(not(feature = "pex"))]
+                        Span::styled(
+                            "Not included in this [PRIVATE] build of superseedr.",
+                            Style::default().fg(theme::RED),
+                        ),
+                    ])),
+                ]),
+                Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
+
+                // --- NEW: Session Stats at the Bottom ---
+                Row::new(vec![Cell::from(Span::styled(
+                    "Session Stats",
+                    Style::default().fg(theme::YELLOW),
+                ))]),
+                Row::new(vec![
+                    Cell::from(Span::styled("Level Up:", Style::default().fg(theme::MAUVE))), 
+                    Cell::from("Upload data or keep a large library seeding."),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(gauge_str, Style::default().fg(theme::GREEN))), 
+                    Cell::from(Span::styled(level_text, Style::default().fg(theme::YELLOW).bold())),
+                ]),
+            ],
         ),
         AppMode::Config { .. } => (
             " Help / Config ",
             vec![
-                Row::new(vec![Cell::from(Span::styled("Esc / q", Style::default().fg(theme::GREEN))), Cell::from("Save and exit config")]),
-                Row::new(vec![Cell::from(Span::styled("↑ / ↓ / k / j", Style::default().fg(theme::BLUE))), Cell::from("Navigate items")]),
-                Row::new(vec![Cell::from(Span::styled("← / → / h / l", Style::default().fg(theme::BLUE))), Cell::from("Decrease / Increase value")]),
-                Row::new(vec![Cell::from(Span::styled("Enter", Style::default().fg(theme::YELLOW))), Cell::from("Start or confirm editing")]),
+                Row::new(vec![
+                    Cell::from(Span::styled("Esc / q", Style::default().fg(theme::GREEN))),
+                    Cell::from("Save and exit config"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "↑ / ↓ / k / j",
+                        Style::default().fg(theme::BLUE),
+                    )),
+                    Cell::from("Navigate items"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "← / → / h / l",
+                        Style::default().fg(theme::BLUE),
+                    )),
+                    Cell::from("Decrease / Increase value"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("Enter", Style::default().fg(theme::YELLOW))),
+                    Cell::from("Start or confirm editing"),
+                ]),
             ],
         ),
         AppMode::ConfigPathPicker { .. } | AppMode::DownloadPathPicker { .. } => (
             " Help / File Browser ",
             vec![
-                Row::new(vec![Cell::from(Span::styled("Esc", Style::default().fg(theme::RED))), Cell::from("Cancel selection")]),
-                Row::new(vec![Cell::from(Span::styled("Tab", Style::default().fg(theme::GREEN))), Cell::from("Confirm selection")]),
+                Row::new(vec![
+                    Cell::from(Span::styled("Esc", Style::default().fg(theme::RED))),
+                    Cell::from("Cancel selection"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("Tab", Style::default().fg(theme::GREEN))),
+                    Cell::from("Confirm selection"),
+                ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
-                Row::new(vec![Cell::from(Span::styled("↑ / ↓", Style::default().fg(theme::BLUE))), Cell::from("Navigate files")]),
-                Row::new(vec![Cell::from(Span::styled("←", Style::default().fg(theme::BLUE))), Cell::from("Go to parent directory")]),
-                Row::new(vec![Cell::from(Span::styled("→ / Enter", Style::default().fg(theme::BLUE))), Cell::from("Enter directory")]),
+                Row::new(vec![
+                    Cell::from(Span::styled("↑ / ↓", Style::default().fg(theme::BLUE))),
+                    Cell::from("Navigate files"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("←", Style::default().fg(theme::BLUE))),
+                    Cell::from("Go to parent directory"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled("→ / Enter", Style::default().fg(theme::BLUE))),
+                    Cell::from("Enter directory"),
+                ]),
             ],
         ),
-        _ => (" Help ", vec![Row::new(vec![Cell::from("No help available for this view.")])]),
+        _ => (
+            " Help ",
+            vec![Row::new(vec![Cell::from(
+                "No help available for this view.",
+            )])],
+        ),
     };
 
-    let help_table = Table::new(rows, [Constraint::Length(20), Constraint::Min(30)]).block(Block::default().title(title).borders(Borders::ALL).border_style(Style::default().fg(theme::SURFACE2)));
+    let help_table = Table::new(rows, [Constraint::Length(20), Constraint::Min(30)]).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::SURFACE2))
+            .padding(Padding::new(2, 2, 1, 1)),
+    );
+
     f.render_widget(Clear, area);
     f.render_widget(help_table, area);
 }
@@ -1873,4 +2162,61 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         Constraint::Percentage((100 - percent_x) / 2),
     ])
     .split(popup_layout[1])[1]
+}
+
+fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
+    // --- 1. CONFIGURATION ---
+    // XP needed for Level 1. 
+    // 250KB Upload = Level 1.
+    const XP_FOR_LEVEL_1: f64 = 250_000.0; 
+
+    // --- 2. CALCULATE PASSIVE XP (UPTIME + SIZE) ---
+    // We count the total size of all torrents currently loaded/seeding.
+    let total_seeding_size_bytes: u64 = app_state.torrents.values()
+        .map(|t| t.latest_state.total_size)
+        .sum();
+
+    // Convert to GB.
+    let total_gb = (total_seeding_size_bytes as f64) / 1_073_741_824.0;
+    
+    // Formula: (Sqrt(GB) * 20) per second.
+    // We drastically reduced this constant (was 200, now 20).
+    //
+    // - 100 GB Library -> ~200 XP/sec
+    // - 1 TB Library   -> ~630 XP/sec
+    //
+    // This makes passive XP a "slow burn" background bonus rather than the main driver.
+    let passive_rate_per_sec = (total_gb + 1.0).powf(0.5) * 20.0;
+    
+    // Calculate total passive XP generated over the session runtime.
+    let passive_xp = passive_rate_per_sec * (app_state.run_time as f64);
+
+    // --- 3. CALCULATE ACTIVE XP (PURE UPLOAD) ---
+    // 1 Byte = 1 XP. 
+    // No multipliers. No hidden math.
+    let active_xp = app_state.session_total_uploaded as f64;
+
+    // --- 4. TOTAL & LEVELING ---
+    let total_xp = active_xp + passive_xp;
+
+    // Curve: Level = Sqrt(XP / Base)
+    //
+    // With 17MB Upload (17,000,000 XP) + negligible passive:
+    // 17,000,000 / 250,000 = 68.
+    // Sqrt(68) = Level 8.
+    //
+    // This is much more reasonable than Level 32.
+    let raw_level = (total_xp / XP_FOR_LEVEL_1).sqrt();
+    let current_level = raw_level.floor() as u32;
+
+    // --- 5. PROGRESS BAR ---
+    let xp_current_level_start = XP_FOR_LEVEL_1 * (current_level as f64).powi(2);
+    let xp_next_level_start = XP_FOR_LEVEL_1 * ((current_level + 1) as f64).powi(2);
+    
+    let range = xp_next_level_start - xp_current_level_start;
+    let progress_into_level = total_xp - xp_current_level_start;
+    
+    let ratio = if range <= 0.001 { 0.0 } else { progress_into_level / range };
+
+    (current_level, ratio.clamp(0.0, 1.0))
 }
