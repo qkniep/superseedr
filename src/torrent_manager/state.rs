@@ -1395,11 +1395,16 @@ impl TorrentState {
                 self.torrent = Some(*torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
 
+                // --- 1. POPULATE PIECE_TO_ROOTS MAP (V2 Support) ---
                 // We map every piece index to the Merkle Root of the file it belongs to.
+                // This allows us to look up the correct root when a peer sends a hash proof.
                 let v2_roots = torrent.get_v2_roots(); // Returns Vec<(PathString, RootHash)>
                 let roots_map: HashMap<String, Vec<u8>> = v2_roots.into_iter().collect();
+                
                 let piece_length = torrent.info.piece_length as u64;
                 let mut current_byte_offset = 0;
+                
+                // Handle both Single-File and Multi-File modes uniformly
                 let files_list = if torrent.info.files.is_empty() {
                     vec![crate::torrent_file::InfoFile {
                         length: torrent.info.length,
@@ -1410,24 +1415,51 @@ impl TorrentState {
                 } else {
                     torrent.info.files.clone()
                 };
+
                 for file in files_list {
+                    // Reconstruct path to match keys from get_v2_roots
                     let path_key = file.path.join("/"); 
                     
                     if let Some(root_hash) = roots_map.get(&path_key) {
-                        let start_piece = current_byte_offset / piece_length;
-                        let end_byte = current_byte_offset + file.length as u64;
-                        let end_piece = (end_byte + piece_length - 1) / piece_length;
-                        for idx in start_piece..end_piece {
-                            self.piece_to_roots
-                                .entry(idx as u32)
-                                .or_default()
-                                .push((current_byte_offset, root_hash.clone()));
+                        if file.length > 0 && piece_length > 0 {
+                            let start_piece = current_byte_offset / piece_length;
+                            // Calculate end piece inclusive
+                            let end_byte = current_byte_offset + file.length as u64;
+                            let end_piece = (end_byte + piece_length - 1) / piece_length;
+                            
+                            // Map all pieces covering this file to its root
+                            for idx in start_piece..end_piece {
+                                self.piece_to_roots
+                                    .entry(idx as u32)
+                                    .or_default()
+                                    .push((current_byte_offset, root_hash.clone()));
+                            }
                         }
                     }
                     current_byte_offset += file.length as u64;
                 }
 
-                let num_pieces = torrent.info.pieces.len() / 20;
+                // --- 2. CALCULATE PIECE COUNT (V2 Fix) ---
+                // If it's a V2-only torrent, the v1 'pieces' string is empty.
+                // We must calculate the count from the total size.
+                let num_pieces = if !torrent.info.pieces.is_empty() {
+                    torrent.info.pieces.len() / 20
+                } else {
+                    let total_len: u64 = if !torrent.info.files.is_empty() {
+                        torrent.info.files.iter().map(|f| f.length as u64).sum()
+                    } else {
+                        torrent.info.length as u64
+                    };
+                    
+                    let pl = torrent.info.piece_length as u64;
+                    if pl > 0 {
+                        ((total_len + pl - 1) / pl) as usize
+                    } else {
+                        0
+                    }
+                };
+
+                // --- 3. INITIALIZE PIECE MANAGER ---
                 self.piece_manager = PieceManager::new();
                 self.piece_manager
                     .set_initial_fields(num_pieces, self.torrent_validation_status);
@@ -1438,14 +1470,15 @@ impl TorrentState {
                     torrent.info.files.iter().map(|f| f.length as u64).sum()
                 };
 
-                // Pass geometry so BlockManager can do math
+                // Pass geometry so BlockManager can do math (offsets, last piece size, etc.)
                 self.piece_manager.set_geometry(
                     torrent.info.piece_length as u32,
                     total_len,
                     self.torrent_validation_status,
                 );
 
-                // Retroactive bitfield resize for non-compliant clients
+                // --- 4. RESIZE PEER BITFIELDS ---
+                // If peers connected before we had metadata, their bitfields might be wrong size.
                 for peer in self.peers.values_mut() {
                     if peer.bitfield.len() > num_pieces {
                         peer.bitfield.truncate(num_pieces);
@@ -4249,6 +4282,164 @@ mod tests {
         assert!(verified_hybrid, 
             "Case 4 Fail: Data from V1 Peer + Proof from V2 Peer should successfully trigger verification!");
     }
+
+    #[test]
+    fn test_v2_magnet_metadata_sequence() {
+        // GIVEN: An empty state (simulating a fresh V2 Magnet connection)
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::AwaitingMetadata;
+
+        // Construct a V2-Only Torrent (Empty V1 pieces, Has V2 Roots)
+        let mut torrent = create_dummy_torrent(5);
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // V2 has empty pieces string
+        torrent.info.piece_length = 16384;
+        torrent.info.length = 16384 * 5; // 5 Pieces
+        
+        // Ensure the name matches what we put in the tree
+        let filename = "test_torrent".to_string();
+        torrent.info.name = filename.clone();
+
+        // Setup V2 Root (Critical for piece_to_roots population)
+        let root = vec![0xAA; 32];
+        
+        // Mock the V2 File Tree Structure
+        // Structure: { "filename": { "": { "pieces root": ..., "length": ... } } }
+        use serde_bencode::value::Value;
+        
+        // 1. The Leaf Node (Metadata)
+        let mut file_metadata = std::collections::HashMap::new();
+        file_metadata.insert("pieces root".as_bytes().to_vec(), Value::Bytes(root.clone()));
+        file_metadata.insert("length".as_bytes().to_vec(), Value::Int(torrent.info.length));
+        
+        // 2. The Directory Node (mapping "" -> Metadata)
+        let mut dir_node = std::collections::HashMap::new();
+        dir_node.insert("".as_bytes().to_vec(), Value::Dict(file_metadata));
+        
+        // 3. The Root Node (mapping "filename" -> Directory Node)
+        let mut tree = std::collections::HashMap::new();
+        tree.insert(filename.as_bytes().to_vec(), Value::Dict(dir_node)); 
+        
+        torrent.info.file_tree = Some(Value::Dict(tree));
+
+        // WHEN: Metadata is received
+        let action = Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 12345,
+        };
+        let effects = state.update(action);
+
+        // THEN 1: Sequencing - Should transition to Validating and Init Storage
+        assert_eq!(state.torrent_status, TorrentStatus::Validating);
+        assert!(effects.iter().any(|e| matches!(e, Effect::InitializeStorage)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::StartValidation)));
+
+        // THEN 2: V2 Initialization - Piece count must be 5 (calculated from length)
+        assert_eq!(state.piece_manager.bitfield.len(), 5, 
+            "Failed to calculate piece count for V2 torrent (likely initialized to 0)");
+
+        // THEN 3: V2 State - piece_to_roots must be populated
+        assert!(!state.piece_to_roots.is_empty(), 
+            "Failed to populate V2 roots from metadata");
+        
+        let roots_for_piece_0 = state.piece_to_roots.get(&0).unwrap();
+        assert_eq!(roots_for_piece_0[0].1, root, "Piece 0 should map to our mock root");
+    }
+
+    #[test]
+    fn test_v2_magnet_metadata_sequence_multi_file() {
+        // GIVEN: An empty state (simulating a fresh V2 Magnet connection)
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::AwaitingMetadata;
+
+        // Construct a V2-Only Torrent
+        // 2 Files, 1 Piece each. Total 2 Pieces.
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // V2 has empty pieces string
+        torrent.info.piece_length = 16384;
+        torrent.info.length = 0; // Unused in multi-file usually, but safer to leave 0 or sum
+        
+        let dir_name = "multi_v2_download".to_string();
+        torrent.info.name = dir_name.clone();
+
+        // define file properties
+        let len_a = 16384;
+        let len_b = 16384;
+        let root_a = vec![0xAA; 32];
+        let root_b = vec![0xBB; 32];
+
+        // 1. Setup info.files (Standard List)
+        torrent.info.files = vec![
+            crate::torrent_file::InfoFile {
+                length: len_a,
+                path: vec![dir_name.clone(), "file_a.txt".to_string()],
+                md5sum: None,
+                attr: None,
+            },
+            crate::torrent_file::InfoFile {
+                length: len_b,
+                path: vec![dir_name.clone(), "file_b.txt".to_string()],
+                md5sum: None,
+                attr: None,
+            },
+        ];
+
+        // 2. Setup info.file_tree (Merkle Tree Structure)
+        // Structure: { "dir_name": { "file_a.txt": { "": metadata }, "file_b.txt": { "": metadata } } }
+        use serde_bencode::value::Value;
+
+        // Leaf A
+        let mut meta_a = std::collections::HashMap::new();
+        meta_a.insert("pieces root".as_bytes().to_vec(), Value::Bytes(root_a.clone()));
+        meta_a.insert("length".as_bytes().to_vec(), Value::Int(len_a));
+        let mut node_a = std::collections::HashMap::new();
+        node_a.insert("".as_bytes().to_vec(), Value::Dict(meta_a));
+
+        // Leaf B
+        let mut meta_b = std::collections::HashMap::new();
+        meta_b.insert("pieces root".as_bytes().to_vec(), Value::Bytes(root_b.clone()));
+        meta_b.insert("length".as_bytes().to_vec(), Value::Int(len_b));
+        let mut node_b = std::collections::HashMap::new();
+        node_b.insert("".as_bytes().to_vec(), Value::Dict(meta_b));
+
+        // Directory
+        let mut dir_content = std::collections::HashMap::new();
+        dir_content.insert("file_a.txt".as_bytes().to_vec(), Value::Dict(node_a));
+        dir_content.insert("file_b.txt".as_bytes().to_vec(), Value::Dict(node_b));
+
+        // Root
+        let mut tree = std::collections::HashMap::new();
+        tree.insert(dir_name.as_bytes().to_vec(), Value::Dict(dir_content));
+        
+        torrent.info.file_tree = Some(Value::Dict(tree));
+
+        // WHEN: Metadata is received
+        let action = Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 500,
+        };
+        let effects = state.update(action);
+
+        // THEN 1: Transitions
+        assert_eq!(state.torrent_status, TorrentStatus::Validating);
+        assert!(effects.iter().any(|e| matches!(e, Effect::InitializeStorage)));
+
+        // THEN 2: Piece Count Calculation (16384+16384 / 16384 = 2)
+        assert_eq!(state.piece_manager.bitfield.len(), 2, "Should calculate 2 pieces from file sizes");
+
+        // THEN 3: Root Mapping
+        // Piece 0 -> File A -> Root A
+        let roots_0 = state.piece_to_roots.get(&0).expect("Piece 0 missing roots");
+        // Check if we have the correct root. Note: The vector might contain multiple entries if files share pieces, 
+        // but here they are aligned perfectly.
+        assert!(roots_0.iter().any(|(_, r)| *r == root_a), "Piece 0 must map to Root A");
+
+        // Piece 1 -> File B -> Root B
+        let roots_1 = state.piece_to_roots.get(&1).expect("Piece 1 missing roots");
+        assert!(roots_1.iter().any(|(_, r)| *r == root_b), "Piece 1 must map to Root B");
+    }
+
 
 }
 

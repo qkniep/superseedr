@@ -239,11 +239,10 @@ impl TorrentManager {
         #[cfg(not(feature = "dht"))]
         let dht_trigger_tx = ();
 
+        // --- 1. Calculate Piece Count (V2 Support) ---
         let num_pieces = if !torrent.info.pieces.is_empty() {
-            // V1 or Hybrid: Rely on the SHA-1 hash string length
             torrent.info.pieces.len() / 20
         } else {
-            // V2 Only: Calculate pieces from Total Size / Piece Length
             let total_len: u64 = if !torrent.info.files.is_empty() {
                 torrent.info.files.iter().map(|f| f.length as u64).sum()
             } else {
@@ -257,7 +256,43 @@ impl TorrentManager {
                 0
             }
         };
-        // --- FIX END ---
+
+        // --- 2. Populate V2 Roots Map ---
+        let mut piece_to_roots: HashMap<u32, Vec<(u64, Vec<u8>)>> = HashMap::new();
+
+        if torrent.info.meta_version == Some(2) {
+            let v2_roots = torrent.get_v2_roots();
+            let root_map: HashMap<String, Vec<u8>> = v2_roots.into_iter().collect();
+            let piece_len = torrent.info.piece_length as u64;
+
+            // Helper to populate the map for a given file
+            let mut add_file_roots = |path: &str, length: u64, offset: u64| {
+                if let Some(root_hash) = root_map.get(path) {
+                    if length > 0 && piece_len > 0 {
+                        let start_piece = (offset / piece_len) as u32;
+                        let end_piece = ((offset + length - 1) / piece_len) as u32;
+
+                        for p in start_piece..=end_piece {
+                            piece_to_roots
+                                .entry(p)
+                                .or_default()
+                                .push((offset as u64, root_hash.clone()));
+                        }
+                    }
+                }
+            };
+
+            if !torrent.info.files.is_empty() {
+                let mut current_offset = 0u64;
+                for file in &torrent.info.files {
+                    let path = file.path.join("/");
+                    add_file_roots(&path, file.length as u64, current_offset);
+                    current_offset += file.length as u64;
+                }
+            } else {
+                add_file_roots(&torrent.info.name, torrent.info.length as u64, 0);
+            }
+        }
 
         let mut piece_manager = PieceManager::new();
         piece_manager.set_initial_fields(num_pieces, torrent_validation_status);
@@ -278,7 +313,7 @@ impl TorrentManager {
         )
         .map_err(|e| format!("Failed to initialize file manager: {}", e))?;
 
-        let state = TorrentState::new(
+        let mut state = TorrentState::new(
             info_hash.to_vec(),
             Some(torrent),
             Some(torrent_length as i64),
@@ -286,6 +321,9 @@ impl TorrentManager {
             trackers,
             torrent_validation_status,
         );
+
+        // Assign the populated map to state
+        state.piece_to_roots = piece_to_roots;
 
         Ok(Self {
             state,
