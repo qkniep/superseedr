@@ -164,6 +164,7 @@ pub struct TorrentManager {
 }
 
 impl TorrentManager {
+
     pub fn from_torrent(
         torrent_parameters: TorrentParameters,
         torrent: Torrent,
@@ -238,10 +239,28 @@ impl TorrentManager {
         #[cfg(not(feature = "dht"))]
         let dht_trigger_tx = ();
 
-        let pieces_len = torrent.info.pieces.len();
+        let num_pieces = if !torrent.info.pieces.is_empty() {
+            // V1 or Hybrid: Rely on the SHA-1 hash string length
+            torrent.info.pieces.len() / 20
+        } else {
+            // V2 Only: Calculate pieces from Total Size / Piece Length
+            let total_len: u64 = if !torrent.info.files.is_empty() {
+                torrent.info.files.iter().map(|f| f.length as u64).sum()
+            } else {
+                torrent.info.length as u64
+            };
+            
+            let pl = torrent.info.piece_length as u64;
+            if pl > 0 {
+                ((total_len + pl - 1) / pl) as usize
+            } else {
+                0
+            }
+        };
+        // --- FIX END ---
 
         let mut piece_manager = PieceManager::new();
-        piece_manager.set_initial_fields(pieces_len / 20, torrent_validation_status);
+        piece_manager.set_initial_fields(num_pieces, torrent_validation_status);
 
         let multi_file_info = MultiFileInfo::new(
             &download_dir,
