@@ -286,18 +286,18 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
             .get(app_state.selected_torrent_index)
         {
             if let Some(torrent) = app_state.torrents.get(info_hash) {
-                let path_cow; 
-                
+                let path_cow;
+
                 let text_to_show = if app_state.anonymize_torrent_names {
                     "/path/to/torrent/file"
                 } else {
                     path_cow = torrent.latest_state.download_path.to_string_lossy();
                     &path_cow
                 };
-                
+
                 let avail_width = area.width.saturating_sub(10) as usize;
                 let display_name = truncate_with_ellipsis(text_to_show, avail_width);
-                
+
                 title_spans.push(Span::styled(
                     display_name,
                     Style::default().fg(theme::YELLOW),
@@ -310,9 +310,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Line::from(title_spans));
-    let table = Table::new(rows, constraints)
-        .header(header)
-        .block(block);
+    let table = Table::new(rows, constraints).header(header).block(block);
     f.render_stateful_widget(table, area, &mut table_state);
 }
 
@@ -3123,8 +3121,8 @@ fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::layout::Rect;
     use crate::tui::layout::MIN_SIDEBAR_WIDTH;
+    use ratatui::layout::Rect;
 
     /// Helper to create a LayoutContext manually since we don't want to mock AppState.
     /// Accessing the struct fields directly allows us to bypass `LayoutContext::new`.
@@ -3173,10 +3171,13 @@ mod tests {
         let plan = calculate_layout(area, &ctx);
 
         // Short layout specific checks
-        assert!(plan.sparklines.is_some(), "Short layout should show sparklines");
+        assert!(
+            plan.sparklines.is_some(),
+            "Short layout should show sparklines"
+        );
         assert!(plan.stats.is_some(), "Short layout should show stats");
         assert!(plan.chart.is_none(), "Short layout hides the large chart");
-        
+
         // Ensure footer is at the bottom
         assert_eq!(plan.footer.height, 1);
         assert_eq!(plan.footer.y, height - 1);
@@ -3197,8 +3198,14 @@ mod tests {
         // In narrow mode (< 90 width), block stream is generally hidden or rearranged
         // The code for width < 90 splits info_cols into just details and block_stream(as vertical stack?)
         // Let's check logic: if ctx.width < 90: left_v split details/block_stream
-        assert!(plan.block_stream.is_some(), "Narrow layout (w<90) preserves block stream in vertical stack");
-        assert!(plan.peer_stream.is_none(), "Height < 70 in vertical mode hides peer_stream");
+        assert!(
+            plan.block_stream.is_some(),
+            "Narrow layout (w<90) preserves block stream in vertical stack"
+        );
+        assert!(
+            plan.peer_stream.is_none(),
+            "Height < 70 in vertical mode hides peer_stream"
+        );
     }
 
     #[test]
@@ -3211,7 +3218,10 @@ mod tests {
 
         let plan = calculate_layout(area, &ctx);
 
-        assert!(plan.peer_stream.is_some(), "Tall vertical layout (>70h) should show peer stream");
+        assert!(
+            plan.peer_stream.is_some(),
+            "Tall vertical layout (>70h) should show peer stream"
+        );
         assert!(plan.chart.is_some());
     }
 
@@ -3225,7 +3235,7 @@ mod tests {
         // is_narrow=False (120 > 100).
         // is_short=False (40 > 30).
         // -> Hits the "Standard/Wide" else block.
-        
+
         let width = 120;
         let height = 40;
         let area = Rect::new(0, 0, width, height);
@@ -3233,12 +3243,18 @@ mod tests {
 
         let plan = calculate_layout(area, &ctx);
 
-        assert!(plan.list.width >= MIN_SIDEBAR_WIDTH, "Sidebar should respect min width");
+        assert!(
+            plan.list.width >= MIN_SIDEBAR_WIDTH,
+            "Sidebar should respect min width"
+        );
         assert!(plan.sparklines.is_some());
         assert!(plan.peer_stream.is_some());
-        
+
         // Width 120 is < 135, so block_stream should be hidden in standard view
-        assert!(plan.block_stream.is_none(), "Standard width < 135 should hide block stream");
+        assert!(
+            plan.block_stream.is_none(),
+            "Standard width < 135 should hide block stream"
+        );
     }
 
     #[test]
@@ -3251,11 +3267,17 @@ mod tests {
 
         let plan = calculate_layout(area, &ctx);
 
-        assert!(plan.block_stream.is_some(), "Wide width > 135 should show block stream");
-        
+        assert!(
+            plan.block_stream.is_some(),
+            "Wide width > 135 should show block stream"
+        );
+
         // Ensure stats and block stream are splitting the bottom area
         if let Some(bs) = plan.block_stream {
-             assert_eq!(bs.width, 14, "Block stream has fixed width of 14 in wide mode");
+            assert_eq!(
+                bs.width, 14,
+                "Block stream has fixed width of 14 in wide mode"
+            );
         }
     }
 
@@ -3263,9 +3285,21 @@ mod tests {
     fn test_smart_table_layout_priorities() {
         // Test the smart column dropper logic
         let cols = vec![
-            SmartCol { min_width: 10, priority: 0, constraint: Constraint::Length(10) }, // Must show
-            SmartCol { min_width: 20, priority: 1, constraint: Constraint::Length(20) }, // High priority
-            SmartCol { min_width: 50, priority: 2, constraint: Constraint::Length(50) }, // Low priority
+            SmartCol {
+                min_width: 10,
+                priority: 0,
+                constraint: Constraint::Length(10),
+            }, // Must show
+            SmartCol {
+                min_width: 20,
+                priority: 1,
+                constraint: Constraint::Length(20),
+            }, // High priority
+            SmartCol {
+                min_width: 50,
+                priority: 2,
+                constraint: Constraint::Length(50),
+            }, // Low priority
         ];
 
         // 1. Very narrow: only priority 0 fits
