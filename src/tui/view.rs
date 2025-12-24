@@ -208,7 +208,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                     };
 
                     if is_selected {
-                        let is_safe_ascii = state.torrent_name.chars().all(|c| c.is_ascii());
+                        let is_safe_ascii = state.torrent_name.is_ascii();
                         if is_safe_ascii {
                             row_style = row_style.add_modifier(Modifier::BOLD);
                         }
@@ -3311,13 +3311,13 @@ mod tests {
         // With expansion_reserve logic: if width < 80, reserve is 15.
         // Available effective = 45 - 15 = 30.
         // Cost = 10 (p0) + 20 (p1) = 30. Fits exactly.
-        let (constraints, indices) = compute_smart_table_layout(&cols, 45, 0);
+        let (_constraints, indices) = compute_smart_table_layout(&cols, 45, 0);
         assert!(indices.contains(&0));
         assert!(indices.contains(&1));
         assert!(!indices.contains(&2));
 
         // 3. Wide: all fit
-        let (constraints, indices) = compute_smart_table_layout(&cols, 200, 0);
+        let (_constraints, indices) = compute_smart_table_layout(&cols, 200, 0);
         assert_eq!(indices.len(), 3, "All columns should fit in 200 width");
     }
 }
