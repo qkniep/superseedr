@@ -396,26 +396,26 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
             buffer.extend_from_slice(&length.to_be_bytes());
             Ok(buffer)
         }
-        Message::HashReject(index, base, offset, length) => {
+        Message::HashPiece(index, base, offset, data) => {
             let mut buffer = Vec::new();
-            let len = 1 + 4 + 4 + 4 + 4;
+            let len = 1 + 4 + 4 + 4 + data.len();
             buffer.extend_from_slice(&(len as u32).to_be_bytes());
             buffer.push(22);
             buffer.extend_from_slice(&index.to_be_bytes());
             buffer.extend_from_slice(&base.to_be_bytes());
             buffer.extend_from_slice(&offset.to_be_bytes());
-            buffer.extend_from_slice(&length.to_be_bytes());
+            buffer.extend_from_slice(&data);
             Ok(buffer)
         }
-        Message::HashPiece(index, base, offset, data) => {
+        Message::HashReject(index, base, offset, length) => {
             let mut buffer = Vec::new();
-            let len = 1 + 4 + 4 + 4 + data.len();
+            let len = 1 + 4 + 4 + 4 + 4;
             buffer.extend_from_slice(&(len as u32).to_be_bytes());
             buffer.push(23);
             buffer.extend_from_slice(&index.to_be_bytes());
             buffer.extend_from_slice(&base.to_be_bytes());
             buffer.extend_from_slice(&offset.to_be_bytes());
-            buffer.extend_from_slice(&data);
+            buffer.extend_from_slice(&length.to_be_bytes());
             Ok(buffer)
         }
 
@@ -565,20 +565,20 @@ pub fn parse_message_from_bytes(
             Ok(Message::HashRequest(index, base, offset, length))
         }
         22 => {
-            if payload.len() != 16 { return Err(Error::new(ErrorKind::InvalidData, "Invalid HashReject length")); }
-            let index = read_be_u32(&payload, 0)?;
-            let base = read_be_u32(&payload, 4)?;
-            let offset = read_be_u32(&payload, 8)?;
-            let length = read_be_u32(&payload, 12)?;
-            Ok(Message::HashReject(index, base, offset, length))
-        }
-        23 => {
             if payload.len() < 12 { return Err(Error::new(ErrorKind::InvalidData, "Invalid HashPiece length")); }
             let index = read_be_u32(&payload, 0)?;
             let base = read_be_u32(&payload, 4)?;
             let offset = read_be_u32(&payload, 8)?;
             let data = payload[12..].to_vec();
             Ok(Message::HashPiece(index, base, offset, data))
+        }
+        23 => {
+            if payload.len() != 16 { return Err(Error::new(ErrorKind::InvalidData, "Invalid HashReject length")); }
+            let index = read_be_u32(&payload, 0)?;
+            let base = read_be_u32(&payload, 4)?;
+            let offset = read_be_u32(&payload, 8)?;
+            let length = read_be_u32(&payload, 12)?;
+            Ok(Message::HashReject(index, base, offset, length))
         }
         _ => {
             // Unknown ID
