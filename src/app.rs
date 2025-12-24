@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::tui;
-
 use std::fs;
 use std::io::Stdout;
 
@@ -19,7 +17,8 @@ use crate::torrent_manager::DiskIoOperation;
 use crate::config::{PeerSortColumn, Settings, SortDirection, TorrentSettings, TorrentSortColumn};
 use crate::token_bucket::TokenBucket;
 
-use crate::tui_events;
+use crate::tui::events;
+use crate::tui::view::draw;
 
 use crate::config::get_watch_path;
 
@@ -56,6 +55,7 @@ use std::time::Duration;
 
 use notify::{Config, Error as NotifyError, Event, RecommendedWatcher, RecursiveMode, Watcher};
 
+use ratatui::prelude::Rect;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use ratatui_explorer::FileExplorer;
 use std::cell::RefCell;
@@ -393,6 +393,7 @@ pub struct AppState {
     pub system_error: Option<String>,
     pub limits: CalculatedLimits,
 
+    pub screen_area: Rect,
     pub mode: AppMode,
     pub show_help: bool,
     pub externally_accessable_port: bool,
@@ -498,6 +499,7 @@ pub struct App {
     pub tui_event_tx: mpsc::Sender<CrosstermEvent>,
     pub tui_event_rx: mpsc::Receiver<CrosstermEvent>,
     pub shutdown_tx: broadcast::Sender<()>,
+    pub tui_task: Option<tokio::task::JoinHandle<()>>,
 }
 impl App {
     pub async fn new(client_configs: Settings) -> Result<Self, Box<dyn std::error::Error>> {
@@ -604,6 +606,7 @@ impl App {
             tui_event_tx,
             tui_event_rx,
             shutdown_tx,
+            tui_task: None,
         };
 
         let mut torrents_to_load = app.client_configs.torrents.clone();
@@ -645,6 +648,10 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Ok(size) = terminal.size() {
+            self.app_state.screen_area = Rect::new(0, 0, size.width, size.height);
+        }
+
         self.process_pending_commands().await;
 
         self.startup_crossterm_event_listener();
@@ -683,7 +690,7 @@ impl App {
 
                 Some(event) = self.tui_event_rx.recv() => {
                     self.clamp_selected_indices();
-                    tui_events::handle_event(event, self).await;
+                    events::handle_event(event, self).await;
                 }
 
                 Some(result) = notify_rx.recv() => {
@@ -702,7 +709,7 @@ impl App {
                 _ = draw_interval.tick() => {
                     if self.app_state.ui_needs_redraw {
                         terminal.draw(|f| {
-                            tui::draw(f, &self.app_state, &self.client_configs);
+                            draw(f, &self.app_state, &self.client_configs);
                         })?;
                         self.app_state.ui_needs_redraw = false;
                     }
@@ -720,36 +727,59 @@ impl App {
     fn startup_crossterm_event_listener(&mut self) {
         let tui_event_tx_clone = self.tui_event_tx.clone();
         let mut tui_shutdown_rx = self.shutdown_tx.subscribe();
-        tokio::spawn(async move {
+
+        self.tui_task = Some(tokio::spawn(async move {
             loop {
-                tokio::select! {
-                    _ = tui_shutdown_rx.recv() => break,
+                if tui_shutdown_rx.try_recv().is_ok() {
+                    break;
+                }
 
-                    result = tokio::task::spawn_blocking(event::read) => {
-                        let event = match result {
-                            Ok(Ok(e)) => e,
-                            Ok(Err(e)) => {
-                                tracing_event!(Level::ERROR, "Crossterm event read error: {}", e);
-                                break;
-                            }
-                            Err(e) => {
-                                tracing_event!(Level::ERROR, "Blocking TUI read task panicked: {}", e);
-                                break;
-                            }
-                        };
+                // Run blocking poll to completion (do NOT use tokio::select!)
+                // This ensures we never abandon a thread that is reading from stdin.
+                // Keep the timeout relatively short (250ms) so the app remains responsive to shutdown.
+                let event =
+                    tokio::task::spawn_blocking(|| -> std::io::Result<Option<CrosstermEvent>> {
+                        if event::poll(Duration::from_millis(250))? {
+                            return Ok(Some(event::read()?));
+                        }
+                        Ok(None)
+                    })
+                    .await;
 
-                        if tui_event_tx_clone.send(event).await.is_err() {
+                match event {
+                    Ok(Ok(Some(e))) => {
+                        if tui_event_tx_clone.send(e).await.is_err() {
                             break;
                         }
                     }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(e)) => {
+                        tracing::error!("Crossterm event error: {}", e);
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!("Blocking task join error: {}", e);
+                        break;
+                    }
+                }
 
+                if tui_shutdown_rx.try_recv().is_ok() {
+                    break;
                 }
             }
-        });
+        }));
     }
 
     async fn shutdown_sequence(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
         let _ = self.shutdown_tx.send(());
+
+        if let Some(handle) = self.tui_task.take() {
+            tracing::info!("Waiting for TUI event listener to finish...");
+            if let Err(e) = handle.await {
+                tracing::error!("Error joining TUI task: {}", e);
+            }
+        }
+
         let total_managers_to_shut_down = self.torrent_manager_command_txs.len();
         let mut managers_shut_down = 0;
 
@@ -775,7 +805,7 @@ impl App {
             self.app_state.shutdown_progress =
                 managers_shut_down as f64 / total_managers_to_shut_down as f64;
             let _ = terminal.draw(|f| {
-                tui::draw(f, &self.app_state, &self.client_configs);
+                draw(f, &self.app_state, &self.client_configs);
             });
 
             tokio::select! {
@@ -1946,6 +1976,22 @@ impl App {
                 TorrentSortColumn::Up => b_torrent
                     .smoothed_upload_speed_bps
                     .cmp(&a_torrent.smoothed_upload_speed_bps),
+                TorrentSortColumn::Progress => {
+                    let calc_progress = |t: &TorrentDisplayState| -> f64 {
+                        if t.latest_state.number_of_pieces_total == 0 {
+                            0.0
+                        } else {
+                            t.latest_state.number_of_pieces_completed as f64
+                                / t.latest_state.number_of_pieces_total as f64
+                        }
+                    };
+
+                    let a_prog = calc_progress(a_torrent);
+                    let b_prog = calc_progress(b_torrent);
+
+                    // Standard float comparison
+                    a_prog.total_cmp(&b_prog)
+                }
             };
 
             let default_direction = match sort_by {
