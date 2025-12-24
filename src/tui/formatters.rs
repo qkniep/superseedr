@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::theme; // You'll need this for ip_to_color and speed_to_style
-use ratatui::style::{Color, Style}; // And these
+use crate::theme;
+use ratatui::style::{Color, Style};
 use std::path::Path;
 use std::time::Duration;
 
@@ -153,7 +153,6 @@ pub fn path_to_string(path: Option<&Path>) -> String {
 }
 
 pub fn ip_to_color(ip: &str) -> Color {
-    // A curated list of pastel-like colors from your theme.
     let colors = [
         theme::ROSEWATER,
         theme::FLAMINGO,
@@ -171,14 +170,11 @@ pub fn ip_to_color(ip: &str) -> Color {
         theme::LAVENDER,
     ];
 
-    // A simple, fast hashing function: sum the byte values of the IP string.
-    // Using wrapping_add prevents overflow.
     let hash = ip
         .as_bytes()
         .iter()
         .fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
 
-    // Use the hash to pick a color from the palette.
     colors[hash as usize % colors.len()]
 }
 
@@ -224,7 +220,6 @@ pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
 
 pub fn calculate_nice_upper_bound(speed_bps: u64) -> u64 {
     if speed_bps == 0 {
-        // Default to 10 Kbps if speed is 0.
         return 10_000;
     }
 
@@ -301,8 +296,6 @@ pub fn format_graph_time_label(duration_secs: usize) -> String {
     const MINUTE: usize = 60;
     const HOUR: usize = 60 * MINUTE;
 
-    // --- THIS IS THE FIX ---
-    // Add a new branch to handle durations less than a minute.
     if duration_secs < MINUTE {
         format!("-{}s", duration_secs)
     } else if duration_secs < HOUR {
@@ -313,7 +306,6 @@ pub fn format_graph_time_label(duration_secs: usize) -> String {
 }
 
 pub fn generate_x_axis_labels(graph_mode: GraphDisplayMode) -> Vec<Span<'static>> {
-    // Generate a specific set of "nice" label strings for each time window.
     let labels_str: Vec<String> = match graph_mode {
         GraphDisplayMode::OneMinute => (0..=4)
             .map(|i| format_graph_time_label(60 - i * 15))
@@ -414,7 +406,6 @@ pub fn format_permits_spans(
         theme::TEXT
     };
 
-    // CHANGE: We now return the Vec<Span> directly.
     vec![
         Span::styled(label, Style::default().fg(base_color)),
         Span::styled(

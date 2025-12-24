@@ -1,5 +1,19 @@
 # Changelog
 
+## Release v0.9.29
+### Performance
+- Introduced "Smart Table" logic to dynamically hide columns based on priority and width.
+- Optimized TUI event listener to use non-blocking polls for better shutdown responsiveness.
+
+### Refactoring
+- Major TUI refactor: decoupled layout calculation from rendering logic.
+- Modularized TUI components into `src/tui/` directory.
+- Introduced `LayoutContext` and `LayoutPlan` for structured UI management.
+
+### Testing
+- Added unit tests for new TUI navigation logic.
+- Enhanced `Settings` parsing tests with comprehensive coverage.
+
 ## Release v0.9.28 
 ### Performance
 - Implemented a dynamic request window size in `PeerSession` to improve download throughput.
