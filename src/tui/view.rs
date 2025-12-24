@@ -206,8 +206,12 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                         TorrentControlState::Paused => Style::default().fg(theme::SURFACE1),
                         TorrentControlState::Deleting => Style::default().fg(theme::RED),
                     };
+
                     if is_selected {
-                        row_style = row_style.add_modifier(Modifier::BOLD);
+                        let is_safe_ascii = state.torrent_name.chars().all(|c| c.is_ascii());
+                        if is_safe_ascii {
+                            row_style = row_style.add_modifier(Modifier::BOLD);
+                        }
                     }
 
                     let cells: Vec<Cell> = visible_indices
@@ -282,13 +286,18 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
             .get(app_state.selected_torrent_index)
         {
             if let Some(torrent) = app_state.torrents.get(info_hash) {
-                let name = if app_state.anonymize_torrent_names {
-                    "Torrent..."
+                let path_cow; 
+                
+                let text_to_show = if app_state.anonymize_torrent_names {
+                    "/path/to/torrent/file"
                 } else {
-                    &torrent.latest_state.torrent_name
+                    path_cow = torrent.latest_state.download_path.to_string_lossy();
+                    &path_cow
                 };
+                
                 let avail_width = area.width.saturating_sub(10) as usize;
-                let display_name = truncate_with_ellipsis(name, avail_width);
+                let display_name = truncate_with_ellipsis(text_to_show, avail_width);
+                
                 title_spans.push(Span::styled(
                     display_name,
                     Style::default().fg(theme::YELLOW),
@@ -303,8 +312,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         .title(Line::from(title_spans));
     let table = Table::new(rows, constraints)
         .header(header)
-        .block(block)
-        .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .block(block);
     f.render_stateful_widget(table, area, &mut table_state);
 }
 
@@ -755,17 +763,10 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
         ]),
     ];
 
-    // --- GAME STATS TITLE LOGIC ---
     let (lvl, progress) = calculate_player_stats(app_state);
-
-    // Calculate available width for the dynamic parts.
     // "Stats | Lvl 999 " is roughly 16 chars. Borders are 2. Total static overhead ~18.
     let available_width = stats_chunk.width.saturating_sub(18) as usize;
 
-    // Logic:
-    // 1. If we have > 25 spare chars, use a Wide Bar (20) + Text.
-    // 2. If we have > 15 spare chars, use a Standard Bar (10) + Text.
-    // 3. Otherwise, just use the Standard Bar (10) to prevent wrapping/cutting.
     let (gauge_width, show_pct) = if available_width > 25 {
         (20, true)
     } else if available_width > 15 {
@@ -967,7 +968,6 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
         if let Some(torrent) = app_state.torrents.get(info_hash) {
             let state = &torrent.latest_state;
 
-            // PEERS TABLE
             if peers_chunk.height > 0 {
                 let has_established_peers =
                     state.peers.iter().any(|p| p.last_action != "Connecting...");
@@ -1212,8 +1212,6 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
 }
 
 fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_chunk: Rect) {
-    // 1. Layout: Use fixed widths for sides to maximize center space
-    // If screen is very narrow (<80), hide the "Superseedr" branding entirely
     let show_branding = footer_chunk.width >= 80;
 
     let footer_layout = if show_branding {
@@ -3072,30 +3070,18 @@ fn render_sparkles<'a>(
 }
 
 fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
-    // --- 1. CONFIGURATION ---
-    // XP needed for Level 1.
-    // 5 MB Upload = Level 1. (Was 250KB, which was too trivial)
     const XP_FOR_LEVEL_1: f64 = 5_000_000.0;
 
-    // Power Curve Exponent.
-    // 2.0 = Quadratic (Standard).
-    // 2.6 = Steeper (Harder at high levels).
     const LEVEL_EXPONENT: f64 = 2.6;
 
-    // --- 2. CALCULATE PASSIVE XP (UPTIME + SIZE) ---
-    // We count the total size of all torrents currently loaded/seeding.
     let total_seeding_size_bytes: u64 = app_state
         .torrents
         .values()
         .map(|t| t.latest_state.total_size)
         .sum();
 
-    // Convert to GB.
     let total_gb = (total_seeding_size_bytes as f64) / 1_073_741_824.0;
 
-    // Formula: (Sqrt(GB) * 50) per second.
-    // Increased from 20 to 50 to make large libraries feel more rewarding.
-    //
     // - 100 GB Library -> ~500 XP/sec (~1.8 MB/hr)
     // - 1 TB Library   -> ~1500 XP/sec (~5.4 MB/hr)
     let passive_rate_per_sec = (total_gb + 1.0).powf(0.5) * 50.0;
@@ -3103,11 +3089,9 @@ fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
     // Calculate total passive XP generated over the session runtime.
     let passive_xp = passive_rate_per_sec * (app_state.run_time as f64);
 
-    // --- 3. CALCULATE ACTIVE XP (PURE UPLOAD) ---
     // 1 Byte = 1 XP.
     let active_xp = app_state.session_total_uploaded as f64;
 
-    // --- 4. TOTAL & LEVELING ---
     let total_xp = active_xp + passive_xp;
 
     // Curve: Level = (XP / Base) ^ (1 / Exponent)
@@ -3134,4 +3118,172 @@ fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
     };
 
     (current_level, ratio.clamp(0.0, 1.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+    use crate::tui::layout::MIN_SIDEBAR_WIDTH;
+
+    /// Helper to create a LayoutContext manually since we don't want to mock AppState.
+    /// Accessing the struct fields directly allows us to bypass `LayoutContext::new`.
+    fn create_ctx(width: u16, height: u16) -> LayoutContext {
+        LayoutContext {
+            width,
+            height,
+            settings_sidebar_percent: 35, // Default sidebar percentage
+        }
+    }
+
+    #[test]
+    fn test_too_small_window_width() {
+        let width = 39;
+        let height = 50;
+        let area = Rect::new(0, 0, width, height);
+        let ctx = create_ctx(width, height);
+
+        let plan = calculate_layout(area, &ctx);
+
+        assert!(plan.warning_message.is_some(), "Should warn if width < 40");
+        assert_eq!(plan.warning_message.unwrap(), "Window too small");
+    }
+
+    #[test]
+    fn test_too_small_window_height() {
+        let width = 100;
+        let height = 9;
+        let area = Rect::new(0, 0, width, height);
+        let ctx = create_ctx(width, height);
+
+        let plan = calculate_layout(area, &ctx);
+
+        assert!(plan.warning_message.is_some(), "Should warn if height < 10");
+        assert_eq!(plan.warning_message.unwrap(), "Window too small");
+    }
+
+    #[test]
+    fn test_short_window_layout() {
+        // Condition: height < 30 (but not too small)
+        let width = 100;
+        let height = 25;
+        let area = Rect::new(0, 0, width, height);
+        let ctx = create_ctx(width, height);
+
+        let plan = calculate_layout(area, &ctx);
+
+        // Short layout specific checks
+        assert!(plan.sparklines.is_some(), "Short layout should show sparklines");
+        assert!(plan.stats.is_some(), "Short layout should show stats");
+        assert!(plan.chart.is_none(), "Short layout hides the large chart");
+        
+        // Ensure footer is at the bottom
+        assert_eq!(plan.footer.height, 1);
+        assert_eq!(plan.footer.y, height - 1);
+    }
+
+    #[test]
+    fn test_narrow_vertical_layout() {
+        // Condition: width < 100 (triggers "is_narrow")
+        let width = 90;
+        let height = 60;
+        let area = Rect::new(0, 0, width, height);
+        let ctx = create_ctx(width, height);
+
+        let plan = calculate_layout(area, &ctx);
+
+        // Vertical/Narrow layout expectations
+        assert!(plan.chart.is_some(), "Narrow layout should show chart");
+        // In narrow mode (< 90 width), block stream is generally hidden or rearranged
+        // The code for width < 90 splits info_cols into just details and block_stream(as vertical stack?)
+        // Let's check logic: if ctx.width < 90: left_v split details/block_stream
+        assert!(plan.block_stream.is_some(), "Narrow layout (w<90) preserves block stream in vertical stack");
+        assert!(plan.peer_stream.is_none(), "Height < 70 in vertical mode hides peer_stream");
+    }
+
+    #[test]
+    fn test_tall_vertical_layout() {
+        // Condition: height > width * 0.6 AND height >= 70
+        let width = 100;
+        let height = 80; // 80 > 60
+        let area = Rect::new(0, 0, width, height);
+        let ctx = create_ctx(width, height);
+
+        let plan = calculate_layout(area, &ctx);
+
+        assert!(plan.peer_stream.is_some(), "Tall vertical layout (>70h) should show peer stream");
+        assert!(plan.chart.is_some());
+    }
+
+    #[test]
+    fn test_standard_wide_layout_no_block_stream() {
+        // Condition: Not short, not narrow (<100), not vertical aspect.
+        // Width 120, Height 40.
+        // Aspect: 40 vs 120*0.6=72. 40 < 72.
+        // Wait, logic is: is_vertical_aspect = height > width * 0.6
+        // If H=40, W=120, is_vertical=False.
+        // is_narrow=False (120 > 100).
+        // is_short=False (40 > 30).
+        // -> Hits the "Standard/Wide" else block.
+        
+        let width = 120;
+        let height = 40;
+        let area = Rect::new(0, 0, width, height);
+        let ctx = create_ctx(width, height);
+
+        let plan = calculate_layout(area, &ctx);
+
+        assert!(plan.list.width >= MIN_SIDEBAR_WIDTH, "Sidebar should respect min width");
+        assert!(plan.sparklines.is_some());
+        assert!(plan.peer_stream.is_some());
+        
+        // Width 120 is < 135, so block_stream should be hidden in standard view
+        assert!(plan.block_stream.is_none(), "Standard width < 135 should hide block stream");
+    }
+
+    #[test]
+    fn test_ultra_wide_layout_with_block_stream() {
+        // Condition: Width > 135
+        let width = 150;
+        let height = 60;
+        let area = Rect::new(0, 0, width, height);
+        let ctx = create_ctx(width, height);
+
+        let plan = calculate_layout(area, &ctx);
+
+        assert!(plan.block_stream.is_some(), "Wide width > 135 should show block stream");
+        
+        // Ensure stats and block stream are splitting the bottom area
+        if let Some(bs) = plan.block_stream {
+             assert_eq!(bs.width, 14, "Block stream has fixed width of 14 in wide mode");
+        }
+    }
+
+    #[test]
+    fn test_smart_table_layout_priorities() {
+        // Test the smart column dropper logic
+        let cols = vec![
+            SmartCol { min_width: 10, priority: 0, constraint: Constraint::Length(10) }, // Must show
+            SmartCol { min_width: 20, priority: 1, constraint: Constraint::Length(20) }, // High priority
+            SmartCol { min_width: 50, priority: 2, constraint: Constraint::Length(50) }, // Low priority
+        ];
+
+        // 1. Very narrow: only priority 0 fits
+        let (constraints, indices) = compute_smart_table_layout(&cols, 15, 0);
+        assert_eq!(indices, vec![0], "Only priority 0 should fit in 15 width");
+        assert_eq!(constraints.len(), 1);
+
+        // 2. Medium: priority 0 + 1 fit (10 + 20 = 30 width needed)
+        // With expansion_reserve logic: if width < 80, reserve is 15.
+        // Available effective = 45 - 15 = 30.
+        // Cost = 10 (p0) + 20 (p1) = 30. Fits exactly.
+        let (constraints, indices) = compute_smart_table_layout(&cols, 45, 0);
+        assert!(indices.contains(&0));
+        assert!(indices.contains(&1));
+        assert!(!indices.contains(&2));
+
+        // 3. Wide: all fit
+        let (constraints, indices) = compute_smart_table_layout(&cols, 200, 0);
+        assert_eq!(indices.len(), 3, "All columns should fit in 200 width");
+    }
 }
