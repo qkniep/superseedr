@@ -1057,23 +1057,18 @@ impl TorrentState {
                 let piece_size = self.get_piece_size(piece_index);
 
                 if let Some(complete_data) = self.piece_manager.handle_block(piece_index, block_offset, &data, piece_size) {
-                    
-                    // 1. Check if this piece has associated v2 roots
                     if let Some(roots) = self.piece_to_roots.get(&piece_index) {
                         
-                        // 2. Calculate Global Offset of this block
                         let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(0);
                         let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
 
-                        // 3. Find the root for the file that contains this offset
-                        // We look for the file with the largest start_offset that is <= our global_offset
                         let matching_root = roots.iter()
                             .filter(|(start, _)| *start <= global_offset)
                             .max_by_key(|(start, _)| *start)
                             .map(|(_, root)| root);
 
                         if let Some(root) = matching_root {
-                            // It is v2. Do we have the proof?
+                            // OPTION A: We have the V2 proof ready -> Use V2 (Strongest)
                             if let Some(proof) = self.v2_proofs.get(&piece_index) {
                                 self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                                 effects.push(Effect::VerifyPieceV2 {
@@ -1083,13 +1078,21 @@ impl TorrentState {
                                     data: complete_data,
                                     root_hash: root.clone(),
                                 });
-                            } else {
-                                // Buffer data AND offset so we can verify later
+                            } 
+                            // OPTION B (THE FIX): No proof, but we have V1 SHA-1 hashes (Hybrid) -> Use V1
+                            else if self.torrent.as_ref().map_or(false, |t| !t.info.pieces.is_empty()) {
+                                // Fallback to V1 verification so we don't stall!
+                                self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
+                                effects.push(Effect::VerifyPiece {
+                                    peer_id: peer_id.clone(),
+                                    piece_index,
+                                    data: complete_data,
+                                });
+                            }
+                            // OPTION C: Pure V2, no proof -> We MUST buffer and wait
+                            else {
                                 self.v2_pending_data.insert(piece_index, (block_offset, complete_data));
                             }
-                        } else {
-                            // Fallback (Shouldn't happen if metadata is correct)
-                            // Or maybe it's a padding file without a root?
                         }
                     } else {
                         // Standard v1 behavior (No roots found for this piece)
