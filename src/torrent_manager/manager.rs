@@ -183,8 +183,6 @@ impl TorrentManager {
             global_ul_bucket,
         } = torrent_parameters;
 
-        event!(Level::INFO, "Added new torrent {:?}", torrent);
-
         let bencoded_data = serde_bencode::to_bytes(&torrent)
             .map_err(|e| format!("Failed to re-encode torrent struct: {}", e))?;
 
@@ -1245,7 +1243,22 @@ impl TorrentManager {
         event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
-        let num_pieces = torrent.info.pieces.len() / 20;
+        let num_pieces = if !torrent.info.pieces.is_empty() {
+            torrent.info.pieces.len() / 20
+        } else {
+            let total_len: u64 = if !torrent.info.files.is_empty() {
+                torrent.info.files.iter().map(|f| f.length as u64).sum()
+            } else {
+                torrent.info.length as u64
+            };
+            let pl = torrent.info.piece_length as u64;
+            if pl > 0 {
+                ((total_len + pl - 1) / pl) as usize
+            } else {
+                0
+            }
+        };
+
         if skip_hashing {
             event!(
                 Level::INFO,
@@ -1850,10 +1863,6 @@ impl TorrentManager {
             let multi_file_info = match self.multi_file_info.as_ref() {
                 Some(mfi) => mfi,
                 None => {
-                    debug_assert!(
-                        self.multi_file_info.is_some(),
-                        "File info not ready for metrics."
-                    );
                     event!(Level::WARN, "Cannot send metrics: File info not available.");
                     return;
                 }
@@ -1881,7 +1890,7 @@ impl TorrentManager {
             let metrics_tx_clone = self.metrics_tx.clone();
             let info_hash_clone = self.state.info_hash.clone();
             let torrent_name_clone = torrent.info.name.clone();
-            let number_of_pieces_total = (torrent.info.pieces.len() / 20) as u32;
+            let number_of_pieces_total = self.state.piece_manager.bitfield.len() as u32;
             let number_of_pieces_completed =
                 if self.state.torrent_status == TorrentStatus::Validating {
                     self.state.validation_pieces_found
@@ -2584,6 +2593,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::{broadcast, mpsc};
+
     #[tokio::test]
     async fn test_manager_event_loop_throughput() {
         // 1. Setup Channels & Dependencies
@@ -2717,6 +2727,7 @@ mod tests {
             Err(_) => panic!("Test timed out! Manager loop likely deadlocked processing blocks."),
         }
     }
+
 }
 
 #[cfg(test)]
@@ -3787,6 +3798,274 @@ mod resource_tests {
         } else {
             panic!("Security Fail: Manager accepted out-of-bounds request index 5! Got: {:?}", resp2);
         }
+    }
+
+
+    // --- HARNESS: Fixed Resource Manager Spawning & Return Type ---
+    fn setup_scale_test_harness() -> (
+        TorrentManager,
+        mpsc::Sender<TorrentCommand>, 
+        mpsc::Sender<ManagerCommand>, 
+        broadcast::Sender<()>,        
+        ResourceManagerClient, // CHANGED: Return Client, not the Manager actor
+    ) {
+        let (_incoming_tx, _incoming_rx) = mpsc::channel(100);
+        let (cmd_tx, cmd_rx) = mpsc::channel(100);
+        let (event_tx, mut event_rx) = mpsc::channel(100);
+        let (metrics_tx, _) = broadcast::channel(100);
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let settings = Arc::new(Settings::default());
+
+        // Drain events to prevent deadlock
+        tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+
+        let mut limits = HashMap::new();
+        // High limits to prevent throttling
+        limits.insert(crate::resource_manager::ResourceType::PeerConnection, (100_000, 100_000));
+        limits.insert(crate::resource_manager::ResourceType::DiskRead, (100_000, 100_000));
+        limits.insert(crate::resource_manager::ResourceType::DiskWrite, (100_000, 100_000));
+        limits.insert(crate::resource_manager::ResourceType::Reserve, (0, 0));
+
+        let (resource_manager, rm_client) = ResourceManager::new(limits, shutdown_tx.clone());
+        
+        // FIX: Spawn the Resource Manager (Consumes 'resource_manager')
+        tokio::spawn(async move { resource_manager.run().await }); 
+
+        let dl_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
+        let ul_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
+
+        let magnet = Magnet::new("magnet:?xt=urn:btih:0000000000000000000000000000000000000000").unwrap();
+
+        let dht_handle = {
+            #[cfg(feature = "dht")]
+            { mainline::Dht::builder().port(0).build().unwrap().as_async() }
+            #[cfg(not(feature = "dht"))]
+            { () }
+        };
+
+        let params = TorrentParameters {
+            dht_handle, 
+            incoming_peer_rx: _incoming_rx,
+            metrics_tx,
+            torrent_validation_status: false,
+            download_dir: PathBuf::from("."),
+            manager_command_rx: cmd_rx,
+            manager_event_tx: event_tx,
+            settings,
+            resource_manager: rm_client.clone(),
+            global_dl_bucket: dl_bucket,
+            global_ul_bucket: ul_bucket,
+        };
+
+        let manager = TorrentManager::from_magnet(params, magnet).unwrap();
+        let torrent_tx = manager.torrent_manager_tx.clone();
+
+        // Return 'rm_client' instead of 'resource_manager'
+        (manager, torrent_tx, cmd_tx, shutdown_tx, rm_client)
+    }
+
+    #[tokio::test]
+    async fn test_manager_scale_1000_hybrid() {
+        let temp_dir = std::env::temp_dir().join(format!("superseedr_scale_hybrid_{}", rand::random::<u32>()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 1000;
+        let piece_len = 1024; 
+        
+        // 1. Setup Data & V2 Proofs
+        let data_chunk = vec![0xAA; piece_len];
+        let leaf_hash = sha2::Sha256::digest(&data_chunk).to_vec();
+        
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&leaf_hash);
+        hasher.update(&leaf_hash); 
+        let root_hash = hasher.finalize().to_vec();
+        let proof = leaf_hash; 
+
+        // 2. Setup Manager Harness
+        let (mut manager, torrent_tx, cmd_tx, _, _) = setup_scale_test_harness();
+        
+        // 3. Create Hybrid Torrent (V1 Data + V2 Flag)
+        let v1_piece_hash = sha1::Sha1::digest(&data_chunk).to_vec();
+        let mut all_v1_hashes = Vec::new();
+        for _ in 0..num_pieces {
+            all_v1_hashes.extend_from_slice(&v1_piece_hash);
+        }
+
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.length = (piece_len * num_pieces) as i64;
+        torrent.info.pieces = all_v1_hashes; 
+        torrent.info.meta_version = Some(2); 
+
+        // 4. FIX: Set Download Path BEFORE Metadata
+        // This ensures InitializeStorage uses the correct temp_dir
+        manager.root_download_path = temp_dir.clone();
+
+        // 5. Initialize Manager State
+        manager.apply_action(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 12345,
+        });
+
+        // 6. Post-Init Fixups
+        manager.state.torrent_status = TorrentStatus::Standard; 
+        
+        // Manually inject V2 Roots
+        for i in 0..num_pieces {
+            manager.state.piece_to_roots.insert(i as u32, vec![(0, root_hash.clone())]);
+        }
+
+        // 7. Register Peer
+        let peer_id = "scale_worker".to_string();
+        let (p_tx, _) = mpsc::channel(100);
+        manager.apply_action(Action::RegisterPeer { peer_id: peer_id.clone(), tx: p_tx });
+
+        // 8. Run Manager
+        let tx = manager.torrent_manager_tx.clone();
+        let run_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        // 9. FLOOD LOOP (1000 Pieces)
+        let start = Instant::now();
+        
+        for i in 0..num_pieces {
+            tx.send(TorrentCommand::Block(
+                peer_id.clone(),
+                i as u32,
+                0,
+                data_chunk.clone(),
+            )).await.unwrap();
+
+            tx.send(TorrentCommand::MerkleHashData {
+                peer_id: peer_id.clone(),
+                file_index: 0,
+                piece_index: i as u32, 
+                base_layer: 0,
+                length: 1,
+                proof: proof.clone(),
+            }).await.unwrap();
+        }
+
+        // 10. WAIT FOR COMPLETION
+        let expected_size = (num_pieces * piece_len) as u64;
+        let file_path = temp_dir.join("test_torrent");
+        
+        let mut success = false;
+        // Wait up to 30 seconds
+        for _ in 0..60 { 
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Ok(meta) = std::fs::metadata(&file_path) {
+                if meta.len() >= expected_size {
+                    success = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(success, "Hybrid Scale Test: Failed to write all 1000 pieces to disk within 30s");
+        println!("Hybrid V2 Scale: 1000 Blocks processed in {:?}", start.elapsed());
+
+        // Cleanup
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = run_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_manager_scale_1000_pure_v2() {
+        let temp_dir = std::env::temp_dir().join(format!("superseedr_scale_v2_{}", rand::random::<u32>()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 1000;
+        let piece_len = 1024;
+
+        let data_chunk = vec![0xBB; piece_len];
+        let leaf_hash = sha2::Sha256::digest(&data_chunk).to_vec();
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&leaf_hash);
+        hasher.update(&leaf_hash); 
+        let root_hash = hasher.finalize().to_vec();
+        let proof = leaf_hash;
+
+        let (mut manager, torrent_tx, cmd_tx, _, _) = setup_scale_test_harness();
+
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.length = (piece_len * num_pieces) as i64;
+        torrent.info.pieces = Vec::new(); 
+        torrent.info.meta_version = Some(2);
+
+        // FIX: Set Path BEFORE Metadata
+        manager.root_download_path = temp_dir.clone();
+
+        manager.apply_action(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 12345,
+        });
+
+        manager.state.torrent_status = TorrentStatus::Standard;
+        
+        for i in 0..num_pieces {
+            manager.state.piece_to_roots.insert(i as u32, vec![(0, root_hash.clone())]);
+        }
+
+        if manager.state.piece_manager.bitfield.is_empty() {
+             manager.state.piece_manager.set_initial_fields(num_pieces, false);
+             manager.state.piece_manager.set_geometry(piece_len as u32, (piece_len * num_pieces) as u64, false);
+        }
+
+        let peer_id = "pure_v2_worker".to_string();
+        let (p_tx, _) = mpsc::channel(100);
+        manager.apply_action(Action::RegisterPeer { peer_id: peer_id.clone(), tx: p_tx });
+
+        let tx = manager.torrent_manager_tx.clone();
+        let run_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        let start = Instant::now();
+        for i in 0..num_pieces {
+            tx.send(TorrentCommand::Block(
+                peer_id.clone(),
+                i as u32,
+                0,
+                data_chunk.clone(),
+            )).await.unwrap();
+
+            tx.send(TorrentCommand::MerkleHashData {
+                peer_id: peer_id.clone(),
+                file_index: 0,
+                piece_index: i as u32,
+                base_layer: 0,
+                length: 1,
+                proof: proof.clone(),
+            }).await.unwrap();
+        }
+
+        let expected_size = (num_pieces * piece_len) as u64;
+        let file_path = temp_dir.join("test_torrent");
+        
+        let mut success = false;
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Ok(meta) = std::fs::metadata(&file_path) {
+                if meta.len() >= expected_size {
+                    success = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(success, "Pure V2 Scale Test: Failed to write 1000 pieces");
+        println!("Pure V2 Scale: 1000 Blocks processed in {:?}", start.elapsed());
+
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = run_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
 }

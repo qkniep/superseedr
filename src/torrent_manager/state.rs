@@ -4441,6 +4441,136 @@ mod tests {
     }
 
 
+    #[test]
+    fn test_scale_1000_blocks_hybrid() {
+        println!("\n=== STARTING SCALE TEST: HYBRID (1000 Blocks) ===");
+        
+        let mut state = create_empty_state();
+        let num_pieces = 1000;
+        let piece_len = 1024;
+        
+        // 1. Setup Torrent with CONSISTENT length/piece_length
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = piece_len;
+        torrent.info.length = (num_pieces as i64) * piece_len; 
+        torrent.info.meta_version = Some(2); 
+
+        // 2. Initialize State
+        let action = Action::MetadataReceived {
+            torrent: Box::new(torrent.clone()),
+            metadata_length: 5000,
+        };
+        state.update(action);
+        
+        // FIX: Use 'Standard' instead of 'Downloading'
+        state.torrent_status = TorrentStatus::Standard;
+
+        // 3. Mock V2 Roots
+        let root = vec![0xAA; 32];
+        for i in 0..num_pieces {
+            state.piece_to_roots.insert(i as u32, vec![(0, root.clone())]);
+        }
+
+        // 4. Setup Peer & Unchoke
+        let peer_id = "hybrid_worker".to_string();
+        add_peer(&mut state, &peer_id);
+        state.update(Action::PeerUnchoked { peer_id: peer_id.clone() }); 
+
+        // 5. DATA PHASE: Send 1000 blocks
+        for i in 0..num_pieces {
+            state.update(Action::IncomingBlock {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                block_offset: 0,
+                data: vec![0u8; piece_len as usize],
+            });
+        }
+        
+        assert_eq!(state.v2_pending_data.len(), 1000, "Hybrid: Should buffer 1000 pieces waiting for V2 proofs");
+
+        // 6. PROOF PHASE
+        let mut verify_count = 0;
+        for i in 0..num_pieces {
+            let effects = state.update(Action::MerkleProofReceived {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                proof: vec![0xFF; 32],
+            });
+            if effects.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { .. })) {
+                verify_count += 1;
+            }
+        }
+        assert_eq!(verify_count, 1000, "Hybrid: All 1000 pieces should trigger V2 verification");
+        assert!(state.v2_pending_data.is_empty(), "Buffer must be empty after proofs");
+    }
+
+    #[test]
+    fn test_scale_1000_blocks_pure_v2() {
+        println!("\n=== STARTING SCALE TEST: PURE V2 (1000 Blocks) ===");
+
+        let mut state = create_empty_state();
+        let num_pieces = 1000;
+        let piece_len = 1024;
+        
+        // 1. Setup Pure V2 Torrent
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = piece_len;
+        torrent.info.length = (num_pieces as i64) * piece_len; 
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // Empty V1 Data
+
+        // 2. Initialize State
+        let action = Action::MetadataReceived {
+            torrent: Box::new(torrent.clone()),
+            metadata_length: 5000,
+        };
+        state.update(action);
+        
+        if state.piece_manager.bitfield.len() == 0 {
+             state.piece_manager.set_initial_fields(num_pieces, false);
+        }
+        
+        // FIX: Use 'Standard' instead of 'Downloading'
+        state.torrent_status = TorrentStatus::Standard;
+
+        // 3. Mock V2 Roots
+        let root = vec![0xBB; 32];
+        for i in 0..num_pieces {
+            state.piece_to_roots.insert(i as u32, vec![(0, root.clone())]);
+        }
+
+        // 4. Setup Peer & Unchoke
+        let peer_id = "v2_worker".to_string();
+        add_peer(&mut state, &peer_id);
+        state.update(Action::PeerUnchoked { peer_id: peer_id.clone() });
+
+        // 5. DATA PHASE
+        for i in 0..num_pieces {
+            state.update(Action::IncomingBlock {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                block_offset: 0,
+                data: vec![0u8; piece_len as usize],
+            });
+        }
+        assert_eq!(state.v2_pending_data.len(), 1000, "Pure V2: Should buffer 1000 pieces");
+
+        // 6. PROOF PHASE
+        let mut verify_count = 0;
+        for i in 0..num_pieces {
+            let effects = state.update(Action::MerkleProofReceived {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                proof: vec![0xEE; 32],
+            });
+            if effects.iter().any(|e| matches!(e, Effect::VerifyPieceV2 { .. })) {
+                verify_count += 1;
+            }
+        }
+        assert_eq!(verify_count, 1000, "Pure V2: All 1000 pieces should trigger V2 verification");
+    }
+
+
 }
 
 #[cfg(test)]
