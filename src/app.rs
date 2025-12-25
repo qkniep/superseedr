@@ -48,6 +48,7 @@ use mainline::{async_dht::AsyncDht, Dht};
 type AsyncDht = ();
 
 use sha1::Digest;
+use sha2::Sha256;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -2114,9 +2115,24 @@ impl App {
             }
         }
 
-        let mut hasher = sha1::Sha1::new();
-        hasher.update(&torrent.info_dict_bencode);
-        let info_hash = hasher.finalize().to_vec();
+        let info_hash = if torrent.info.meta_version == Some(2) {
+            // Check if Hybrid (Has V1 fields) -> Primary is V1
+            if !torrent.info.files.is_empty() || torrent.info.length > 0 {
+                let mut hasher = sha1::Sha1::new();
+                hasher.update(&torrent.info_dict_bencode);
+                hasher.finalize().to_vec()
+            } else {
+                // Pure V2 -> Primary is V2 (SHA-256 Truncated)
+                let mut hasher = Sha256::new();
+                hasher.update(&torrent.info_dict_bencode);
+                hasher.finalize()[0..20].to_vec()
+            }
+        } else {
+            // V1 -> SHA-1
+            let mut hasher = sha1::Sha1::new();
+            hasher.update(&torrent.info_dict_bencode);
+            hasher.finalize().to_vec()
+        };
 
         if self.app_state.torrents.contains_key(&info_hash) {
             tracing_event!(
