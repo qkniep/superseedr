@@ -72,6 +72,10 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
             draw_file_picker(f, file_explorer, "Select Download Folder".to_string());
             return;
         }
+        AppMode::AddTorrentPicker(file_explorer) => {
+            draw_file_picker(f, file_explorer, "Select Torrent File".to_string());
+            return;
+        }
         _ => {}
     }
 
@@ -1308,6 +1312,8 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     // Priority 3: Management
     if width > 90 {
         spans.extend(vec![
+            Span::styled("[a]", Style::default().fg(theme::GREEN)),
+            Span::raw("dd | "),
             Span::styled("[d]", Style::default().fg(theme::YELLOW)),
             Span::raw("elete | "),
             Span::styled("[s]", Style::default().fg(theme::MAUVE)),

@@ -199,6 +199,30 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 }
                             }
                         }
+                        KeyCode::Char('a') => {
+                             let theme = Theme::default()
+                                .add_default_title()
+                                .with_item_style(Style::default().fg(Color::DarkGray))
+                                .with_dir_style(Style::default());
+                            
+                            match FileExplorer::with_theme(theme) {
+                                Ok(mut file_explorer) => {
+                                    // Try to find the user's Download folder first
+                                    let initial_path = UserDirs::new()
+                                        .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
+                                        .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()));
+
+                                    if let Some(path) = initial_path {
+                                        let _ = file_explorer.set_cwd(path);
+                                    }
+                                    app.app_state.mode = AppMode::AddTorrentPicker(file_explorer);
+                                }
+                                Err(e) => {
+                                     tracing_event!(Level::ERROR, "Failed to create FileExplorer: {}", e);
+                                     app.app_state.system_error = Some(format!("Error opening file picker: {}", e));
+                                }
+                            }
+                        }
                         KeyCode::Char('d') => {
                             if let Some(info_hash) = app
                                 .app_state
@@ -614,6 +638,27 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                     _ => {
                         if let Err(e) = file_explorer.handle(&event) {
                             tracing_event!(Level::ERROR, "File explorer error: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+        AppMode::AddTorrentPicker(file_explorer) => {
+            if let CrosstermEvent::Key(key) = event {
+                match key.code {
+                     KeyCode::Tab | KeyCode::Enter => {
+                        let path = file_explorer.current().path().clone();
+                        if path.is_file() {
+                             let _ = app.app_command_tx.send(crate::app::AppCommand::AddTorrentFromFile(path)).await;
+                             app.app_state.mode = AppMode::Normal;
+                        }
+                    }
+                    KeyCode::Esc => {
+                        app.app_state.mode = AppMode::Normal;
+                    }
+                    _ => {
+                        if let Err(e) = file_explorer.handle(&event) {
+                             tracing_event!(Level::ERROR, "File explorer error: {}", e);
                         }
                     }
                 }

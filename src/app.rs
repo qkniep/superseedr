@@ -290,6 +290,7 @@ pub enum AppMode {
     Normal,
     PowerSaving,
     DownloadPathPicker(FileExplorer),
+    AddTorrentPicker(FileExplorer),
     DeleteConfirm {
         info_hash: Vec<u8>,
         with_files: bool,
@@ -305,6 +306,7 @@ pub enum AppMode {
         for_item: ConfigItem,
         file_explorer: FileExplorer,
     },
+
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -889,43 +891,57 @@ impl App {
                     )
                     .await;
 
-                    let move_successful =
-                        if let Some(watch_folder) = &self.client_configs.watch_folder {
-                            (|| {
-                                let parent_dir = watch_folder.parent()?;
-                                let processed_folder = parent_dir.join("processed_torrents");
-                                fs::create_dir_all(&processed_folder).ok()?;
-
-                                let file_name = path.file_name()?;
-                                let new_path = processed_folder.join(file_name);
-                                fs::rename(&path, &new_path).ok()?;
-
-                                Some(())
-                            })()
-                            .is_some()
-                        } else {
-                            false
-                        };
-
                     self.save_state_to_disk();
 
-                    if !move_successful {
-                        tracing_event!(
-                            Level::WARN,
-                            "Could not move torrent file. Defaulting to renaming in place."
-                        );
-                        let mut new_path = path.clone();
-                        new_path.set_extension("torrent.added");
-                        if let Err(e) = fs::rename(&path, &new_path) {
+                    let parent_dir = path.parent();
+
+                    let is_user_watch = self.client_configs.watch_folder
+                        .as_ref()
+                        .map_or(false, |p| parent_dir == Some(p));
+
+                    let is_system_watch = get_watch_path()
+                        .map_or(false, |(p, _)| parent_dir == Some(&p));
+
+                    if is_user_watch || is_system_watch {
+                        let move_successful =
+                            if let Some(watch_folder) = &self.client_configs.watch_folder {
+                                (|| {
+                                    let parent = watch_folder.parent()?;
+                                    let processed_folder = parent.join("processed_torrents");
+                                    fs::create_dir_all(&processed_folder).ok()?;
+
+                                    let file_name = path.file_name()?;
+                                    let new_path = processed_folder.join(file_name);
+                                    fs::rename(&path, &new_path).ok()?;
+
+                                    Some(())
+                                })()
+                                .is_some()
+                            } else {
+                                false
+                            };
+
+                        // Fallback: Rename to .added only if move failed AND it was in a watch folder
+                        if !move_successful {
                             tracing_event!(
-                                Level::ERROR,
-                                "Fallback rename failed for {:?}: {}",
-                                path,
-                                e
+                                Level::WARN,
+                                "Could not move torrent file. Defaulting to renaming in place."
                             );
+                            let mut new_path = path.clone();
+                            new_path.set_extension("torrent.added");
+                            if let Err(e) = fs::rename(&path, &new_path) {
+                                tracing_event!(
+                                    Level::ERROR,
+                                    "Fallback rename failed for {:?}: {}",
+                                    path,
+                                    e
+                                );
+                            }
                         }
                     }
+                    
                 } else {
+                    // Handle case where no default download folder is set (Manual selection)
                     self.app_state.pending_torrent_path = Some(path.clone());
                     if let Ok(mut explorer) = FileExplorer::new() {
                         let initial_path = self
