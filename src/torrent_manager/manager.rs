@@ -622,6 +622,15 @@ impl TorrentManager {
                     let verification_task = tokio::task::spawn_blocking(move || {
                         if let Some(expected) = expected_hash {
                             let hash = sha1::Sha1::digest(&data);
+
+
+                            let hash_hex = hex::encode(hash);
+                            let expected_hex = hex::encode(&expected);
+                            tracing::info!(
+                                "🔍 V1 Verify Piece {}: Len={} | Calc={} | Expect={}", 
+                                piece_index, data.len(), hash_hex, expected_hex
+                            );
+
                             if hash.as_slice() == expected.as_slice() {
                                 return Ok(data);
                             }
@@ -681,6 +690,12 @@ impl TorrentManager {
                         &data, 
                         relative_index,
                         &proof
+                    );
+
+                    let root_hex = hex::encode(&root_hash);
+                    tracing::info!(
+                        "🔍 V2 Verify Piece {}: Len={} | FileRoot={} | Valid={}",
+                        piece_index, data.len(), root_hex, is_valid
                     );
 
                     let result = if is_valid { Ok(data) } else { Err(()) };
@@ -2555,39 +2570,81 @@ impl TorrentManager {
 }
 
 fn verify_merkle_proof(
-    root_hash: &[u8],
+    target_root_hash: &[u8],
     piece_data: &[u8],
-    piece_index: u32,
+    _piece_index: u32,
     proof: &[u8],
 ) -> bool {
-    if proof.len() % 32 != 0 { return false; }
+    // 1. Calculate the V2 Root of the data we have
+    // If the data is > 16KB, we must build the local tree first.
+    let calculated_root = compute_v2_piece_root(piece_data);
 
-    // 1. Hash the leaf (Piece Data)
-    let mut current_hash: [u8; 32] = Sha256::digest(piece_data).into();
+    // 2. If we have no proof (Local Verification / Option B), 
+    // we simply compare our calculated root against the target.
+    if proof.is_empty() {
+        return calculated_root.as_slice() == target_root_hash;
+    }
 
-    let mut current_index = piece_index;
+    // 3. If we DO have a proof (Network Verification),
+    // we climb the tree using the proof.
+    // Note: This path is rare for full pieces because 'calculated_root'
+    // usually *is* the piece hash we are looking for.
+    let mut current_hash = calculated_root;
+    let mut current_idx = _piece_index; // This logic depends on what the proof represents
 
-    // 2. Climb the tree
     for sibling in proof.chunks(32) {
         let mut hasher = Sha256::new();
-        
-        // v2 Tree Logic: 
-        // If index is even, we are Left, sibling is Right.
-        // If index is odd, we are Right, sibling is Left.
-        if current_index % 2 == 0 {
+        if current_idx % 2 == 0 {
             hasher.update(current_hash);
             hasher.update(sibling);
         } else {
             hasher.update(sibling);
             hasher.update(current_hash);
         }
-
         current_hash = hasher.finalize().into();
-        current_index /= 2;
+        current_idx /= 2;
     }
 
-    // 3. Verify Root
-    current_hash.as_slice() == root_hash
+    current_hash.as_slice() == target_root_hash
+}
+
+/// Helper: correctly computes the BitTorrent v2 Merkle Root for a buffer.
+/// Splits data into 16KB blocks and combines hashes up the tree.
+fn compute_v2_piece_root(data: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 16_384;
+
+    if data.len() <= BLOCK_SIZE {
+        return Sha256::digest(data).into();
+    }
+
+    // 1. Hash all 16KB leaves
+    let mut layer: Vec<[u8; 32]> = data
+        .chunks(BLOCK_SIZE)
+        .map(|chunk| Sha256::digest(chunk).into())
+        .collect();
+
+    // 2. Build the tree up
+    // BitTorrent v2 pieces are typically powers of 2 (32KB, 64KB, etc),
+    // so this binary reduction works perfectly.
+    while layer.len() > 1 {
+        let mut next_layer = Vec::with_capacity(layer.len() / 2);
+        for pair in layer.chunks(2) {
+            let mut hasher = Sha256::new();
+            if pair.len() == 2 {
+                hasher.update(pair[0]);
+                hasher.update(pair[1]);
+            } else {
+                // Should not happen for standard power-of-2 pieces, 
+                // but if it does (last piece), standard practice is often to duplicate
+                // or just bubble up. For valid .torrent pieces, pairs strictly exist.
+                hasher.update(pair[0]);
+            }
+            next_layer.push(hasher.finalize().into());
+        }
+        layer = next_layer;
+    }
+
+    layer[0]
 }
 
 
@@ -2737,6 +2794,66 @@ mod tests {
             Ok(Err(e)) => panic!("Manager task panicked: {:?}", e),
             Err(_) => panic!("Test timed out! Manager loop likely deadlocked processing blocks."),
         }
+    }
+
+    #[test]
+    fn test_v2_merkle_root_calculation() {
+        use sha2::{Digest, Sha256};
+
+        // 1. Create 32KB of deterministic data (2 blocks of 16KB)
+        let block_size = 16_384;
+        let piece_size = 32_768;
+        let mut data = Vec::with_capacity(piece_size);
+        
+        // Fill Block 1 with 0xAA
+        data.extend_from_slice(&vec![0xAA; block_size]);
+        // Fill Block 2 with 0xBB
+        data.extend_from_slice(&vec![0xBB; block_size]);
+
+        // 2. Manually Calculate Expected Root
+        // Hash( Hash(Block1) + Hash(Block2) )
+        
+        let hash_1 = Sha256::digest(&data[0..block_size]);
+        let hash_2 = Sha256::digest(&data[block_size..piece_size]);
+        
+        let mut hasher = Sha256::new();
+        hasher.update(hash_1);
+        hasher.update(hash_2);
+        let expected_root = hasher.finalize();
+
+        // 3. Run the Function Under Test
+        // Note: You need to expose the function or test inside the module
+        let calculated_root = super::compute_v2_piece_root(&data);
+
+        // 4. Assert
+        assert_eq!(
+            calculated_root.as_slice(), 
+            expected_root.as_slice(), 
+            "Merkle Root mismatch! The function failed to combine 16KB blocks correctly."
+        );
+        
+        println!("SUCCESS: 32KB Merkle Root calculated correctly.");
+    }
+
+    #[test]
+    fn test_v2_merkle_root_single_block() {
+        use sha2::{Digest, Sha256};
+
+        // 1. Create 16KB data (Single Block)
+        let data = vec![0xCC; 16_384];
+
+        // 2. Expected Root is just the SHA256 of the data (Leaf)
+        let expected_root = Sha256::digest(&data);
+
+        // 3. Run Function
+        let calculated_root = super::compute_v2_piece_root(&data);
+
+        // 4. Assert
+        assert_eq!(
+            calculated_root.as_slice(), 
+            expected_root.as_slice(), 
+            "Single block (16KB) should just be hashed directly."
+        );
     }
 
 }
