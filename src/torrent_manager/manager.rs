@@ -4126,6 +4126,7 @@ mod resource_tests {
         // --- 3. INIT MANAGER ---
         let mut torrent = create_dummy_torrent(3);
         torrent.info.piece_length = piece_len as i64;
+        torrent.info.pieces = Vec::new();
         
         // Ensure name is consistent for file creation
         torrent.info.name = "test_v2_relative_logic".to_string();
