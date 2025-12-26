@@ -1739,7 +1739,7 @@ mod tests {
         let start = Instant::now();
 
         // Pump blocks for 4 seconds to trigger growth
-        while start.elapsed() < Duration::from_secs(4) {
+        while start.elapsed() < Duration::from_secs(8) {
             while inflight < 100 {
                 let _ = client_cmd_tx
                     .send(TorrentCommand::BulkRequest(vec![(

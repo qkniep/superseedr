@@ -2132,8 +2132,7 @@ impl App {
         }
 
         let info_hash = if torrent.info.meta_version == Some(2) {
-            // Check if Hybrid (Has V1 fields) -> Primary is V1
-            if !torrent.info.files.is_empty() || torrent.info.length > 0 {
+            if !torrent.info.pieces.is_empty() {
                 let mut hasher = sha1::Sha1::new();
                 hasher.update(&torrent.info_dict_bencode);
                 hasher.finalize().to_vec()

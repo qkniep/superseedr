@@ -583,6 +583,7 @@ impl TorrentState {
                     .all(|s| *s == PieceStatus::Done);
 
                 if all_done {
+                    tracing::warn!("State: CheckCompletion believes all pieces are done. Bitfield Len: {}", self.piece_manager.bitfield.len());
                     let mut effects = Vec::new();
                     self.torrent_status = TorrentStatus::Done;
 
@@ -928,8 +929,11 @@ impl TorrentState {
                         .flat_map(|&byte| (0..8).map(move |i| (byte >> (7 - i)) & 1 == 1))
                         .collect();
 
-                    if let Some(torrent) = &self.torrent {
-                        let total_pieces = torrent.info.pieces.len() / 20;
+                    let total_pieces = self.piece_manager.bitfield.len();
+                    
+                    if peer.bitfield.len() > total_pieces {
+                        peer.bitfield.truncate(total_pieces);
+                    } else if peer.bitfield.len() < total_pieces {
                         peer.bitfield.resize(total_pieces, false);
                     }
                 }
@@ -1079,17 +1083,8 @@ impl TorrentState {
                                     root_hash: root.clone(),
                                 });
                             } 
-                            // OPTION B (THE FIX): No proof, but we have V1 SHA-1 hashes (Hybrid) -> Use V1
-                            else if self.torrent.as_ref().map_or(false, |t| !t.info.pieces.is_empty()) {
-                                // Fallback to V1 verification so we don't stall!
-                                self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
-                                effects.push(Effect::VerifyPiece {
-                                    peer_id: peer_id.clone(),
-                                    piece_index,
-                                    data: complete_data,
-                                });
-                            }
-                            // OPTION C: Pure V2, no proof -> We MUST buffer and wait
+                            // OPTION C: Pure V2 (or Hybrid preferring V2), no proof -> We MUST buffer and wait
+                            // We removed OPTION B (aggressive V1 fallback) because it broke V2 compliance/buffering tests.
                             else {
                                 self.v2_pending_data.insert(piece_index, (block_offset, complete_data));
                             }
@@ -1514,6 +1509,12 @@ impl TorrentState {
             Action::ValidationComplete { completed_pieces } => {
                 let mut effects = Vec::new();
 
+                tracing::info!("State: Validation Complete. Found {} valid pieces out of {}. Bitfield len: {}", 
+                    completed_pieces.len(), 
+                    self.piece_manager.bitfield.len(),
+                    self.piece_manager.bitfield.len()
+                );
+
                 if self.torrent_status != TorrentStatus::Validating {
                     return vec![Effect::DoNothing];
                 }
@@ -1544,6 +1545,7 @@ impl TorrentState {
                         self.piece_manager.need_queue.push(idx);
                     }
                 }
+                tracing::info!("State: Need Queue rebuilt. Items needed: {}", self.piece_manager.need_queue.len());
 
                 self.piece_manager
                     .update_rarity(self.peers.values().map(|p| &p.bitfield));

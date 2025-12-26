@@ -52,6 +52,12 @@ pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
     //    Serde is fast, so this second pass is not a major performance issue.
     let mut torrent: Torrent = de::from_bytes(bencode_data)?;
 
+    // If 'length' is 0 (typical for Pure V2), calculate it from the file tree
+    // so the rest of the application sees a valid size immediately.
+    if torrent.info.length == 0 {
+        torrent.info.length = torrent.info.total_length();
+    }
+
     // 5. Manually set the `info_dict_bencode` field we created.
     torrent.info_dict_bencode = info_dict_bencode;
 
@@ -140,7 +146,9 @@ mod tests {
 
         // ... verify logic ...
         let extracted_roots = parsed_torrent.get_v2_roots();
-        let root_map: std::collections::HashMap<_, _> = extracted_roots.into_iter().collect();
+        let root_map: HashMap<String, Vec<u8>> = extracted_roots.into_iter()
+                    .map(|(path, _len, root)| (path, root))
+                    .collect();
 
         assert_eq!(root_map.len(), 2);
         assert_eq!(root_map.get("folder/file_a.txt"), Some(&root_hash_1));

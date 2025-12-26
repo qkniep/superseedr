@@ -200,21 +200,22 @@ impl TorrentManager {
             );
         }
 
+        // --- Info Hash Calculation ---
         let info_hash = if torrent.info.meta_version == Some(2) {
-            // Check if Hybrid (Has V1 fields) -> Primary is V1
-            if !torrent.info.files.is_empty() || torrent.info.length > 0 {
-                let mut hasher = Sha1::new();
+            if !torrent.info.pieces.is_empty() {
+                tracing::info!("Init: Hybrid Torrent detected (V1 compatible). Using SHA-1.");
+                let mut hasher = sha1::Sha1::new();
                 hasher.update(&torrent.info_dict_bencode);
                 hasher.finalize().to_vec()
             } else {
-                // Pure V2 -> Primary is V2
+                tracing::info!("Init: Pure V2 Torrent detected. Using SHA-256 (Truncated).");
                 let mut hasher = sha2::Sha256::new();
                 hasher.update(&torrent.info_dict_bencode);
                 hasher.finalize()[0..20].to_vec()
             }
         } else {
             // V1
-            let mut hasher = Sha1::new();
+            let mut hasher = sha1::Sha1::new();
             hasher.update(&torrent.info_dict_bencode);
             hasher.finalize().to_vec()
         };
@@ -237,62 +238,51 @@ impl TorrentManager {
         #[cfg(not(feature = "dht"))]
         let dht_trigger_tx = ();
 
-        // --- 1. Calculate Piece Count (V2 Support) ---
+        // --- 1. PRE-CALCULATE V2 ROOTS & TOTAL SIZE ---
+        // We do this EARLY so we can calculate num_pieces correctly for Pure V2 torrents
+        let mut piece_to_roots: HashMap<u32, Vec<(u64, Vec<u8>)>> = HashMap::new();
+        let mut v2_total_len: u64 = 0;
+        let piece_len = torrent.info.piece_length as u64;
+
+        if torrent.info.meta_version == Some(2) {
+            let v2_roots = torrent.get_v2_roots(); // Returns (path, length, root_hash)
+            event!(Level::INFO, "Init: Found {} V2 files from Merkle Tree.", v2_roots.len());
+            
+            let mut current_byte_offset = 0;
+            
+            for (path, length, root_hash) in v2_roots {
+                v2_total_len += length;
+
+                if length > 0 && piece_len > 0 {
+                    let start_piece = (current_byte_offset / piece_len) as u32;
+                    let end_byte = current_byte_offset + length;
+                    let end_piece = ((end_byte + piece_len - 1) / piece_len) as u32;
+
+                    for p in start_piece..end_piece {
+                        piece_to_roots
+                            .entry(p)
+                            .or_default()
+                            .push((current_byte_offset, root_hash.clone()));
+                    }
+                }
+                current_byte_offset += length;
+            }
+        }
+
+        // --- 2. Calculate Piece Count ---
         let num_pieces = if !torrent.info.pieces.is_empty() {
             torrent.info.pieces.len() / 20
         } else {
-            let total_len: u64 = if !torrent.info.files.is_empty() {
-                torrent.info.files.iter().map(|f| f.length as u64).sum()
-            } else {
-                torrent.info.length as u64
-            };
-            
+            let total_len = torrent.info.length as u64; 
             let pl = torrent.info.piece_length as u64;
+            
             if pl > 0 {
                 ((total_len + pl - 1) / pl) as usize
             } else {
                 0
             }
         };
-
-        // --- 2. Populate V2 Roots Map ---
-        let mut piece_to_roots: HashMap<u32, Vec<(u64, Vec<u8>)>> = HashMap::new();
-
-        if torrent.info.meta_version == Some(2) {
-            let v2_roots = torrent.get_v2_roots();
-            let root_map: HashMap<String, Vec<u8>> = v2_roots.into_iter()
-                .map(|(path, _len, root)| (path, root)) 
-                .collect();
-            let piece_len = torrent.info.piece_length as u64;
-
-            // Helper to populate the map for a given file
-            let mut add_file_roots = |path: &str, length: u64, offset: u64| {
-                if let Some(root_hash) = root_map.get(path) {
-                    if length > 0 && piece_len > 0 {
-                        let start_piece = (offset / piece_len) as u32;
-                        let end_piece = ((offset + length - 1) / piece_len) as u32;
-
-                        for p in start_piece..=end_piece {
-                            piece_to_roots
-                                .entry(p)
-                                .or_default()
-                                .push((offset as u64, root_hash.clone()));
-                        }
-                    }
-                }
-            };
-
-            if !torrent.info.files.is_empty() {
-                let mut current_offset = 0u64;
-                for file in &torrent.info.files {
-                    let path = file.path.join("/");
-                    add_file_roots(&path, file.length as u64, current_offset);
-                    current_offset += file.length as u64;
-                }
-            } else {
-                add_file_roots(&torrent.info.name, torrent.info.length as u64, 0);
-            }
-        }
+        event!(Level::INFO, "Init: Calculated num_pieces: {}. (V2 len: {})", num_pieces, v2_total_len);
 
         let mut piece_manager = PieceManager::new();
         piece_manager.set_initial_fields(num_pieces, torrent_validation_status);
@@ -3232,8 +3222,8 @@ mod resource_tests {
         const TOTAL_BLOCKS: usize = (PIECE_SIZE / BLOCK_SIZE) * NUM_PIECES; // 2080 blocks
 
         // Setup channels
-        let (_incoming_tx, incoming_rx) = mpsc::channel(10);
-        let (cmd_tx, cmd_rx) = mpsc::channel(10);
+        let (_incoming_tx, incoming_rx) = mpsc::channel(1000);
+        let (cmd_tx, cmd_rx) = mpsc::channel(1000);
 
         let (event_tx, mut event_rx) = mpsc::channel(100);
         tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
