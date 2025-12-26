@@ -47,9 +47,7 @@ pub struct Torrent {
 }
 
 impl Torrent {
-    /// Extracts all File Merkle Roots found in the v2 `file tree`.
-    /// Returns a map of Path -> Root Hash (32 bytes).
-    pub fn get_v2_roots(&self) -> Vec<(String, Vec<u8>)> {
+    pub fn get_v2_roots(&self) -> Vec<(String, u64, Vec<u8>)> {
         let mut results = Vec::new();
         if let Some(ref tree) = self.info.file_tree {
             traverse_file_tree(tree, String::new(), &mut results);
@@ -70,19 +68,28 @@ impl Torrent {
 fn traverse_file_tree(
     node: &Value,
     current_path: String,
-    results: &mut Vec<(String, Vec<u8>)>,
+    results: &mut Vec<(String, u64, Vec<u8>)>,
 ) {
     if let Value::Dict(map) = node {
         for (key, value) in map {
             let name = String::from_utf8_lossy(key).to_string();
 
             if name == "" {
+                // This is a file metadata node (Leaf)
                 if let Value::Dict(file_metadata) = value {
+                    // Extract Root
                     if let Some(Value::Bytes(root)) = file_metadata.get("pieces root".as_bytes()) {
-                        results.push((current_path.clone(), root.clone()));
+                        // Extract Length
+                        let len = if let Some(Value::Int(l)) = file_metadata.get("length".as_bytes()) {
+                            *l as u64
+                        } else {
+                            0
+                        };
+                        results.push((current_path.clone(), len, root.clone()));
                     }
                 }
             } else {
+                 // Directory node
                  let new_path = if current_path.is_empty() {
                      name
                  } else {
@@ -100,6 +107,7 @@ pub struct Info {
     pub piece_length: i64,
 
     #[serde(with = "serde_bytes")]
+    #[serde(default)]
     pub pieces: Vec<u8>,
 
     #[serde(default)]
@@ -122,6 +130,28 @@ pub struct Info {
 
     #[serde(rename = "file tree", default)]
     pub file_tree: Option<Value>,
+}
+
+impl Info {
+
+    pub fn total_length(&self) -> i64 {
+        // Case 1: v1 Single File
+        if self.length > 0 {
+            return self.length;
+        }
+
+        // Case 2: v1 Multi-File
+        if !self.files.is_empty() {
+            return self.files.iter().map(|f| f.length).sum();
+        }
+
+        // Case 3: v2 File Tree
+        if let Some(ref tree) = self.file_tree {
+            return calculate_tree_size(tree);
+        }
+
+        0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -163,4 +193,25 @@ where
         }
         _ => Ok(None),
     }
+}
+
+fn calculate_tree_size(node: &Value) -> i64 {
+    let mut size = 0;
+    if let Value::Dict(map) = node {
+        for (key, value) in map {
+            let name = String::from_utf8_lossy(key);
+            if name == "" {
+                // This is a file metadata node
+                if let Value::Dict(meta) = value {
+                    if let Some(Value::Int(len)) = meta.get("length".as_bytes()) {
+                        size += len;
+                    }
+                }
+            } else {
+                // This is a subdirectory or file entry, recurse
+                size += calculate_tree_size(value);
+            }
+        }
+    }
+    size
 }

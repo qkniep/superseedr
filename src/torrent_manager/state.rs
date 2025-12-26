@@ -1402,7 +1402,9 @@ impl TorrentState {
                 // We map every piece index to the Merkle Root of the file it belongs to.
                 // This allows us to look up the correct root when a peer sends a hash proof.
                 let v2_roots = torrent.get_v2_roots(); // Returns Vec<(PathString, RootHash)>
-                let roots_map: HashMap<String, Vec<u8>> = v2_roots.into_iter().collect();
+                let roots_map: HashMap<String, Vec<u8>> = v2_roots.into_iter()
+                    .map(|(path, _len, root)| (path, root))
+                    .collect();
                 
                 let piece_length = torrent.info.piece_length as u64;
                 let mut current_byte_offset = 0;

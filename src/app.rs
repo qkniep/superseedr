@@ -2188,6 +2188,19 @@ impl App {
             return;
         }
 
+        let number_of_pieces_total = if !torrent.info.pieces.is_empty() {
+            (torrent.info.pieces.len() / 20) as u32
+        } else {
+            // Handle v2 torrents (empty pieces list)
+            let total_len = torrent.info.total_length();
+            if torrent.info.piece_length > 0 {
+                // ceil(total_len / piece_length)
+                ((total_len as f64) / (torrent.info.piece_length as f64)).ceil() as u32
+            } else {
+                0
+            }
+        };
+
         let placeholder_state = TorrentDisplayState {
             latest_state: TorrentMetrics {
                 torrent_control_state: torrent_control_state.clone(),
@@ -2195,7 +2208,7 @@ impl App {
                 torrent_or_magnet: permanent_torrent_path.to_string_lossy().to_string(),
                 torrent_name: torrent.info.name.clone(),
                 download_path: download_path.clone(),
-                number_of_pieces_total: (torrent.info.pieces.len() / 20) as u32,
+                number_of_pieces_total,
                 ..Default::default()
             },
             ..Default::default()
