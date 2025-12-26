@@ -658,24 +658,33 @@ impl TorrentManager {
                 });
             }
 
-
-            Effect::VerifyPieceV2 { peer_id, piece_index, proof, data, root_hash } => {
+            Effect::VerifyPieceV2 { peer_id, piece_index, proof, data, root_hash, file_start_offset } => {
                 let tx = self.torrent_manager_tx.clone();
                 let peer_id_clone = peer_id.clone();
                 
-                // Spawn blocking task for SHA-256 Merkle hashing
+                let piece_len = self.state.torrent.as_ref()
+                    .map(|t| t.info.piece_length as u64)
+                    .unwrap_or(0);
+
                 tokio::task::spawn_blocking(move || {
+                    let global_byte_start = piece_index as u64 * piece_len;
+                    let relative_byte_offset = global_byte_start.saturating_sub(file_start_offset);
+
+                    let relative_index = if piece_len > 0 {
+                        (relative_byte_offset / piece_len) as u32
+                    } else {
+                        0
+                    };
+
                     let is_valid = verify_merkle_proof(
                         &root_hash, 
                         &data, 
-                        piece_index, 
+                        relative_index,
                         &proof
                     );
 
                     let result = if is_valid { Ok(data) } else { Err(()) };
 
-                    // Reuse existing PieceVerified command!
-                    // This loops back to Action::PieceVerified, which handles disk writes.
                     let _ = tx.blocking_send(TorrentCommand::PieceVerified {
                         piece_index,
                         peer_id: peer_id_clone,
@@ -2346,7 +2355,7 @@ impl TorrentManager {
                             
                             self.apply_action(Action::MerkleProofReceived {
                                 peer_id,
-                                piece_index: calculated_global_index, // <--- Pass CORRECTED Global Index
+                                piece_index: calculated_global_index,
                                 proof,
                             });
                         },
@@ -4070,4 +4079,161 @@ mod resource_tests {
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 
+    #[tokio::test]
+    async fn test_v2_relative_index_logic() {
+        use sha2::{Digest, Sha256};
+        use crate::resource_manager::ResourceManager;
+        use crate::token_bucket::TokenBucket;
+        use tokio::io::AsyncWriteExt; // Needed for manual file creation
+
+        // --- 1. MANUAL SETUP ---
+        let (_incoming_tx, incoming_peer_rx) = mpsc::channel(100);
+        let (cmd_tx, cmd_rx) = mpsc::channel(100);
+        let (metrics_tx, _) = broadcast::channel(100);
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let settings = Arc::new(Settings::default());
+
+        // Drain event channel to prevent deadlock
+        let (event_tx, mut event_rx) = mpsc::channel(100);
+        tokio::spawn(async move { while let Some(_) = event_rx.recv().await {} }); // Modified to keep checking
+
+        let mut limits = HashMap::new();
+        limits.insert(crate::resource_manager::ResourceType::PeerConnection, (100, 100));
+        limits.insert(crate::resource_manager::ResourceType::DiskRead, (100, 100));
+        limits.insert(crate::resource_manager::ResourceType::DiskWrite, (100, 100));
+        limits.insert(crate::resource_manager::ResourceType::Reserve, (0, 0));
+        
+        let (resource_manager, rm_client) = ResourceManager::new(limits, shutdown_tx.clone());
+        tokio::spawn(resource_manager.run());
+
+        let bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
+        let piece_len = 1024;
+
+        // --- 2. CONSTRUCT DATA & PROOFS ---
+        // File B: Piece 1 (Relative 0) + Piece 2 (Relative 1)
+        let data_b0 = vec![0xBB; piece_len]; 
+        let hash_b0 = Sha256::digest(&data_b0);
+
+        let data_b1 = vec![0xCC; piece_len]; // <-- TARGET (Global 2, Relative 1)
+        let hash_b1 = Sha256::digest(&data_b1);
+
+        // Root = Hash(B0 + B1)
+        let mut hasher = Sha256::new();
+        hasher.update(&hash_b0);
+        hasher.update(&hash_b1);
+        let root_b = hasher.finalize().to_vec();
+
+        // --- 3. INIT MANAGER ---
+        let mut torrent = create_dummy_torrent(3);
+        torrent.info.piece_length = piece_len as i64;
+        
+        // Ensure name is consistent for file creation
+        torrent.info.name = "test_v2_relative_logic".to_string();
+
+        let params = TorrentParameters {
+            dht_handle: {
+                #[cfg(feature = "dht")]
+                {
+                    mainline::Dht::builder().port(0).build().unwrap().as_async()
+                }
+                #[cfg(not(feature = "dht"))]
+                {
+                    ()
+                }
+            },
+            incoming_peer_rx,
+            metrics_tx,
+            torrent_validation_status: false,
+            download_dir: std::env::temp_dir(),
+            manager_command_rx: cmd_rx,
+            manager_event_tx: event_tx,
+            settings,
+            resource_manager: rm_client,
+            global_dl_bucket: bucket.clone(),
+            global_ul_bucket: bucket,
+        };
+
+        let mut manager = TorrentManager::from_torrent(params, torrent).unwrap();
+
+        // --- FIX 1: Manually Create File on Disk (Prevents Write Retry Loop) ---
+        // We pre-allocate the file so the WriteToDisk command succeeds immediately.
+        let file_path = manager.root_download_path.join("test_v2_relative_logic");
+        {
+            let mut file = tokio::fs::File::create(&file_path).await.expect("Failed to create test file");
+            file.set_len((piece_len * 3) as u64).await.expect("Failed to set file length");
+        }
+
+        // --- FIX 2: Set Status to Standard (Prevents IncomingBlock Drop) ---
+        manager.state.torrent_status = crate::torrent_manager::state::TorrentStatus::Standard;
+
+        // --- 4. PREPARE STATE ---
+        // Map Global Piece 2 -> File B Root (Offset 1024)
+        manager.state.piece_to_roots.insert(2, vec![(1024, root_b.clone())]);
+
+        // Register Peer
+        let peer_id = "v2_tester".to_string();
+        let (peer_tx, mut peer_rx) = mpsc::channel(10);
+        manager.apply_action(Action::RegisterPeer {
+            peer_id: peer_id.clone(),
+            tx: peer_tx,
+        });
+
+        let manager_tx = manager.torrent_manager_tx.clone();
+        let run_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        // --- 5. EXECUTE TEST ---
+        // A. Send Data for Global Piece 2
+        manager_tx.send(TorrentCommand::Block(
+            peer_id.clone(),
+            2, // Global Index
+            0,
+            data_b1.clone()
+        )).await.unwrap();
+
+        // B. Send Proof for Global Piece 2
+        // Proof needed for Relative Index 1 (Right Node) is the Left Sibling (Hash B0)
+        let proof = hash_b0.to_vec();
+        
+        manager_tx.send(TorrentCommand::MerkleHashData {
+            peer_id: peer_id.clone(),
+            file_index: 0, 
+            piece_index: 2, // Global Index
+            base_layer: 0,
+            length: 1,
+            proof,
+        }).await.unwrap();
+
+        // --- 6. ASSERTION ---
+        // We spy on the PEER channel. 
+        // If verification succeeds, Manager sends "Have(2)" to the peer.
+        // If verification fails, Manager sends "Disconnect".
+        
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    TorrentCommand::Have(_, idx) => {
+                        if idx == 2 { return true; }
+                    }
+                    TorrentCommand::Disconnect(_) => {
+                        return false; 
+                    }
+                    _ => {}
+                }
+            }
+            false
+        }).await;
+
+        // CLEANUP
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = run_handle.await;
+        let _ = std::fs::remove_file(file_path);
+
+        match outcome {
+            Ok(true) => println!("SUCCESS: Piece verified using relative indexing."),
+            Ok(false) => panic!("FAILURE: Peer was disconnected (Verification Failed). Logic used Global Index instead of Relative."),
+            Err(_) => panic!("TIMEOUT: Manager took too long to verify."),
+        }
+    }
 }

@@ -183,6 +183,7 @@ pub enum Effect {
         proof: Vec<u8>,
         data: Vec<u8>,
         root_hash: Vec<u8>,
+        file_start_offset: u64,
     },
     WriteToDisk {
         peer_id: String,
@@ -1066,12 +1067,11 @@ impl TorrentState {
                         let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(0);
                         let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
 
-                        let matching_root = roots.iter()
+                        let matching_root_info = roots.iter()
                             .filter(|(start, _)| *start <= global_offset)
-                            .max_by_key(|(start, _)| *start)
-                            .map(|(_, root)| root);
+                            .max_by_key(|(start, _)| *start);
 
-                        if let Some(root) = matching_root {
+                        if let Some((file_start, root)) = matching_root_info {
                             // OPTION A: We have the V2 proof ready -> Use V2 (Strongest)
                             if let Some(proof) = self.v2_proofs.get(&piece_index) {
                                 self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
@@ -1081,6 +1081,7 @@ impl TorrentState {
                                     proof: proof.clone(),
                                     data: complete_data,
                                     root_hash: root.clone(),
+                                    file_start_offset: *file_start,
                                 });
                             } 
                             // OPTION C: Pure V2 (or Hybrid preferring V2), no proof -> We MUST buffer and wait
@@ -1132,18 +1133,18 @@ impl TorrentState {
                         let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(0);
                         let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
 
-                        let matching_root = roots.iter()
+                        let matching_root_info = roots.iter()
                             .filter(|(start, _)| *start <= global_offset)
-                            .max_by_key(|(start, _)| *start)
-                            .map(|(_, root)| root);
+                            .max_by_key(|(start, _)| *start);
 
-                        if let Some(root) = matching_root {
+                        if let Some((file_start, root)) = matching_root_info {
                             return vec![Effect::VerifyPieceV2 {
                                 peer_id,
                                 piece_index,
                                 proof,
                                 data,
                                 root_hash: root.clone(),
+                                file_start_offset: *file_start,
                             }];
                         }
                     }
@@ -1393,41 +1394,18 @@ impl TorrentState {
                 self.torrent = Some(*torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
 
-                // --- 1. POPULATE PIECE_TO_ROOTS MAP (V2 Support) ---
-                // We map every piece index to the Merkle Root of the file it belongs to.
-                // This allows us to look up the correct root when a peer sends a hash proof.
-                let v2_roots = torrent.get_v2_roots(); // Returns Vec<(PathString, RootHash)>
-                let roots_map: HashMap<String, Vec<u8>> = v2_roots.into_iter()
-                    .map(|(path, _len, root)| (path, root))
-                    .collect();
-                
-                let piece_length = torrent.info.piece_length as u64;
-                let mut current_byte_offset = 0;
-                
-                // Handle both Single-File and Multi-File modes uniformly
-                let files_list = if torrent.info.files.is_empty() {
-                    vec![crate::torrent_file::InfoFile {
-                        length: torrent.info.length,
-                        path: vec![torrent.info.name.clone()],
-                        md5sum: None,
-                        attr: None,
-                    }]
-                } else {
-                    torrent.info.files.clone()
-                };
+                if torrent.info.meta_version == Some(2) {
+                    let v2_roots = torrent.get_v2_roots(); // (Path, Length, Root)
+                    let piece_length = torrent.info.piece_length as u64;
+                    let mut current_byte_offset = 0;
 
-                for file in files_list {
-                    // Reconstruct path to match keys from get_v2_roots
-                    let path_key = file.path.join("/"); 
-                    
-                    if let Some(root_hash) = roots_map.get(&path_key) {
-                        if file.length > 0 && piece_length > 0 {
+                    for (_path, length, root_hash) in v2_roots {
+                        if length > 0 && piece_length > 0 {
                             let start_piece = current_byte_offset / piece_length;
-                            // Calculate end piece inclusive
-                            let end_byte = current_byte_offset + file.length as u64;
+                            // Calculate end piece (exclusive of next file start)
+                            let end_byte = current_byte_offset + length;
                             let end_piece = (end_byte + piece_length - 1) / piece_length;
-                            
-                            // Map all pieces covering this file to its root
+
                             for idx in start_piece..end_piece {
                                 self.piece_to_roots
                                     .entry(idx as u32)
@@ -1435,8 +1413,8 @@ impl TorrentState {
                                     .push((current_byte_offset, root_hash.clone()));
                             }
                         }
+                        current_byte_offset += length;
                     }
-                    current_byte_offset += file.length as u64;
                 }
 
                 // --- 2. CALCULATE PIECE COUNT (V2 Fix) ---
@@ -4575,6 +4553,72 @@ mod tests {
             }
         }
         assert_eq!(verify_count, 1000, "Pure V2: All 1000 pieces should trigger V2 verification");
+    }
+
+    #[test]
+    fn test_v2_verification_with_nonzero_file_offset() {
+        let mut state = create_empty_state();
+        
+        // Setup: 2 Pieces total. 
+        // Piece 0: File A (Padding/Skip)
+        // Piece 1: File B (The one we want to verify)
+        let piece_len = 1024;
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = piece_len;
+        state.torrent = Some(torrent);
+        
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.set_geometry(1024, 2048, false);
+
+        // Root for File B
+        let root_b = vec![0xBB; 32];
+        
+        // Map Piece 1 to File B, which starts at 1024 (Piece 1's start)
+        // This implies File A occupied 0..1024.
+        state.piece_to_roots.insert(1, vec![(1024, root_b.clone())]);
+
+        let peer_id = "offset_tester".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // 1. Send Proof for Piece 1 (Global Index)
+        // The proof corresponds to the FIRST piece of File B (Relative Index 0)
+        let proof = vec![0xFF; 32]; // Dummy proof
+        state.update(Action::MerkleProofReceived {
+            peer_id: peer_id.clone(),
+            piece_index: 1, // GLOBAL Index 1
+            proof: proof.clone(),
+        });
+
+        // 2. Send Data for Piece 1
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 1, // GLOBAL Index 1
+            block_offset: 0,
+            data: vec![0xBB; 1024],
+        });
+
+        // 3. CAPTURE THE EFFECT
+        // If your logic is correct, it should spawn VerifyPieceV2.
+        // Inspect the arguments passed to it.
+        
+        let verify_effect = effects.iter().find_map(|e| {
+            if let Effect::VerifyPieceV2 { piece_index, root_hash, .. } = e {
+                Some((piece_index, root_hash))
+            } else {
+                None
+            }
+        });
+
+        assert!(verify_effect.is_some(), "Should trigger V2 verification");
+        
+        let (idx, hash) = verify_effect.unwrap();
+        assert_eq!(hash, &root_b, "Should verify against Root B");
+        
+        // CRITICAL CHECK:
+        // If you updated the enum to have `relative_index`, check that here.
+        // If you are relying on the manager to calculate it, this test ensures
+        // the manager receives the correct GLOBAL index (1) to look up the file info later.
+        assert_eq!(*idx, 1, "Effect should carry Global Index 1 for state tracking");
     }
 
 
