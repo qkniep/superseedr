@@ -293,9 +293,9 @@ pub struct TorrentState {
     pub validation_pieces_found: u32,
     pub now: Instant,
     pub has_started_announce_sent: bool,
-    pub v2_proofs: HashMap<u32, Vec<u8>>,       // Proofs waiting for data
+    pub v2_proofs: HashMap<u32, Vec<u8>>, 
     pub v2_pending_data: HashMap<u32, (u32, Vec<u8>)>,
-    pub piece_to_roots: HashMap<u32, Vec<(u64, Vec<u8>)>>,
+    pub piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>)>>,
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -378,10 +378,27 @@ impl TorrentState {
         }
     }
 
-    // Helper to determine piece size based on torrent metadata
     fn get_piece_size(&self, piece_index: u32) -> usize {
         if let Some(torrent) = &self.torrent {
             let piece_len = torrent.info.piece_length as u64;
+
+            // V2 Logic: Clamp size to the specific file length
+            if let Some(roots) = self.piece_to_roots.get(&piece_index) {
+                // In V2, pieces align to files. We check the mapped file for this piece.
+                if let Some((file_start, file_len, _)) = roots.first() {
+                     let global_piece_start = piece_index as u64 * piece_len;
+                     
+                     // Calculate offset relative to the start of this specific file
+                     let offset_in_file = global_piece_start.saturating_sub(*file_start);
+                     
+                     // The piece cannot exceed the remaining bytes in this file
+                     let remaining_in_file = file_len.saturating_sub(offset_in_file);
+                     
+                     return std::cmp::min(piece_len, remaining_in_file) as usize;
+                }
+            }
+
+            // Fallback (V1 / Standard contiguous stream logic)
             let total_len: u64 = if !torrent.info.files.is_empty() {
                 torrent.info.files.iter().map(|f| f.length as u64).sum()
             } else {
@@ -1068,10 +1085,10 @@ impl TorrentState {
                         let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
 
                         let matching_root_info = roots.iter()
-                            .filter(|(start, _)| *start <= global_offset)
-                            .max_by_key(|(start, _)| *start);
+                            .filter(|(start, _, _)| *start <= global_offset)
+                            .max_by_key(|(start, _, _)| *start);
 
-                        if let Some((file_start, root)) = matching_root_info {
+                        if let Some((file_start, _len, root)) = matching_root_info {
                             // OPTION A: We received a dynamic proof from the network
                             if let Some(proof) = self.v2_proofs.get(&piece_index) {
                                 self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
@@ -1157,10 +1174,10 @@ impl TorrentState {
                         let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
 
                         let matching_root_info = roots.iter()
-                            .filter(|(start, _)| *start <= global_offset)
-                            .max_by_key(|(start, _)| *start);
+                            .filter(|(start, _, _)| *start <= global_offset)
+                            .max_by_key(|(start, _, _)| *start);
 
-                        if let Some((file_start, root)) = matching_root_info {
+                        if let Some((file_start, _len, root)) = matching_root_info {
                             return vec![Effect::VerifyPieceV2 {
                                 peer_id,
                                 piece_index,
@@ -1443,7 +1460,7 @@ impl TorrentState {
                                 self.piece_to_roots
                                     .entry(idx as u32)
                                     .or_default()
-                                    .push((file_start_offset, root_hash.clone()));
+                                    .push((file_start_offset, length, root_hash.clone()));
                             }
                             
                             current_piece_index += file_pieces;
@@ -4591,7 +4608,7 @@ mod tests {
         state.piece_manager.set_initial_fields(num_pieces, false);
         state.piece_manager.set_geometry(piece_len as u32, piece_len as u64, false);
 
-        state.piece_to_roots.insert(0, vec![(0, root.clone())]);
+        state.piece_to_roots.insert(0, vec![(0, piece_len as u64, root.clone())]);
         
         let peer_id = "optimized_peer".to_string();
         add_peer(&mut state, &peer_id);

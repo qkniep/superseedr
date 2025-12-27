@@ -239,7 +239,7 @@ impl TorrentManager {
         let dht_trigger_tx = ();
 
         // --- 1. PRE-CALCULATE V2 ROOTS & TOTAL PIECES ---
-        let mut piece_to_roots: HashMap<u32, Vec<(u64, Vec<u8>)>> = HashMap::new();
+        let mut piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>)>> = HashMap::new();
         let mut v2_piece_count: u64 = 0;
         let piece_len = torrent.info.piece_length as u64;
 
@@ -271,7 +271,7 @@ impl TorrentManager {
                         piece_to_roots
                             .entry(p as u32)
                             .or_default()
-                            .push((file_start_offset, root_hash.clone()));
+                            .push((file_start_offset, length, root_hash.clone()));
                     }
                     
                     tracing::debug!(
@@ -1283,7 +1283,7 @@ impl TorrentManager {
         tracing::info!("--- STARTING VALIDATION (V2 FIX) ---");
 
         // --- 1. PRE-CALCULATE V2 ROOTS & TOTAL SIZE ---
-        let mut piece_to_roots: HashMap<u32, Vec<(u64, Vec<u8>)>> = HashMap::new();
+        let mut piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>)>> = HashMap::new();
         let mut v2_total_len: u64 = 0;
 
         if torrent.info.meta_version == Some(2) {
@@ -1309,7 +1309,7 @@ impl TorrentManager {
                         piece_to_roots
                             .entry(idx as u32)
                             .or_default()
-                            .push((current_byte_offset, root_hash.clone()));
+                            .push((current_byte_offset, length, root_hash.clone()));
                     }
                     tracing::debug!("Mapped '{}' (len {}) to pieces {}..{}", path, length, start_piece, end_piece);
                 }
@@ -1385,9 +1385,9 @@ impl TorrentManager {
                 if let Some(roots) = piece_to_roots.get(&(piece_index as u32)) {
                     let global_offset = (piece_index as u64) * piece_length_u64;
                     // Find file that starts before or at this piece
-                    let best = roots.iter().filter(|(start, _)| *start <= global_offset).max_by_key(|(s, _)| *s);
+                    let best = roots.iter().filter(|(start, _, _)| *start <= global_offset).max_by_key(|(s, _, _)| *s);
                     
-                    if let Some((f_start, root)) = best {
+                    if let Some((f_start, _len, root)) = best {
                         if let Some(layers) = torrent.get_layer_hashes(root) {
                             let rel_idx = ((global_offset - f_start) / piece_length_u64) as usize;
                             if rel_idx * 32 + 32 <= layers.len() {
@@ -2470,7 +2470,7 @@ impl TorrentManager {
                                     // We iterate to find the one that actually contains the data we want to serve.
                                     // (Simplification: We take the first match that has valid bounds).
                                     
-                                    for (file_start_byte_offset, resolved_root) in roots {
+                                    for (file_start_byte_offset, _len, resolved_root) in roots {
                                         if let Some(layer_bytes) = torrent.get_layer_hashes(resolved_root) {
                                             
                                             // 1. Get Global Start Piece for this file
@@ -3732,9 +3732,9 @@ mod resource_tests {
 
         // 3. Manually Inject State
         // Map Global Piece 0 -> Root A
-        manager.state.piece_to_roots.insert(0, vec![(0, root_a.clone())]);
+        manager.state.piece_to_roots.insert(0, vec![(0, piece_len as u64, root_a.clone())]);
         // Map Global Piece 1 -> Root B (File starts at byte 16384)
-        manager.state.piece_to_roots.insert(1, vec![(16384, root_b.clone())]);
+        manager.state.piece_to_roots.insert(1, vec![(16384, piece_len as u64, root_b.clone())]);
 
         // Inject the piece_layers into the Torrent struct
         let mut torrent = create_dummy_torrent(2);
@@ -3821,7 +3821,7 @@ mod resource_tests {
         let layer_data = vec![0xFF; 32 * 10]; 
 
         // Map it
-        manager.state.piece_to_roots.insert(0, vec![(0, root.clone())]);
+        manager.state.piece_to_roots.insert(0, vec![(0, piece_len as u64, root.clone())]);
         
         let mut torrent = create_dummy_torrent(10);
         torrent.info.piece_length = piece_len as i64;
@@ -3887,10 +3887,9 @@ mod resource_tests {
         let root = vec![0xCC; 32];
         let layer_data = vec![0x11; 32 * 5]; // 5 Hashes (Indices 0, 1, 2, 3, 4)
 
-        // FIX: Populate piece_to_roots for ALL pieces in the file (0..5)
         // The manager looks up the specific piece index requested.
         for i in 0..5 {
-            manager.state.piece_to_roots.insert(i, vec![(0, root.clone())]);
+            manager.state.piece_to_roots.insert(i, vec![(0, piece_len as u64, root.clone())]);
         }
         
         let mut torrent = create_dummy_torrent(5);
@@ -4075,7 +4074,7 @@ mod resource_tests {
         
         // Manually inject V2 Roots
         for i in 0..num_pieces {
-            manager.state.piece_to_roots.insert(i as u32, vec![(0, root_hash.clone())]);
+            manager.state.piece_to_roots.insert(i as u32, vec![(0, piece_len as u64, root_hash.clone())]);
         }
 
         // 7. Register Peer
@@ -4170,7 +4169,7 @@ mod resource_tests {
         manager.state.torrent_status = TorrentStatus::Standard;
         
         for i in 0..num_pieces {
-            manager.state.piece_to_roots.insert(i as u32, vec![(0, root_hash.clone())]);
+            manager.state.piece_to_roots.insert(i as u32, vec![(0, piece_len as u64, root_hash.clone())]);
         }
 
         if manager.state.piece_manager.bitfield.is_empty() {
@@ -4318,7 +4317,7 @@ mod resource_tests {
 
         // --- 4. PREPARE STATE ---
         // Map Global Piece 2 -> File B Root (Offset 1024)
-        manager.state.piece_to_roots.insert(2, vec![(1024, root_b.clone())]);
+        manager.state.piece_to_roots.insert(2, vec![(1024, piece_len as u64, root_b.clone())]);
 
         // Register Peer
         let peer_id = "v2_tester".to_string();
@@ -4419,7 +4418,7 @@ mod resource_tests {
         // Mock V2 Roots so the manager accepts it
         let root = vec![0xAA; 32];
         for i in 0..num_pieces {
-            manager.state.piece_to_roots.insert(i as u32, vec![(0, root.clone())]);
+            manager.state.piece_to_roots.insert(i as u32, vec![(0, piece_len as u64, root.clone())]);
         }
         
         // Set state
