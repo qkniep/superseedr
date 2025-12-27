@@ -2640,19 +2640,30 @@ fn verify_merkle_proof(
     current_hash.as_slice() == target_root_hash
 }
 
-/// Helper: correctly computes the BitTorrent v2 Merkle Root for a buffer.
-/// Splits data into 16KB blocks and combines hashes up the tree.
 fn compute_v2_piece_root(data: &[u8]) -> [u8; 32] {
     const BLOCK_SIZE: usize = 16_384;
 
     if data.len() <= BLOCK_SIZE {
+        if data.len() < BLOCK_SIZE {
+            let mut padded = vec![0u8; BLOCK_SIZE];
+            padded[0..data.len()].copy_from_slice(data);
+            return Sha256::digest(&padded).into();
+        }
         return Sha256::digest(data).into();
     }
 
     // 1. Hash all 16KB leaves
     let mut layer: Vec<[u8; 32]> = data
         .chunks(BLOCK_SIZE)
-        .map(|chunk| Sha256::digest(chunk).into())
+        .map(|chunk| {
+            if chunk.len() < BLOCK_SIZE {
+                let mut padded = vec![0u8; BLOCK_SIZE];
+                padded[0..chunk.len()].copy_from_slice(chunk);
+                Sha256::digest(&padded).into()
+            } else {
+                Sha256::digest(chunk).into()
+            }
+        })
         .collect();
 
     // 2. Build the tree up
@@ -2666,10 +2677,9 @@ fn compute_v2_piece_root(data: &[u8]) -> [u8; 32] {
                 hasher.update(pair[0]);
                 hasher.update(pair[1]);
             } else {
-                // Should not happen for standard power-of-2 pieces, 
-                // but if it does (last piece), standard practice is often to duplicate
-                // or just bubble up. For valid .torrent pieces, pairs strictly exist.
-                hasher.update(pair[0]);
+                // This case implies an unbalanced tree (unusual for standard piece sizes)
+                // We just bubble the hash up.
+                hasher.update(pair[0]); 
             }
             next_layer.push(hasher.finalize().into());
         }
@@ -2678,8 +2688,6 @@ fn compute_v2_piece_root(data: &[u8]) -> [u8; 32] {
 
     layer[0]
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -4232,7 +4240,7 @@ mod resource_tests {
         use sha2::{Digest, Sha256};
         use crate::resource_manager::ResourceManager;
         use crate::token_bucket::TokenBucket;
-        use tokio::io::AsyncWriteExt; // Needed for manual file creation
+        use tokio::io::AsyncWriteExt; 
 
         // --- 1. MANUAL SETUP ---
         let (_incoming_tx, incoming_peer_rx) = mpsc::channel(100);
@@ -4243,7 +4251,7 @@ mod resource_tests {
 
         // Drain event channel to prevent deadlock
         let (event_tx, mut event_rx) = mpsc::channel(100);
-        tokio::spawn(async move { while let Some(_) = event_rx.recv().await {} }); // Modified to keep checking
+        tokio::spawn(async move { while let Some(_) = event_rx.recv().await {} });
 
         let mut limits = HashMap::new();
         limits.insert(crate::resource_manager::ResourceType::PeerConnection, (100, 100));
@@ -4258,12 +4266,20 @@ mod resource_tests {
         let piece_len = 1024;
 
         // --- 2. CONSTRUCT DATA & PROOFS ---
+        // Helper to simulate V2 Padding (BEP 52)
+        // Since piece_len (1024) < 16384, the Manager will pad it. We must too.
+        let pad = |data: &Vec<u8>| -> Vec<u8> {
+            let mut p = vec![0u8; 16384];
+            p[0..data.len()].copy_from_slice(data);
+            p
+        };
+
         // File B: Piece 1 (Relative 0) + Piece 2 (Relative 1)
         let data_b0 = vec![0xBB; piece_len]; 
-        let hash_b0 = Sha256::digest(&data_b0);
+        let hash_b0 = Sha256::digest(&pad(&data_b0)); // Hash PADDED data
 
         let data_b1 = vec![0xCC; piece_len]; // <-- TARGET (Global 2, Relative 1)
-        let hash_b1 = Sha256::digest(&data_b1);
+        let hash_b1 = Sha256::digest(&pad(&data_b1)); // Hash PADDED data
 
         // Root = Hash(B0 + B1)
         let mut hasher = Sha256::new();
@@ -4276,19 +4292,14 @@ mod resource_tests {
         torrent.info.piece_length = piece_len as i64;
         torrent.info.pieces = Vec::new();
         
-        // Ensure name is consistent for file creation
         torrent.info.name = "test_v2_relative_logic".to_string();
 
         let params = TorrentParameters {
             dht_handle: {
                 #[cfg(feature = "dht")]
-                {
-                    mainline::Dht::builder().port(0).build().unwrap().as_async()
-                }
+                { mainline::Dht::builder().port(0).build().unwrap().as_async() }
                 #[cfg(not(feature = "dht"))]
-                {
-                    ()
-                }
+                { () }
             },
             incoming_peer_rx,
             metrics_tx,
@@ -4304,20 +4315,19 @@ mod resource_tests {
 
         let mut manager = TorrentManager::from_torrent(params, torrent).unwrap();
 
-        // --- FIX 1: Manually Create File on Disk (Prevents Write Retry Loop) ---
-        // We pre-allocate the file so the WriteToDisk command succeeds immediately.
+        // --- FIX 1: Manually Create File on Disk ---
         let file_path = manager.root_download_path.join("test_v2_relative_logic");
         {
             let mut file = tokio::fs::File::create(&file_path).await.expect("Failed to create test file");
             file.set_len((piece_len * 3) as u64).await.expect("Failed to set file length");
         }
 
-        // --- FIX 2: Set Status to Standard (Prevents IncomingBlock Drop) ---
         manager.state.torrent_status = crate::torrent_manager::state::TorrentStatus::Standard;
 
         // --- 4. PREPARE STATE ---
         // Map Global Piece 2 -> File B Root (Offset 1024)
-        manager.state.piece_to_roots.insert(2, vec![(1024, piece_len as u64, root_b.clone())]);
+        // [FIX] Correct file length is 2048 (2 pieces), not 1024.
+        manager.state.piece_to_roots.insert(2, vec![(1024, (piece_len * 2) as u64, root_b.clone())]);
 
         // Register Peer
         let peer_id = "v2_tester".to_string();
@@ -4355,10 +4365,6 @@ mod resource_tests {
         }).await.unwrap();
 
         // --- 6. ASSERTION ---
-        // We spy on the PEER channel. 
-        // If verification succeeds, Manager sends "Have(2)" to the peer.
-        // If verification fails, Manager sends "Disconnect".
-        
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
@@ -4569,8 +4575,8 @@ mod resource_tests {
         assert_eq!(roots_1.unwrap().len(), 1, "Piece 1 should map to exactly 1 file");
 
         // Check 3: The roots must be different (One is A, one is B)
-        let hash_0 = &roots_0.unwrap()[0].1;
-        let hash_1 = &roots_1.unwrap()[0].1;
+        let hash_0 = &roots_0.unwrap()[0].2;
+        let hash_1 = &roots_1.unwrap()[0].2;
         
         assert_ne!(hash_0, hash_1, "Piece 0 and 1 should point to different roots");
         
@@ -4638,59 +4644,44 @@ mod resource_tests {
         assert!(roots_1.is_some(), "Piece 1 missing roots");
         
         // Verify alignment: Piece 0 -> Root A, Piece 1 -> Root B
-        assert_eq!(roots_0.unwrap()[0].1, root_a, "Piece 0 should map to File A");
-        assert_eq!(roots_1.unwrap()[0].1, root_b, "Piece 1 should map to File B");
+        assert_eq!(roots_0.unwrap()[0].2, root_a, "Piece 0 should map to File A");
+        assert_eq!(roots_1.unwrap()[0].2, root_b, "Piece 1 should map to File B");
     }
 
     #[test]
-    fn verify_tail_padding_hypothesis() {
+    fn verify_tail_padding_fix() {
+        use sha2::{Digest, Sha256};
+
         // --- 1. SETUP ---
-        // Simulate a standard 16KB block or 1KB chunk. 
-        // Based on your error, let's use the specific sizes you mentioned:
-        let total_buffer_size = 1024;
+        // Scenario: A file ends 976 bytes into a block.
+        // We have a buffer of 976 bytes of data.
         let valid_data_size = 976;
+        let padded_size = 1024; // We simulate a 1KB block size for this micro-test, or standard padding behavior
 
-        // Create a buffer with known data (All 'A's)
-        let mut buffer = vec![0u8; total_buffer_size];
-        for i in 0..valid_data_size {
-            buffer[i] = b'A';
-        }
-        // The remaining bytes (976..1024) are 0 (padding) by default.
+        // Create the valid data (976 bytes of 'A')
+        let mut valid_data = vec![b'A'; valid_data_size];
 
-        // --- 2. GENERATE REFERENCE HASHES ---
+        // --- 2. EXPECTED RESULT (V2 Spec) ---
+        // The hash should be SHA256( Data + Padding )
+        let mut padded_buffer = vec![0u8; 16384]; // Standard 16KB block size
+        padded_buffer[0..valid_data_size].copy_from_slice(&valid_data);
+        let expected_hash = Sha256::digest(&padded_buffer);
+
+        // --- 3. RUN FUNCTION UNDER TEST ---
+        // We pass ONLY the valid data. The function must pad it internally.
+        let calculated_root = super::compute_v2_piece_root(&valid_data);
+
+        // --- 4. ASSERT ---
+        // If the function didn't pad, it would return SHA256(976 bytes), which matches "Bad Hash".
+        // If it pads correctly, it returns SHA256(16KB with zeros).
         
-        // Scenario A: The Correct Hash (Hashing ONLY valid data)
-        let mut hasher = Sha256::new();
-        hasher.update(&buffer[0..valid_data_size]); 
-        let expected_hash = hasher.finalize();
-
-        // Scenario B: The Buggy Hash (Hashing valid data + padding)
-        let mut hasher = Sha256::new();
-        hasher.update(&buffer[..]); // Hashing the full 1024 bytes
-        let padded_hash = hasher.finalize();
-
-        println!("---------------------------------------------------");
-        println!("Expected (Valid) Hash: {:x}", expected_hash);
-        println!("Hypothesis (Bad) Hash: {:x}", padded_hash);
-        println!("---------------------------------------------------");
-
-        // --- 3. RUN YOUR ACTUAL CODE ---
+        assert_eq!(
+            calculated_root.as_slice(),
+            expected_hash.as_slice(),
+            "V2 Hashing Error: Function failed to apply zero-padding to the tail block."
+        );
         
-        // TODO: Replace `your_function_here` with the function causing the issue.
-        // It must return the hash it calculates.
-        // Example: let actual_result = Manager::hash_piece(&buffer, valid_data_size);
-        
-        // Mocking the 'Bad' result for demonstration (Remove this line):
-        let actual_result = padded_hash; 
-
-        // --- 4. VERDICT ---
-        
-        if actual_result == padded_hash {
-            panic!("❌ TEST FAILED SUCCESSFULLY: The code is definitely hashing the padding! (1024 bytes instead of 976)");
-        } else if actual_result == expected_hash {
-            println!("✅ CODE IS CORRECT: The hashing logic properly ignored the padding.");
-        } else {
-            panic!("❓ UNKNOWN: The result matches neither the padded nor the unpadded hash. Check data integrity.");
-        }
+        println!("✅ SUCCESS: compute_v2_piece_root correctly padded the tail block.");
     }
+
 }

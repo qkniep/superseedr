@@ -3641,8 +3641,8 @@ mod tests {
         let root_b = vec![0xBB; 32]; // File B (16384-32768)
 
         state.piece_to_roots.insert(0, vec![
-            (0, root_a.clone()),      
-            (16384, root_b.clone())   
+            (0, 16384, root_a.clone()),      
+            (16384, 16384, root_b.clone())   
         ]);
         state.v2_proofs.insert(0, vec![0xFF; 32]); // Proof ready
 
@@ -3709,7 +3709,7 @@ mod tests {
         state.piece_manager.set_geometry(4, 40, false);
 
         let root_target = vec![0xCC; 32];
-        state.piece_to_roots.insert(5, vec![(0, root_target.clone())]);
+        state.piece_to_roots.insert(5, vec![(0, 4, root_target.clone())]);
 
         // WHEN: Data arrives (Block 0).
         let effects_data = state.update(Action::IncomingBlock {
@@ -3749,7 +3749,7 @@ mod tests {
         state.piece_manager.set_geometry(1024, 1024, false);
 
         let root_hash = vec![0xAA; 32];
-        state.piece_to_roots.insert(0, vec![(0, root_hash.clone())]);
+        state.piece_to_roots.insert(0, vec![(0, 1024, root_hash.clone())]);
         
         // Proof arrives first
         state.v2_proofs.insert(0, vec![0xFF; 32]);
@@ -3789,7 +3789,7 @@ mod tests {
         state.piece_manager.set_geometry(1024, 1024, false);
 
         let root_hash = vec![0xAA; 32];
-        state.piece_to_roots.insert(0, vec![(0, root_hash.clone())]);
+        state.piece_to_roots.insert(0, vec![(0, 1024, root_hash.clone())]);
         
         // 1. Peer sends Proof
         state.update(Action::MerkleProofReceived {
@@ -3836,7 +3836,7 @@ mod tests {
         state.piece_manager.set_initial_fields(1, false);
         state.piece_manager.set_geometry(4, 4, false);
 
-        state.piece_to_roots.insert(0, vec![(0, vec![0xAA; 32])]);
+        state.piece_to_roots.insert(0, vec![(0, 4, vec![0xAA; 32])]);
 
         // 1. Buffer Data (Stored in v2_pending_data)
         state.update(Action::IncomingBlock {
@@ -3880,7 +3880,7 @@ mod tests {
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
         state.piece_manager.set_geometry(1024, 1024, false);
-        state.piece_to_roots.insert(0, vec![(0, vec![0xAA; 32])]);
+        state.piece_to_roots.insert(0, vec![(0, 1024, vec![0xAA; 32])]);
 
         // 1. Send Proof
         state.update(Action::MerkleProofReceived {
@@ -3938,7 +3938,7 @@ mod tests {
         // Map all pieces to a dummy root
         let root = vec![0xAA; 32];
         for i in 0..num_pieces {
-            state.piece_to_roots.insert(i as u32, vec![(0, root.clone())]);
+            state.piece_to_roots.insert(i as u32, vec![(0, 1024, root.clone())]);
         }
 
         let peer_id = "worker_peer".to_string();
@@ -4022,7 +4022,7 @@ mod tests {
         // CONFIGURATION: Hybrid Setup
         // Piece 0: Has a V2 Root
         let root = vec![0xAA; 32];
-        state.piece_to_roots.insert(0, vec![(0, root.clone())]);
+        state.piece_to_roots.insert(0, vec![(0, 1024, root.clone())]);
         
         // Piece 1: NO Root (V1 Only)
 
@@ -4068,7 +4068,7 @@ mod tests {
 
         let root = vec![0xAA; 32];
         for i in 0..num_pieces {
-            state.piece_to_roots.insert(i as u32, vec![(0, root.clone())]);
+            state.piece_to_roots.insert(i as u32, vec![(0, 1024, root.clone())]);
         }
 
         let peer_id = "seeder".to_string();
@@ -4111,7 +4111,7 @@ mod tests {
         state.piece_manager.set_geometry(1024, 1024, false);
         
         // V2 Setup
-        state.piece_to_roots.insert(0, vec![(0, vec![0xAA; 32])]);
+        state.piece_to_roots.insert(0, vec![(0, 1024, vec![0xAA; 32])]);
         let peer_id = "racer".to_string();
         add_peer(&mut state, &peer_id);
 
@@ -4160,7 +4160,7 @@ mod tests {
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
         state.piece_manager.set_geometry(1024, 1024, false);
-        state.piece_to_roots.insert(0, vec![(0, vec![0xAA; 32])]);
+        state.piece_to_roots.insert(0, vec![(0, 1024, vec![0xAA; 32])]);
 
         let peer_id = "bad_actor".to_string();
         add_peer(&mut state, &peer_id);
@@ -4203,7 +4203,7 @@ mod tests {
         // CONFIGURATION:
         // Piece 0: V2 (Has Root)
         let root = vec![0xAA; 32];
-        state.piece_to_roots.insert(0, vec![(0, root.clone())]);
+        state.piece_to_roots.insert(0, vec![(0, 1024, root.clone())]);
 
         let peer_a = "v2_peer_A".to_string();
         add_peer(&mut state, &peer_a);
@@ -4294,7 +4294,7 @@ mod tests {
             "Failed to populate V2 roots from metadata");
         
         let roots_for_piece_0 = state.piece_to_roots.get(&0).unwrap();
-        assert_eq!(roots_for_piece_0[0].1, root, "Piece 0 should map to our mock root");
+        assert_eq!(roots_for_piece_0[0].2, root, "Piece 0 should map to our mock root");
     }
 
     #[test]
@@ -4384,11 +4384,11 @@ mod tests {
         let roots_0 = state.piece_to_roots.get(&0).expect("Piece 0 missing roots");
         // Check if we have the correct root. Note: The vector might contain multiple entries if files share pieces, 
         // but here they are aligned perfectly.
-        assert!(roots_0.iter().any(|(_, r)| *r == root_a), "Piece 0 must map to Root A");
+        assert!(roots_0.iter().any(|(_, _, r)| *r == root_a), "Piece 0 must map to Root A");
 
         // Piece 1 -> File B -> Root B
         let roots_1 = state.piece_to_roots.get(&1).expect("Piece 1 missing roots");
-        assert!(roots_1.iter().any(|(_, r)| *r == root_b), "Piece 1 must map to Root B");
+        assert!(roots_1.iter().any(|(_, _, r)| *r == root_b), "Piece 1 must map to Root B");
     }
 
     #[test]
@@ -4413,7 +4413,7 @@ mod tests {
 
         let root = vec![0xAA; 32];
         for i in 0..num_pieces {
-            state.piece_to_roots.insert(i as u32, vec![(0, root.clone())]);
+            state.piece_to_roots.insert(i as u32, vec![(0, 1024, root.clone())]);
         }
 
         let peer_id = "hybrid_worker".to_string();
@@ -4473,7 +4473,7 @@ mod tests {
         // 3. Mock V2 Roots
         let root = vec![0xBB; 32];
         for i in 0..num_pieces {
-            state.piece_to_roots.insert(i as u32, vec![(0, root.clone())]);
+            state.piece_to_roots.insert(i as u32, vec![(0, 1024, root.clone())]);
         }
 
         // 4. Setup Peer & Unchoke
@@ -4527,7 +4527,7 @@ mod tests {
         
         // Map Piece 1 to File B, which starts at 1024 (Piece 1's start)
         // This implies File A occupied 0..1024.
-        state.piece_to_roots.insert(1, vec![(1024, root_b.clone())]);
+        state.piece_to_roots.insert(1, vec![(1024, 1024, root_b.clone())]);
 
         let peer_id = "offset_tester".to_string();
         add_peer(&mut state, &peer_id);
