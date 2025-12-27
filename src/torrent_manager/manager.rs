@@ -238,61 +238,76 @@ impl TorrentManager {
         #[cfg(not(feature = "dht"))]
         let dht_trigger_tx = ();
 
-        // --- 1. PRE-CALCULATE V2 ROOTS & TOTAL SIZE ---
-        // We do this EARLY so we can calculate num_pieces correctly for Pure V2 torrents
+        // --- 1. PRE-CALCULATE V2 ROOTS & TOTAL PIECES ---
         let mut piece_to_roots: HashMap<u32, Vec<(u64, Vec<u8>)>> = HashMap::new();
-        let mut v2_total_len: u64 = 0;
+        let mut v2_piece_count: u64 = 0;
         let piece_len = torrent.info.piece_length as u64;
 
         if torrent.info.meta_version == Some(2) {
             let mut v2_roots = torrent.get_v2_roots(); // Returns (path, length, root_hash)
+            
+            // Critical: Sort files by path to ensure deterministic mapping across restarts.
+            // Bencoding dictionaries (file tree) are unordered in HashMap, but piece mapping 
+            // relies on a stable, sorted order.
             v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
+
             event!(Level::INFO, "Init: Found {} V2 files from Merkle Tree.", v2_roots.len());
             
-            let mut current_byte_offset = 0;
+            // In V2, pieces are aligned to files. We track the cumulative piece index.
+            let mut current_piece_index = 0;
             
             for (path, length, root_hash) in v2_roots {
-                v2_total_len += length;
-
                 if length > 0 && piece_len > 0 {
-                    let start_piece = (current_byte_offset / piece_len) as u32;
+                    // Calculate pieces occupied by this file (including padding at the end)
+                    let file_pieces = (length + piece_len - 1) / piece_len;
                     
-                    let file_end_offset = current_byte_offset + length;
-                    let end_piece = ((file_end_offset + piece_len - 1) / piece_len) as u32;
+                    let start_piece = current_piece_index;
+                    let end_piece = current_piece_index + file_pieces;
+                    
+                    // The file logically starts at this byte offset in the aligned space
+                    let file_start_offset = current_piece_index * piece_len;
 
                     for p in start_piece..end_piece {
                         piece_to_roots
-                            .entry(p)
+                            .entry(p as u32)
                             .or_default()
-                            .push((current_byte_offset, root_hash.clone()));
+                            .push((file_start_offset, root_hash.clone()));
                     }
-                }
-                
-                if piece_len > 0 {
-                    let remainder = (current_byte_offset + length) % piece_len;
-                    if remainder > 0 {
-                        current_byte_offset += length + (piece_len - remainder);
-                    } else {
-                        current_byte_offset += length;
-                    }
+                    
+                    tracing::debug!(
+                        "Mapped '{}' (len {}) to pieces {}..{} (Aligned)", 
+                        path, length, start_piece, end_piece
+                    );
+
+                    current_piece_index += file_pieces;
                 }
             }
+            v2_piece_count = current_piece_index;
         }
 
         // --- 2. Calculate Piece Count ---
         let num_pieces = if !torrent.info.pieces.is_empty() {
+            // V1 / Hybrid: Use the explicit pieces string length
             torrent.info.pieces.len() / 20
+        } else if v2_piece_count > 0 {
+            // Pure V2: Use the calculated aligned piece count
+            v2_piece_count as usize
         } else {
-            let total_len = torrent.info.length as u64; 
-            let pl = torrent.info.piece_length as u64;
+            // Fallback: V1 Single File or legacy calculation
+            let total_len = if !torrent.info.files.is_empty() {
+                torrent.info.files.iter().map(|f| f.length as u64).sum()
+            } else {
+                torrent.info.length as u64
+            };
             
-            if pl > 0 {
-                ((total_len + pl - 1) / pl) as usize
+            if piece_len > 0 {
+                ((total_len + piece_len - 1) / piece_len) as usize
             } else {
                 0
             }
         };
-        event!(Level::INFO, "Init: Calculated num_pieces: {}. (V2 len: {})", num_pieces, v2_total_len);
+
+        event!(Level::INFO, "Init: Calculated num_pieces: {}. (V2 Aligned)", num_pieces);
         tracing::info!("🔥 Calculated Info Hash: {}", hex::encode(&info_hash));
 
         let mut piece_manager = PieceManager::new();
@@ -4566,5 +4581,65 @@ mod resource_tests {
         assert!(valid_roots.contains(hash_1), "Piece 1 has unknown root");
 
         println!("✅ SUCCESS: Multi-file V2 alignment verified. Files occupy Piece 0 and Piece 1 separately.");
+    }
+
+    #[tokio::test]
+    async fn test_v2_multi_file_alignment_bug_regression() {
+        // --- 1. SETUP ---
+        let (mut manager, _, _, _, _) = setup_test_harness();
+        let piece_len = 16384;
+
+        // --- 2. CREATE MULTI-FILE V2 TORRENT ---
+        // Scenario: Two tiny files (100 bytes each).
+        // V1 Logic: Total 200 bytes -> 1 Piece.
+        // V2 Logic: File A (Piece 0), File B (Piece 1) -> 2 Pieces.
+        
+        let root_a = vec![0xAA; 32];
+        let root_b = vec![0xBB; 32];
+
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // Pure V2
+        torrent.info.length = 0; // Unused in multi-file usually
+        
+        let files = vec![
+            ("file_a.txt".to_string(), 100, root_a.clone()),
+            ("file_b.txt".to_string(), 100, root_b.clone()),
+        ];
+        
+        torrent.info.file_tree = Some(build_mock_v2_file_tree(files));
+        
+        // Populate info.files for allocator
+        torrent.info.files = vec![
+            crate::torrent_file::InfoFile { length: 100, path: vec!["file_a.txt".into()], md5sum: None, attr: None },
+            crate::torrent_file::InfoFile { length: 100, path: vec!["file_b.txt".into()], md5sum: None, attr: None },
+        ];
+
+        // --- 3. INIT MANAGER ---
+        // This triggers the piece count calculation logic
+        manager.apply_action(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 1000,
+        });
+
+        // --- 4. ASSERTION ---
+        let total_pieces = manager.state.piece_manager.bitfield.len();
+        println!("Calculated Pieces: {}", total_pieces);
+
+        // CHECK 1: Piece Count
+        // If bug exists, this is 1. If fixed, this is 2.
+        assert_eq!(total_pieces, 2, "V2 Alignment Bug: Calculated {} pieces, expected 2 (one per file).", total_pieces);
+
+        // CHECK 2: Root Mapping
+        let roots_0 = manager.state.piece_to_roots.get(&0);
+        let roots_1 = manager.state.piece_to_roots.get(&1);
+
+        assert!(roots_0.is_some(), "Piece 0 missing roots");
+        assert!(roots_1.is_some(), "Piece 1 missing roots");
+        
+        // Verify alignment: Piece 0 -> Root A, Piece 1 -> Root B
+        assert_eq!(roots_0.unwrap()[0].1, root_a, "Piece 0 should map to File A");
+        assert_eq!(roots_1.unwrap()[0].1, root_b, "Piece 1 should map to File B");
     }
 }

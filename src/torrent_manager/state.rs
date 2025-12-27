@@ -1417,52 +1417,50 @@ impl TorrentState {
                 self.torrent = Some(*torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
 
+                let mut v2_piece_count: u64 = 0;
+
                 if torrent.info.meta_version == Some(2) {
                     let mut v2_roots = torrent.get_v2_roots(); // (Path, Length, Root)
+                    
+                    // Critical: Sort to ensure deterministic piece mapping
                     v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
+
                     let piece_length = torrent.info.piece_length as u64;
-                    let mut current_byte_offset = 0;
+                    let mut current_piece_index = 0;
 
                     for (_path, length, root_hash) in v2_roots {
                         if length > 0 && piece_length > 0 {
-                            let start_piece = current_byte_offset / piece_length;
-                            let file_end_offset = current_byte_offset + length;
-                            let end_piece = (file_end_offset + piece_length - 1) / piece_length;
+                            // Calculate piece span for this file
+                            let file_pieces = (length + piece_length - 1) / piece_length;
+                            
+                            let start_piece = current_piece_index;
+                            let end_piece = current_piece_index + file_pieces;
+                            
+                            // The file logically starts at this byte offset in the aligned space
+                            let file_start_offset = current_piece_index * piece_length;
 
                             for idx in start_piece..end_piece {
                                 self.piece_to_roots
                                     .entry(idx as u32)
                                     .or_default()
-                                    .push((current_byte_offset, root_hash.clone()));
+                                    .push((file_start_offset, root_hash.clone()));
                             }
-                        }
-                        
-                        // FIX: Removed the incorrect 'current_byte_offset += length;' here.
-                        // The offset update is handled correctly in the alignment logic below.
-
-                        if piece_length > 0 {
-                            let file_end = current_byte_offset + length;
-                            let remainder = file_end % piece_length;
                             
-                            if remainder > 0 {
-                                // Pad to the next piece boundary
-                                current_byte_offset = file_end + (piece_length - remainder);
-                            } else {
-                                // Already aligned
-                                current_byte_offset = file_end;
-                            }
-                        } else {
-                            current_byte_offset += length;
+                            current_piece_index += file_pieces;
                         }
                     }
+                    v2_piece_count = current_piece_index;
                 }
 
-                // --- 2. CALCULATE PIECE COUNT (V2 Fix) ---
-                // If it's a V2-only torrent, the v1 'pieces' string is empty.
-                // We must calculate the count from the total size.
+                // --- 2. CALCULATE PIECE COUNT (V2 Aligned) ---
                 let num_pieces = if !torrent.info.pieces.is_empty() {
+                    // V1 / Hybrid: Use explicit pieces string
                     torrent.info.pieces.len() / 20
+                } else if v2_piece_count > 0 {
+                    // Pure V2: Use aligned piece count
+                    v2_piece_count as usize
                 } else {
+                    // Fallback calculation
                     let total_len: u64 = if !torrent.info.files.is_empty() {
                         torrent.info.files.iter().map(|f| f.length as u64).sum()
                     } else {
