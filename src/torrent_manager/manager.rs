@@ -4642,4 +4642,56 @@ mod resource_tests {
         assert_eq!(roots_0.unwrap()[0].1, root_a, "Piece 0 should map to File A");
         assert_eq!(roots_1.unwrap()[0].1, root_b, "Piece 1 should map to File B");
     }
+
+    #[test]
+    fn verify_tail_padding_hypothesis() {
+        // --- 1. SETUP ---
+        // Simulate a standard 16KB block or 1KB chunk. 
+        // Based on your error, let's use the specific sizes you mentioned:
+        let total_buffer_size = 1024;
+        let valid_data_size = 976;
+
+        // Create a buffer with known data (All 'A's)
+        let mut buffer = vec![0u8; total_buffer_size];
+        for i in 0..valid_data_size {
+            buffer[i] = b'A';
+        }
+        // The remaining bytes (976..1024) are 0 (padding) by default.
+
+        // --- 2. GENERATE REFERENCE HASHES ---
+        
+        // Scenario A: The Correct Hash (Hashing ONLY valid data)
+        let mut hasher = Sha256::new();
+        hasher.update(&buffer[0..valid_data_size]); 
+        let expected_hash = hasher.finalize();
+
+        // Scenario B: The Buggy Hash (Hashing valid data + padding)
+        let mut hasher = Sha256::new();
+        hasher.update(&buffer[..]); // Hashing the full 1024 bytes
+        let padded_hash = hasher.finalize();
+
+        println!("---------------------------------------------------");
+        println!("Expected (Valid) Hash: {:x}", expected_hash);
+        println!("Hypothesis (Bad) Hash: {:x}", padded_hash);
+        println!("---------------------------------------------------");
+
+        // --- 3. RUN YOUR ACTUAL CODE ---
+        
+        // TODO: Replace `your_function_here` with the function causing the issue.
+        // It must return the hash it calculates.
+        // Example: let actual_result = Manager::hash_piece(&buffer, valid_data_size);
+        
+        // Mocking the 'Bad' result for demonstration (Remove this line):
+        let actual_result = padded_hash; 
+
+        // --- 4. VERDICT ---
+        
+        if actual_result == padded_hash {
+            panic!("❌ TEST FAILED SUCCESSFULLY: The code is definitely hashing the padding! (1024 bytes instead of 976)");
+        } else if actual_result == expected_hash {
+            println!("✅ CODE IS CORRECT: The hashing logic properly ignored the padding.");
+        } else {
+            panic!("❓ UNKNOWN: The result matches neither the padded nor the unpadded hash. Check data integrity.");
+        }
+    }
 }
