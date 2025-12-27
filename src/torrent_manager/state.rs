@@ -1418,16 +1418,16 @@ impl TorrentState {
                 self.torrent_metadata_length = Some(metadata_length);
 
                 if torrent.info.meta_version == Some(2) {
-                    let v2_roots = torrent.get_v2_roots(); // (Path, Length, Root)
+                    let mut v2_roots = torrent.get_v2_roots(); // (Path, Length, Root)
+                    v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
                     let piece_length = torrent.info.piece_length as u64;
                     let mut current_byte_offset = 0;
 
                     for (_path, length, root_hash) in v2_roots {
                         if length > 0 && piece_length > 0 {
                             let start_piece = current_byte_offset / piece_length;
-                            // Calculate end piece (exclusive of next file start)
-                            let end_byte = current_byte_offset + length;
-                            let end_piece = (end_byte + piece_length - 1) / piece_length;
+                            let file_end_offset = current_byte_offset + length;
+                            let end_piece = (file_end_offset + piece_length - 1) / piece_length;
 
                             for idx in start_piece..end_piece {
                                 self.piece_to_roots
@@ -1436,7 +1436,24 @@ impl TorrentState {
                                     .push((current_byte_offset, root_hash.clone()));
                             }
                         }
-                        current_byte_offset += length;
+                        
+                        // FIX: Removed the incorrect 'current_byte_offset += length;' here.
+                        // The offset update is handled correctly in the alignment logic below.
+
+                        if piece_length > 0 {
+                            let file_end = current_byte_offset + length;
+                            let remainder = file_end % piece_length;
+                            
+                            if remainder > 0 {
+                                // Pad to the next piece boundary
+                                current_byte_offset = file_end + (piece_length - remainder);
+                            } else {
+                                // Already aligned
+                                current_byte_offset = file_end;
+                            }
+                        } else {
+                            current_byte_offset += length;
+                        }
                     }
                 }
 

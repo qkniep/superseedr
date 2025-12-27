@@ -245,7 +245,8 @@ impl TorrentManager {
         let piece_len = torrent.info.piece_length as u64;
 
         if torrent.info.meta_version == Some(2) {
-            let v2_roots = torrent.get_v2_roots(); // Returns (path, length, root_hash)
+            let mut v2_roots = torrent.get_v2_roots(); // Returns (path, length, root_hash)
+            v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
             event!(Level::INFO, "Init: Found {} V2 files from Merkle Tree.", v2_roots.len());
             
             let mut current_byte_offset = 0;
@@ -255,8 +256,9 @@ impl TorrentManager {
 
                 if length > 0 && piece_len > 0 {
                     let start_piece = (current_byte_offset / piece_len) as u32;
-                    let end_byte = current_byte_offset + length;
-                    let end_piece = ((end_byte + piece_len - 1) / piece_len) as u32;
+                    
+                    let file_end_offset = current_byte_offset + length;
+                    let end_piece = ((file_end_offset + piece_len - 1) / piece_len) as u32;
 
                     for p in start_piece..end_piece {
                         piece_to_roots
@@ -265,7 +267,15 @@ impl TorrentManager {
                             .push((current_byte_offset, root_hash.clone()));
                     }
                 }
-                current_byte_offset += length;
+                
+                if piece_len > 0 {
+                    let remainder = (current_byte_offset + length) % piece_len;
+                    if remainder > 0 {
+                        current_byte_offset += length + (piece_len - remainder);
+                    } else {
+                        current_byte_offset += length;
+                    }
+                }
             }
         }
 
@@ -283,6 +293,7 @@ impl TorrentManager {
             }
         };
         event!(Level::INFO, "Init: Calculated num_pieces: {}. (V2 len: {})", num_pieces, v2_total_len);
+        tracing::info!("🔥 Calculated Info Hash: {}", hex::encode(&info_hash));
 
         let mut piece_manager = PieceManager::new();
         piece_manager.set_initial_fields(num_pieces, torrent_validation_status);
@@ -532,21 +543,15 @@ impl TorrentManager {
                         );
                     }
 
-                    // 2. Spawn the task
-                    tokio::spawn(async move {
-                        tokio::select! {
-                            // Option A: Send successfully (waits if full)
-                            res = tx.send(command) => {
-                                if let Err(_e) = res {
-                                     event!(Level::TRACE, "Failed to send to peer {}: Channel closed", pid);
-                                }
-                            }
-                            // Option B: Shutdown triggered -> Cancel immediately
-                            _ = shutdown_rx.recv() => {
-                                event!(Level::TRACE, "Dropping command to peer {} due to shutdown", pid);
-                            }
+                    match peer.peer_tx.try_send(command) {
+                        Ok(_) => {},
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            tracing::warn!("⚠️  Peer {} channel full. Dropping command.", peer_id);
+                        },
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            tracing::debug!("Peer {} disconnected.", peer_id);
                         }
-                    });
+                    }
                 }
             }
 
@@ -1268,7 +1273,8 @@ impl TorrentManager {
 
         if torrent.info.meta_version == Some(2) {
             // Now returns (Path, Length, Root)
-            let v2_files = torrent.get_v2_roots(); 
+            let mut v2_files = torrent.get_v2_roots(); 
+            v2_files.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
             
             let piece_length = torrent.info.piece_length as u64;
             let mut current_byte_offset = 0;
@@ -1292,7 +1298,18 @@ impl TorrentManager {
                     }
                     tracing::debug!("Mapped '{}' (len {}) to pieces {}..{}", path, length, start_piece, end_piece);
                 }
-                current_byte_offset += length;
+                if piece_length > 0 {
+                    let file_end = current_byte_offset + length;
+                    let remainder = file_end % piece_length;
+                    
+                    if remainder > 0 {
+                        current_byte_offset = file_end + (piece_length - remainder);
+                    } else {
+                        current_byte_offset = file_end;
+                    }
+                } else {
+                    current_byte_offset += length;
+                }
             }
         }
 
@@ -2856,6 +2873,7 @@ mod tests {
         );
     }
 
+
 }
 
 #[cfg(test)]
@@ -4027,7 +4045,7 @@ mod resource_tests {
         torrent.info.pieces = all_v1_hashes; 
         torrent.info.meta_version = Some(2); 
 
-        // 4. FIX: Set Download Path BEFORE Metadata
+        // 4.Set Download Path BEFORE Metadata
         // This ensures InitializeStorage uses the correct temp_dir
         manager.root_download_path = temp_dir.clone();
 
@@ -4127,7 +4145,6 @@ mod resource_tests {
         torrent.info.pieces = Vec::new(); 
         torrent.info.meta_version = Some(2);
 
-        // FIX: Set Path BEFORE Metadata
         manager.root_download_path = temp_dir.clone();
 
         manager.apply_action(Action::MetadataReceived {
@@ -4353,5 +4370,201 @@ mod resource_tests {
             Ok(false) => panic!("FAILURE: Peer was disconnected (Verification Failed). Logic used Global Index instead of Relative."),
             Err(_) => panic!("TIMEOUT: Manager took too long to verify."),
         }
+    }
+
+
+    #[tokio::test]
+    async fn test_repro_tail_block_disconnect() {
+        use tokio::io::AsyncWriteExt;
+        
+        // --- 1. SETUP HARNESS ---
+        let (mut manager, _, _, _, _) = setup_scale_test_harness();
+        
+        // --- 2. CONSTRUCT V2 TORRENT (Mimicking libavcodec.59.dylib) ---
+        // [FIX] Explicitly type as u64 to fix "ambiguous numeric type" error
+        let file_len: u64 = 9_872_080;
+        let piece_len: u64 = 262_144;
+        
+        let last_piece_size = file_len % piece_len; // 172,752
+        let block_size = 16_384;
+        
+        // Calculate the exact size of the final block request
+        // 172,752 % 16,384 = 8,912 bytes
+        let expected_tail_req_len = (last_piece_size % block_size) as u32;
+        
+        let num_pieces = file_len.div_ceil(piece_len) as usize; // 38 pieces (0-37)
+        let last_piece_index = (num_pieces - 1) as u32;
+
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.length = file_len as i64;
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.pieces = Vec::new(); // Pure V2
+        torrent.info.meta_version = Some(2);
+        
+        // Mock V2 Roots so the manager accepts it
+        let root = vec![0xAA; 32];
+        for i in 0..num_pieces {
+            manager.state.piece_to_roots.insert(i as u32, vec![(0, root.clone())]);
+        }
+        
+        // Set state
+        manager.state.torrent = Some(torrent);
+        manager.state.torrent_status = TorrentStatus::Standard;
+        
+        // Initialize Piece Manager correctly
+        manager.state.piece_manager.set_initial_fields(num_pieces, false);
+        manager.state.piece_manager.set_geometry(piece_len as u32, file_len, false);
+
+        // --- 3. SETUP MOCK PEER ---
+        let peer_id = "strict_qbit".to_string();
+        let (peer_tx, mut peer_rx) = mpsc::channel(100);
+        
+        // Register Peer
+        let mut peer_state = crate::torrent_manager::state::PeerState::new(
+            peer_id.clone(), peer_tx, Instant::now()
+        );
+        peer_state.peer_id = peer_id.as_bytes().to_vec();
+        peer_state.bitfield = vec![true; num_pieces]; // Peer has everything
+        peer_state.peer_choking = ChokeStatus::Unchoke; // Unchoked us
+        peer_state.am_interested = true; // We are interested
+        
+        manager.state.peers.insert(peer_id.clone(), peer_state);
+
+        // --- 4. ACTION: Assign Work for the LAST PIECE ---
+        // We forcibly assign the very last piece (Index 37) to check the request size.
+        // We must clear the need queue and only add the last piece to guarantee it picks it.
+        manager.state.piece_manager.need_queue.clear();
+        manager.state.piece_manager.need_queue.push(last_piece_index);
+
+        // Run AssignWork
+        manager.apply_action(Action::AssignWork { peer_id: peer_id.clone() });
+
+        // --- 5. ASSERTION ---
+        // Spy on the requests sent to the peer
+        let mut seen_tail_request = false;
+        
+        // We expect a batch of requests. We need to find the very last one.
+        // The loop waits for the command to arrive on the channel.
+        let timeout = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(cmd) = peer_rx.recv().await {
+                if let TorrentCommand::BulkRequest(requests) = cmd {
+                    for (index, begin, length) in requests {
+                        if index == last_piece_index {
+                            // Calculate the offset of the absolute last block
+                            // The last piece is 172,752 bytes.
+                            // The last block starts at 163,840.
+                            if begin == 163_840 {
+                                println!("Captured Tail Request: Piece={} Offset={} Len={}", index, begin, length);
+                                
+                                if length == expected_tail_req_len {
+                                    println!("✅ SUCCESS: Client requested clamped length ({})", length);
+                                    seen_tail_request = true;
+                                    return;
+                                } else if length == 16384 {
+                                    panic!("❌ FAILURE: Client requested full 16KB block ({}) past file end! This causes qBit disconnect.", length);
+                                } else {
+                                    panic!("❌ FAILURE: Weird length requested: {}", length);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }).await;
+
+        if timeout.is_err() {
+            panic!("Timed out waiting for tail block request. Did AssignWork trigger?");
+        }
+    }
+
+    // Helper to build a V2 File Tree manually
+    fn build_mock_v2_file_tree(files: Vec<(String, usize, Vec<u8>)>) -> serde_bencode::value::Value {
+        use std::collections::HashMap;
+        use serde_bencode::value::Value;
+
+        let mut root_dir_map = HashMap::new();
+
+        for (name, length, root) in files {
+            // Leaf Node: { "": { "length": ..., "pieces root": ... } }
+            let mut metadata = HashMap::new();
+            metadata.insert("length".as_bytes().to_vec(), Value::Int(length as i64));
+            metadata.insert("pieces root".as_bytes().to_vec(), Value::Bytes(root));
+
+            let mut leaf_node = HashMap::new();
+            leaf_node.insert("".as_bytes().to_vec(), Value::Dict(metadata));
+
+            // Insert into root dir: { "filename": { ...leaf... } }
+            root_dir_map.insert(name.as_bytes().to_vec(), Value::Dict(leaf_node));
+        }
+
+        Value::Dict(root_dir_map)
+    }
+
+    #[tokio::test]
+    async fn test_v2_multi_file_alignment_bug() {
+        // --- 1. SETUP ---
+        let (mut manager, _, _, _, _) = setup_test_harness();
+        let piece_len = 1024;
+
+        // --- 2. CREATE MULTI-FILE V2 TORRENT ---
+        // File A: 100 bytes (Hash A)
+        // File B: 100 bytes (Hash B)
+        let root_a = vec![0xAA; 32];
+        let root_b = vec![0xBB; 32];
+
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // Pure V2
+        torrent.info.length = 0;
+        
+        let files = vec![
+            ("file_a.txt".to_string(), 100, root_a.clone()),
+            ("file_b.txt".to_string(), 100, root_b.clone()),
+        ];
+        
+        torrent.info.file_tree = Some(build_mock_v2_file_tree(files));
+        
+        // Populate info.files for allocator
+        torrent.info.files = vec![
+            crate::torrent_file::InfoFile { length: 100, path: vec!["file_a.txt".into()], md5sum: None, attr: None },
+            crate::torrent_file::InfoFile { length: 100, path: vec!["file_b.txt".into()], md5sum: None, attr: None },
+        ];
+
+        // --- 3. INIT MANAGER ---
+        manager.apply_action(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 1000,
+        });
+
+        // --- 4. ASSERTION ---
+        // We verified that HashMap iteration order is random.
+        // We don't care if A or B comes first. 
+        // We ONLY care that they are on DIFFERENT pieces (Alignment).
+        
+        let roots_0 = manager.state.piece_to_roots.get(&0);
+        let roots_1 = manager.state.piece_to_roots.get(&1);
+
+        // Check 1: Both pieces must exist and have mapped roots
+        assert!(roots_0.is_some(), "Piece 0 should have a root");
+        assert!(roots_1.is_some(), "Piece 1 should have a root (Alignment Logic Check)");
+
+        // Check 2: Each piece should only map to ONE file. 
+        // If alignment failed, Piece 0 would likely contain BOTH [(0, A), (100, B)].
+        assert_eq!(roots_0.unwrap().len(), 1, "Piece 0 should map to exactly 1 file");
+        assert_eq!(roots_1.unwrap().len(), 1, "Piece 1 should map to exactly 1 file");
+
+        // Check 3: The roots must be different (One is A, one is B)
+        let hash_0 = &roots_0.unwrap()[0].1;
+        let hash_1 = &roots_1.unwrap()[0].1;
+        
+        assert_ne!(hash_0, hash_1, "Piece 0 and 1 should point to different roots");
+        
+        // Verify contents
+        let valid_roots = vec![root_a, root_b];
+        assert!(valid_roots.contains(hash_0), "Piece 0 has unknown root");
+        assert!(valid_roots.contains(hash_1), "Piece 1 has unknown root");
+
+        println!("✅ SUCCESS: Multi-file V2 alignment verified. Files occupy Piece 0 and Piece 1 separately.");
     }
 }
