@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::torrent_file::Torrent;
+use crate::torrent_file::{Torrent, InfoFile}; 
 use serde_bencode::de;
 use serde_bencode::value::Value;
 
@@ -16,7 +16,6 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            // For the Bencode variant, we now use the contained error `e`
             ParseError::Bencode(e) => write!(f, "Bencode parsing error: {}", e),
             ParseError::MissingInfoDict => write!(f, "Missing 'info' dictionary in torrent file"),
         }
@@ -32,11 +31,10 @@ impl From<serde_bencode::Error> for ParseError {
 }
 
 pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
-    // 1. First, deserialize the data into a generic Bencode Value structure.
-    //    This allows us to inspect the raw data before converting to our final struct.
+    // 1. First, deserialize into a generic Value to extract the raw info dict.
     let generic_bencode: Value = de::from_bytes(bencode_data)?;
 
-    // 2. Extract the raw 'info' dictionary value.
+    // 2. Extract the raw 'info' dictionary value for hashing.
     let info_dict_value = if let Value::Dict(mut top_level_dict) = generic_bencode.clone() {
         top_level_dict
             .remove("info".as_bytes())
@@ -45,20 +43,64 @@ pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
         return Err(ParseError::MissingInfoDict);
     };
 
-    // 3. Re-encode just the 'info' dictionary to get the bytes needed for the info_hash.
+    // 3. Re-encode just the 'info' dictionary to get the exact bytes for the hash.
     let info_dict_bencode = serde_bencode::to_bytes(&info_dict_value)?;
 
-    // 4. Deserialize the original data AGAIN, but this time into our strongly-typed Torrent struct.
-    //    Serde is fast, so this second pass is not a major performance issue.
+    // 4. Deserialize into the strongly-typed Torrent struct.
     let mut torrent: Torrent = de::from_bytes(bencode_data)?;
 
-    // If 'length' is 0 (typical for Pure V2), calculate it from the file tree
-    // so the rest of the application sees a valid size immediately.
+    // --- V2 COMPATIBILITY LAYER ---
+    // If this is a Pure V2 torrent, the 'files' list will be empty.
+    // We polyfill 'info.files' here so Storage/UI work seamlessly.
+    if torrent.info.files.is_empty() && torrent.info.file_tree.is_some() {
+        let mut v2_roots = torrent.get_v2_roots(); // (PathString, u64, RootHash)
+        
+        // 1. Sort roots FIRST to ensure canonical V2 order (Alphabetical by path)
+        // This is critical so that offsets match the PieceManager's calculation.
+        v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
+        
+        let mut new_files = Vec::new();
+        let piece_len = torrent.info.piece_length as u64;
+
+        for (path_str, length, _root) in v2_roots {
+            let path_components: Vec<String> = path_str.split('/')
+                .map(|s| s.to_string())
+                .collect();
+            
+            // A. Add the Real File
+            new_files.push(InfoFile {
+                length: length as i64,
+                path: path_components,
+                md5sum: None,
+                attr: None,
+            });
+
+            // B. Add Synthetic Padding File (Alignment)
+            // In BitTorrent v2, files are aligned to piece boundaries.
+            // If a file doesn't end exactly on a piece boundary, we insert a "padding file"
+            // to fill the gap. This ensures the NEXT file starts at offset 0 of the NEXT piece.
+            if piece_len > 0 {
+                let remainder = length % piece_len;
+                if remainder > 0 {
+                    let padding_len = piece_len - remainder;
+                    new_files.push(InfoFile {
+                        length: padding_len as i64,
+                        path: vec![".pad".to_string(), padding_len.to_string()],
+                        md5sum: None,
+                        attr: Some("p".to_string()), // Mark as padding (BEP 47)
+                    });
+                }
+            }
+        }
+        
+        torrent.info.files = new_files;
+    }
+    // ------------------------------
+
     if torrent.info.length == 0 {
         torrent.info.length = torrent.info.total_length();
     }
 
-    // 5. Manually set the `info_dict_bencode` field we created.
     torrent.info_dict_bencode = info_dict_bencode;
 
     Ok(torrent)
@@ -67,9 +109,9 @@ pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::torrent_file::{Info, Torrent};
+    use crate::torrent_file::Info;
     use serde_bencode::value::Value;
-    use std::collections::HashMap; // Changed from BTreeMap
+    use std::collections::HashMap;
 
     #[test]
     fn test_parse_bittorrent_v2_hybrid_structure() {
@@ -77,7 +119,7 @@ mod tests {
         let root_hash_1 = vec![0xAA; 32];
         let root_hash_2 = vec![0xBB; 32];
 
-        // Use HashMap instead of BTreeMap
+        // Use HashMap for tree construction
         let mut file_a_metadata = HashMap::new();
         file_a_metadata.insert(
             "pieces root".as_bytes().to_vec(),
@@ -115,13 +157,12 @@ mod tests {
         layers.insert(root_hash_1.clone(), Value::Bytes(vec![0x11; 32]));
         layers.insert(root_hash_2.clone(), Value::Bytes(vec![0x22; 32]));
 
-        // ... rest of the test remains the same ...
         let info = Info {
             name: "v2_test_torrent".to_string(),
             piece_length: 16384,
             pieces: vec![],
             length: 0,
-            files: vec![],
+            files: vec![], // Empty files list initially
             private: None,
             md5sum: None,
             meta_version: Some(2),
@@ -142,17 +183,22 @@ mod tests {
         };
 
         let bencoded_data = serde_bencode::to_bytes(&torrent_input).expect("Serialization failed");
+        
+        // --- TEST: Parsing should automatically populate 'files' ---
         let parsed_torrent = super::from_bytes(&bencoded_data).expect("Parsing failed");
 
-        // ... verify logic ...
-        let extracted_roots = parsed_torrent.get_v2_roots();
-        let root_map: HashMap<String, Vec<u8>> = extracted_roots.into_iter()
-                    .map(|(path, _len, root)| (path, root))
-                    .collect();
+        // Expect 4 files (2 Real + 2 Padding)
+        assert_eq!(parsed_torrent.info.files.len(), 4, "Should have 2 real files + 2 padding files");
+        
+        // Verify Paths
+        let paths: Vec<Vec<String>> = parsed_torrent.info.files.iter().map(|f| f.path.clone()).collect();
+        assert!(paths.contains(&vec!["file_b.txt".to_string()]));
+        assert!(paths.contains(&vec!["folder".to_string(), "file_a.txt".to_string()]));
 
-        assert_eq!(root_map.len(), 2);
-        assert_eq!(root_map.get("folder/file_a.txt"), Some(&root_hash_1));
-        assert_eq!(root_map.get("file_b.txt"), Some(&root_hash_2));
+        // Verify Lengths (Sum of files + padding must equal aligned size)
+        let len_sum: i64 = parsed_torrent.info.files.iter().map(|f| f.length).sum();
+        assert_eq!(len_sum, 32768); // 2 pieces * 16384
+        assert_eq!(parsed_torrent.info.length, 32768);
     }
-}
 
+}

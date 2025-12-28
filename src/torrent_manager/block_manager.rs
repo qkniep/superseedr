@@ -68,6 +68,10 @@ pub struct BlockManager {
     // V2: Files are mapped by index to their geometry and root hash
     pub files: Vec<FileInfo>,
 
+    // [NEW] Explicit overrides for piece lengths (e.g. V2 tail pieces)
+    // This allows pieces to be shorter than standard length even if they aren't the global last piece.
+    pub piece_lengths: HashMap<u32, u32>,
+
     // --- V1 COMPATIBILITY ---
     pub legacy_buffers: HashMap<u32, LegacyAssembler>,
 
@@ -90,11 +94,14 @@ impl BlockManager {
         v1_hashes: Vec<[u8; 20]>,
         // Map of file_index -> (size, root_hash)
         v2_file_info: Vec<(u64, [u8; 32])>,
+        // [NEW] Overrides map
+        piece_overrides: HashMap<u32, u32>,
         validation_complete: bool,
     ) {
         self.piece_length = piece_length;
         self.total_length = total_length;
         self.piece_hashes_v1 = v1_hashes;
+        self.piece_lengths = piece_overrides;
 
         // Construct File Layout
         let mut current_offset = 0;
@@ -232,8 +239,10 @@ impl BlockManager {
     }
 
     pub fn get_block_range(&self, piece_idx: u32) -> (u32, u32) {
+        // [FIX] Use calculated size which respects overrides
         let piece_len = self.calculate_piece_size(piece_idx);
         let blocks_in_piece = self.blocks_in_piece(piece_len);
+        
         let piece_start_offset = piece_idx as u64 * self.piece_length as u64;
         let start_blk = (piece_start_offset / BLOCK_SIZE as u64) as u32;
         let actual_start_blk = std::cmp::min(start_blk, self.total_blocks);
@@ -242,6 +251,11 @@ impl BlockManager {
     }
 
     fn calculate_piece_size(&self, piece_idx: u32) -> u32 {
+        // [FIX] Check for explicit overrides first (V2 Tail Logic)
+        if let Some(&len) = self.piece_lengths.get(&piece_idx) {
+            return len;
+        }
+
         let offset = piece_idx as u64 * self.piece_length as u64;
         let remaining = self.total_length.saturating_sub(offset);
         std::cmp::min(self.piece_length as u64, remaining) as u32
@@ -252,8 +266,10 @@ impl BlockManager {
         let piece_index = (global_offset / self.piece_length as u64) as u32;
         let byte_offset_in_piece = (global_offset % self.piece_length as u64) as u32;
 
-        let remaining_len = self.total_length.saturating_sub(global_offset);
-        let length = std::cmp::min(BLOCK_SIZE as u64, remaining_len) as u32;
+        // [FIX] Use calculated size to check valid bounds for this specific piece
+        let valid_piece_len = self.calculate_piece_size(piece_index);
+        let remaining_in_piece = (valid_piece_len as u64).saturating_sub(byte_offset_in_piece as u64);
+        let length = std::cmp::min(BLOCK_SIZE as u64, remaining_in_piece) as u32;
 
         BlockAddress {
             piece_index,
@@ -422,7 +438,7 @@ mod tests {
         let piece_count = (total_len as f64 / piece_len as f64).ceil() as usize;
         let v1_hashes = vec![[0; 20]; piece_count];
         let mut manager = BlockManager::new();
-        manager.set_geometry(piece_len, total_len, v1_hashes, vec![], false);
+        manager.set_geometry(piece_len, total_len, v1_hashes, vec![], HashMap::new(), false);
         manager
     }
 
@@ -569,7 +585,7 @@ mod tests {
     fn test_decision_routing_v1_only() {
         let mut bm = BlockManager::new();
         // V1 Setup: No V2 file info provided
-        bm.set_geometry(16384, 16384 * 10, vec![], vec![], false);
+        bm.set_geometry(16384, 16384 * 10, vec![], vec![], HashMap::new(), false);
 
         let addr = bm.inflate_address(0); // Block 0
         let decision = bm.handle_incoming_block_decision(addr);
@@ -590,7 +606,7 @@ mod tests {
         let v2_info = vec![(32768, root_a), (16384, root_b)];
 
         // Total len = 48KB
-        bm.set_geometry(16384, 49152, vec![], v2_info, false);
+        bm.set_geometry(16384, 49152, vec![], v2_info, HashMap::new(), false);
 
         // 1. Test Block inside File A (Offset 0)
         let addr_a1 = bm.inflate_address(0); // Block 0
@@ -634,7 +650,7 @@ mod tests {
         // File starts at 0, ends at 16385 (1 block + 1 byte)
         let v2_info = vec![(16385, root)];
 
-        bm.set_geometry(16384, 16385, vec![], v2_info, false);
+        bm.set_geometry(16384, 16385, vec![], v2_info, HashMap::new(), false);
 
         // 1. First full block
         let addr_0 = bm.inflate_address(0);
@@ -672,7 +688,7 @@ mod tests {
         let piece_len = 32768;
         let total_len = 32768;
         // v1_hashes and v2_file_info can be empty for this logic test
-        bm.set_geometry(piece_len, total_len, vec![], vec![], false);
+        bm.set_geometry(piece_len, total_len, vec![], vec![], HashMap::new(), false);
 
         let block_size = 16384;
         let data_block_0 = vec![1u8; block_size];
@@ -712,10 +728,11 @@ mod tests {
 #[cfg(test)]
 mod comprehensive_tests {
     use crate::torrent_manager::block_manager::BlockManager;
+    use std::collections::HashMap;
 
     fn create_manager(piece_len: u32, total_len: u64) -> BlockManager {
         let mut bm = BlockManager::new();
-        bm.set_geometry(piece_len, total_len, vec![], vec![], false);
+        bm.set_geometry(piece_len, total_len, vec![], vec![], HashMap::new(), false);
         bm
     }
 
@@ -794,10 +811,11 @@ mod comprehensive_tests {
 #[cfg(test)]
 mod security_tests {
     use crate::torrent_manager::block_manager::BlockManager;
+    use std::collections::HashMap;
 
     fn create_manager(piece_len: u32, total_len: u64) -> BlockManager {
         let mut bm = BlockManager::new();
-        bm.set_geometry(piece_len, total_len, vec![], vec![], false);
+        bm.set_geometry(piece_len, total_len, vec![], vec![], HashMap::new(), false);
         bm
     }
 
@@ -863,13 +881,14 @@ mod security_tests {
 #[cfg(test)]
 mod state_tests {
     use crate::torrent_manager::block_manager::BlockManager;
+    use std::collections::HashMap;
 
     #[test]
     fn test_revert_piece_clears_bits() {
         let mut bm = BlockManager::new();
         let piece_len = 32768; // 2 blocks
         let total_len = 32768;
-        bm.set_geometry(piece_len, total_len, vec![], vec![], false);
+        bm.set_geometry(piece_len, total_len, vec![], vec![], HashMap::new(), false);
 
         // 1. Mark both blocks as done
         bm.commit_v1_piece(0);
@@ -896,13 +915,14 @@ mod state_tests {
 #[cfg(test)]
 mod selection_tests {
     use crate::torrent_manager::block_manager::BlockManager;
+    use std::collections::HashMap;
 
     #[test]
     fn test_pick_blocks_standard_vs_endgame() {
         let mut bm = BlockManager::new();
         // 1 piece, 4 blocks
         let piece_len = 16384 * 4;
-        bm.set_geometry(piece_len, piece_len as u64, vec![], vec![], false);
+        bm.set_geometry(piece_len, piece_len as u64, vec![], vec![], HashMap::new(), false);
 
         let peer_bitfield = vec![true]; // Peer has Piece 0
         let rarest = vec![0];

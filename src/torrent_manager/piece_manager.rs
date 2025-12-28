@@ -47,13 +47,18 @@ impl PieceManager {
         &mut self,
         piece_length: u32,
         total_length: u64,
+        piece_overrides: HashMap<u32, u32>,
         validation_complete: bool,
     ) {
+tracing::info!("📏 [PieceManager] Applying Geometry: total_len {}, global_piece_len {}, overrides_count {}", 
+        total_length, piece_length, piece_overrides.len());
+
         self.block_manager.set_geometry(
             piece_length,
             total_length,
             Vec::new(),
             Vec::new(),
+            piece_overrides,
             validation_complete,
         );
     }
@@ -85,7 +90,13 @@ impl PieceManager {
         // 1. Safety fallback: If geometry wasn't set externally, infer it now.
         if self.block_manager.piece_length == 0 {
             let estimated_total = (piece_index as u64 + 1) * piece_size as u64;
-            self.set_geometry(piece_size as u32, estimated_total, false);
+tracing::info!("⚠️ [PieceManager] WARNING: Falling back to inferred geometry for piece {}", piece_index);
+            self.set_geometry(
+                piece_size as u32, 
+                estimated_total, 
+                HashMap::new(), 
+                false
+            );
         }
 
         // 2. Map the incoming byte offset to a BlockAddress
@@ -95,26 +106,66 @@ impl PieceManager {
             block_data.len() as u32,
         )?;
 
-        // 3. Delegate buffering to BlockManager
-        self.block_manager
-            .handle_v1_block_buffering(addr, block_data)
+        // [DEBUG] Trace completion status
+        let result = self.block_manager.handle_v1_block_buffering(addr, block_data);
+        
+        if piece_index == 132 {
+            if let Some(assembler) = self.block_manager.legacy_buffers.get(&piece_index) {
+                let missing_blocks = assembler.mask.iter().filter(|&&b| !b).count();
+                let received_bytes: usize = assembler.buffer.len(); // Buffer is pre-allocated to piece_size
+                
+                // Calculate how many bytes we actually have *valid* in the buffer?
+                // The assembler tracks blocks, not bytes directly in a counter, but we can infer.
+                tracing::error!(
+                    "🧩 [PieceManager] Piece 132 Update. Blocks: {}/{}. Missing Blocks: {}. Buffer Size: {}. Just Completed? {}", 
+                    assembler.received_blocks, 
+                    assembler.total_blocks,
+                    missing_blocks,
+                    received_bytes,
+                    result.is_some()
+                );
+            }
+        }
+
+if let Some(ref data) = result {
+    tracing::info!("📦 [PieceManager] Piece {} complete. Buffer size: {}, Expected size: {}", 
+        piece_index, data.len(), piece_size);
+}
+        result
     }
 
     pub fn mark_as_complete(&mut self, piece_index: u32) -> Vec<String> {
-        if self.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
+        let current_status = self.bitfield.get(piece_index as usize).cloned();
+        
+        // [DEBUG] Trace Entry
+        if piece_index == 133 { // Target the problematic piece
+            tracing::error!("🛑 [PieceManager] mark_as_complete(133) called. Current Status: {:?}. Queue Len: {}", 
+                current_status, self.need_queue.len());
+        }
+
+        if current_status == Some(PieceStatus::Done) {
+            if piece_index == 133 { tracing::error!("🛑 [PieceManager] Piece 133 already DONE. Bailing out."); }
             return Vec::new();
         }
 
-        // 1. Update High-Level State (for state.rs logic)
+        // 1. Update High-Level State
         self.bitfield[piece_index as usize] = PieceStatus::Done;
         self.pieces_remaining = self.pieces_remaining.saturating_sub(1);
+        
+        // [DEBUG] Check if retain actually removes it
+        let old_need_len = self.need_queue.len();
         self.need_queue.retain(|&p| p != piece_index);
+        let new_need_len = self.need_queue.len();
 
         let peers_to_cancel = self.pending_queue.remove(&piece_index).unwrap_or_default();
 
-        // 2. Update Low-Level State (BlockManager)
-        // This ensures the block manager knows this piece is done and won't accept duplicates.
+        // 2. Update Low-Level State
         self.block_manager.commit_v1_piece(piece_index);
+
+        if piece_index == 133 { 
+            tracing::error!("🛑 [PieceManager] Piece 133 Status SET TO DONE. NeedQueue removed items: {}. Peers to cancel: {}", 
+                old_need_len - new_need_len, peers_to_cancel.len());
+        }
 
         peers_to_cancel
     }

@@ -165,6 +165,38 @@ pub async fn write_data_to_disk(
     global_offset: u64,
     data_to_write: &[u8],
 ) -> Result<(), StorageError> {
+    
+    // --- [DEBUG INSTRUMENTATION START] ---
+    // Log intent: Where do we EXPECT this data to go?
+    let mut accumulated_len = 0;
+    for file in &multi_file_info.files {
+        let file_end = accumulated_len + file.length;
+        
+        // Check if the write overlaps with this file
+        let write_end = global_offset + data_to_write.len() as u64;
+        
+        if global_offset < file_end && write_end > accumulated_len {
+            let relative_start = global_offset.saturating_sub(accumulated_len);
+            
+            // Only log high-volume data if it matches our suspect pieces (Piece 132/133)
+            // Based on previous logs, Piece 133 started around offset 163840 relative to something,
+            // or if testing the 20MB file, it's near the end.
+            // We'll log everything for now since it's a test run.
+            tracing::error!(
+                "💾 [Storage] INTENT: Write {} bytes @ Global {}. Target: {:?} (File Range: {}-{}). Rel Offset: {}. IsPadding: {}", 
+                data_to_write.len(),
+                global_offset, 
+                file.path, 
+                accumulated_len, 
+                file_end, 
+                relative_start,
+                file.is_padding
+            );
+        }
+        accumulated_len += file.length;
+    }
+    // --- [DEBUG INSTRUMENTATION END] ---
+
     let mut bytes_written = 0;
     let data_len = data_to_write.len();
 
@@ -183,16 +215,38 @@ pub async fn write_data_to_disk(
             if bytes_to_write_in_this_file > 0 {
                 if !file_info.is_padding {
                     // STANDARD LOGIC: Write only if it is NOT a padding file.
-                    let mut file = OpenOptions::new().write(true).open(&file_info.path).await?;
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .create(true) // Ensure file exists if we race to write
+                        .open(&file_info.path)
+                        .await?;
+                    
                     file.seek(SeekFrom::Start(local_offset)).await?;
 
                     let data_slice =
                         &data_to_write[bytes_written..bytes_written + bytes_to_write_in_this_file];
+                    
                     file.write_all(data_slice).await?;
+                    
+                    // [FIX] CRITICAL: Force flush to OS/Disk.
+                    // Without this, the OS might hold the data in memory, and if the app exits immediately
+                    // (like in the test case), the data is lost.
+                    file.flush().await?; 
+                    
+                    tracing::error!(
+                        "💾 [Storage] SUCCESS: Wrote {} bytes to {:?} @ Local {}", 
+                        bytes_to_write_in_this_file, 
+                        file_info.path, 
+                        local_offset
+                    );
+                } else {
+                    tracing::error!(
+                        "💾 [Storage] SKIP: Skipping {} bytes for Padding File {:?} @ Local {}", 
+                        bytes_to_write_in_this_file, 
+                        file_info.path, 
+                        local_offset
+                    );
                 }
-                // PADDING LOGIC: Just advance the counter. We effectively "discard"
-                // the write, which is correct because padding bytes are usually zero
-                // and the file doesn't exist on disk.
 
                 bytes_written += bytes_to_write_in_this_file;
             }
@@ -202,6 +256,12 @@ pub async fn write_data_to_disk(
             }
         }
     }
+
+    // If we reach here, we ran out of files before writing all data
+    tracing::error!(
+        "💾 [Storage] ERROR: Write incomplete! Written: {}/{}. Global Offset: {}", 
+        bytes_written, data_len, global_offset
+    );
 
     Err(StorageError::Io(std::io::Error::new(
         std::io::ErrorKind::InvalidInput,

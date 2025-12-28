@@ -347,20 +347,42 @@ impl TorrentState {
         };
 
         if let Some(ref t) = torrent {
-            let total_len: u64 = if t.info.files.is_empty() {
-                t.info.length as u64
+            let total_len: u64 = if t.info.meta_version == Some(2) {
+                // V2: Geometry is aligned to piece boundaries
+                let num_pieces = if !t.info.pieces.is_empty() {
+                    t.info.pieces.len() / 20
+                } else {
+                    // Calculate from file tree if pieces string is empty (Pure V2)
+                    let piece_len = t.info.piece_length as u64;
+                    let mut count = 0;
+                    // We can reuse the same logic or helper as manager.rs
+                    // A simple approximation if you don't want to re-traverse the tree 
+                    // is to rely on the fact that manager.rs likely calculated num_pieces 
+                    // correctly before passing piece_manager in.
+                    
+                    // HOWEVER, safely recalculating is better:
+                    let v2_roots = t.get_v2_roots();
+                    let mut c = 0;
+                    for (_, length, _) in v2_roots {
+                        if length > 0 && piece_len > 0 {
+                            c += (length + piece_len - 1) / piece_len;
+                        }
+                    }
+                    c as usize
+                };
+                (num_pieces as u64) * (t.info.piece_length as u64)
             } else {
-                t.info.files.iter().map(|f| f.length as u64).sum()
+                // V1: Geometry is the sum of files (Packed)
+                if t.info.files.is_empty() {
+                    t.info.length as u64
+                } else {
+                    t.info.files.iter().map(|f| f.length as u64).sum()
+                }
             };
 
-            piece_manager.set_geometry(
-                t.info.piece_length as u32,
-                total_len,
-                torrent_validation_status,
-            );
         }
 
-        Self {
+        let mut state = Self {
             info_hash,
             torrent,
             torrent_metadata_length,
@@ -375,7 +397,43 @@ impl TorrentState {
             ),
             now: Instant::now(),
             ..Default::default()
+        };
+
+        // 2. [FIX] Populate V2 Maps Immediately
+        // This ensures AssignWork has the data it needs to clamp requests from the very start.
+        let (v2_piece_count, piece_overrides) = state.rebuild_v2_mappings();
+
+        // 3. Initialize Geometry with Correct Counts
+        if let Some(ref t) = state.torrent {
+            let total_len: u64 = if t.info.meta_version == Some(2) {
+                // V2: Geometry is aligned to piece boundaries
+                let num_pieces = if !t.info.pieces.is_empty() {
+                    t.info.pieces.len() / 20
+                } else if v2_piece_count > 0 {
+                    // Use the count we just calculated
+                    v2_piece_count as usize
+                } else {
+                    0 
+                };
+                (num_pieces as u64) * (t.info.piece_length as u64)
+            } else {
+                // V1: Geometry is packed (sum of files)
+                if t.info.files.is_empty() {
+                    t.info.length as u64
+                } else {
+                    t.info.files.iter().map(|f| f.length as u64).sum()
+                }
+            };
+
+            state.piece_manager.set_geometry(
+                t.info.piece_length as u32,
+                total_len,
+                piece_overrides,
+                torrent_validation_status,
+            );
         }
+
+        state
     }
 
     fn get_piece_size(&self, piece_index: u32) -> usize {
@@ -641,6 +699,36 @@ impl TorrentState {
                     return vec![Effect::DoNothing];
                 }
 
+                if self.piece_manager.need_queue.contains(&133) {
+                    let blocks = self.piece_manager.block_manager.legacy_buffers.get(&133);
+                    // Use error! level to ensure it shows up
+                    tracing::error!("🛠️ [AssignWork] Piece 133 is in NEED Queue. Buffered Blocks: {:?}. Is Global Pending? {:?}", 
+                        blocks.map(|b| b.received_blocks),
+                        self.piece_manager.pending_queue.contains_key(&133)
+                    );
+                }
+
+                // [FIX] Prepare size calculation closure with disjoint borrows.
+                let torrent_ref = &self.torrent;
+                let roots_ref = &self.piece_to_roots;
+                
+                let calc_v2_limit = |piece_index: u32| -> Option<u32> {
+                    if let Some(torrent) = torrent_ref {
+                        let piece_len = torrent.info.piece_length as u64;
+                        if let Some(roots) = roots_ref.get(&piece_index) {
+                            if let Some((file_start, file_len, _)) = roots.first() {
+                                 let global_piece_start = piece_index as u64 * piece_len;
+                                 let offset_in_file = global_piece_start.saturating_sub(*file_start);
+                                 let remaining_in_file = file_len.saturating_sub(offset_in_file);
+                                 return Some(std::cmp::min(piece_len, remaining_in_file) as u32);
+                            }
+                        }
+                        None
+                    } else {
+                        None
+                    }
+                };
+
                 let mut effects = Vec::new();
                 let mut request_batch = Vec::new();
 
@@ -697,6 +785,7 @@ impl TorrentState {
                 let mut pending_pieces: Vec<u32> = peer.pending_requests.iter().cloned().collect();
                 pending_pieces.sort();
 
+                // --- PHASE 1: FILL FROM PENDING PIECES ---
                 for piece_index in pending_pieces {
                     if available_slots == 0 {
                         break;
@@ -712,6 +801,9 @@ impl TorrentState {
                         .get(&piece_index)
                         .map(|a| a.mask.clone());
 
+                    // --- DEBUG INSTRUMENTATION START ---
+                    // --- DEBUG INSTRUMENTATION END ---
+
                     for global_block_idx in start..end {
                         if available_slots == 0 {
                             break;
@@ -725,6 +817,8 @@ impl TorrentState {
                             .get(global_block_idx as usize)
                             == Some(&true)
                         {
+                            // --- DEBUG ---
+                            if piece_index == 133 { tracing::debug!("  -> Block {} is DONE (Skipping)", global_block_idx); }
                             continue;
                         }
 
@@ -732,6 +826,8 @@ impl TorrentState {
                         let local_block_idx = global_block_idx - start;
                         if let Some(mask) = &assembler_mask {
                             if mask.get(local_block_idx as usize) == Some(&true) {
+                                // --- DEBUG ---
+                                if piece_index == 133 { tracing::debug!("  -> Block {} is BUFFERED (Skipping)", global_block_idx); }
                                 continue;
                             }
                         }
@@ -741,26 +837,51 @@ impl TorrentState {
                             .block_manager
                             .inflate_address(global_block_idx);
 
+                        let final_len = if let Some(limit) = calc_v2_limit(addr.piece_index) {
+                             let remaining = limit.saturating_sub(addr.byte_offset);
+                             std::cmp::min(addr.length, remaining)
+                        } else {
+                             addr.length
+                        };
+                        
+                        if final_len == 0 {
+                            continue;
+                        }
+
                         // Is peer already working on it?
                         if peer.active_blocks.contains(&(
                             addr.piece_index,
                             addr.byte_offset,
-                            addr.length,
+                            final_len,
                         )) {
+                            // --- DEBUG ---
+                            if piece_index == 133 { tracing::debug!("  -> Block {} is ACTIVE (Skipping)", global_block_idx); }
                             continue;
                         }
 
-                        request_batch.push((addr.piece_index, addr.byte_offset, addr.length));
+                        // --- DEBUG: TRIGGER DETECTION ---
+                        if piece_index == 133 {
+                            tracing::warn!(
+                                "⚠️ RE-REQUEST TRIGGER: Block {} (Offset {}) considered MISSING. GlobalBitfield: {:?}, Buffered: {:?}", 
+                                global_block_idx, addr.byte_offset,
+                                self.piece_manager.block_manager.block_bitfield.get(global_block_idx as usize),
+                                assembler_mask.as_ref().map(|m| m.get(local_block_idx as usize))
+                            );
+                        }
+                        // --------------------------------
+
+                        request_batch.push((addr.piece_index, addr.byte_offset, final_len));
                         peer.active_blocks.insert((
                             addr.piece_index,
                             addr.byte_offset,
-                            addr.length,
+                            final_len,
                         ));
+
                         available_slots -= 1;
                     }
                 }
 
-                // --- 4. PHASE 2: FILL FROM NEW PIECES ---
+                // --- PHASE 2: FILL FROM NEW PIECES ---
                 while available_slots > 0 {
                     let choice = self.piece_manager.choose_piece_for_peer(
                         &peer.bitfield,
@@ -819,10 +940,22 @@ impl TorrentState {
                                     .piece_manager
                                     .block_manager
                                     .inflate_address(global_block_idx);
+
+                                let final_len = if let Some(limit) = calc_v2_limit(addr.piece_index) {
+                                     let remaining = limit.saturating_sub(addr.byte_offset);
+                                     std::cmp::min(addr.length, remaining)
+                                } else {
+                                     addr.length
+                                };
+
+                                if final_len == 0 {
+                                    continue;
+                                }
+
                                 if peer.active_blocks.contains(&(
                                     addr.piece_index,
                                     addr.byte_offset,
-                                    addr.length,
+                                    final_len,
                                 )) {
                                     continue;
                                 }
@@ -830,12 +963,12 @@ impl TorrentState {
                                 request_batch.push((
                                     addr.piece_index,
                                     addr.byte_offset,
-                                    addr.length,
+                                    final_len,
                                 ));
                                 peer.active_blocks.insert((
                                     addr.piece_index,
                                     addr.byte_offset,
-                                    addr.length,
+                                    final_len,
                                 ));
                                 available_slots -= 1;
                             }
@@ -1020,6 +1153,12 @@ impl TorrentState {
                 block_offset,
                 data,
             } => {
+
+let block_len = data.len();
+    tracing::info!(
+        "📥 RECEIVED BLOCK: Piece {} | Offset {} | Len {} | Peer {}", 
+        piece_index, block_offset, block_len, peer_id
+    );
                 // 1. Safety Guard: Bounds Check
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
@@ -1078,7 +1217,24 @@ impl TorrentState {
                 // 7. Process the Block
                 let piece_size = self.get_piece_size(piece_index);
 
+
+if piece_index == 132 || piece_index == 265 {
+    tracing::info!("🔍 [State] Piece {} calculated physical size: {}", piece_index, piece_size);
+}
+
                 if let Some(complete_data) = self.piece_manager.handle_block(piece_index, block_offset, &data, piece_size) {
+tracing::info!("✅ [State] Piece {} assembly finished. Physical Data Len: {}", piece_index, complete_data.len());
+    
+    // DEBUG: Check state IMMEDIATELY after handle_block
+    let (start, end) = self.piece_manager.block_manager.get_block_range(piece_index);
+    let first_block_status = self.piece_manager.block_manager.block_bitfield.get(start as usize).as_deref().cloned();
+    
+    tracing::info!(
+        "🔍 POST-HANDLE DEBUG: Piece {} | Block Range: {}..{} | First Block Bitfield: {:?} | Piece Status: {:?}", 
+        piece_index, start, end, first_block_status,
+        self.piece_manager.bitfield.get(piece_index as usize)
+    );
+
                     if let Some(roots) = self.piece_to_roots.get(&piece_index) {
                         
                         let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(0);
@@ -1089,34 +1245,34 @@ impl TorrentState {
                             .max_by_key(|(start, _, _)| *start);
 
                         if let Some((file_start, _len, root)) = matching_root_info {
-                            // OPTION A: We received a dynamic proof from the network
-                            if let Some(proof) = self.v2_proofs.get(&piece_index) {
+                            // [FIX] PRIORITY 1: Use Local Proof (Trust Metadata over Peer)
+                            // If we have the specific leaf hash in our 'piece layers', use it.
+                            // This ensures we compare Leaf-to-Leaf, which works even without a full Merkle proof.
+                            if let Some(target_hash) = self.get_local_v2_hash(piece_index, root, *file_start) {
+                                self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
+                                effects.push(Effect::VerifyPieceV2 {
+                                    peer_id: peer_id.clone(),
+                                    piece_index,
+                                    proof: Vec::new(), // Local verify = direct comparison, no proof needed
+                                    data: complete_data,
+                                    root_hash: target_hash, // This is now the LEAF hash (c97a...), not Root
+                                    file_start_offset: *file_start,
+                                });
+                            }
+                            // PRIORITY 2: Use Dynamic Network Proof
+                            // Only use this if we lack local metadata (rare for V2, more common for V1/Hybrid)
+                            else if let Some(proof) = self.v2_proofs.get(&piece_index) {
                                 self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                                 effects.push(Effect::VerifyPieceV2 {
                                     peer_id: peer_id.clone(),
                                     piece_index,
                                     proof: proof.clone(),
                                     data: complete_data,
-                                    root_hash: root.clone(),
+                                    root_hash: root.clone(), // Must verify against Root using Proof
                                     file_start_offset: *file_start,
                                 });
                             } 
-                            // [FIX] OPTION B: Use the Local Proof (from .torrent file)
-                            // We already have the hashes in 'piece layers'. We don't need to ask the peer.
-                            else if let Some(target_hash) = self.get_local_v2_hash(piece_index, root, *file_start) {
-                                self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
-                                effects.push(Effect::VerifyPieceV2 {
-                                    peer_id: peer_id.clone(),
-                                    piece_index,
-                                    // Empty proof + Target Hash = Direct Comparison in manager.rs
-                                    proof: Vec::new(), 
-                                    data: complete_data,
-                                    root_hash: target_hash, 
-                                    file_start_offset: *file_start,
-                                });
-                            }
-                            // [FIX] OPTION C: Hybrid Fallback (V1 Compatibility)
-                            // If we don't have a V2 proof/hash, but we have V1 SHA1 hashes, use them.
+                            // PRIORITY 3: Hybrid Fallback (V1)
                             else if self.torrent.as_ref().map_or(false, |t| !t.info.pieces.is_empty()) {
                                 self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                                 effects.push(Effect::VerifyPiece {
@@ -1125,7 +1281,7 @@ impl TorrentState {
                                     data: complete_data,
                                 });
                             }
-                            // OPTION D: No proof found anywhere -> Buffer and wait
+                            // PRIORITY 4: Buffer and Wait
                             else {
                                 self.v2_pending_data.insert(piece_index, (block_offset, complete_data));
                             }
@@ -1178,12 +1334,22 @@ impl TorrentState {
                             .max_by_key(|(start, _, _)| *start);
 
                         if let Some((file_start, _len, root)) = matching_root_info {
+                            
+                            // [FIX] PRIORITY 1: Prefer Local Metadata (Leaf Hash)
+                            // If we have the specific leaf hash in 'piece layers', use it.
+                            let target_hash = if let Some(local_leaf) = self.get_local_v2_hash(piece_index, root, *file_start) {
+                                local_leaf
+                            } else {
+                                // PRIORITY 2: Fallback to File Root (requires valid proof)
+                                root.clone()
+                            };
+
                             return vec![Effect::VerifyPieceV2 {
                                 peer_id,
                                 piece_index,
                                 proof,
                                 data,
-                                root_hash: root.clone(),
+                                root_hash: target_hash, // <--- Now correctly uses Leaf Hash if available
                                 file_start_offset: *file_start,
                             }];
                         }
@@ -1198,6 +1364,10 @@ impl TorrentState {
                 valid,
                 data,
             } => {
+tracing::info!(
+        "🔍 VERIFICATION RESULT: Piece {} | Valid: {} | Peer {}", 
+        piece_index, valid, peer_id
+    );
                 let mut effects = Vec::new();
 
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
@@ -1237,54 +1407,62 @@ impl TorrentState {
                 peer_id,
                 piece_index,
             } => {
-                // GUARD: Protect against reordered events (e.g. arriving before Metadata)
+                // [DEBUG] Trace Entry
+                if piece_index == 133 {
+                    tracing::error!("💿 [State] Processing PieceWrittenToDisk for Piece 133. Current Status in Bitfield: {:?}", 
+                        self.piece_manager.bitfield.get(piece_index as usize));
+                }
+
+                // GUARD: Protect against reordered events
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
                 }
 
-                // Any stray write completions (e.g. from before a restart) should be dropped.
                 if self.torrent_status == TorrentStatus::Validating
                     || self.torrent_status == TorrentStatus::AwaitingMetadata
                 {
+                    if piece_index == 133 { tracing::error!("💿 [State] IGNORED Piece 133 Write: State is {:?}.", self.torrent_status); }
                     return vec![Effect::DoNothing];
                 }
 
                 let mut effects = Vec::new();
-                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done)
-                {
+
+                // [FIX/DEBUG] Allow idempotency. If it's already done, just clean up the peer.
+                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
+                    if piece_index == 133 { tracing::error!("💿 [State] Piece 133 was ALREADY Done. Performing cleanup only."); }
+                    
                     if let Some(peer) = self.peers.get_mut(&peer_id) {
                         peer.pending_requests.remove(&piece_index);
                     }
                     effects.extend(self.update(Action::AssignWork { peer_id }));
                     return effects;
                 }
+
+                // ACTUAL STATE CHANGE
                 let peers_to_cancel = self.piece_manager.mark_as_complete(piece_index);
+                
                 effects.push(Effect::EmitManagerEvent(ManagerEvent::DiskWriteFinished));
+                
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.pending_requests.remove(&piece_index);
                 }
+                
                 effects.extend(self.update(Action::AssignWork {
                     peer_id: peer_id.clone(),
                 }));
+
+                // ... (rest of the existing cancellation logic) ...
                 for other_peer in peers_to_cancel {
                     if other_peer != peer_id {
                         if let Some(peer) = self.peers.get_mut(&other_peer) {
                             peer.pending_requests.remove(&piece_index);
-
-                            let (start, end) = self
-                                .piece_manager
-                                .block_manager
-                                .get_block_range(piece_index);
+                            // ... cancellation construction ...
+                            let (start, end) = self.piece_manager.block_manager.get_block_range(piece_index);
                             let mut batch = Vec::new();
-
                             for global_block_idx in start..end {
-                                let addr = self
-                                    .piece_manager
-                                    .block_manager
-                                    .inflate_address(global_block_idx);
+                                let addr = self.piece_manager.block_manager.inflate_address(global_block_idx);
                                 batch.push((addr.piece_index, addr.byte_offset, addr.length));
                             }
-
                             if !batch.is_empty() {
                                 effects.push(Effect::SendToPeer {
                                     peer_id: other_peer.clone(),
@@ -1297,6 +1475,7 @@ impl TorrentState {
                         }));
                     }
                 }
+                
                 effects.push(Effect::BroadcastHave { piece_index });
                 effects.extend(self.update(Action::CheckCompletion));
 
@@ -1434,7 +1613,7 @@ impl TorrentState {
                 self.torrent = Some(*torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
 
-                let mut v2_piece_count: u64 = 0;
+                let (mut v2_piece_count, piece_overrides) = self.rebuild_v2_mappings();
 
                 if torrent.info.meta_version == Some(2) {
                     let mut v2_roots = torrent.get_v2_roots(); // (Path, Length, Root)
@@ -1471,13 +1650,11 @@ impl TorrentState {
 
                 // --- 2. CALCULATE PIECE COUNT (V2 Aligned) ---
                 let num_pieces = if !torrent.info.pieces.is_empty() {
-                    // V1 / Hybrid: Use explicit pieces string
                     torrent.info.pieces.len() / 20
                 } else if v2_piece_count > 0 {
-                    // Pure V2: Use aligned piece count
                     v2_piece_count as usize
                 } else {
-                    // Fallback calculation
+                    // ... (rest of the fallback logic remains the same) ...
                     let total_len: u64 = if !torrent.info.files.is_empty() {
                         torrent.info.files.iter().map(|f| f.length as u64).sum()
                     } else {
@@ -1497,16 +1674,23 @@ impl TorrentState {
                 self.piece_manager
                     .set_initial_fields(num_pieces, self.torrent_validation_status);
 
-                let total_len: u64 = if torrent.info.files.is_empty() {
-                    torrent.info.length as u64
+                let total_len: u64 = if torrent.info.meta_version == Some(2) {
+                    // V2: Geometry is determined by the number of aligned pieces
+                    (num_pieces as u64) * (torrent.info.piece_length as u64)
                 } else {
-                    torrent.info.files.iter().map(|f| f.length as u64).sum()
+                    // V1: Geometry is the sum of file lengths (Packed)
+                    if torrent.info.files.is_empty() {
+                        torrent.info.length as u64
+                    } else {
+                        torrent.info.files.iter().map(|f| f.length as u64).sum()
+                    }
                 };
 
                 // Pass geometry so BlockManager can do math (offsets, last piece size, etc.)
                 self.piece_manager.set_geometry(
                     torrent.info.piece_length as u32,
                     total_len,
+                    piece_overrides,
                     self.torrent_validation_status,
                 );
 
@@ -1902,6 +2086,8 @@ impl TorrentState {
         if global_bytes < file_start_offset { return None; }
         
         let relative_index = ((global_bytes - file_start_offset) / piece_len) as usize;
+tracing::info!("🔑 [V2 Hash] Piece {} (rel: {}) lookup in layer {}. Bytes available: {}", 
+        global_piece_index, relative_index, hex::encode(root), layer_bytes.len());
         
         // 3. Extract the 32-byte hash
         let start = relative_index * 32;
@@ -1912,6 +2098,53 @@ impl TorrentState {
         } else {
             None
         }
+    }
+
+    fn rebuild_v2_mappings(&mut self) -> (u64, HashMap<u32, u32>) {
+        self.piece_to_roots.clear();
+        let mut v2_piece_count = 0;
+        let mut overrides = HashMap::new();
+        
+        if let Some(torrent) = &self.torrent {
+            if torrent.info.meta_version == Some(2) {
+                let mut v2_roots = torrent.get_v2_roots();
+                v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
+
+                let piece_length = torrent.info.piece_length as u64;
+                let mut current_piece_index = 0;
+
+                for (_path, length, root_hash) in v2_roots {
+                    if length > 0 && piece_length > 0 {
+                        let file_pieces = (length + piece_length - 1) / piece_length;
+                        
+                        // Calculate Tail Length for this file
+                        let tail_len = length % piece_length;
+                        if tail_len > 0 {
+
+                            // The last piece of this file is shorter than standard
+                            let tail_piece_idx = current_piece_index + file_pieces - 1;
+tracing::info!("🧩 [V2 Geometry] Detected tail piece: index {}, tail_len {}, file_len {}", 
+        tail_piece_idx, tail_len, length);
+                            overrides.insert(tail_piece_idx as u32, tail_len as u32);
+                        }
+                        
+                        let file_start_offset = current_piece_index * piece_length;
+                        let start_piece = current_piece_index;
+                        let end_piece = current_piece_index + file_pieces;
+
+                        for idx in start_piece..end_piece {
+                            self.piece_to_roots
+                                .entry(idx as u32)
+                                .or_default()
+                                .push((file_start_offset, length, root_hash.clone()));
+                        }
+                        current_piece_index += file_pieces;
+                    }
+                }
+                v2_piece_count = current_piece_index;
+            }
+        }
+        (v2_piece_count, overrides)
     }
 }
 
@@ -4632,6 +4865,232 @@ mod tests {
             }
         });
         assert!(verified, "Optimization Fail: VerifyPieceV2 was not triggered immediately.");
+    }
+
+    #[test]
+    fn test_repro_v2_proof_priority_bug() {
+        use sha2::{Digest, Sha256};
+        
+        // --- 1. SETUP ---
+        let mut state = create_empty_state();
+        let piece_len = 1024;
+        
+        // Construct a V2 Torrent with 1 piece
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // Pure V2
+        
+        // A. Generate hashes
+        let data = vec![0xAA; 1024];
+        let leaf_hash = Sha256::digest(&data).to_vec(); // The Hash of the Piece
+        let file_root = vec![0xBB; 32];                 // The Root of the File (different)
+
+        // B. Populate Local Metadata (Piece Layers)
+        let mut layer_map = std::collections::HashMap::new();
+        layer_map.insert(
+            file_root.clone(), 
+            serde_bencode::value::Value::Bytes(leaf_hash.clone()) 
+        );
+        torrent.piece_layers = Some(serde_bencode::value::Value::Dict(layer_map));
+        state.torrent = Some(torrent);
+
+        // C. Populate State Maps
+        state.piece_to_roots.insert(0, vec![(0, 1024, file_root.clone())]);
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.set_geometry(1024, 1024, false);
+
+        let peer_id = "bug_tester".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // --- 2. EXECUTE ---
+        // A. MANUALLY Buffer Data (Bypassing IncomingBlock logic)
+        // This places us in the state where data is waiting for a proof.
+        state.v2_pending_data.insert(0, (0, data.clone()));
+
+        // B. Send Network Proof (Triggers MerkleProofReceived)
+        // This action contains the BUG: It will pick the File Root instead of the Leaf Hash.
+        let effects = state.update(Action::MerkleProofReceived {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            proof: vec![0xFF; 32], 
+        });
+
+        // --- 3. ASSERT ---
+        let verify_op = effects.iter().find_map(|e| {
+            if let Effect::VerifyPieceV2 { root_hash, .. } = e {
+                Some(root_hash)
+            } else {
+                None
+            }
+        });
+
+        assert!(verify_op.is_some(), "Should trigger verification");
+        
+        let target_hash = verify_op.unwrap();
+
+        // The Test Failure We Want:
+        // Expected: Leaf Hash (0xAA...)
+        // Actual:   File Root (0xBB...) -> Proves the bug.
+        assert_eq!(
+            target_hash, &leaf_hash, 
+            "BUG REPRODUCED: MerkleProofReceived used the File Root (0xBB...) instead of the Leaf Hash (0xAA...)!"
+        );
+    }
+
+    #[test]
+    fn test_incoming_block_uses_local_leaf_hash_priority() {
+        use sha2::{Digest, Sha256};
+        use std::collections::HashMap;
+
+        // --- 1. SETUP ---
+        let mut state = create_empty_state();
+        let piece_len = 1024;
+        let num_pieces = 1;
+
+        // Construct Pure V2 Torrent
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.pieces = Vec::new(); // Pure V2 (No V1 Fallback)
+        torrent.info.meta_version = Some(2);
+
+        // A. Create Distinct Hashes
+        let data = vec![0xAA; piece_len];
+        let leaf_hash = Sha256::digest(&data).to_vec(); // The Hash of the Data (0xAA...)
+        let file_root = vec![0xBB; 32];                 // The Root of the File (0xBB...)
+
+        // B. Populate Local Metadata (Piece Layers)
+        // We tell the state: "File Root 0xBB maps to this Leaf Hash 0xAA"
+        let mut layer_map = HashMap::new();
+        layer_map.insert(
+            file_root.clone(), 
+            serde_bencode::value::Value::Bytes(leaf_hash.clone())
+        );
+        torrent.piece_layers = Some(serde_bencode::value::Value::Dict(layer_map));
+        state.torrent = Some(torrent);
+
+        // C. Init Piece Manager & Maps
+        state.piece_manager.set_initial_fields(num_pieces, false);
+        state.piece_manager.set_geometry(piece_len as u32, piece_len as u64, false);
+        
+        // Map Piece 0 -> File Root (0xBB)
+        state.piece_to_roots.insert(0, vec![(0, piece_len as u64, file_root.clone())]);
+
+        let peer_id = "priority_tester".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // --- 2. EXECUTE ---
+        // Peer sends Block 0. We have NO network proof (v2_proofs is empty).
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: data.clone(),
+        });
+
+        // --- 3. ASSERT ---
+        // We expect immediate verification
+        let verify_op = effects.iter().find_map(|e| {
+            if let Effect::VerifyPieceV2 { root_hash, proof, .. } = e {
+                Some((root_hash, proof))
+            } else {
+                None
+            }
+        });
+
+        assert!(verify_op.is_some(), "Should trigger VerifyPieceV2 immediately (failed to find local metadata?)");
+        
+        let (target_hash, proof) = verify_op.unwrap();
+
+        // CHECK 1: Did we verify against the LEAF (Correct) or ROOT (Bug)?
+        assert_eq!(
+            target_hash, &leaf_hash, 
+            "PRIORITY BUG: Verified against File Root (0xBB...) instead of Local Leaf Hash (0xAA...)!"
+        );
+
+        // CHECK 2: Proof should be empty (Direct comparison)
+        assert!(proof.is_empty(), "Proof should be empty when verifying against a local leaf hash");
+    }
+
+    #[test]
+    fn test_v2_tail_block_request_clamping() {
+        use serde_bencode::value::Value;
+        
+        // 1. SETUP GEOMETRY
+        let piece_len = 16_384;
+        let file_len: u64 = 20_000;
+        let tail_size = 3_616; 
+        let num_pieces = 2;
+        let padded_len = (num_pieces as u64) * (piece_len as u64); // 32,768
+        
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.meta_version = Some(2);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.length = file_len as i64;
+        torrent.info.pieces = Vec::new(); 
+        
+        let mut file_map = std::collections::HashMap::new();
+        file_map.insert("length".as_bytes().to_vec(), Value::Int(file_len as i64));
+        file_map.insert("pieces root".as_bytes().to_vec(), Value::Bytes(vec![0xAA; 32]));
+        let mut dir_map = std::collections::HashMap::new();
+        dir_map.insert("".as_bytes().to_vec(), Value::Dict(file_map));
+        let mut root_map = std::collections::HashMap::new();
+        root_map.insert("test_tail_file".as_bytes().to_vec(), Value::Dict(dir_map));
+        torrent.info.file_tree = Some(Value::Dict(root_map));
+
+        // 2. CREATE STATE
+        let mut state = TorrentState::new(
+            vec![0; 20],
+            Some(torrent),
+            Some(100),
+            PieceManager::new(),
+            HashMap::new(),
+            false 
+        );
+        
+        // 3. FORCE "BUGGY" GEOMETRY (The Padded/Aligned Size)
+        // This simulates exactly what TorrentState::new does incorrectly for V2.
+        // The BlockManager now thinks the tail piece is full (16384 bytes).
+        state.torrent_status = TorrentStatus::Standard;
+        state.piece_manager.set_initial_fields(num_pieces, false);
+        state.piece_manager.set_geometry(piece_len as u32, padded_len, false); // <--- CHANGED to padded_len
+        state.piece_manager.need_queue = vec![1]; 
+
+        // 4. SETUP PEER
+        let peer_id = "strict_peer".to_string();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1); 
+        let mut peer = PeerState::new(peer_id.clone(), tx, state.now);
+        peer.bitfield = vec![true, true];
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.am_interested = true;
+        state.peers.insert(peer_id.clone(), peer);
+
+        // 5. TRIGGER
+        let effects = state.update(Action::AssignWork { peer_id: peer_id.clone() });
+
+        // 6. ASSERT
+        let mut request_found = false;
+        for effect in effects {
+            if let Effect::SendToPeer { cmd, .. } = effect {
+                if let TorrentCommand::BulkRequest(reqs) = *cmd {
+                    for (idx, _off, len) in reqs {
+                        if idx == 1 {
+                            request_found = true;
+                            // Without the V2 map, this will be 16384 (Full Block) -> FAIL
+                            assert_eq!(
+                                len, tail_size, 
+                                "BUG REPRODUCED: Requested {} (full) instead of {} (tail). V2 roots missing.", 
+                                len, tail_size
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        
+        if !request_found {
+            panic!("Setup Failure: No requests generated.");
+        }
     }
 
 }
