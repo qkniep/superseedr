@@ -281,7 +281,7 @@ mod tests {
         // 16KB * 10 blocks per piece = 163840 bytes per piece
         let piece_len = 163_840;
         let total_len = piece_len as u64 * num_pieces as u64;
-        pm.set_geometry(piece_len, total_len, false);
+        pm.set_geometry(piece_len, total_len, HashMap::new(), false);
 
         pm.set_initial_fields(num_pieces, false);
         pm
@@ -376,7 +376,7 @@ mod tests {
         let block_size = 16384;
 
         // Set geometry explicitly (required for block manager calculations)
-        pm.set_geometry(piece_size as u32, piece_size as u64 * 10, false);
+        pm.set_geometry(piece_size as u32, piece_size as u64 * 10, HashMap::new(), false);
 
         let block_data_0 = vec![1; block_size];
         let block_data_1 = vec![2; block_size];
@@ -531,7 +531,7 @@ mod tests {
         let piece_size = 32768;
         let block_size = 16384;
 
-        pm.set_geometry(piece_size as u32, piece_size as u64 * 5, false);
+        pm.set_geometry(piece_size as u32, piece_size as u64 * 5, HashMap::new(), false);
 
         let block_data_0 = vec![1; block_size];
         let block_data_1 = vec![2; block_size];
@@ -563,7 +563,7 @@ mod tests {
         let block_size = 16384;
         let block_data = vec![1; block_size];
 
-        pm.set_geometry(piece_size as u32, piece_size as u64, false);
+        pm.set_geometry(piece_size as u32, piece_size as u64, HashMap::new(), false);
 
         // Receive block 0
         let result1 = pm.handle_block(piece_index, 0, &block_data, piece_size);
@@ -573,7 +573,7 @@ mod tests {
         // Test duplicate detection during assembly
         let piece_size_2 = 32768;
 
-        pm.set_geometry(piece_size_2 as u32, piece_size_2 as u64 * 2, false);
+        pm.set_geometry(piece_size_2 as u32, piece_size_2 as u64 * 2, HashMap::new(), false);
 
         let block_data_0 = vec![1; block_size];
         let block_data_1 = vec![2; block_size];
@@ -602,7 +602,7 @@ mod tests {
         let piece_size = 16384;
         let block_data = vec![1; piece_size];
 
-        pm.set_geometry(piece_size as u32, piece_size as u64, false);
+        pm.set_geometry(piece_size as u32, piece_size as u64, HashMap::new(), false);
 
         // Mark piece as complete first
         pm.mark_as_complete(piece_index);
@@ -684,7 +684,7 @@ mod tests {
         let piece_size = 32768; // Standard 32KB piece size
         let total_len = 16385;
 
-        pm.set_geometry(piece_size, total_len, false);
+        pm.set_geometry(piece_size, total_len, HashMap::new(), false);
 
         // 1. Handle the full block (0-16384)
         let block_0 = vec![1u8; 16384];

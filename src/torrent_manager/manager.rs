@@ -2967,7 +2967,7 @@ mod tests {
 
         // 3. Run the Function Under Test
         // Note: You need to expose the function or test inside the module
-        let calculated_root = super::compute_v2_piece_root(&data);
+        let calculated_root = super::compute_v2_piece_root(&data, data.len());
 
         // 4. Assert
         assert_eq!(
@@ -2990,7 +2990,7 @@ mod tests {
         let expected_root = Sha256::digest(&data);
 
         // 3. Run Function
-        let calculated_root = super::compute_v2_piece_root(&data);
+        let calculated_root = super::compute_v2_piece_root(&data, data.len());
 
         // 4. Assert
         assert_eq!(
@@ -4284,7 +4284,7 @@ mod resource_tests {
 
         if manager.state.piece_manager.bitfield.is_empty() {
              manager.state.piece_manager.set_initial_fields(num_pieces, false);
-             manager.state.piece_manager.set_geometry(piece_len as u32, (piece_len * num_pieces) as u64, false);
+             manager.state.piece_manager.set_geometry(piece_len as u32, (piece_len * num_pieces) as u64, std::collections::HashMap::new(), false);
         }
 
         let peer_id = "pure_v2_worker".to_string();
@@ -4645,7 +4645,7 @@ mod resource_tests {
 
         // --- 3. RUN FUNCTION UNDER TEST ---
         // We pass ONLY the valid data. The function must pad it internally.
-        let calculated_root = super::compute_v2_piece_root(&valid_data);
+        let calculated_root = super::compute_v2_piece_root(&valid_data, valid_data.len());
 
         // --- 4. ASSERT ---
         // If the function didn't pad, it would return SHA256(976 bytes), which matches "Bad Hash".

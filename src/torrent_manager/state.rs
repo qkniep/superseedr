@@ -2422,7 +2422,7 @@ mod tests {
         state
             .piece_manager
             .block_manager
-            .set_geometry(16384, 163840, vec![], vec![], false); // NEW: Init geometry
+            .set_geometry(16384, 163840, vec![], vec![], HashMap::new(), false); // NEW: Init geometry
 
         add_peer(&mut state, "peer_A");
         let peer = state.peers.get_mut("peer_A").unwrap();
@@ -2572,7 +2572,7 @@ mod tests {
         state
             .piece_manager
             .block_manager
-            .set_geometry(16384, 16384 * 2, vec![], vec![], false);
+            .set_geometry(16384, 16384 * 2, vec![], vec![], HashMap::new(), false);
         state.torrent_status = TorrentStatus::Standard;
 
         add_peer(&mut state, "peer_A");
@@ -2750,7 +2750,7 @@ mod tests {
         state
             .piece_manager
             .block_manager
-            .set_geometry(16384, 16384 * 20, vec![], vec![], false);
+            .set_geometry(16384, 16384 * 20, vec![], vec![], HashMap::new(), false);
         state.torrent_status = TorrentStatus::Standard;
 
         // 2. Setup Peer and Need Queue
@@ -2977,7 +2977,7 @@ mod tests {
         state
             .piece_manager
             .block_manager
-            .set_geometry(16384, 163840, vec![], vec![], false);
+            .set_geometry(16384, 163840, vec![], vec![], HashMap::new(), false);
         state.torrent_status = TorrentStatus::Validating;
 
         // We need piece 0 and 1
@@ -3037,7 +3037,7 @@ mod tests {
         state
             .piece_manager
             .block_manager
-            .set_geometry(16384, 163840, vec![], vec![], false);
+            .set_geometry(16384, 163840, vec![], vec![], HashMap::new(), false);
         state.torrent_status = TorrentStatus::Standard;
 
         // We explicitly need Piece 0
@@ -3101,7 +3101,7 @@ mod tests {
         state
             .piece_manager
             .block_manager
-            .set_geometry(32768, 65536, vec![], vec![], false);
+            .set_geometry(32768, 65536, vec![], vec![], HashMap::new(), false);
 
         state.piece_manager.need_queue = vec![0, 1];
 
@@ -3326,6 +3326,7 @@ mod tests {
             (piece_len * num_pieces) as u64,
             vec![],
             vec![],
+            HashMap::new(),
             false,
         );
         state.torrent_status = TorrentStatus::Standard;
@@ -3477,6 +3478,7 @@ mod tests {
             (piece_len * num_pieces) as u64,
             vec![],
             vec![],
+            HashMap::new(),
             false,
         );
         state.torrent_status = TorrentStatus::Standard;
@@ -3623,6 +3625,7 @@ mod tests {
             piece_len as u64,
             vec![],
             vec![],
+            HashMap::new(),
             false,
         );
         state.torrent_status = TorrentStatus::Standard;
@@ -3693,6 +3696,7 @@ mod tests {
             piece_len as u64,
             vec![],
             vec![],
+            HashMap::new(),
             false,
         );
         state.torrent_status = TorrentStatus::Standard;
@@ -3768,6 +3772,7 @@ mod tests {
             (piece_len * num_pieces as u32) as u64,
             vec![],
             vec![],
+            HashMap::new(),
             false,
         );
         state.torrent_status = TorrentStatus::Standard;
@@ -3868,7 +3873,7 @@ mod tests {
         torrent.info.piece_length = 32768; 
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
-        state.piece_manager.set_geometry(32768, 32768, false);
+        state.piece_manager.set_geometry(32768, 32768, HashMap::new(), false);
 
         let root_a = vec![0xAA; 32]; // File A (0-16384)
         let root_b = vec![0xBB; 32]; // File B (16384-32768)
@@ -3906,7 +3911,7 @@ mod tests {
         // Reset State for clean run
         state.piece_manager = PieceManager::new();
         state.piece_manager.set_initial_fields(1, false);
-        state.piece_manager.set_geometry(32768, 32768, false);
+        state.piece_manager.set_geometry(32768, 32768, HashMap::new(), false);
 
         // 1. Fill Second Half (16384..32768) - Incomplete
         state.update(Action::IncomingBlock {
@@ -3939,7 +3944,7 @@ mod tests {
         
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(10, false);
-        state.piece_manager.set_geometry(4, 40, false);
+        state.piece_manager.set_geometry(4, 40, HashMap::new(), false);
 
         let root_target = vec![0xCC; 32];
         state.piece_to_roots.insert(5, vec![(0, 4, root_target.clone())]);
@@ -3979,7 +3984,7 @@ mod tests {
         torrent.info.piece_length = 1024;
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
-        state.piece_manager.set_geometry(1024, 1024, false);
+        state.piece_manager.set_geometry(1024, 1024, HashMap::new(), false);
 
         let root_hash = vec![0xAA; 32];
         state.piece_to_roots.insert(0, vec![(0, 1024, root_hash.clone())]);
@@ -4019,7 +4024,7 @@ mod tests {
         torrent.info.piece_length = 1024;
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
-        state.piece_manager.set_geometry(1024, 1024, false);
+        state.piece_manager.set_geometry(1024, 1024, HashMap::new(), false);
 
         let root_hash = vec![0xAA; 32];
         state.piece_to_roots.insert(0, vec![(0, 1024, root_hash.clone())]);
@@ -4067,7 +4072,7 @@ mod tests {
         torrent.info.pieces = Vec::new();
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
-        state.piece_manager.set_geometry(4, 4, false);
+        state.piece_manager.set_geometry(4, 4, HashMap::new(), false);
 
         state.piece_to_roots.insert(0, vec![(0, 4, vec![0xAA; 32])]);
 
@@ -4112,7 +4117,7 @@ mod tests {
         torrent.info.piece_length = 1024;
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
-        state.piece_manager.set_geometry(1024, 1024, false);
+        state.piece_manager.set_geometry(1024, 1024, HashMap::new(), false);
         state.piece_to_roots.insert(0, vec![(0, 1024, vec![0xAA; 32])]);
 
         // 1. Send Proof
@@ -4166,7 +4171,7 @@ mod tests {
         torrent.info.pieces = Vec::new();
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(num_pieces, false);
-        state.piece_manager.set_geometry(1024, 1024 * num_pieces as u64, false);
+        state.piece_manager.set_geometry(1024, 1024 * num_pieces as u64, HashMap::new(), false);
 
         // Map all pieces to a dummy root
         let root = vec![0xAA; 32];
@@ -4250,7 +4255,7 @@ mod tests {
         state.torrent = Some(torrent);
         
         state.piece_manager.set_initial_fields(2, false);
-        state.piece_manager.set_geometry(1024, 2048, false);
+        state.piece_manager.set_geometry(1024, 2048, HashMap::new(), false);
 
         // CONFIGURATION: Hybrid Setup
         // Piece 0: Has a V2 Root
@@ -4296,7 +4301,7 @@ mod tests {
 
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(num_pieces, false);
-        state.piece_manager.set_geometry(1024, 1024 * num_pieces as u64, false);
+        state.piece_manager.set_geometry(1024, 1024 * num_pieces as u64, HashMap::new(), false);
         state.torrent_status = TorrentStatus::Standard; 
 
         let root = vec![0xAA; 32];
@@ -4341,7 +4346,7 @@ mod tests {
         torrent.info.pieces = Vec::new();
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
-        state.piece_manager.set_geometry(1024, 1024, false);
+        state.piece_manager.set_geometry(1024, 1024, HashMap::new(), false);
         
         // V2 Setup
         state.piece_to_roots.insert(0, vec![(0, 1024, vec![0xAA; 32])]);
@@ -4392,7 +4397,7 @@ mod tests {
         torrent.info.piece_length = 1024;
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
-        state.piece_manager.set_geometry(1024, 1024, false);
+        state.piece_manager.set_geometry(1024, 1024, HashMap::new(), false);
         state.piece_to_roots.insert(0, vec![(0, 1024, vec![0xAA; 32])]);
 
         let peer_id = "bad_actor".to_string();
@@ -4431,7 +4436,7 @@ mod tests {
         state.torrent = Some(torrent);
         
         state.piece_manager.set_initial_fields(4, false);
-        state.piece_manager.set_geometry(1024, 4096, false);
+        state.piece_manager.set_geometry(1024, 4096, HashMap::new(), false);
 
         // CONFIGURATION:
         // Piece 0: V2 (Has Root)
@@ -4753,7 +4758,7 @@ mod tests {
         state.torrent = Some(torrent);
         
         state.piece_manager.set_initial_fields(2, false);
-        state.piece_manager.set_geometry(1024, 2048, false);
+        state.piece_manager.set_geometry(1024, 2048, HashMap::new(), false);
 
         // Root for File B
         let root_b = vec![0xBB; 32];
@@ -4839,7 +4844,7 @@ mod tests {
         
         // CRITICAL FIX: Initialize PieceManager so it accepts the block!
         state.piece_manager.set_initial_fields(num_pieces, false);
-        state.piece_manager.set_geometry(piece_len as u32, piece_len as u64, false);
+        state.piece_manager.set_geometry(piece_len as u32, piece_len as u64, HashMap::new(), false);
 
         state.piece_to_roots.insert(0, vec![(0, piece_len as u64, root.clone())]);
         
@@ -4898,7 +4903,7 @@ mod tests {
         // C. Populate State Maps
         state.piece_to_roots.insert(0, vec![(0, 1024, file_root.clone())]);
         state.piece_manager.set_initial_fields(1, false);
-        state.piece_manager.set_geometry(1024, 1024, false);
+        state.piece_manager.set_geometry(1024, 1024, HashMap::new(), false);
 
         let peer_id = "bug_tester".to_string();
         add_peer(&mut state, &peer_id);
@@ -4971,7 +4976,7 @@ mod tests {
 
         // C. Init Piece Manager & Maps
         state.piece_manager.set_initial_fields(num_pieces, false);
-        state.piece_manager.set_geometry(piece_len as u32, piece_len as u64, false);
+        state.piece_manager.set_geometry(piece_len as u32, piece_len as u64, HashMap::new(), false);
         
         // Map Piece 0 -> File Root (0xBB)
         state.piece_to_roots.insert(0, vec![(0, piece_len as u64, file_root.clone())]);
@@ -5053,7 +5058,7 @@ mod tests {
         // The BlockManager now thinks the tail piece is full (16384 bytes).
         state.torrent_status = TorrentStatus::Standard;
         state.piece_manager.set_initial_fields(num_pieces, false);
-        state.piece_manager.set_geometry(piece_len as u32, padded_len, false); // <--- CHANGED to padded_len
+        state.piece_manager.set_geometry(piece_len as u32, padded_len, HashMap::new(), false); // <--- CHANGED to padded_len
         state.piece_manager.need_queue = vec![1]; 
 
         // 4. SETUP PEER
@@ -5600,7 +5605,7 @@ mod prop_tests {
             state
                 .piece_manager
                 .block_manager
-                .set_geometry(16384, 16384 * 2, vec![], vec![], false);
+                .set_geometry(16384, 16384 * 2, vec![], vec![], HashMap::new(), false);
             state.torrent_status = TorrentStatus::Standard;
 
             state.piece_manager.need_queue = vec![0, 1];
@@ -5673,7 +5678,7 @@ mod prop_tests {
             state
                 .piece_manager
                 .block_manager
-                .set_geometry(16384, 16384 * 2, vec![], vec![], false);
+                .set_geometry(16384, 16384 * 2, vec![], vec![], HashMap::new(), false);
             state.torrent_status = TorrentStatus::Standard;
             state.piece_manager.need_queue = vec![0, 1];
 
@@ -5711,7 +5716,7 @@ mod prop_tests {
             state
                 .piece_manager
                 .block_manager
-                .set_geometry(16384, 16384 * 2, vec![], vec![], false);
+                .set_geometry(16384, 16384 * 2, vec![], vec![], HashMap::new(), false);
             state.torrent_status = TorrentStatus::Standard;
             state.piece_manager.need_queue = vec![0, 1];
 
@@ -5812,7 +5817,7 @@ mod prop_tests {
             state
                 .piece_manager
                 .block_manager
-                .set_geometry(16384, 16384 * 2, vec![], vec![], false);
+                .set_geometry(16384, 16384 * 2, vec![], vec![], HashMap::new(), false);
             state.torrent_status = TorrentStatus::Standard;
             state.piece_manager.need_queue = vec![0, 1];
 
