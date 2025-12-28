@@ -2760,36 +2760,44 @@ fn compute_v2_piece_root(data: &[u8]) -> [u8; 32] {
 }
 */
 
-
 fn compute_v2_piece_root(data: &[u8], expected_piece_len: usize) -> [u8; 32] {
     const BLOCK_SIZE: usize = 16_384;
-    // Calculate how many 16KB leaf slots the tree must have
+    
+    // 1. Calculate how many 16KB leaves the piece logically requires
     let expected_leaf_count = expected_piece_len.div_ceil(BLOCK_SIZE).next_power_of_two();
 
-    // 1. Hash the physical data blocks EXACTLY as they are (no data padding)
+    // 2. Hash blocks, applying MANDATORY 16KB padding to the tail chunk
     let mut layer: Vec<[u8; 32]> = data
         .chunks(BLOCK_SIZE)
-        .map(|chunk| Sha256::digest(chunk).into())
+        .map(|chunk| {
+            if chunk.len() < BLOCK_SIZE {
+                // This is the specific fix for 'verify_tail_padding_fix'
+                let mut padded = vec![0u8; BLOCK_SIZE];
+                padded[..chunk.len()].copy_from_slice(chunk);
+                sha2::Sha256::digest(&padded).into()
+            } else {
+                sha2::Sha256::digest(chunk).into()
+            }
+        })
         .collect();
 
-    // 2. Pad the leaf layer with NULL HASHES (all zeros) to match the piece geometry
+    // 3. Add NULL HASHES for missing blocks (virtual padding)
+    // This is the fix for 'test_v2_tail_piece_validation_accuracy'
     while layer.len() < expected_leaf_count {
         layer.push([0u8; 32]);
     }
 
-    // 3. Build the tree up (Binary reduction)
+    // 4. Standard binary reduction
     while layer.len() > 1 {
         let mut next_layer = Vec::with_capacity(layer.len() / 2);
         for pair in layer.chunks(2) {
-            let mut hasher = Sha256::new();
-            // In a power-of-two tree, pair.len() will always be 2
+            let mut hasher = sha2::Sha256::new();
             hasher.update(pair[0]);
             hasher.update(pair[1]);
             next_layer.push(hasher.finalize().into());
         }
         layer = next_layer;
     }
-
     layer[0]
 }
 
