@@ -302,6 +302,7 @@ pub struct TorrentState {
     pub v2_proofs: HashMap<u32, Vec<u8>>, 
     pub v2_pending_data: HashMap<u32, (u32, Vec<u8>)>,
     pub piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>)>>,
+    pub verifying_pieces: HashSet<u32>,
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -333,6 +334,7 @@ impl Default for TorrentState {
             v2_proofs: HashMap::new(),
             v2_pending_data: HashMap::new(),
             piece_to_roots: HashMap::new(),
+            verifying_pieces: HashSet::new(),
         }
     }
 }
@@ -787,6 +789,9 @@ impl TorrentState {
                     if available_slots == 0 {
                         break;
                     }
+                    if self.verifying_pieces.contains(&piece_index) {
+                        continue;
+                    }
                     let (start, end) = self
                         .piece_manager
                         .block_manager
@@ -843,12 +848,9 @@ impl TorrentState {
                             addr.byte_offset,
                             final_len,
                         )) {
-                            event!(Level::INFO, "PEER ALREADY WORKING ON {} - {}.", addr.piece_index, addr.byte_offset);
                             continue;
                         }
 
-
-                        event!(Level::INFO, "PEER ASSIGNED {} - {}.", addr.piece_index, addr.byte_offset);
                         request_batch.push((addr.piece_index, addr.byte_offset, final_len));
                         peer.active_blocks.insert((
                             addr.piece_index,
@@ -870,6 +872,11 @@ impl TorrentState {
 
                     match choice {
                         Some(piece_index) => {
+
+                            if self.verifying_pieces.contains(&piece_index) {
+                                continue; 
+                            }
+
                             self.piece_manager
                                 .mark_as_pending(piece_index, peer_id.clone());
                             peer.pending_requests.insert(piece_index);
@@ -1191,9 +1198,15 @@ impl TorrentState {
                 let piece_size = self.get_piece_size(piece_index);
 
                 if let Some(complete_data) = self.piece_manager.handle_block(piece_index, block_offset, &data, piece_size) {
+                    
+                    tracing::info!("🧩 [State] Piece {} Download Complete (Size: {}). Starting Verification Flow...", piece_index, complete_data.len());
+
+                    // Mark as verifying
+                    self.verifying_pieces.insert(piece_index);
 
                     if let Some(roots) = self.piece_to_roots.get(&piece_index) {
-                        
+                        tracing::info!("🔍 [State] Piece {} is V2/Hybrid. Found {} candidate roots.", piece_index, roots.len());
+
                         let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(0);
                         let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
 
@@ -1204,13 +1217,13 @@ impl TorrentState {
                         let (valid_length, relative_index, hashing_context_len) = 
                                 self.calculate_v2_verify_params(piece_index, complete_data.len());
 
-                        if let Some((file_start, _len, root)) = matching_root_info {
-                            // [FIX] PRIORITY 1: Use Local Proof (Trust Metadata over Peer)
-                            // If we have the specific leaf hash in our 'piece layers', use it.
-                            // This ensures we compare Leaf-to-Leaf, which works even without a full Merkle proof.
-                            if let Some(target_hash) = self.get_local_v2_hash(piece_index, root, *file_start) {
-                                self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
-                                effects.push(Effect::VerifyPieceV2 {
+                        if let Some((file_start, file_len, root)) = matching_root_info {
+                            tracing::info!("✅ [State] Piece {} matched to V2 Root (File Start: {}). Dispatching VerifyPieceV2.", piece_index, file_start);
+                            
+                            // [Priority 1 Logic] ...
+                            if let Some(target_hash) = self.get_local_v2_hash(piece_index, root, *file_start, *file_len) {
+                                 self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
+                                 effects.push(Effect::VerifyPieceV2 {
                                     peer_id: peer_id.clone(),
                                     piece_index,
                                     proof: Vec::new(),
@@ -1221,12 +1234,11 @@ impl TorrentState {
                                     relative_index,
                                     hashing_context_len,
                                 });
-                            }
-                            // PRIORITY 2: Use Dynamic Network Proof
-                            // Only use this if we lack local metadata (rare for V2, more common for V1/Hybrid)
+                            } 
                             else if let Some(proof) = self.v2_proofs.get(&piece_index) {
-                                self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
+                                // ... [Priority 2] ...
                                 effects.push(Effect::VerifyPieceV2 {
+                                    // ... (same params as your code) ...
                                     peer_id: peer_id.clone(),
                                     piece_index,
                                     proof: proof.clone(),
@@ -1237,9 +1249,10 @@ impl TorrentState {
                                     relative_index,
                                     hashing_context_len,
                                 });
-                            } 
-                            // PRIORITY 3: Hybrid Fallback (V1)
+                            }
                             else if self.torrent.as_ref().map_or(false, |t| !t.info.pieces.is_empty()) {
+                                // [Priority 3]
+                                tracing::info!("⚠️ [State] Piece {} missing V2 Proof/Local Hash. Falling back to V1 verify.", piece_index);
                                 self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                                 effects.push(Effect::VerifyPiece {
                                     peer_id: peer_id.clone(),
@@ -1247,13 +1260,24 @@ impl TorrentState {
                                     data: complete_data,
                                 });
                             }
-                            // PRIORITY 4: Buffer and Wait
                             else {
+                                // [Priority 4]
+                                tracing::warn!("⏸️ [State] Piece {} Buffered (Pure V2, Waiting for Proof). Data len: {}", piece_index, complete_data.len());
                                 self.v2_pending_data.insert(piece_index, (block_offset, complete_data));
                             }
+                        } else {
+                            tracing::error!("❌ [State] CRITICAL: Piece {} has V2 roots, but OFFSET MATCH FAILED. Global Offset: {}", piece_index, global_offset);
+                            
+                            // Fallback attempt to V1 if possible
+                            self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
+                            effects.push(Effect::VerifyPiece {
+                                peer_id: peer_id.clone(),
+                                piece_index,
+                                data: complete_data,
+                            });
                         }
                     } else {
-                        // Standard v1 behavior (No roots found for this piece)
+                        tracing::info!("📉 [State] Piece {} has NO V2 roots. Standard V1 Verify.", piece_index);
                         self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                         effects.push(Effect::VerifyPiece {
                             peer_id: peer_id.clone(),
@@ -1262,7 +1286,6 @@ impl TorrentState {
                         });
                     }
                 }
-
 
                 // 4. Refill Pipeline (Work Assignment)
                 if let Some(peer) = self.peers.get(&peer_id) {
@@ -1288,6 +1311,7 @@ impl TorrentState {
 
                 // Retrieve data AND offset
                 if let Some((block_offset, data)) = self.v2_pending_data.remove(&piece_index) {
+                    self.verifying_pieces.insert(piece_index);
                     
                     // REPEAT LOOKUP LOGIC
                     if let Some(roots) = self.piece_to_roots.get(&piece_index) {
@@ -1301,11 +1325,11 @@ impl TorrentState {
                         let (valid_length, relative_index, hashing_context_len) = 
                                 self.calculate_v2_verify_params(piece_index, data.len());
 
-                        if let Some((file_start, _len, root)) = matching_root_info {
+                        if let Some((file_start, file_len, root)) = matching_root_info {
                             
                             // [FIX] PRIORITY 1: Prefer Local Metadata (Leaf Hash)
                             // If we have the specific leaf hash in 'piece layers', use it.
-                            let target_hash = if let Some(local_leaf) = self.get_local_v2_hash(piece_index, root, *file_start) {
+                            let target_hash = if let Some(local_leaf) = self.get_local_v2_hash(piece_index, root, *file_start, *file_len) {
                                 local_leaf
                             } else {
                                 // PRIORITY 2: Fallback to File Root (requires valid proof)
@@ -1341,6 +1365,7 @@ impl TorrentState {
                     return vec![Effect::DoNothing];
                 }
 
+                self.verifying_pieces.remove(&piece_index);
                 self.v2_proofs.remove(&piece_index);
                 self.v2_pending_data.remove(&piece_index);
 
@@ -1936,6 +1961,7 @@ impl TorrentState {
                 self.v2_proofs.clear();
                 self.v2_pending_data.clear();
                 self.piece_to_roots.clear();
+                self.verifying_pieces.clear();
 
                 let num_pieces = self.piece_manager.bitfield.len();
                 self.piece_manager = PieceManager::new();
@@ -2025,22 +2051,34 @@ impl TorrentState {
         }
     }
 
-    fn get_local_v2_hash(&self, global_piece_index: u32, root: &[u8], file_start_offset: u64) -> Option<Vec<u8>> {
+
+    fn get_local_v2_hash(
+        &self, 
+        global_piece_index: u32, 
+        root: &[u8], 
+        file_start_offset: u64, 
+        file_len: u64
+    ) -> Option<Vec<u8>> {
         let torrent = self.torrent.as_ref()?;
         let piece_len = torrent.info.piece_length as u64;
         if piece_len == 0 { return None; }
 
-        // 1. Get the full layer of hashes for this file
+        // [FIX] Small File Optimization
+        // If the file fits inside a single piece, it has no layer hashes.
+        // The "root" hash in the file tree IS the integrity hash for the data.
+        if file_len <= piece_len {
+            return Some(root.to_vec());
+        }
+
+        // Standard V2 Logic: Get the full layer of hashes for this file
         let layer_bytes = torrent.get_layer_hashes(root)?;
 
-        // 2. Calculate which index this is *relative* to the file
-        // (GlobalByteOffset - FileStart) / PieceLen
+        // Calculate which index this is *relative* to the file
         let global_bytes = global_piece_index as u64 * piece_len;
         if global_bytes < file_start_offset { return None; }
         
         let relative_index = ((global_bytes - file_start_offset) / piece_len) as usize;
         
-        // 3. Extract the 32-byte hash
         let start = relative_index * 32;
         let end = start + 32;
 

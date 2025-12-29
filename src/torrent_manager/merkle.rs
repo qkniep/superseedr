@@ -69,7 +69,7 @@ pub fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
     // Determine target leaves (power of two) based on the context length
     let leaf_count = expected_len.div_ceil(BLOCK_SIZE).next_power_of_two();
 
-    tracing::debug!(
+    tracing::info!(
         "Compute v2 hash data-len {} - expected len {} - leaf_count {}",
         data.len(),
         expected_len,
@@ -83,7 +83,7 @@ pub fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
             Sha256::digest(chunk).into()
         })
         .collect();
-    tracing::debug!(
+    tracing::info!(
         "Leafs data tree len {}",
         layer.len()
     );
@@ -94,7 +94,7 @@ pub fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
     while layer.len() < leaf_count {
         layer.push(empty_hash);
     }
-    tracing::debug!(
+    tracing::info!(
         "Leafs node padding tree len {}",
         layer.len()
     );
@@ -114,7 +114,7 @@ pub fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
             hasher.finalize().into()
         }).collect();
     }
-    tracing::debug!(
+    tracing::info!(
         "Hash tree reduction {}",
         hex::encode(layer[0])
     );
