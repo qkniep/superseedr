@@ -5116,6 +5116,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_v2_small_file_optimization_no_proof_needed() {
+        let mut state = create_empty_state();
+        let piece_len = 16384;
+        let num_pieces = 1;
+        
+        // 1. Setup Torrent
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.length = piece_len as i64;
+        torrent.info.pieces = Vec::new(); // Pure V2
+        torrent.info.meta_version = Some(2);
+
+        // 2. Inject Torrent into State (Manual injection is safer than Action::MetadataReceived for dummy torrents)
+        state.torrent = Some(torrent);
+        
+        // [FIX] Manually Initialize PieceManager so it accepts Piece 0
+        state.piece_manager.set_initial_fields(num_pieces, false);
+        state.piece_manager.set_geometry(piece_len as u32, piece_len as u64, std::collections::HashMap::new(), false);
+
+        // 3. Setup Roots (Critical for the V2 lookup)
+        let small_file_root = vec![0xAA; 32];
+        state.piece_to_roots.insert(0, vec![(0, piece_len as u64, small_file_root.clone())]);
+
+        // 4. Connect Peer
+        let peer_id = "small_file_peer".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // WHEN: Peer sends the data
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0xAA; piece_len as usize],
+        });
+
+        // THEN: Verify IMMEDIATE verification triggered
+        let verify_op = effects.iter().find_map(|e| {
+            if let Effect::VerifyPieceV2 { root_hash, proof, .. } = e {
+                Some((root_hash, proof))
+            } else {
+                None
+            }
+        });
+
+        assert!(verify_op.is_some(), 
+            "FIX CONFIRMATION FAILED: Small file was not verified immediately. (PieceManager likely rejected the block due to setup issues)");
+
+        let (target_hash, proof) = verify_op.unwrap();
+        assert_eq!(target_hash, &small_file_root, "Must verify against the File Root directly.");
+        assert!(proof.is_empty(), "Small files should not require a proof.");
+        assert!(state.v2_pending_data.is_empty(), "Data should not be buffered.");
+    }
+
 }
 
 #[cfg(test)]
