@@ -4484,43 +4484,53 @@ mod resource_tests {
     async fn test_v2_tail_piece_validation_accuracy() {
         use sha2::{Digest, Sha256};
         
-        // 1. Setup: 20,000 byte file (Piece 0: 16384, Piece 1: 3616)
+        // 1. Setup: 20,000 byte file 
+        // Piece 0: 16,384 bytes (Full)
+        // Piece 1: 3,616 bytes (Partial tail)
         let piece_len: u64 = 16384;
         let file_len: u64 = 20000;
         let data = vec![0xEE; file_len as usize];
         
-        // [FIX] Calculate EXPECTED hashes using NO DATA PADDING
+        // 2. Exact Manual Calculation (Correct BEP 52 Logic)
+        // Rule: Tail data is hashed AS-IS. Padding is only applied to tree nodes.
         
-        // Block 0: Full 16KB
+        // Piece 0: Full 16KB block
         let p0_data = &data[0..16384];
         let hash_0 = Sha256::digest(p0_data).to_vec();
         
-        // Block 1: Partial 3616 bytes (Unpadded)
+        // Piece 1: Partial 3,616 bytes (NO DATA PADDING)
         let p1_data = &data[16384..20000];
         let hash_1 = Sha256::digest(p1_data).to_vec();
 
         // File Root = Hash(Hash0 + Hash1)
-        // (Note: No tree padding needed as 2 chunks is a power of 2)
+        // Since there are 2 pieces, this is a power of two; no tree-node padding needed.
         let mut hasher = Sha256::new();
         hasher.update(&hash_0);
         hasher.update(&hash_1);
         let root_v2 = hasher.finalize().to_vec();
 
-        // 2. Initialize Harness
+        // 3. Initialize Harness
         let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, rm_client) = setup_scale_test_harness();
-        let temp_dir = std::env::temp_dir().join("v2_tail_test_nopad");
+        let temp_dir = std::env::temp_dir().join("v2_tail_fixed_bep52");
+        let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
         let file_path = temp_dir.join("v2_tail_file");
         std::fs::write(&file_path, &data).unwrap();
 
-        // 3. Configure V2 Metadata
+        // 4. Configure V2 Metadata
         let mut torrent = create_dummy_torrent(2);
         torrent.info.name = "v2_tail_file".to_string();
         torrent.info.piece_length = piece_len as i64;
         torrent.info.meta_version = Some(2);
-        torrent.info.pieces = Vec::new(); // Pure V2
+        torrent.info.pieces = Vec::new();
 
-        // Inject Layer Hashes
+        // Define File Tree so validation can find the roots
+        let files = vec![
+            ("v2_tail_file".to_string(), file_len as usize, root_v2.clone()),
+        ];
+        torrent.info.file_tree = Some(build_mock_v2_file_tree(files));
+
+        // Inject Layer Hashes (Piece Layers)
         let mut layer_map = std::collections::HashMap::new();
         let mut layer_bytes = Vec::new();
         layer_bytes.extend_from_slice(&hash_0);
@@ -4536,7 +4546,7 @@ mod resource_tests {
         manager.state.piece_to_roots.insert(0, vec![(0, file_len, root_v2.clone())]);
         manager.state.piece_to_roots.insert(1, vec![(0, file_len, root_v2.clone())]);
 
-        // 4. Run Validation
+        // 5. Run Validation
         let result = TorrentManager::perform_validation(
             manager.multi_file_info.unwrap(),
             torrent,
@@ -4547,9 +4557,9 @@ mod resource_tests {
             false,
         ).await.unwrap();
 
-        // 5. ASSERTION
-        assert!(result.contains(&0), "Piece 0 failed");
-        assert!(result.contains(&1), "Piece 1 failed - Check tail hashing logic");
+        // 6. ASSERTIONS
+        assert!(result.contains(&0), "Piece 0 failed validation.");
+        assert!(result.contains(&1), "Piece 1 failed validation. Tail hashing logic mismatch.");
         
         let _ = std::fs::remove_dir_all(temp_dir);
     }

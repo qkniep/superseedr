@@ -4384,7 +4384,6 @@ mod tests {
 
     #[test]
     fn test_v2_cleanup_on_completion_race() {
-        // GIVEN: A torrent with Piece 0
         let mut state = create_empty_state();
         let mut torrent = create_dummy_torrent(1);
         torrent.info.piece_length = 1024;
@@ -4393,12 +4392,13 @@ mod tests {
         state.piece_manager.set_initial_fields(1, false);
         state.piece_manager.set_geometry(1024, 1024, HashMap::new(), false);
         
-        // V2 Setup
-        state.piece_to_roots.insert(0, vec![(0, 1024, vec![0xAA; 32])]);
+        // FIX: Set file_len (2048) > piece_length (1024) to force buffering 
+        // Small files (<= piece_len) verify immediately using the root as the leaf.
+        state.piece_to_roots.insert(0, vec![(0, 2048, vec![0xAA; 32])]); 
         let peer_id = "racer".to_string();
         add_peer(&mut state, &peer_id);
 
-        // 1. SETUP: Buffer Data (State is waiting for proof)
+        // 1. SETUP: Buffer Data (State is now waiting for proof)
         state.update(Action::IncomingBlock {
             peer_id: peer_id.clone(),
             piece_index: 0,
@@ -4406,7 +4406,6 @@ mod tests {
             data: vec![1u8; 1024],
         });
         assert!(state.v2_pending_data.contains_key(&0), "Sanity: Data buffered");
-
         // 2. RACE: The piece completes (simulating worker returning success)
         state.update(Action::PieceVerified {
             peer_id: peer_id.clone(),
@@ -5024,6 +5023,11 @@ mod tests {
         state.piece_manager.set_initial_fields(num_pieces, false);
         state.piece_manager.set_geometry(piece_len as u32, padded_len, HashMap::new(), false); // <--- CHANGED to padded_len
         state.piece_manager.need_queue = vec![1]; 
+
+        let mut overrides = HashMap::new();
+        overrides.insert(1, tail_size as u32);
+        state.piece_manager.set_geometry(piece_len as u32, padded_len, overrides, false); 
+        state.piece_manager.need_queue = vec![1];
 
         // 4. SETUP PEER
         let peer_id = "strict_peer".to_string();
