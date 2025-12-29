@@ -862,108 +862,97 @@ impl TorrentState {
                     }
                 }
 
-                // --- PHASE 2: FILL FROM NEW PIECES ---
-                while available_slots > 0 {
-                    let choice = self.piece_manager.choose_piece_for_peer(
-                        &peer.bitfield,
-                        &peer.pending_requests,
-                        &self.torrent_status,
-                    );
+                // --- PHASE 2: DETERMINISTIC FILL ---
+                // 1. Determine the pool of candidates
+                let candidate_pool: Box<dyn Iterator<Item = &u32> + '_> = 
+                    if self.torrent_status == TorrentStatus::Endgame {
+                        Box::new(
+                            self.piece_manager.need_queue.iter()
+                                .chain(self.piece_manager.pending_queue.keys())
+                        )
+                    } else {
+                        Box::new(self.piece_manager.need_queue.iter())
+                    };
 
-                    match choice {
-                        Some(piece_index) => {
+                // 2. Filter & Collect ALL valid candidates
+                let mut valid_candidates: Vec<u32> = candidate_pool
+                    .copied()
+                    .filter(|&p_idx| {
+                        // Peer must have the piece
+                        if peer.bitfield.get(p_idx as usize) != Some(&true) { return false; }
+                        // Don't duplicate work currently verifying
+                        if self.verifying_pieces.contains(&p_idx) { return false; }
+                        // Don't request what we already asked this specific peer for
+                        if peer.pending_requests.contains(&p_idx) { return false; }
+                        true
+                    })
+                    .collect();
 
-                            if self.verifying_pieces.contains(&piece_index) {
-                                continue; 
-                            }
+                // 3. SORT BY RARITY (Rarest First)
+                // Sort ascending: Lower availability count = Rarer = Higher Priority
+                valid_candidates.sort_by_key(|&p_idx| {
+                    // FIX: Call the helper method we just created
+                    self.piece_manager.get_piece_availability(p_idx)
+                });
 
-                            self.piece_manager
-                                .mark_as_pending(piece_index, peer_id.clone());
-                            peer.pending_requests.insert(piece_index);
+                // 4. Select the batch
+                let pieces_to_request = valid_candidates
+                    .into_iter()
+                    .take(available_slots);
 
-                            if self.piece_manager.need_queue.is_empty()
-                                && self.torrent_status != TorrentStatus::Endgame
-                            {
-                                self.torrent_status = TorrentStatus::Endgame;
-                            }
+                // 5. Process the Batch
+                for piece_index in pieces_to_request {
+                    if available_slots == 0 {
+                        break;
+                    }
 
-                            let initial_batch_len = request_batch.len();
+                    // --- A. Update State ---
+                    self.piece_manager.mark_as_pending(piece_index, peer_id.clone());
+                    peer.pending_requests.insert(piece_index);
 
-                            let (start, end) = self
-                                .piece_manager
-                                .block_manager
-                                .get_block_range(piece_index);
-                            let assembler_mask = self
-                                .piece_manager
-                                .block_manager
-                                .legacy_buffers
-                                .get(&piece_index)
-                                .map(|a| a.mask.clone());
+                    if self.piece_manager.need_queue.is_empty() 
+                        && self.torrent_status != TorrentStatus::Endgame 
+                    {
+                        self.torrent_status = TorrentStatus::Endgame;
+                    }
 
-                            for global_block_idx in start..end {
-                                if available_slots == 0 {
-                                    break;
-                                }
+                    // --- B. Generate Block Requests ---
+                    let (start, end) = self.piece_manager.block_manager.get_block_range(piece_index);
+                    let assembler_mask = self.piece_manager.block_manager.legacy_buffers
+                        .get(&piece_index)
+                        .map(|a| a.mask.clone());
 
-                                if self
-                                    .piece_manager
-                                    .block_manager
-                                    .block_bitfield
-                                    .get(global_block_idx as usize)
-                                    == Some(&true)
-                                {
-                                    continue;
-                                }
+                    for global_block_idx in start..end {
+                        if available_slots == 0 { break; }
 
-                                let local_block_idx = global_block_idx - start;
-                                if let Some(mask) = &assembler_mask {
-                                    if mask.get(local_block_idx as usize) == Some(&true) {
-                                        continue;
-                                    }
-                                }
+                        if self.piece_manager.block_manager.block_bitfield
+                            .get(global_block_idx as usize) == Some(&true) 
+                        { continue; }
 
-                                let addr = self
-                                    .piece_manager
-                                    .block_manager
-                                    .inflate_address(global_block_idx);
-
-                                let final_len = if let Some(limit) = calc_v2_limit(addr.piece_index) {
-                                     let remaining = limit.saturating_sub(addr.byte_offset);
-                                     std::cmp::min(addr.length, remaining)
-                                } else {
-                                     addr.length
-                                };
-
-                                if final_len == 0 {
-                                    continue;
-                                }
-
-                                if peer.active_blocks.contains(&(
-                                    addr.piece_index,
-                                    addr.byte_offset,
-                                    final_len,
-                                )) {
-                                    continue;
-                                }
-
-                                request_batch.push((
-                                    addr.piece_index,
-                                    addr.byte_offset,
-                                    final_len,
-                                ));
-                                peer.active_blocks.insert((
-                                    addr.piece_index,
-                                    addr.byte_offset,
-                                    final_len,
-                                ));
-                                available_slots -= 1;
-                            }
-
-                            if request_batch.len() == initial_batch_len {
-                                break;
-                            }
+                        let local_block_idx = global_block_idx - start;
+                        if let Some(mask) = &assembler_mask {
+                            if mask.get(local_block_idx as usize) == Some(&true) { continue; }
                         }
-                        None => break,
+
+                        let addr = self.piece_manager.block_manager.inflate_address(global_block_idx);
+
+                        let final_len = if let Some(limit) = calc_v2_limit(addr.piece_index) {
+                             let remaining = limit.saturating_sub(addr.byte_offset);
+                             std::cmp::min(addr.length, remaining)
+                        } else {
+                             addr.length
+                        };
+
+                        if final_len == 0 { continue; }
+
+                        if peer.active_blocks.contains(&(addr.piece_index, addr.byte_offset, final_len)) {
+                            continue;
+                        }
+
+                        request_batch.push((addr.piece_index, addr.byte_offset, final_len));
+                        peer.active_blocks.insert((addr.piece_index, addr.byte_offset, final_len));
+                        
+                        available_slots -= 1;
                     }
                 }
 

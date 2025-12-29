@@ -235,6 +235,13 @@ tracing::info!("⚠️ [PieceManager] WARNING: Falling back to inferred geometry
     pub fn clear_assembly_buffers(&mut self) {
         self.block_manager.legacy_buffers.clear();
     }
+
+    pub fn get_piece_availability(&self, piece_index: u32) -> u32 {
+        self.piece_rarity
+            .get(&piece_index)
+            .copied()
+            .unwrap_or(0) as u32
+    }
 }
 
 #[cfg(test)]
