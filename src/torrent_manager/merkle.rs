@@ -364,4 +364,171 @@ mod tests {
 
         assert!(is_valid, "Verification failed. Manual root calculation must exactly match the 32KB context logic.");
     }
+
+    #[test]
+    fn test_compute_root_3_blocks_padding() {
+        // Data: 3 full blocks (48KB). 
+        // Logic should pad to 4 blocks (64KB) with a zero-hash leaf.
+        let block_size = 16_384;
+        let data = vec![0xCC; block_size * 3];
+
+        // Manual Tree Construction:
+        // Leaves: [H(B1), H(B2), H(B3), H(Zero)]
+        let h1 = Sha256::digest(&data[0..block_size]);
+        let h2 = Sha256::digest(&data[block_size..block_size*2]);
+        let h3 = Sha256::digest(&data[block_size*2..]);
+        let h_zero = [0u8; 32]; // Padding leaf is raw zeros in hash form? 
+                                // NO. BEP 52 says padding *nodes* are zero hashes.
+                                // In `compute_v2_piece_root`: `let empty_hash: [u8; 32] = [0u8; 32];`
+                                // So yes, the leaf added is all zeros.
+
+        // Layer 1:
+        // Node A = Hash(H1 + H2)
+        let mut hasher_a = Sha256::new();
+        hasher_a.update(h1);
+        hasher_a.update(h2);
+        let node_a = hasher_a.finalize();
+
+        // Node B = Hash(H3 + ZeroHash)
+        let mut hasher_b = Sha256::new();
+        hasher_b.update(h3);
+        hasher_b.update(h_zero);
+        let node_b = hasher_b.finalize();
+
+        // Root = Hash(Node A + Node B)
+        let mut hasher_root = Sha256::new();
+        hasher_root.update(node_a);
+        hasher_root.update(node_b);
+        let expected_root = hasher_root.finalize();
+
+        let actual_root = compute_v2_piece_root(&data, data.len());
+        assert_eq!(actual_root.as_slice(), expected_root.as_slice(), "Failed to hash 3-block uneven tree correctly");
+    }
+
+    #[test]
+    fn test_verify_deep_tree_path() {
+        // Scenario: 16 Blocks (256KB). Depth 4.
+        // We verify Block 14 (Index 14).
+        // Path: 
+        // 1. Sibling 15 (Right) -> Parent(14,15) is Index 7
+        // 2. Sibling 6 (Left)   -> Parent(6,7)   is Index 3
+        // 3. Sibling 2 (Left)   -> Parent(2,3)   is Index 1
+        // 4. Sibling 0 (Left)   -> Root(0,1)     is Index 0
+
+        // 1. Generate 16 blocks of random hashes
+        let leaves: Vec<[u8; 32]> = (0..16).map(|i| {
+            let mut h = Sha256::new();
+            h.update([i as u8]); 
+            h.finalize().into()
+        }).collect();
+
+        // 2. Build Tree Helper (simplified for test)
+        fn hash_pair(a: &[u8], b: &[u8]) -> [u8; 32] {
+            let mut h = Sha256::new();
+            h.update(a); h.update(b);
+            h.finalize().into()
+        }
+        
+        let l1: Vec<_> = leaves.chunks(2).map(|c| hash_pair(&c[0], &c[1])).collect(); // 8 nodes
+        let l2: Vec<_> = l1.chunks(2).map(|c| hash_pair(&c[0], &c[1])).collect();     // 4 nodes
+        let l3: Vec<_> = l2.chunks(2).map(|c| hash_pair(&c[0], &c[1])).collect();     // 2 nodes
+        let root = hash_pair(&l3[0], &l3[1]);
+
+        // 3. Construct Proof for Index 14
+        let mut proof = Vec::new();
+        proof.extend_from_slice(&leaves[15]); // Sibling of 14
+        proof.extend_from_slice(&l1[6]);      // Sibling of parent(14,15) -> Index 7's sibling is 6
+        proof.extend_from_slice(&l2[1]);      // Sibling of Index 3 -> Index 2 (l2[1] is index 1?? No, l2 has indices 0..3. Wait. 
+                                              // Indices at Layer 2: 0,1,2,3.
+                                              // 14/2 = 7. 7/2 = 3. Sibling of 3 is 2. So l2[2]? 
+                                              // Let's trace carefully:
+                                              // L0 Indices: 0..15. Target 14. Sibling 15.
+                                              // L1 Indices: 0..7.  Target 7.  Sibling 6.  (Node 6 is l1[6])
+                                              // L2 Indices: 0..3.  Target 3.  Sibling 2.  (Node 2 is l2[2])
+                                              // L3 Indices: 0..1.  Target 1.  Sibling 0.  (Node 0 is l3[0])
+                                              
+        // Re-do proof construction with correct indices
+        let proof_leaves = vec![
+            leaves[15], // Neighbor of 14
+            l1[6],      // Neighbor of 7
+            l2[2],      // Neighbor of 3
+            l3[0],      // Neighbor of 1
+        ];
+        
+        let mut proof_bytes = Vec::new();
+        for p in proof_leaves { proof_bytes.extend_from_slice(&p); }
+
+        // We fake the "data" by just providing its hash as the starting point, 
+        // since verify_merkle_proof calculates the root of the data first.
+        // But verify_merkle_proof takes RAW DATA.
+        // So we must provide raw data that hashes to leaves[14].
+        // In this test setup, we generated leaves directly from integers, so we can't easily provide matching "data" 
+        // unless we reverse SHA256 (impossible).
+        
+        // FIX: Verify a manually hashed node directly? 
+        // No, the function signature requires `piece_data`.
+        // WORKAROUND: Create actual data for Block 14.
+        let block_14_data = vec![0x14; 16384]; 
+        let leaf_14 = Sha256::digest(&block_14_data).into(); // This is the real leaf 14
+        
+        // Now rebuild the tree with this ONE real leaf, others can be fake.
+        let mut leaves = leaves; 
+        leaves[14] = leaf_14; 
+        
+        // Re-hash up
+        let l1: Vec<_> = leaves.chunks(2).map(|c| hash_pair(&c[0], &c[1])).collect();
+        let l2: Vec<_> = l1.chunks(2).map(|c| hash_pair(&c[0], &c[1])).collect();
+        let l3: Vec<_> = l2.chunks(2).map(|c| hash_pair(&c[0], &c[1])).collect();
+        let root = hash_pair(&l3[0], &l3[1]);
+        
+        // Re-proof
+        let proof_bytes = [
+            leaves[15], l1[6], l2[2], l3[0]
+        ].concat();
+
+        let is_valid = verify_merkle_proof(
+            &root,
+            &block_14_data,
+            14, // Relative Index 14
+            &proof_bytes,
+            16384 // Context: Single block
+        );
+
+        assert!(is_valid, "Failed to verify deep tree (depth 4) at index 14");
+    }
+
+    #[test]
+    fn test_verify_fails_on_corruption() {
+        let block_size = 16_384;
+        let data = vec![0xAA; block_size];
+        let root = Sha256::digest(&data);
+
+        // 1. Corrupt Data
+        let mut corrupt_data = data.clone();
+        corrupt_data[0] = 0xBB; // Flip one byte
+        assert!(!verify_merkle_proof(&root, &corrupt_data, 0, &[], block_size), "Should fail with corrupt data");
+
+        // 2. Corrupt Proof
+        // Create a 2-block tree
+        let data_sibling = vec![0xBB; block_size];
+        let h_sibling = Sha256::digest(&data_sibling);
+        
+        let mut hasher = Sha256::new();
+        hasher.update(root);
+        hasher.update(h_sibling);
+        let parent_root = hasher.finalize();
+
+        let mut bad_proof = h_sibling.to_vec();
+        bad_proof[0] = bad_proof[0].wrapping_add(1); // Corrupt the proof hash
+
+        assert!(!verify_merkle_proof(
+            &parent_root, 
+            &data, 
+            0, 
+            &bad_proof, 
+            block_size
+        ), "Should fail with corrupt proof");
+    }
+
+
 }
