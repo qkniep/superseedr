@@ -183,7 +183,10 @@ pub enum Effect {
         proof: Vec<u8>,
         data: Vec<u8>,
         root_hash: Vec<u8>,
-        file_start_offset: u64,
+        file_start_offset: u64, // Kept for logging/debugging if needed, or can be removed
+        valid_length: usize,
+        relative_index: u32,
+        hashing_context_len: usize,
     },
     WriteToDisk {
         peer_id: String,
@@ -1154,11 +1157,6 @@ impl TorrentState {
                 data,
             } => {
 
-let block_len = data.len();
-    tracing::info!(
-        "📥 RECEIVED BLOCK: Piece {} | Offset {} | Len {} | Peer {}", 
-        piece_index, block_offset, block_len, peer_id
-    );
                 // 1. Safety Guard: Bounds Check
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
@@ -1244,6 +1242,9 @@ tracing::info!("✅ [State] Piece {} assembly finished. Physical Data Len: {}", 
                             .filter(|(start, _, _)| *start <= global_offset)
                             .max_by_key(|(start, _, _)| *start);
 
+                        let (valid_length, relative_index, hashing_context_len) = 
+                                self.calculate_v2_verify_params(piece_index, complete_data.len());
+
                         if let Some((file_start, _len, root)) = matching_root_info {
                             // [FIX] PRIORITY 1: Use Local Proof (Trust Metadata over Peer)
                             // If we have the specific leaf hash in our 'piece layers', use it.
@@ -1253,10 +1254,13 @@ tracing::info!("✅ [State] Piece {} assembly finished. Physical Data Len: {}", 
                                 effects.push(Effect::VerifyPieceV2 {
                                     peer_id: peer_id.clone(),
                                     piece_index,
-                                    proof: Vec::new(), // Local verify = direct comparison, no proof needed
+                                    proof: Vec::new(),
                                     data: complete_data,
-                                    root_hash: target_hash, // This is now the LEAF hash (c97a...), not Root
+                                    root_hash: target_hash,
                                     file_start_offset: *file_start,
+                                    valid_length,
+                                    relative_index,
+                                    hashing_context_len,
                                 });
                             }
                             // PRIORITY 2: Use Dynamic Network Proof
@@ -1268,8 +1272,11 @@ tracing::info!("✅ [State] Piece {} assembly finished. Physical Data Len: {}", 
                                     piece_index,
                                     proof: proof.clone(),
                                     data: complete_data,
-                                    root_hash: root.clone(), // Must verify against Root using Proof
+                                    root_hash: root.clone(),
                                     file_start_offset: *file_start,
+                                    valid_length,
+                                    relative_index,
+                                    hashing_context_len,
                                 });
                             } 
                             // PRIORITY 3: Hybrid Fallback (V1)
@@ -1333,6 +1340,9 @@ tracing::info!("✅ [State] Piece {} assembly finished. Physical Data Len: {}", 
                             .filter(|(start, _, _)| *start <= global_offset)
                             .max_by_key(|(start, _, _)| *start);
 
+                        let (valid_length, relative_index, hashing_context_len) = 
+                                self.calculate_v2_verify_params(piece_index, data.len());
+
                         if let Some((file_start, _len, root)) = matching_root_info {
                             
                             // [FIX] PRIORITY 1: Prefer Local Metadata (Leaf Hash)
@@ -1349,8 +1359,11 @@ tracing::info!("✅ [State] Piece {} assembly finished. Physical Data Len: {}", 
                                 piece_index,
                                 proof,
                                 data,
-                                root_hash: target_hash, // <--- Now correctly uses Leaf Hash if available
+                                root_hash: target_hash,
                                 file_start_offset: *file_start,
+                                valid_length,
+                                relative_index,
+                                hashing_context_len,
                             }];
                         }
                     }
@@ -2145,6 +2158,37 @@ tracing::info!("🧩 [V2 Geometry] Detected tail piece: index {}, tail_len {}, f
             }
         }
         (v2_piece_count, overrides)
+    }
+
+    fn calculate_v2_verify_params(&self, piece_index: u32, data_len: usize) -> (usize, u32, usize) {
+        if let Some(roots) = self.piece_to_roots.get(&piece_index) {
+            // In V2, pieces are aligned to files. We check the mapped file for this piece.
+            if let Some((file_start, file_len, _)) = roots.first() {
+                let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(0);
+                
+                let piece_start_global = piece_index as u64 * piece_len;
+                let offset_in_file = piece_start_global.saturating_sub(*file_start);
+                let remaining = file_len.saturating_sub(offset_in_file);
+                
+                let valid_length = std::cmp::min(data_len as u64, remaining) as usize;
+                
+                // Calculate relative index (offset / piece_len)
+                let relative_index = (offset_in_file / piece_len) as u32;
+
+                // Determine context length for the Merkle tree height
+                // If the file is smaller than one piece, the tree height is determined by file_len.
+                // Otherwise, it is determined by piece_len.
+                let hashing_context_len = if *file_len <= piece_len {
+                    *file_len as usize
+                } else {
+                    piece_len as usize
+                };
+
+                return (valid_length, relative_index, hashing_context_len);
+            }
+        }
+        // Fallback defaults
+        (data_len, 0, data_len)
     }
 }
 

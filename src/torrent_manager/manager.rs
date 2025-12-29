@@ -694,78 +694,32 @@ impl TorrentManager {
                 mut data,
                 root_hash,
                 file_start_offset: _,
+                // DESTRUCTURE NEW FIELDS
+                valid_length,
+                relative_index,
+                hashing_context_len,
             } => {
                 let tx = self.torrent_manager_tx.clone();
                 let peer_id_for_msg = peer_id.clone();
                 let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-                // [DEBUG] Capture expected piece length from torrent metadata
-                let full_piece_len = self.state.torrent.as_ref()
-                    .map(|t| t.info.piece_length as usize)
-                    .unwrap_or(16384);
-
-                let root_hex = hex::encode(&root_hash);
-
-                // 1. Resolve Geometry (Existing logic)
-                let (valid_length, relative_index) = if let Some(roots) = self.state.piece_to_roots.get(&piece_index) {
-                    if let Some((file_start, file_len, _)) = roots.first() {
-                        let piece_len = self.state.torrent.as_ref().map_or(16384, |t| t.info.piece_length as u64);
-                        let piece_start_global = piece_index as u64 * piece_len;
-                        let offset_in_file = piece_start_global.saturating_sub(*file_start);
-                        let remaining = file_len.saturating_sub(offset_in_file);
-                        let rel_index = (offset_in_file / piece_len) as u32;
-                        (std::cmp::min(data.len() as u64, remaining) as usize, rel_index)
-                    } else {
-                        (data.len(), 0)
-                    }
-                } else {
-                    (data.len(), 0)
-                };
-
+                // LOGIC IS NOW SIMPLIFIED - No lookups, just execution
                 tokio::spawn(async move {
-                    // 2. Sanitize Buffer (Existing logic)
+                    // 1. Sanitize Buffer
                     if valid_length < data.len() {
                         data[valid_length..].fill(0);
-                    } else if data.len() < 16384 {
-                        data.resize(16384, 0);
                     }
 
                     let verification_task = tokio::task::spawn_blocking(move || {
-                        // --- INSTRUMENTATION START ---
-                        
-                        // 1. Hash As-Is (Current Behavior)
-                        let current_calc = compute_v2_piece_root(&data, full_piece_len);
-                        let current_hex = hex::encode(current_calc);
+                        let is_valid = verify_merkle_proof(
+                            &root_hash, 
+                            &data, 
+                            relative_index, 
+                            &proof, 
+                            hashing_context_len
+                        );
 
-                        // 2. Hash With Padding (Hypothetical Fix)
-                        // We clone data and pad it to the full piece size to see if THAT matches
-                        let mut padded_data = data.clone();
-                        if padded_data.len() < full_piece_len {
-                            padded_data.resize(full_piece_len, 0);
-                        }
-                        let padded_calc = compute_v2_piece_root(&data, full_piece_len);
-                        let padded_hex = hex::encode(padded_calc);
-
-                        if current_hex != root_hex {
-                            tracing::error!(
-                                "🛑 [V2 Hashing Mismatch] Piece {}:\n   Received Len: {}\n   Expected Len: {}\n   Expected Root: {}\n   Calculated (As-Is):   {}\n   Calculated (Padded):  {}", 
-                                piece_index, 
-                                data.len(), 
-                                full_piece_len,
-                                root_hex,
-                                current_hex, 
-                                padded_hex
-                            );
-                            
-                            if padded_hex == root_hex {
-                                tracing::error!("✅ CONFIRMED: PADDING IS THE MISSING LINK.");
-                            }
-                        }
-                        // --- INSTRUMENTATION END ---
-
-                        let is_valid_standard = verify_merkle_proof(&root_hash, &data, relative_index, &proof, full_piece_len);
-
-                        if is_valid_standard {
+                        if is_valid {
                             Ok(data)
                         } else {
                             Err(())
@@ -2669,6 +2623,7 @@ impl TorrentManager {
     }
 }
 
+/*
 fn verify_merkle_proof(
     target_root_hash: &[u8],
     piece_data: &[u8],
@@ -2707,6 +2662,70 @@ fn verify_merkle_proof(
     }
 
     current_hash.as_slice() == target_root_hash
+}
+*/
+fn verify_merkle_proof(
+    target_root_hash: &[u8],
+    piece_data: &[u8],
+    relative_index: u32,
+    proof: &[u8],
+    hashing_context_len: usize,
+) -> bool {
+    // 1. Calculate the V2 Root of the data we have using the specific context length
+    // For small files, this context length ensures the tree depth matches the file root.
+    let calculated_root = compute_v2_piece_root(piece_data, hashing_context_len);
+
+    // 2. If we have no proof (Local Verification / Option B), 
+    // we simply compare our calculated root against the target.
+    if proof.is_empty() {
+        let matches = calculated_root.as_slice() == target_root_hash;
+        
+        if !matches {
+            println!("[DEBUG VERIFY] MISMATCH detected in local verification!");
+            println!("  Context Len:    {}", hashing_context_len);
+            println!("  Expected Root:  {}", hex::encode(target_root_hash));
+            println!("  Calculated:     {}", hex::encode(calculated_root));
+        }
+        
+        return matches;
+    }
+
+    // 3. If we DO have a proof (Network Verification), we climb the tree.
+    // In BitTorrent v2, we hash the current node with its sibling provided in the proof.
+    let mut current_hash = calculated_root;
+    let mut current_idx = relative_index; 
+
+    println!("[DEBUG VERIFY] Starting Merkle climb from index {}", relative_index);
+
+    for (i, sibling) in proof.chunks(32).enumerate() {
+        let mut hasher = Sha256::new();
+        
+        // BitTorrent v2 uses standard Merkle tree rules:
+        // If current index is even, current_hash is the left child.
+        // If current index is odd, current_hash is the right child.
+        if current_idx % 2 == 0 {
+            hasher.update(current_hash);
+            hasher.update(sibling);
+        } else {
+            hasher.update(sibling);
+            hasher.update(current_hash);
+        }
+        
+        current_hash = hasher.finalize().into();
+        current_idx /= 2;
+        
+        println!("[DEBUG VERIFY] Level {} climb: new_hash={}", i + 1, hex::encode(current_hash));
+    }
+
+    let final_matches = current_hash.as_slice() == target_root_hash;
+    
+    if !final_matches {
+        println!("[DEBUG VERIFY] MISMATCH after proof climb!");
+        println!("  Target Root: {}", hex::encode(target_root_hash));
+        println!("  Final Hash:  {}", hex::encode(current_hash));
+    }
+
+    final_matches
 }
 
 /*
@@ -2760,43 +2779,37 @@ fn compute_v2_piece_root(data: &[u8]) -> [u8; 32] {
 }
 */
 
-fn compute_v2_piece_root(data: &[u8], expected_piece_len: usize) -> [u8; 32] {
+fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
     const BLOCK_SIZE: usize = 16_384;
     
-    // 1. Calculate how many 16KB leaves the piece logically requires
-    let expected_leaf_count = expected_piece_len.div_ceil(BLOCK_SIZE).next_power_of_two();
+    // Determine target leaves (power of two) based on the context length
+    let leaf_count = expected_len.div_ceil(BLOCK_SIZE).next_power_of_two();
 
-    // 2. Hash blocks, applying MANDATORY 16KB padding to the tail chunk
+    // 1. Hash 16KB leaves with zero-padding for the tail
     let mut layer: Vec<[u8; 32]> = data
         .chunks(BLOCK_SIZE)
         .map(|chunk| {
-            if chunk.len() < BLOCK_SIZE {
-                // This is the specific fix for 'verify_tail_padding_fix'
-                let mut padded = vec![0u8; BLOCK_SIZE];
-                padded[..chunk.len()].copy_from_slice(chunk);
-                sha2::Sha256::digest(&padded).into()
-            } else {
-                sha2::Sha256::digest(chunk).into()
-            }
+            let mut padded = [0u8; BLOCK_SIZE];
+            let len = std::cmp::min(chunk.len(), BLOCK_SIZE);
+            padded[..len].copy_from_slice(&chunk[..len]);
+            sha2::Sha256::digest(&padded).into()
         })
         .collect();
 
-    // 3. Add NULL HASHES for missing blocks (virtual padding)
-    // This is the fix for 'test_v2_tail_piece_validation_accuracy'
-    while layer.len() < expected_leaf_count {
-        layer.push([0u8; 32]);
+    // 2. Pad the layer to the power-of-two leaf count using hashes of empty blocks
+    let empty_hash: [u8; 32] = sha2::Sha256::digest(&[0u8; BLOCK_SIZE]).into();
+    while layer.len() < leaf_count {
+        layer.push(empty_hash);
     }
 
-    // 4. Standard binary reduction
+    // 3. Balanced Binary Reduction
     while layer.len() > 1 {
-        let mut next_layer = Vec::with_capacity(layer.len() / 2);
-        for pair in layer.chunks(2) {
+        layer = layer.chunks(2).map(|pair| {
             let mut hasher = sha2::Sha256::new();
             hasher.update(pair[0]);
-            hasher.update(pair[1]);
-            next_layer.push(hasher.finalize().into());
-        }
-        layer = next_layer;
+            hasher.update(pair[1]); // Guaranteed to exist due to power-of-two padding
+            hasher.finalize().into()
+        }).collect();
     }
     layer[0]
 }
@@ -4804,6 +4817,9 @@ mod resource_tests {
             data: raw_data.clone(),
             root_hash: correct_leaf_hash.clone(), // In this case, the leaf is the root
             file_start_offset: 0,
+            valid_length: actual_data_len,
+            relative_index: 0,
+            hashing_context_len: 16384,
         });
 
         // 4. ASSERTION: Check if the manager sends back PieceVerified(Ok)
@@ -4822,6 +4838,196 @@ mod resource_tests {
         if timeout.is_err() {
             panic!("Test Timed Out: Manager failed to process the VerifyPieceV2 effect.");
         }
+    }
+
+    #[tokio::test]
+    async fn test_v2_small_file_less_than_piece_len() {
+        use sha2::{Digest, Sha256};
+        
+        // 1. SETUP: Torrent piece_length is 256KB, but file is only 16KB.
+        let global_piece_len: u64 = 262144;
+        let file_len: u64 = 16384; 
+        let raw_data = vec![0xDD; file_len as usize];
+        
+        // In V2, if a file < piece_length, the 'pieces root' is the hash of 
+        // the file itself (padded to 16KB if it were smaller, but here it is exactly 16KB).
+        let expected_file_root = Sha256::digest(&raw_data).to_vec();
+
+        // 2. INITIALIZE MANAGER HARNESS
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _rm) = setup_scale_test_harness();
+        
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = global_piece_len as i64;
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new();
+        
+        manager.state.torrent = Some(torrent);
+        manager.state.torrent_status = TorrentStatus::Standard;
+        
+        // Map Piece 0 to this small file.
+        // piece_to_roots: (file_start_offset, file_total_len, root_hash)
+        manager.state.piece_to_roots.insert(0, vec![(0, file_len, expected_file_root.clone())]);
+
+        // 3. EXECUTE: Trigger verification for Piece 0
+        // The handler must recognize that because file_len (16KB) < global_piece_len (256KB),
+        // the hashing_width is 16KB.
+        manager.handle_effect(Effect::VerifyPieceV2 {
+            peer_id: "small_file_peer".into(),
+            piece_index: 0,
+            proof: Vec::new(), 
+            data: raw_data.clone(),
+            root_hash: expected_file_root.clone(),
+            file_start_offset: 0,
+            valid_length: file_len as usize,
+            relative_index: 0,
+            hashing_context_len: 16384,
+        });
+
+        // 4. ASSERTION: Verification should succeed.
+        // If the bug exists, the manager would try to pad the 16KB to 256KB (16 leaves),
+        // generating a different hash and failing.
+        let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut rx = manager.torrent_manager_rx;
+            while let Some(cmd) = rx.recv().await {
+                if let TorrentCommand::PieceVerified { piece_index, verification_result, .. } = cmd {
+                    assert_eq!(piece_index, 0);
+                    return verification_result.is_ok();
+                }
+            }
+            false
+        }).await;
+
+        assert!(outcome.unwrap_or(false), 
+            "Small file verification failed. Logic likely padded 16KB file to 256KB piece boundary.");
+    }
+    
+    #[tokio::test]
+    async fn test_v2_merkle_parity_regression() {
+        use sha2::{Digest, Sha256};
+
+        // 1. SETUP: Create a scenario where Global Index != Relative Index
+        // File B starts at Global Piece 1, but it is the FIRST piece of that file (Rel 0).
+        let piece_len: usize = 16384;
+        let data_b0 = vec![0xAA; piece_len];
+        let data_b1 = vec![0xBB; piece_len]; // Neighbor piece to build a tree
+
+        // Calculate Hashes
+        let h0 = Sha256::digest(&data_b0).to_vec();
+        let h1 = Sha256::digest(&data_b1).to_vec();
+
+        // File Root = Hash(h0 + h1)
+        let mut hasher = Sha256::new();
+        hasher.update(&h0);
+        hasher.update(&h1);
+        let file_root = hasher.finalize().to_vec();
+
+        // 2. Initialize Manager Harness
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _rm) = setup_scale_test_harness();
+        
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.meta_version = Some(2);
+        manager.state.torrent = Some(torrent);
+        manager.state.torrent_status = TorrentStatus::Standard;
+
+        // 3. MAPPING: Force File B to start at Global Piece 1
+        // piece_to_roots: (file_start_offset, file_total_len, root_hash)
+        // Global Piece 1 starts at byte 16384 in the global space.
+        manager.state.piece_to_roots.insert(1, vec![(16384, (piece_len * 2) as u64, file_root.clone())]);
+
+        // 4. ACTION: Verify Piece 1 using a Network Proof (h1 is the sibling)
+        // If the code uses Global Index (1) for parity, it will think h0 is the RIGHT sibling.
+        // Because 1 is odd, it performs: Hash(Sibling + Current)
+        // But Rel Index is 0 (even), so it SHOULD perform: Hash(Current + Sibling)
+        let proof = h1.clone(); // The sibling needed to climb from h0 to file_root
+
+        manager.handle_effect(Effect::VerifyPieceV2 {
+            peer_id: "parity_tester".into(),
+            piece_index: 1, // Global Index is 1 (ODD)
+            proof,          // Provide a proof to trigger the Merkle climber
+            data: data_b0.clone(),
+            root_hash: file_root.clone(),
+            file_start_offset: 0,
+            valid_length: piece_len,
+            relative_index: 0, // Explicitly 0 (Even)
+            hashing_context_len: piece_len,
+        });
+
+        // 5. ASSERTION
+        let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut rx = manager.torrent_manager_rx;
+            while let Some(cmd) = rx.recv().await {
+                if let TorrentCommand::PieceVerified { piece_index, verification_result, .. } = cmd {
+                    if piece_index == 1 {
+                        return verification_result.is_ok();
+                    }
+                }
+            }
+            false
+        }).await;
+
+        assert!(outcome.unwrap_or(false), 
+            "Merkle Parity Failed! Piece verified as ODD (Global) instead of EVEN (Relative). Proof climbing failed.");
+    }
+
+    #[tokio::test]
+    async fn test_v2_small_file_root_mismatch_regression() {
+        use sha2::{Digest, Sha256};
+        
+        let actual_file_len: usize = 26_704;   
+        let data = vec![0xEE; actual_file_len]; 
+        let block_size = 16_384;
+
+        // --- EXACT MANUAL CALCULATION ---
+        // Block 1: First 16KB
+        let h0 = Sha256::digest(&data[0..block_size]);
+        
+        // Block 2: Remaining 10,320 bytes + 6,064 bytes of ZERO padding
+        let mut block2 = vec![0u8; block_size];
+        block2[..actual_file_len - block_size].copy_from_slice(&data[block_size..]);
+        let h1 = Sha256::digest(&block2);
+        
+        // Combined Root
+        let mut hasher = Sha256::new();
+        hasher.update(h0);
+        hasher.update(h1);
+        let expected_file_root: [u8; 32] = hasher.finalize().into();
+        // --------------------------------
+
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _rm) = setup_test_harness();
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 262_144; // 256KB global
+        torrent.info.meta_version = Some(2);
+        manager.state.torrent = Some(torrent);
+        
+        // [FIX] Set the file offset to start exactly where Piece 311 starts.
+        // Otherwise, the manager thinks Piece 311 is 81MB past the end of this file.
+        let piece_start_offset = 311 * 262_144;
+        manager.state.piece_to_roots.insert(311, vec![(piece_start_offset, actual_file_len as u64, expected_file_root.to_vec())]);
+
+        manager.handle_effect(Effect::VerifyPieceV2 {
+            peer_id: "debug_peer".into(),
+            piece_index: 311,
+            proof: Vec::new(),
+            data: data.clone(),
+            root_hash: expected_file_root.to_vec(),
+            file_start_offset: 0,
+            valid_length: actual_file_len,
+            relative_index: 0,
+            hashing_context_len: 32_768,
+        });
+
+        let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut rx = manager.torrent_manager_rx;
+            while let Some(cmd) = rx.recv().await {
+                if let TorrentCommand::PieceVerified { piece_index, verification_result, .. } = cmd {
+                    if piece_index == 311 { return verification_result.is_ok(); }
+                }
+            }
+            false
+        }).await;
+
+        assert!(outcome.unwrap_or(false), "Verification failed. Check if data or expected_file_root matches.");
     }
 
 }
