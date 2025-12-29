@@ -4,6 +4,9 @@
 use crate::app::PeerInfo;
 use crate::app::TorrentMetrics;
 
+use crate::torrent_manager::merkle;
+use crate::torrent_manager::merkle::compute_v2_piece_root;
+
 use crate::resource_manager::ResourceManagerClient;
 use crate::resource_manager::ResourceManagerError;
 
@@ -694,7 +697,6 @@ impl TorrentManager {
                 mut data,
                 root_hash,
                 file_start_offset: _,
-                // DESTRUCTURE NEW FIELDS
                 valid_length,
                 relative_index,
                 hashing_context_len,
@@ -711,7 +713,7 @@ impl TorrentManager {
                     }
 
                     let verification_task = tokio::task::spawn_blocking(move || {
-                        let is_valid = verify_merkle_proof(
+                        let is_valid = merkle::verify_merkle_proof(
                             &root_hash, 
                             &data, 
                             relative_index, 
@@ -2621,197 +2623,6 @@ impl TorrentManager {
             }
         }
     }
-}
-
-/*
-fn verify_merkle_proof(
-    target_root_hash: &[u8],
-    piece_data: &[u8],
-    _piece_index: u32,
-    proof: &[u8],
-    expected_piece_len: usize,
-) -> bool {
-    // 1. Calculate the V2 Root of the data we have
-    // If the data is > 16KB, we must build the local tree first.
-    let calculated_root = compute_v2_piece_root(piece_data, expected_piece_len);
-
-    // 2. If we have no proof (Local Verification / Option B), 
-    // we simply compare our calculated root against the target.
-    if proof.is_empty() {
-        return calculated_root.as_slice() == target_root_hash;
-    }
-
-    // 3. If we DO have a proof (Network Verification),
-    // we climb the tree using the proof.
-    // Note: This path is rare for full pieces because 'calculated_root'
-    // usually *is* the piece hash we are looking for.
-    let mut current_hash = calculated_root;
-    let mut current_idx = _piece_index; // This logic depends on what the proof represents
-
-    for sibling in proof.chunks(32) {
-        let mut hasher = Sha256::new();
-        if current_idx % 2 == 0 {
-            hasher.update(current_hash);
-            hasher.update(sibling);
-        } else {
-            hasher.update(sibling);
-            hasher.update(current_hash);
-        }
-        current_hash = hasher.finalize().into();
-        current_idx /= 2;
-    }
-
-    current_hash.as_slice() == target_root_hash
-}
-*/
-fn verify_merkle_proof(
-    target_root_hash: &[u8],
-    piece_data: &[u8],
-    relative_index: u32,
-    proof: &[u8],
-    hashing_context_len: usize,
-) -> bool {
-    // 1. Calculate the V2 Root of the data we have using the specific context length
-    // For small files, this context length ensures the tree depth matches the file root.
-    let calculated_root = compute_v2_piece_root(piece_data, hashing_context_len);
-
-    // 2. If we have no proof (Local Verification / Option B), 
-    // we simply compare our calculated root against the target.
-    if proof.is_empty() {
-        let matches = calculated_root.as_slice() == target_root_hash;
-        
-        if !matches {
-            println!("[DEBUG VERIFY] MISMATCH detected in local verification!");
-            println!("  Context Len:    {}", hashing_context_len);
-            println!("  Expected Root:  {}", hex::encode(target_root_hash));
-            println!("  Calculated:     {}", hex::encode(calculated_root));
-        }
-        
-        return matches;
-    }
-
-    // 3. If we DO have a proof (Network Verification), we climb the tree.
-    // In BitTorrent v2, we hash the current node with its sibling provided in the proof.
-    let mut current_hash = calculated_root;
-    let mut current_idx = relative_index; 
-
-    println!("[DEBUG VERIFY] Starting Merkle climb from index {}", relative_index);
-
-    for (i, sibling) in proof.chunks(32).enumerate() {
-        let mut hasher = Sha256::new();
-        
-        // BitTorrent v2 uses standard Merkle tree rules:
-        // If current index is even, current_hash is the left child.
-        // If current index is odd, current_hash is the right child.
-        if current_idx % 2 == 0 {
-            hasher.update(current_hash);
-            hasher.update(sibling);
-        } else {
-            hasher.update(sibling);
-            hasher.update(current_hash);
-        }
-        
-        current_hash = hasher.finalize().into();
-        current_idx /= 2;
-        
-        println!("[DEBUG VERIFY] Level {} climb: new_hash={}", i + 1, hex::encode(current_hash));
-    }
-
-    let final_matches = current_hash.as_slice() == target_root_hash;
-    
-    if !final_matches {
-        println!("[DEBUG VERIFY] MISMATCH after proof climb!");
-        println!("  Target Root: {}", hex::encode(target_root_hash));
-        println!("  Final Hash:  {}", hex::encode(current_hash));
-    }
-
-    final_matches
-}
-
-/*
-fn compute_v2_piece_root(data: &[u8]) -> [u8; 32] {
-    const BLOCK_SIZE: usize = 16_384;
-
-    if data.len() <= BLOCK_SIZE {
-        if data.len() < BLOCK_SIZE {
-            let mut padded = vec![0u8; BLOCK_SIZE];
-            padded[0..data.len()].copy_from_slice(data);
-            return Sha256::digest(&padded).into();
-        }
-        return Sha256::digest(data).into();
-    }
-
-    // 1. Hash all 16KB leaves
-    let mut layer: Vec<[u8; 32]> = data
-        .chunks(BLOCK_SIZE)
-        .map(|chunk| {
-            if chunk.len() < BLOCK_SIZE {
-                let mut padded = vec![0u8; BLOCK_SIZE];
-                padded[0..chunk.len()].copy_from_slice(chunk);
-                Sha256::digest(&padded).into()
-            } else {
-                Sha256::digest(chunk).into()
-            }
-        })
-        .collect();
-
-    // 2. Build the tree up
-    // BitTorrent v2 pieces are typically powers of 2 (32KB, 64KB, etc),
-    // so this binary reduction works perfectly.
-    while layer.len() > 1 {
-        let mut next_layer = Vec::with_capacity(layer.len() / 2);
-        for pair in layer.chunks(2) {
-            let mut hasher = Sha256::new();
-            if pair.len() == 2 {
-                hasher.update(pair[0]);
-                hasher.update(pair[1]);
-            } else {
-                // This case implies an unbalanced tree (unusual for standard piece sizes)
-                // We just bubble the hash up.
-                hasher.update(pair[0]); 
-            }
-            next_layer.push(hasher.finalize().into());
-        }
-        layer = next_layer;
-    }
-
-    layer[0]
-}
-*/
-
-fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
-    const BLOCK_SIZE: usize = 16_384;
-    
-    // Determine target leaves (power of two) based on the context length
-    let leaf_count = expected_len.div_ceil(BLOCK_SIZE).next_power_of_two();
-
-    // 1. Hash 16KB leaves with zero-padding for the tail
-    let mut layer: Vec<[u8; 32]> = data
-        .chunks(BLOCK_SIZE)
-        .map(|chunk| {
-            let mut padded = [0u8; BLOCK_SIZE];
-            let len = std::cmp::min(chunk.len(), BLOCK_SIZE);
-            padded[..len].copy_from_slice(&chunk[..len]);
-            sha2::Sha256::digest(&padded).into()
-        })
-        .collect();
-
-    // 2. Pad the layer to the power-of-two leaf count using hashes of empty blocks
-    let empty_hash: [u8; 32] = sha2::Sha256::digest(&[0u8; BLOCK_SIZE]).into();
-    while layer.len() < leaf_count {
-        layer.push(empty_hash);
-    }
-
-    // 3. Balanced Binary Reduction
-    while layer.len() > 1 {
-        layer = layer.chunks(2).map(|pair| {
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(pair[0]);
-            hasher.update(pair[1]); // Guaranteed to exist due to power-of-two padding
-            hasher.finalize().into()
-        }).collect();
-    }
-    layer[0]
 }
 
 #[cfg(test)]
