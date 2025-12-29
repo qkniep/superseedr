@@ -166,23 +166,6 @@ pub async fn write_data_to_disk(
     data_to_write: &[u8],
 ) -> Result<(), StorageError> {
     
-    // --- [DEBUG INSTRUMENTATION START] ---
-    // Log intent: Where do we EXPECT this data to go?
-    let mut accumulated_len = 0;
-    for file in &multi_file_info.files {
-        let file_end = accumulated_len + file.length;
-        
-        // Check if the write overlaps with this file
-        let write_end = global_offset + data_to_write.len() as u64;
-        
-        if global_offset < file_end && write_end > accumulated_len {
-            let relative_start = global_offset.saturating_sub(accumulated_len);
-            
-        }
-        accumulated_len += file.length;
-    }
-    // --- [DEBUG INSTRUMENTATION END] ---
-
     let mut bytes_written = 0;
     let data_len = data_to_write.len();
 
