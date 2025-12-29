@@ -13,6 +13,10 @@ pub fn verify_merkle_proof(
 ) -> bool {
     // 1. Calculate the V2 Root of the data we have using the specific context length
     let calculated_root = compute_v2_piece_root(piece_data, hashing_context_len);
+    tracing::info!(
+        "Calciulated root {}",
+        hex::encode(calculated_root),
+    );
 
     // 2. Local Verification (No Proof)
     if proof.is_empty() {
@@ -23,7 +27,19 @@ pub fn verify_merkle_proof(
                 hex::encode(target_root_hash), hex::encode(calculated_root)
             );
         }
+        else {
+
+            tracing::info!(
+                "V2 Verify Match (Local): Expect {}, Got {}", 
+                hex::encode(target_root_hash), hex::encode(calculated_root)
+            );
+        }
         return matches;
+    }
+    else {
+        tracing::info!(
+            "Empty proof?", 
+        );
     }
 
     // 3. Network Verification (Climb the Tree)
@@ -53,20 +69,24 @@ pub fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
     // Determine target leaves (power of two) based on the context length
     let leaf_count = expected_len.div_ceil(BLOCK_SIZE).next_power_of_two();
 
-    tracing::info!(
+    tracing::debug!(
         "Compute v2 hash data-len {} - expected len {} - leaf_count {}",
         data.len(),
         expected_len,
         leaf_count,
     );
 
-    // 1. Hash 16KB leaves with zero-padding for the tail
+    // 1. Hash 16KB leafs
     let mut layer: Vec<[u8; 32]> = data
         .chunks(BLOCK_SIZE)
         .map(|chunk| {
             Sha256::digest(chunk).into()
         })
         .collect();
+    tracing::debug!(
+        "Leafs data tree len {}",
+        layer.len()
+    );
 
     // 2. Pad the layer to the power-of-two leaf count
     // (This handles cases where the file implies more leaves than data provided)
@@ -74,6 +94,10 @@ pub fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
     while layer.len() < leaf_count {
         layer.push(empty_hash);
     }
+    tracing::debug!(
+        "Leafs node padding tree len {}",
+        layer.len()
+    );
 
     // 3. Balanced Binary Reduction
     while layer.len() > 1 {
@@ -90,5 +114,9 @@ pub fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
             hasher.finalize().into()
         }).collect();
     }
+    tracing::debug!(
+        "Hash tree reduction {}",
+        hex::encode(layer[0])
+    );
     layer[0]
 }

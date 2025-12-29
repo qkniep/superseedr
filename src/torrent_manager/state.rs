@@ -14,6 +14,9 @@ use tokio::sync::Semaphore;
 use std::mem::Discriminant;
 use std::sync::Arc;
 
+use tracing::event;
+use tracing::Level;
+
 use crate::torrent_file::Torrent;
 use crate::torrent_manager::piece_manager::PieceManager;
 use crate::torrent_manager::piece_manager::PieceStatus;
@@ -795,15 +798,11 @@ impl TorrentState {
                         .get(&piece_index)
                         .map(|a| a.mask.clone());
 
-                    // --- DEBUG INSTRUMENTATION START ---
-                    // --- DEBUG INSTRUMENTATION END ---
-
                     for global_block_idx in start..end {
                         if available_slots == 0 {
                             break;
                         }
 
-                        // Is it globally done?
                         if self
                             .piece_manager
                             .block_manager
@@ -811,7 +810,6 @@ impl TorrentState {
                             .get(global_block_idx as usize)
                             == Some(&true)
                         {
-                            // --- DEBUG ---
                             continue;
                         }
 
@@ -845,10 +843,12 @@ impl TorrentState {
                             addr.byte_offset,
                             final_len,
                         )) {
+                            event!(Level::INFO, "PEER ALREADY WORKING ON {} - {}.", addr.piece_index, addr.byte_offset);
                             continue;
                         }
 
 
+                        event!(Level::INFO, "PEER ASSIGNED {} - {}.", addr.piece_index, addr.byte_offset);
                         request_batch.push((addr.piece_index, addr.byte_offset, final_len));
                         peer.active_blocks.insert((
                             addr.piece_index,
@@ -1190,14 +1190,7 @@ impl TorrentState {
                 // 7. Process the Block
                 let piece_size = self.get_piece_size(piece_index);
 
-
-
                 if let Some(complete_data) = self.piece_manager.handle_block(piece_index, block_offset, &data, piece_size) {
-    
-    // DEBUG: Check state IMMEDIATELY after handle_block
-    let (start, end) = self.piece_manager.block_manager.get_block_range(piece_index);
-    let first_block_status = self.piece_manager.block_manager.block_bitfield.get(start as usize).as_deref().cloned();
-    
 
                     if let Some(roots) = self.piece_to_roots.get(&piece_index) {
                         

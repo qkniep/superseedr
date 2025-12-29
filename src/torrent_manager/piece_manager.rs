@@ -109,42 +109,15 @@ tracing::info!("⚠️ [PieceManager] WARNING: Falling back to inferred geometry
         // [DEBUG] Trace completion status
         let result = self.block_manager.handle_v1_block_buffering(addr, block_data);
         
-        if piece_index == 132 {
-            if let Some(assembler) = self.block_manager.legacy_buffers.get(&piece_index) {
-                let missing_blocks = assembler.mask.iter().filter(|&&b| !b).count();
-                let received_bytes: usize = assembler.buffer.len(); // Buffer is pre-allocated to piece_size
-                
-                // Calculate how many bytes we actually have *valid* in the buffer?
-                // The assembler tracks blocks, not bytes directly in a counter, but we can infer.
-                tracing::error!(
-                    "🧩 [PieceManager] Piece 132 Update. Blocks: {}/{}. Missing Blocks: {}. Buffer Size: {}. Just Completed? {}", 
-                    assembler.received_blocks, 
-                    assembler.total_blocks,
-                    missing_blocks,
-                    received_bytes,
-                    result.is_some()
-                );
-            }
-        }
 
-if let Some(ref data) = result {
-    tracing::info!("📦 [PieceManager] Piece {} complete. Buffer size: {}, Expected size: {}", 
-        piece_index, data.len(), piece_size);
-}
         result
     }
 
     pub fn mark_as_complete(&mut self, piece_index: u32) -> Vec<String> {
         let current_status = self.bitfield.get(piece_index as usize).cloned();
         
-        // [DEBUG] Trace Entry
-        if piece_index == 133 { // Target the problematic piece
-            tracing::error!("🛑 [PieceManager] mark_as_complete(133) called. Current Status: {:?}. Queue Len: {}", 
-                current_status, self.need_queue.len());
-        }
 
         if current_status == Some(PieceStatus::Done) {
-            if piece_index == 133 { tracing::error!("🛑 [PieceManager] Piece 133 already DONE. Bailing out."); }
             return Vec::new();
         }
 
@@ -162,10 +135,6 @@ if let Some(ref data) = result {
         // 2. Update Low-Level State
         self.block_manager.commit_v1_piece(piece_index);
 
-        if piece_index == 133 { 
-            tracing::error!("🛑 [PieceManager] Piece 133 Status SET TO DONE. NeedQueue removed items: {}. Peers to cancel: {}", 
-                old_need_len - new_need_len, peers_to_cancel.len());
-        }
 
         peers_to_cancel
     }
