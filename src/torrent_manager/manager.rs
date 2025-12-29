@@ -4458,32 +4458,26 @@ mod resource_tests {
         // Scenario: A file ends 976 bytes into a block.
         // We have a buffer of 976 bytes of data.
         let valid_data_size = 976;
-        let padded_size = 1024; // We simulate a 1KB block size for this micro-test, or standard padding behavior
-
-        // Create the valid data (976 bytes of 'A')
         let mut valid_data = vec![b'A'; valid_data_size];
 
-        // --- 2. EXPECTED RESULT (V2 Spec) ---
-        // The hash should be SHA256( Data + Padding )
-        let mut padded_buffer = vec![0u8; 16384]; // Standard 16KB block size
-        padded_buffer[0..valid_data_size].copy_from_slice(&valid_data);
-        let expected_hash = Sha256::digest(&padded_buffer);
+        // --- 2. EXPECTED RESULT (Corrected Rule) ---
+        // Rule: Tail blocks are NOT padded with zeros.
+        // Expected Hash = SHA256(976 bytes)
+        // Tree Padding = None (since 1 chunk is a power of 2: 2^0)
+        let expected_hash = Sha256::digest(&valid_data);
 
-        // --- 3. RUN FUNCTION UNDER TEST ---
-        // We pass ONLY the valid data. The function must pad it internally.
-        let calculated_root = super::compute_v2_piece_root(&valid_data, valid_data.len());
+        // --- 3. RUN FUNCTION ---
+        // Pass 976 as expected_len so it knows there are no extra tree nodes
+        let calculated_root = super::compute_v2_piece_root(&valid_data, valid_data_size);
 
         // --- 4. ASSERT ---
-        // If the function didn't pad, it would return SHA256(976 bytes), which matches "Bad Hash".
-        // If it pads correctly, it returns SHA256(16KB with zeros).
-        
         assert_eq!(
             calculated_root.as_slice(),
             expected_hash.as_slice(),
-            "V2 Hashing Error: Function failed to apply zero-padding to the tail block."
+            "V2 Hashing Error: Function padded data incorrectly (Should hash partial data as-is)."
         );
         
-        println!("✅ SUCCESS: compute_v2_piece_root correctly padded the tail block.");
+        println!("✅ SUCCESS: Tail block hashed without data padding.");
     }
 
     #[tokio::test]
@@ -4495,15 +4489,18 @@ mod resource_tests {
         let file_len: u64 = 20000;
         let data = vec![0xEE; file_len as usize];
         
-        // Calculate expected V2 hashes with mandatory 16KB leaf padding
-        let mut p0_data = data[0..16384].to_vec();
-        let hash_0 = Sha256::digest(&p0_data).to_vec();
+        // [FIX] Calculate EXPECTED hashes using NO DATA PADDING
         
-        let mut p1_data = vec![0u8; 16384]; // Pad tail to 16KB
-        p1_data[0..3616].copy_from_slice(&data[16384..20000]);
-        let hash_1 = Sha256::digest(&p1_data).to_vec();
+        // Block 0: Full 16KB
+        let p0_data = &data[0..16384];
+        let hash_0 = Sha256::digest(p0_data).to_vec();
+        
+        // Block 1: Partial 3616 bytes (Unpadded)
+        let p1_data = &data[16384..20000];
+        let hash_1 = Sha256::digest(p1_data).to_vec();
 
         // File Root = Hash(Hash0 + Hash1)
+        // (Note: No tree padding needed as 2 chunks is a power of 2)
         let mut hasher = Sha256::new();
         hasher.update(&hash_0);
         hasher.update(&hash_1);
@@ -4511,43 +4508,19 @@ mod resource_tests {
 
         // 2. Initialize Harness
         let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, rm_client) = setup_scale_test_harness();
-        let temp_dir = std::env::temp_dir().join("v2_tail_test");
+        let temp_dir = std::env::temp_dir().join("v2_tail_test_nopad");
         let _ = std::fs::create_dir_all(&temp_dir);
         let file_path = temp_dir.join("v2_tail_file");
         std::fs::write(&file_path, &data).unwrap();
 
         // 3. Configure V2 Metadata
         let mut torrent = create_dummy_torrent(2);
-        let file_name = "v2_tail_file".to_string();
-        torrent.info.name = file_name.clone();
+        torrent.info.name = "v2_tail_file".to_string();
         torrent.info.piece_length = piece_len as i64;
         torrent.info.meta_version = Some(2);
         torrent.info.pieces = Vec::new(); // Pure V2
 
-        // Mock the V2 File Tree Structure (Required for get_v2_roots)
-        // Structure: { "filename": { "": { "pieces root": ..., "length": ... } } }
-        use serde_bencode::value::Value;
-        let mut file_metadata = std::collections::HashMap::new();
-        file_metadata.insert("pieces root".as_bytes().to_vec(), Value::Bytes(root_v2.clone()));
-        file_metadata.insert("length".as_bytes().to_vec(), Value::Int(file_len as i64));
-
-        let mut dir_node = std::collections::HashMap::new();
-        dir_node.insert("".as_bytes().to_vec(), Value::Dict(file_metadata));
-
-        let mut tree = std::collections::HashMap::new();
-        tree.insert(file_name.as_bytes().to_vec(), Value::Dict(dir_node)); 
-
-        torrent.info.file_tree = Some(Value::Dict(tree));
-
-        // Inject the layer hashes (The "Piece Layer")
-        let mut layer_map = std::collections::HashMap::new();
-        let mut layer_bytes = Vec::new();
-        layer_bytes.extend_from_slice(&hash_0);
-        layer_bytes.extend_from_slice(&hash_1);
-        layer_map.insert(root_v2.clone(), Value::Bytes(layer_bytes));
-        torrent.piece_layers = Some(Value::Dict(layer_map));
-        
-        // Inject the layer hashes (The "Piece Layer")
+        // Inject Layer Hashes
         let mut layer_map = std::collections::HashMap::new();
         let mut layer_bytes = Vec::new();
         layer_bytes.extend_from_slice(&hash_0);
@@ -4560,7 +4533,6 @@ mod resource_tests {
             &temp_dir, "v2_tail_file", None, Some(file_len)
         ).unwrap());
         
-        // Map the pieces
         manager.state.piece_to_roots.insert(0, vec![(0, file_len, root_v2.clone())]);
         manager.state.piece_to_roots.insert(1, vec![(0, file_len, root_v2.clone())]);
 
@@ -4576,9 +4548,8 @@ mod resource_tests {
         ).await.unwrap();
 
         // 5. ASSERTION
-        // If the bug exists, piece 1 (the tail) will be missing from the completed list.
-        assert!(result.contains(&0), "Piece 0 (Full) failed validation");
-        assert!(result.contains(&1), "Piece 1 (Tail) failed validation - Regression detected in V2 padding logic");
+        assert!(result.contains(&0), "Piece 0 failed");
+        assert!(result.contains(&1), "Piece 1 failed - Check tail hashing logic");
         
         let _ = std::fs::remove_dir_all(temp_dir);
     }
@@ -4587,20 +4558,18 @@ mod resource_tests {
     async fn test_v2_network_verification_padding_accuracy() {
         use sha2::{Digest, Sha256};
         
-        // 1. SETUP DATA: Simulate a partial tail block (e.g., 5000 bytes)
+        // 1. SETUP DATA: Simulate a partial tail block (5000 bytes)
         let piece_len: u64 = 16384;
         let actual_data_len: usize = 5000;
         let raw_data = vec![0xDD; actual_data_len];
         
-        // Calculate the CORRECT hash (Data + Zero Padding up to 16KB)
-        let mut expected_padded_buffer = vec![0u8; 16384];
-        expected_padded_buffer[..actual_data_len].copy_from_slice(&raw_data);
-        let correct_leaf_hash = Sha256::digest(&expected_padded_buffer).to_vec();
+        // Calculate CORRECT hash (NO DATA PADDING)
+        let correct_leaf_hash = Sha256::digest(&raw_data).to_vec();
 
         // 2. INITIALIZE MANAGER HARNESS
         let (mut manager, torrent_tx, _cmd_tx, _shutdown_tx, _rm) = setup_scale_test_harness();
         
-        // Configure V2 Metadata for the manager
+        // Configure V2 Metadata
         let mut torrent = create_dummy_torrent(1);
         torrent.info.piece_length = piece_len as i64;
         torrent.info.meta_version = Some(2);
@@ -4609,40 +4578,36 @@ mod resource_tests {
         manager.state.torrent = Some(torrent);
         manager.state.torrent_status = TorrentStatus::Standard;
         
-        // Map Piece 0 to a file that is exactly 5000 bytes long
-        // This forces the manager to recognize this as a tail block
         manager.state.piece_to_roots.insert(0, vec![(0, actual_data_len as u64, correct_leaf_hash.clone())]);
 
         // 3. EXECUTE: Manually trigger the Effect
-        // We send the 5000 bytes. The effect handler MUST pad this to 16384 internally.
+        // We send 5000 bytes. The manager must hash them as-is.
         manager.handle_effect(Effect::VerifyPieceV2 {
             peer_id: "test_peer".into(),
             piece_index: 0,
-            proof: Vec::new(), // Local verify (direct hash comparison)
+            proof: Vec::new(), 
             data: raw_data.clone(),
-            root_hash: correct_leaf_hash.clone(), // In this case, the leaf is the root
+            root_hash: correct_leaf_hash.clone(), 
             file_start_offset: 0,
             valid_length: actual_data_len,
             relative_index: 0,
-            hashing_context_len: 16384,
+            hashing_context_len: 16384, 
         });
 
-        // 4. ASSERTION: Check if the manager sends back PieceVerified(Ok)
+        // 4. ASSERTION
         let timeout = tokio::time::timeout(Duration::from_secs(2), async {
-            let mut rx = manager.torrent_manager_rx; // The manager sends internal results here
+            let mut rx = manager.torrent_manager_rx;
             while let Some(cmd) = rx.recv().await {
                 if let TorrentCommand::PieceVerified { piece_index, verification_result, .. } = cmd {
                     assert_eq!(piece_index, 0);
                     assert!(verification_result.is_ok(), 
-                        "Verification FAILED. Likely failed to pad {} bytes to 16KB correctly.", actual_data_len);
+                        "Verification FAILED. Manager likely padded data incorrectly.");
                     return;
                 }
             }
         }).await;
 
-        if timeout.is_err() {
-            panic!("Test Timed Out: Manager failed to process the VerifyPieceV2 effect.");
-        }
+        assert!(timeout.is_ok(), "Test Timed Out");
     }
 
     #[tokio::test]
