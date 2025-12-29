@@ -14,8 +14,6 @@ use tokio::sync::Semaphore;
 use std::mem::Discriminant;
 use std::sync::Arc;
 
-use tracing::event;
-use tracing::Level;
 
 use crate::torrent_file::Torrent;
 use crate::torrent_manager::piece_manager::PieceManager;
@@ -344,7 +342,7 @@ impl TorrentState {
         info_hash: Vec<u8>,
         torrent: Option<Torrent>,
         torrent_metadata_length: Option<i64>,
-        mut piece_manager: PieceManager,
+        piece_manager: PieceManager,
         trackers: HashMap<String, TrackerState>,
         torrent_validation_status: bool,
     ) -> Self {
@@ -362,7 +360,7 @@ impl TorrentState {
                 } else {
                     // Calculate from file tree if pieces string is empty (Pure V2)
                     let piece_len = t.info.piece_length as u64;
-                    let mut count = 0;
+                    let count = 0;
                     // We can reuse the same logic or helper as manager.rs
                     // A simple approximation if you don't want to re-traverse the tree 
                     // is to rely on the fact that manager.rs likely calculated num_pieces 

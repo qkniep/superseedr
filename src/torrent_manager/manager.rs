@@ -5,7 +5,6 @@ use crate::app::PeerInfo;
 use crate::app::TorrentMetrics;
 
 use crate::torrent_manager::merkle;
-use crate::torrent_manager::merkle::compute_v2_piece_root;
 
 use crate::resource_manager::ResourceManagerClient;
 use crate::resource_manager::ResourceManagerError;
@@ -75,7 +74,6 @@ use urlencoding::decode;
 use data_encoding::BASE32;
 
 use sha1::{Digest, Sha1};
-use sha2::{ Sha256};
 use tokio::fs;
 use tokio::net::TcpStream;
 use tokio::signal;
@@ -545,7 +543,7 @@ impl TorrentManager {
                     let pid = peer_id.clone();
 
                     // 1. Get a shutdown listener for this specific task
-                    let mut shutdown_rx = self.shutdown_tx.subscribe();
+                    let shutdown_rx = self.shutdown_tx.subscribe();
 
                     let capacity = tx.capacity();
                     let max_cap = tx.max_capacity();
