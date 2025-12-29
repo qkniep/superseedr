@@ -183,7 +183,7 @@ pub enum Effect {
         proof: Vec<u8>,
         data: Vec<u8>,
         root_hash: Vec<u8>,
-        file_start_offset: u64, // Kept for logging/debugging if needed, or can be removed
+        file_start_offset: u64,
         valid_length: usize,
         relative_index: u32,
         hashing_context_len: usize,
@@ -662,7 +662,6 @@ impl TorrentState {
                     .all(|s| *s == PieceStatus::Done);
 
                 if all_done {
-                    tracing::warn!("State: CheckCompletion believes all pieces are done. Bitfield Len: {}", self.piece_manager.bitfield.len());
                     let mut effects = Vec::new();
                     self.torrent_status = TorrentStatus::Done;
 
@@ -702,14 +701,6 @@ impl TorrentState {
                     return vec![Effect::DoNothing];
                 }
 
-                if self.piece_manager.need_queue.contains(&133) {
-                    let blocks = self.piece_manager.block_manager.legacy_buffers.get(&133);
-                    // Use error! level to ensure it shows up
-                    tracing::error!("🛠️ [AssignWork] Piece 133 is in NEED Queue. Buffered Blocks: {:?}. Is Global Pending? {:?}", 
-                        blocks.map(|b| b.received_blocks),
-                        self.piece_manager.pending_queue.contains_key(&133)
-                    );
-                }
 
                 // [FIX] Prepare size calculation closure with disjoint borrows.
                 let torrent_ref = &self.torrent;
@@ -821,7 +812,6 @@ impl TorrentState {
                             == Some(&true)
                         {
                             // --- DEBUG ---
-                            if piece_index == 133 { tracing::debug!("  -> Block {} is DONE (Skipping)", global_block_idx); }
                             continue;
                         }
 
@@ -829,8 +819,6 @@ impl TorrentState {
                         let local_block_idx = global_block_idx - start;
                         if let Some(mask) = &assembler_mask {
                             if mask.get(local_block_idx as usize) == Some(&true) {
-                                // --- DEBUG ---
-                                if piece_index == 133 { tracing::debug!("  -> Block {} is BUFFERED (Skipping)", global_block_idx); }
                                 continue;
                             }
                         }
@@ -857,21 +845,9 @@ impl TorrentState {
                             addr.byte_offset,
                             final_len,
                         )) {
-                            // --- DEBUG ---
-                            if piece_index == 133 { tracing::debug!("  -> Block {} is ACTIVE (Skipping)", global_block_idx); }
                             continue;
                         }
 
-                        // --- DEBUG: TRIGGER DETECTION ---
-                        if piece_index == 133 {
-                            tracing::warn!(
-                                "⚠️ RE-REQUEST TRIGGER: Block {} (Offset {}) considered MISSING. GlobalBitfield: {:?}, Buffered: {:?}", 
-                                global_block_idx, addr.byte_offset,
-                                self.piece_manager.block_manager.block_bitfield.get(global_block_idx as usize),
-                                assembler_mask.as_ref().map(|m| m.get(local_block_idx as usize))
-                            );
-                        }
-                        // --------------------------------
 
                         request_batch.push((addr.piece_index, addr.byte_offset, final_len));
                         peer.active_blocks.insert((
@@ -1032,7 +1008,6 @@ impl TorrentState {
             }
 
             Action::PeerDisconnected { peer_id } => {
-                //event!(Level::INFO, "PEER DISCONNECTED {}", peer_id);
                 let mut effects = Vec::new();
                 if let Some(removed_peer) = self.peers.remove(&peer_id) {
                     for piece_index in removed_peer.pending_requests {
@@ -1216,22 +1191,13 @@ impl TorrentState {
                 let piece_size = self.get_piece_size(piece_index);
 
 
-if piece_index == 132 || piece_index == 265 {
-    tracing::info!("🔍 [State] Piece {} calculated physical size: {}", piece_index, piece_size);
-}
 
                 if let Some(complete_data) = self.piece_manager.handle_block(piece_index, block_offset, &data, piece_size) {
-tracing::info!("✅ [State] Piece {} assembly finished. Physical Data Len: {}", piece_index, complete_data.len());
     
     // DEBUG: Check state IMMEDIATELY after handle_block
     let (start, end) = self.piece_manager.block_manager.get_block_range(piece_index);
     let first_block_status = self.piece_manager.block_manager.block_bitfield.get(start as usize).as_deref().cloned();
     
-    tracing::info!(
-        "🔍 POST-HANDLE DEBUG: Piece {} | Block Range: {}..{} | First Block Bitfield: {:?} | Piece Status: {:?}", 
-        piece_index, start, end, first_block_status,
-        self.piece_manager.bitfield.get(piece_index as usize)
-    );
 
                     if let Some(roots) = self.piece_to_roots.get(&piece_index) {
                         
@@ -1309,7 +1275,6 @@ tracing::info!("✅ [State] Piece {} assembly finished. Physical Data Len: {}", 
                 if let Some(peer) = self.peers.get(&peer_id) {
                     let low_water_mark = MAX_PIPELINE_DEPTH / 2;
                     if peer.inflight_requests <= low_water_mark {
-                        //event!(Level::INFO, "PEER REFILLING WORK: {}", peer_id);
                         effects.extend(self.update(Action::AssignWork {
                             peer_id: peer_id.clone(),
                         }));
@@ -1377,10 +1342,6 @@ tracing::info!("✅ [State] Piece {} assembly finished. Physical Data Len: {}", 
                 valid,
                 data,
             } => {
-tracing::info!(
-        "🔍 VERIFICATION RESULT: Piece {} | Valid: {} | Peer {}", 
-        piece_index, valid, peer_id
-    );
                 let mut effects = Vec::new();
 
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
@@ -1420,11 +1381,6 @@ tracing::info!(
                 peer_id,
                 piece_index,
             } => {
-                // [DEBUG] Trace Entry
-                if piece_index == 133 {
-                    tracing::error!("💿 [State] Processing PieceWrittenToDisk for Piece 133. Current Status in Bitfield: {:?}", 
-                        self.piece_manager.bitfield.get(piece_index as usize));
-                }
 
                 // GUARD: Protect against reordered events
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
@@ -1434,7 +1390,6 @@ tracing::info!(
                 if self.torrent_status == TorrentStatus::Validating
                     || self.torrent_status == TorrentStatus::AwaitingMetadata
                 {
-                    if piece_index == 133 { tracing::error!("💿 [State] IGNORED Piece 133 Write: State is {:?}.", self.torrent_status); }
                     return vec![Effect::DoNothing];
                 }
 
@@ -1442,7 +1397,6 @@ tracing::info!(
 
                 // [FIX/DEBUG] Allow idempotency. If it's already done, just clean up the peer.
                 if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
-                    if piece_index == 133 { tracing::error!("💿 [State] Piece 133 was ALREADY Done. Performing cleanup only."); }
                     
                     if let Some(peer) = self.peers.get_mut(&peer_id) {
                         peer.pending_requests.remove(&piece_index);
@@ -1739,12 +1693,6 @@ tracing::info!(
             Action::ValidationComplete { completed_pieces } => {
                 let mut effects = Vec::new();
 
-                tracing::info!("State: Validation Complete. Found {} valid pieces out of {}. Bitfield len: {}", 
-                    completed_pieces.len(), 
-                    self.piece_manager.bitfield.len(),
-                    self.piece_manager.bitfield.len()
-                );
-
                 if self.torrent_status != TorrentStatus::Validating {
                     return vec![Effect::DoNothing];
                 }
@@ -1775,7 +1723,6 @@ tracing::info!(
                         self.piece_manager.need_queue.push(idx);
                     }
                 }
-                tracing::info!("State: Need Queue rebuilt. Items needed: {}", self.piece_manager.need_queue.len());
 
                 self.piece_manager
                     .update_rarity(self.peers.values().map(|p| &p.bitfield));
@@ -2099,8 +2046,6 @@ tracing::info!(
         if global_bytes < file_start_offset { return None; }
         
         let relative_index = ((global_bytes - file_start_offset) / piece_len) as usize;
-tracing::info!("🔑 [V2 Hash] Piece {} (rel: {}) lookup in layer {}. Bytes available: {}", 
-        global_piece_index, relative_index, hex::encode(root), layer_bytes.len());
         
         // 3. Extract the 32-byte hash
         let start = relative_index * 32;
@@ -2136,8 +2081,6 @@ tracing::info!("🔑 [V2 Hash] Piece {} (rel: {}) lookup in layer {}. Bytes avai
 
                             // The last piece of this file is shorter than standard
                             let tail_piece_idx = current_piece_index + file_pieces - 1;
-tracing::info!("🧩 [V2 Geometry] Detected tail piece: index {}, tail_len {}, file_len {}", 
-        tail_piece_idx, tail_len, length);
                             overrides.insert(tail_piece_idx as u32, tail_len as u32);
                         }
                         

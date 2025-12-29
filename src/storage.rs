@@ -178,20 +178,6 @@ pub async fn write_data_to_disk(
         if global_offset < file_end && write_end > accumulated_len {
             let relative_start = global_offset.saturating_sub(accumulated_len);
             
-            // Only log high-volume data if it matches our suspect pieces (Piece 132/133)
-            // Based on previous logs, Piece 133 started around offset 163840 relative to something,
-            // or if testing the 20MB file, it's near the end.
-            // We'll log everything for now since it's a test run.
-            tracing::error!(
-                "💾 [Storage] INTENT: Write {} bytes @ Global {}. Target: {:?} (File Range: {}-{}). Rel Offset: {}. IsPadding: {}", 
-                data_to_write.len(),
-                global_offset, 
-                file.path, 
-                accumulated_len, 
-                file_end, 
-                relative_start,
-                file.is_padding
-            );
         }
         accumulated_len += file.length;
     }
@@ -233,12 +219,6 @@ pub async fn write_data_to_disk(
                     // (like in the test case), the data is lost.
                     file.flush().await?; 
                     
-                    tracing::error!(
-                        "💾 [Storage] SUCCESS: Wrote {} bytes to {:?} @ Local {}", 
-                        bytes_to_write_in_this_file, 
-                        file_info.path, 
-                        local_offset
-                    );
                 } else {
                     tracing::error!(
                         "💾 [Storage] SKIP: Skipping {} bytes for Padding File {:?} @ Local {}", 

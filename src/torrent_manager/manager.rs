@@ -772,8 +772,6 @@ impl TorrentManager {
                 let peer_id_clone = peer_id.clone();
 
                 let handle = tokio::spawn(async move {
-                    // TRACE: Task Started
-                    tracing::info!("💿 [Task] Piece {} write task started. Acquiring permit...", piece_index);
                     
                     let op = DiskIoOperation {
                         piece_index,
@@ -2372,10 +2370,6 @@ impl TorrentManager {
                             let discriminant = std::mem::discriminant(&command);
                             *peer.action_counts.entry(discriminant).or_insert(0) += 1;
                         }
-                    }
-
-                    if let TorrentCommand::PieceWrittenToDisk { piece_index, .. } = command {
-                        tracing::error!("🏁 [Manager] DEQUEUED PieceWrittenToDisk for Piece {}. Channel Backlog: {}", piece_index, self.torrent_manager_rx.len());
                     }
 
                     match command {

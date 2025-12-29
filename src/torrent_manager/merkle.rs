@@ -18,7 +18,7 @@ pub fn verify_merkle_proof(
     if proof.is_empty() {
         let matches = calculated_root.as_slice() == target_root_hash;
         if !matches {
-            tracing::debug!(
+            tracing::info!(
                 "V2 Verify Mismatch (Local): Expect {}, Got {}", 
                 hex::encode(target_root_hash), hex::encode(calculated_root)
             );
@@ -53,23 +53,24 @@ pub fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
     // Determine target leaves (power of two) based on the context length
     let leaf_count = expected_len.div_ceil(BLOCK_SIZE).next_power_of_two();
 
+    tracing::info!(
+        "Compute v2 hash data-len {} - expected len {} - leaf_count {}",
+        data.len(),
+        expected_len,
+        leaf_count,
+    );
+
     // 1. Hash 16KB leaves with zero-padding for the tail
     let mut layer: Vec<[u8; 32]> = data
         .chunks(BLOCK_SIZE)
         .map(|chunk| {
-            if chunk.len() == BLOCK_SIZE {
-                Sha256::digest(chunk).into()
-            } else {
-                let mut padded = [0u8; BLOCK_SIZE];
-                padded[..chunk.len()].copy_from_slice(chunk);
-                Sha256::digest(&padded).into()
-            }
+            Sha256::digest(chunk).into()
         })
         .collect();
 
     // 2. Pad the layer to the power-of-two leaf count
     // (This handles cases where the file implies more leaves than data provided)
-    let empty_hash: [u8; 32] = Sha256::digest(&[0u8; BLOCK_SIZE]).into();
+    let empty_hash: [u8; 32] = [0u8; 32];
     while layer.len() < leaf_count {
         layer.push(empty_hash);
     }
