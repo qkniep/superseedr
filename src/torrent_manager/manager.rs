@@ -4758,33 +4758,31 @@ mod resource_tests {
         let data = vec![0xEE; actual_file_len]; 
         let block_size = 16_384;
 
-        // --- EXACT MANUAL CALCULATION ---
-        // Block 1: First 16KB
-        let h0 = Sha256::digest(&data[0..block_size]);
+        // --- BEP 52 COMPLIANT MANUAL CALCULATION ---
+        // 1. Hash the partial data AS-IS (No padding)
+        let h0 = Sha256::digest(&data[0..block_size]); // First full 16KB block
+        let h1 = Sha256::digest(&data[block_size..]);  // Remaining 10,320 bytes
         
-        // Block 2: Remaining 10,320 bytes + 6,064 bytes of ZERO padding
-        let mut block2 = vec![0u8; block_size];
-        block2[..actual_file_len - block_size].copy_from_slice(&data[block_size..]);
-        let h1 = Sha256::digest(&block2);
-        
-        // Combined Root
+        // 2. Combine them to form the 32KB Piece Root
         let mut hasher = Sha256::new();
         hasher.update(h0);
         hasher.update(h1);
         let expected_file_root: [u8; 32] = hasher.finalize().into();
-        // --------------------------------
+        // -------------------------------------------
 
         let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _rm) = setup_test_harness();
         let mut torrent = create_dummy_torrent(1);
-        torrent.info.piece_length = 262_144; // 256KB global
+        // Global piece length is 256KB, but our file is only ~26KB.
+        torrent.info.piece_length = 262_144; 
         torrent.info.meta_version = Some(2);
         manager.state.torrent = Some(torrent);
         
-        // [FIX] Set the file offset to start exactly where Piece 311 starts.
-        // Otherwise, the manager thinks Piece 311 is 81MB past the end of this file.
+        // Map the piece to the file. Offset must align with the start of Piece 311.
         let piece_start_offset = 311 * 262_144;
         manager.state.piece_to_roots.insert(311, vec![(piece_start_offset, actual_file_len as u64, expected_file_root.to_vec())]);
 
+        // TRIGGER VERIFICATION
+        // hashing_context_len must be 32,768 to match our 2-block manual root above.
         manager.handle_effect(Effect::VerifyPieceV2 {
             peer_id: "debug_peer".into(),
             piece_index: 311,
@@ -4794,7 +4792,7 @@ mod resource_tests {
             file_start_offset: 0,
             valid_length: actual_file_len,
             relative_index: 0,
-            hashing_context_len: 32_768,
+            hashing_context_len: 32_768, 
         });
 
         let outcome = tokio::time::timeout(Duration::from_secs(2), async {
@@ -4807,7 +4805,7 @@ mod resource_tests {
             false
         }).await;
 
-        assert!(outcome.unwrap_or(false), "Verification failed. Check if data or expected_file_root matches.");
+        assert!(outcome.unwrap_or(false), "Verification failed. Manual root calculation must exactly match the 32KB context logic.");
     }
 
 }
