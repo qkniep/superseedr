@@ -50,7 +50,7 @@ impl PieceManager {
         piece_overrides: HashMap<u32, u32>,
         validation_complete: bool,
     ) {
-tracing::info!("📏 [PieceManager] Applying Geometry: total_len {}, global_piece_len {}, overrides_count {}", 
+        tracing::info!("📏 [PieceManager] Applying Geometry: total_len {}, global_piece_len {}, overrides_count {}", 
         total_length, piece_length, piece_overrides.len());
 
         self.block_manager.set_geometry(
@@ -90,13 +90,11 @@ tracing::info!("📏 [PieceManager] Applying Geometry: total_len {}, global_piec
         // 1. Safety fallback: If geometry wasn't set externally, infer it now.
         if self.block_manager.piece_length == 0 {
             let estimated_total = (piece_index as u64 + 1) * piece_size as u64;
-tracing::info!("⚠️ [PieceManager] WARNING: Falling back to inferred geometry for piece {}", piece_index);
-            self.set_geometry(
-                piece_size as u32, 
-                estimated_total, 
-                HashMap::new(), 
-                false
+            tracing::info!(
+                "⚠️ [PieceManager] WARNING: Falling back to inferred geometry for piece {}",
+                piece_index
             );
+            self.set_geometry(piece_size as u32, estimated_total, HashMap::new(), false);
         }
 
         // 2. Map the incoming byte offset to a BlockAddress
@@ -107,15 +105,12 @@ tracing::info!("⚠️ [PieceManager] WARNING: Falling back to inferred geometry
         )?;
 
         // [DEBUG] Trace completion status
-        let result = self.block_manager.handle_v1_block_buffering(addr, block_data);
-        
-
-        result
+        self.block_manager
+            .handle_v1_block_buffering(addr, block_data)
     }
 
     pub fn mark_as_complete(&mut self, piece_index: u32) -> Vec<String> {
         let current_status = self.bitfield.get(piece_index as usize).cloned();
-        
 
         if current_status == Some(PieceStatus::Done) {
             return Vec::new();
@@ -124,17 +119,16 @@ tracing::info!("⚠️ [PieceManager] WARNING: Falling back to inferred geometry
         // 1. Update High-Level State
         self.bitfield[piece_index as usize] = PieceStatus::Done;
         self.pieces_remaining = self.pieces_remaining.saturating_sub(1);
-        
+
         // [DEBUG] Check if retain actually removes it
-        let old_need_len = self.need_queue.len();
+        let _old_need_len = self.need_queue.len();
         self.need_queue.retain(|&p| p != piece_index);
-        let new_need_len = self.need_queue.len();
+        let _new_need_len = self.need_queue.len();
 
         let peers_to_cancel = self.pending_queue.remove(&piece_index).unwrap_or_default();
 
         // 2. Update Low-Level State
         self.block_manager.commit_v1_piece(piece_index);
-
 
         peers_to_cancel
     }
@@ -195,6 +189,7 @@ tracing::info!("⚠️ [PieceManager] WARNING: Falling back to inferred geometry
     // This logic remains here because it orchestrates the high-level queues
     // (need_queue, pending_queue) which define the download strategy.
 
+    #[allow(dead_code)]
     pub fn choose_piece_for_peer(
         &self,
         peer_bitfield: &[bool],
@@ -237,10 +232,7 @@ tracing::info!("⚠️ [PieceManager] WARNING: Falling back to inferred geometry
     }
 
     pub fn get_piece_availability(&self, piece_index: u32) -> u32 {
-        self.piece_rarity
-            .get(&piece_index)
-            .copied()
-            .unwrap_or(0) as u32
+        self.piece_rarity.get(&piece_index).copied().unwrap_or(0) as u32
     }
 }
 
@@ -352,7 +344,12 @@ mod tests {
         let block_size = 16384;
 
         // Set geometry explicitly (required for block manager calculations)
-        pm.set_geometry(piece_size as u32, piece_size as u64 * 10, HashMap::new(), false);
+        pm.set_geometry(
+            piece_size as u32,
+            piece_size as u64 * 10,
+            HashMap::new(),
+            false,
+        );
 
         let block_data_0 = vec![1; block_size];
         let block_data_1 = vec![2; block_size];
@@ -507,7 +504,12 @@ mod tests {
         let piece_size = 32768;
         let block_size = 16384;
 
-        pm.set_geometry(piece_size as u32, piece_size as u64 * 5, HashMap::new(), false);
+        pm.set_geometry(
+            piece_size as u32,
+            piece_size as u64 * 5,
+            HashMap::new(),
+            false,
+        );
 
         let block_data_0 = vec![1; block_size];
         let block_data_1 = vec![2; block_size];
@@ -549,7 +551,12 @@ mod tests {
         // Test duplicate detection during assembly
         let piece_size_2 = 32768;
 
-        pm.set_geometry(piece_size_2 as u32, piece_size_2 as u64 * 2, HashMap::new(), false);
+        pm.set_geometry(
+            piece_size_2 as u32,
+            piece_size_2 as u64 * 2,
+            HashMap::new(),
+            false,
+        );
 
         let block_data_0 = vec![1; block_size];
         let block_data_1 = vec![2; block_size];

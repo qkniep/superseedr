@@ -94,7 +94,7 @@ pub struct ExtendedHandshakePayload {
 
     #[serde(default)]
     pub metadata_size: Option<i64>,
-    
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lt_v2: Option<u8>,
 }
@@ -118,8 +118,8 @@ pub enum Message {
     Extended(u8, Vec<u8>),
 
     // --- BEP 52 (BitTorrent v2) ---
-    HashRequest(u32, u32, u32, u32), // index, base, offset, length
-    HashReject(u32, u32, u32, u32),  // index, base, offset, length
+    HashRequest(u32, u32, u32, u32),   // index, base, offset, length
+    HashReject(u32, u32, u32, u32),    // index, base, offset, length
     HashPiece(u32, u32, u32, Vec<u8>), // index, base, offset, proof_data
 }
 
@@ -361,7 +361,7 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
                 .collect();
             let payload = ExtendedHandshakePayload {
                 m,
-                metadata_size: metadata_size,
+                metadata_size,
                 lt_v2: Some(1),
             };
             let bencoded_payload =
@@ -418,7 +418,6 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
             buffer.extend_from_slice(&length.to_be_bytes());
             Ok(buffer)
         }
-
     }
 }
 
@@ -557,7 +556,12 @@ pub fn parse_message_from_bytes(
             Ok(Message::Extended(extended_id, extended_payload))
         }
         21 => {
-            if payload.len() != 16 { return Err(Error::new(ErrorKind::InvalidData, "Invalid HashRequest length")); }
+            if payload.len() != 16 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid HashRequest length",
+                ));
+            }
             let index = read_be_u32(&payload, 0)?;
             let base = read_be_u32(&payload, 4)?;
             let offset = read_be_u32(&payload, 8)?;
@@ -565,7 +569,12 @@ pub fn parse_message_from_bytes(
             Ok(Message::HashRequest(index, base, offset, length))
         }
         22 => {
-            if payload.len() < 12 { return Err(Error::new(ErrorKind::InvalidData, "Invalid HashPiece length")); }
+            if payload.len() < 12 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid HashPiece length",
+                ));
+            }
             let index = read_be_u32(&payload, 0)?;
             let base = read_be_u32(&payload, 4)?;
             let offset = read_be_u32(&payload, 8)?;
@@ -573,7 +582,12 @@ pub fn parse_message_from_bytes(
             Ok(Message::HashPiece(index, base, offset, data))
         }
         23 => {
-            if payload.len() != 16 { return Err(Error::new(ErrorKind::InvalidData, "Invalid HashReject length")); }
+            if payload.len() != 16 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid HashReject length",
+                ));
+            }
             let index = read_be_u32(&payload, 0)?;
             let base = read_be_u32(&payload, 4)?;
             let offset = read_be_u32(&payload, 8)?;
@@ -591,10 +605,13 @@ pub fn parse_message_from_bytes(
 // Helper to read a u32 from a byte slice at a specific offset
 fn read_be_u32(slice: &[u8], offset: usize) -> Result<u32, std::io::Error> {
     if offset + 4 > slice.len() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Payload too short"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Payload too short",
+        ));
     }
     // We strictly use try_into() to grab exactly 4 bytes
-    let bytes: [u8; 4] = slice[offset..offset+4].try_into().unwrap();
+    let bytes: [u8; 4] = slice[offset..offset + 4].try_into().unwrap();
     Ok(u32::from_be_bytes(bytes))
 }
 

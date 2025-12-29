@@ -306,7 +306,6 @@ pub enum AppMode {
         for_item: ConfigItem,
         file_explorer: FileExplorer,
     },
-
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -895,12 +894,14 @@ impl App {
 
                     let parent_dir = path.parent();
 
-                    let is_user_watch = self.client_configs.watch_folder
+                    let is_user_watch = self
+                        .client_configs
+                        .watch_folder
                         .as_ref()
-                        .map_or(false, |p| parent_dir == Some(p));
+                        .is_some_and(|p| parent_dir == Some(p));
 
-                    let is_system_watch = get_watch_path()
-                        .map_or(false, |(p, _)| parent_dir == Some(&p));
+                    let is_system_watch =
+                        get_watch_path().is_some_and(|(p, _)| parent_dir == Some(&p));
 
                     if is_user_watch || is_system_watch {
                         let move_successful =
@@ -939,7 +940,6 @@ impl App {
                             }
                         }
                     }
-                    
                 } else {
                     // Handle case where no default download folder is set (Manual selection)
                     self.app_state.pending_torrent_path = Some(path.clone());

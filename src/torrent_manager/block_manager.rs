@@ -242,7 +242,7 @@ impl BlockManager {
         // [FIX] Use calculated size which respects overrides
         let piece_len = self.calculate_piece_size(piece_idx);
         let blocks_in_piece = self.blocks_in_piece(piece_len);
-        
+
         let piece_start_offset = piece_idx as u64 * self.piece_length as u64;
         let start_blk = (piece_start_offset / BLOCK_SIZE as u64) as u32;
         let actual_start_blk = std::cmp::min(start_blk, self.total_blocks);
@@ -268,7 +268,8 @@ impl BlockManager {
 
         // [FIX] Use calculated size to check valid bounds for this specific piece
         let valid_piece_len = self.calculate_piece_size(piece_index);
-        let remaining_in_piece = (valid_piece_len as u64).saturating_sub(byte_offset_in_piece as u64);
+        let remaining_in_piece =
+            (valid_piece_len as u64).saturating_sub(byte_offset_in_piece as u64);
         let length = std::cmp::min(BLOCK_SIZE as u64, remaining_in_piece) as u32;
 
         BlockAddress {
@@ -438,7 +439,14 @@ mod tests {
         let piece_count = (total_len as f64 / piece_len as f64).ceil() as usize;
         let v1_hashes = vec![[0; 20]; piece_count];
         let mut manager = BlockManager::new();
-        manager.set_geometry(piece_len, total_len, v1_hashes, vec![], HashMap::new(), false);
+        manager.set_geometry(
+            piece_len,
+            total_len,
+            v1_hashes,
+            vec![],
+            HashMap::new(),
+            false,
+        );
         manager
     }
 
@@ -922,7 +930,14 @@ mod selection_tests {
         let mut bm = BlockManager::new();
         // 1 piece, 4 blocks
         let piece_len = 16384 * 4;
-        bm.set_geometry(piece_len, piece_len as u64, vec![], vec![], HashMap::new(), false);
+        bm.set_geometry(
+            piece_len,
+            piece_len as u64,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
 
         let peer_bitfield = vec![true]; // Peer has Piece 0
         let rarest = vec![0];

@@ -3,7 +3,7 @@
 
 pub mod parser;
 
-use serde::de::{self}; 
+use serde::de::{self};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_bencode::value::Value;
 
@@ -20,7 +20,7 @@ pub struct Torrent {
     pub announce: Option<String>,
 
     #[serde(rename = "announce-list", default)]
-    pub announce_list: Option<Vec<Vec<String>>>, 
+    pub announce_list: Option<Vec<Vec<String>>>,
 
     #[serde(
         rename = "url-list",
@@ -30,7 +30,7 @@ pub struct Torrent {
     pub url_list: Option<Vec<String>>,
 
     #[serde(rename = "creation date", default)]
-    pub creation_date: Option<i64>, 
+    pub creation_date: Option<i64>,
 
     #[serde(default)]
     pub comment: Option<String>,
@@ -74,28 +74,29 @@ fn traverse_file_tree(
         for (key, value) in map {
             let name = String::from_utf8_lossy(key).to_string();
 
-            if name == "" {
+            if name.is_empty() {
                 // This is a file metadata node (Leaf)
                 if let Value::Dict(file_metadata) = value {
                     // Extract Root
                     if let Some(Value::Bytes(root)) = file_metadata.get("pieces root".as_bytes()) {
                         // Extract Length
-                        let len = if let Some(Value::Int(l)) = file_metadata.get("length".as_bytes()) {
-                            *l as u64
-                        } else {
-                            0
-                        };
+                        let len =
+                            if let Some(Value::Int(l)) = file_metadata.get("length".as_bytes()) {
+                                *l as u64
+                            } else {
+                                0
+                            };
                         results.push((current_path.clone(), len, root.clone()));
                     }
                 }
             } else {
-                 // Directory node
-                 let new_path = if current_path.is_empty() {
-                     name
-                 } else {
-                     format!("{}/{}", current_path, name)
-                 };
-                 traverse_file_tree(value, new_path, results);
+                // Directory node
+                let new_path = if current_path.is_empty() {
+                    name
+                } else {
+                    format!("{}/{}", current_path, name)
+                };
+                traverse_file_tree(value, new_path, results);
             }
         }
     }
@@ -133,7 +134,6 @@ pub struct Info {
 }
 
 impl Info {
-
     pub fn total_length(&self) -> i64 {
         // Case 1: v1 Single File
         if self.length > 0 {
@@ -157,14 +157,14 @@ impl Info {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InfoFile {
     pub length: i64,
-    
+
     #[serde(default)]
     pub md5sum: Option<String>,
-    
+
     pub path: Vec<String>,
 
     #[serde(default)]
-    pub attr: Option<String>, 
+    pub attr: Option<String>,
 }
 
 fn deserialize_url_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
@@ -200,7 +200,7 @@ fn calculate_tree_size(node: &Value) -> i64 {
     if let Value::Dict(map) = node {
         for (key, value) in map {
             let name = String::from_utf8_lossy(key);
-            if name == "" {
+            if name.is_empty() {
                 // This is a file metadata node
                 if let Value::Dict(meta) = value {
                     if let Some(Value::Int(len)) = meta.get("length".as_bytes()) {

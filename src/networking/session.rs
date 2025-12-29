@@ -385,13 +385,13 @@ impl PeerSession {
                             // We log the root_idx so it's not unused
                             tracing::trace!("Peer requested hashes for RootID: {}", root_idx);
                         }
-                        
+
                         Message::HashPiece(root_idx, base, offset, proof) => {
                             let _ = self.torrent_manager_tx.try_send(
                                 TorrentCommand::MerkleHashData {
                                     peer_id: self.peer_ip_port.clone(),
                                     file_index: root_idx,
-                                    piece_index: offset, 
+                                    piece_index: offset,
                                     base_layer: base,
                                     length: proof.len() as u32 / 32,
                                     proof,
@@ -543,16 +543,32 @@ impl PeerSession {
             TorrentCommand::Have(_, idx) => {
                 let _ = self.writer_tx.try_send(Message::Have(idx));
             }
-            TorrentCommand::SendHashPiece { root: _, base_layer, index, proof, .. } => {
+            TorrentCommand::SendHashPiece {
+                root: _,
+                base_layer,
+                index,
+                proof,
+                ..
+            } => {
                 // Protocol expects: HashPiece(u32, u32, u32, Vec<u8>)
                 // We map them to: index, base, offset, proof
-                let _ = self.writer_tx.try_send(Message::HashPiece(index, base_layer, 0, proof));
+                let _ = self
+                    .writer_tx
+                    .try_send(Message::HashPiece(index, base_layer, 0, proof));
             }
 
             // [CORRECTED] Removed 'root' from Message::HashReject construction
-            TorrentCommand::SendHashReject { root: _, base_layer, index, length, .. } => {
+            TorrentCommand::SendHashReject {
+                root: _,
+                base_layer,
+                index,
+                length,
+                ..
+            } => {
                 // Protocol expects: HashReject(u32, u32, u32, u32)
-                let _ = self.writer_tx.try_send(Message::HashReject(index, base_layer, 0, length));
+                let _ = self
+                    .writer_tx
+                    .try_send(Message::HashReject(index, base_layer, 0, length));
             }
             _ => {}
         }
@@ -667,7 +683,7 @@ impl PeerSession {
                             {
                                 let _ =
                                     self.torrent_manager_tx.try_send(TorrentCommand::DhtTorrent(
-                                        Torrent {
+                                        Box::new(Torrent {
                                             info_dict_bencode: self
                                                 .peer_torrent_metadata_pieces
                                                 .clone(),
@@ -680,7 +696,7 @@ impl PeerSession {
                                             created_by: None,
                                             encoding: None,
                                             piece_layers: None,
-                                        },
+                                        }),
                                         torrent_metadata_len,
                                     ));
                             }

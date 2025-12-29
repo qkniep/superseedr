@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::torrent_file::{Torrent, InfoFile}; 
+use crate::torrent_file::{InfoFile, Torrent};
 use serde_bencode::de;
 use serde_bencode::value::Value;
 
@@ -54,19 +54,17 @@ pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
     // We polyfill 'info.files' here so Storage/UI work seamlessly.
     if torrent.info.files.is_empty() && torrent.info.file_tree.is_some() {
         let mut v2_roots = torrent.get_v2_roots(); // (PathString, u64, RootHash)
-        
+
         // 1. Sort roots FIRST to ensure canonical V2 order (Alphabetical by path)
         // This is critical so that offsets match the PieceManager's calculation.
         v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
-        
+
         let mut new_files = Vec::new();
         let piece_len = torrent.info.piece_length as u64;
 
         for (path_str, length, _root) in v2_roots {
-            let path_components: Vec<String> = path_str.split('/')
-                .map(|s| s.to_string())
-                .collect();
-            
+            let path_components: Vec<String> = path_str.split('/').map(|s| s.to_string()).collect();
+
             // A. Add the Real File
             new_files.push(InfoFile {
                 length: length as i64,
@@ -92,7 +90,7 @@ pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
                 }
             }
         }
-        
+
         torrent.info.files = new_files;
     }
     // ------------------------------
@@ -126,7 +124,7 @@ mod tests {
             Value::Bytes(root_hash_1.clone()),
         );
         file_a_metadata.insert("length".as_bytes().to_vec(), Value::Int(1000));
-        
+
         let mut leaf_node_a = HashMap::new();
         leaf_node_a.insert(vec![], Value::Dict(file_a_metadata));
 
@@ -136,7 +134,7 @@ mod tests {
             Value::Bytes(root_hash_2.clone()),
         );
         file_b_metadata.insert("length".as_bytes().to_vec(), Value::Int(2000));
-        
+
         let mut leaf_node_b = HashMap::new();
         leaf_node_b.insert(vec![], Value::Dict(file_b_metadata));
 
@@ -144,14 +142,8 @@ mod tests {
         folder_contents.insert("file_a.txt".as_bytes().to_vec(), Value::Dict(leaf_node_a));
 
         let mut tree_root = HashMap::new();
-        tree_root.insert(
-            "folder".as_bytes().to_vec(),
-            Value::Dict(folder_contents),
-        );
-        tree_root.insert(
-            "file_b.txt".as_bytes().to_vec(),
-            Value::Dict(leaf_node_b),
-        );
+        tree_root.insert("folder".as_bytes().to_vec(), Value::Dict(folder_contents));
+        tree_root.insert("file_b.txt".as_bytes().to_vec(), Value::Dict(leaf_node_b));
 
         let mut layers = HashMap::new();
         layers.insert(root_hash_1.clone(), Value::Bytes(vec![0x11; 32]));
@@ -183,15 +175,24 @@ mod tests {
         };
 
         let bencoded_data = serde_bencode::to_bytes(&torrent_input).expect("Serialization failed");
-        
+
         // --- TEST: Parsing should automatically populate 'files' ---
         let parsed_torrent = super::from_bytes(&bencoded_data).expect("Parsing failed");
 
         // Expect 4 files (2 Real + 2 Padding)
-        assert_eq!(parsed_torrent.info.files.len(), 4, "Should have 2 real files + 2 padding files");
-        
+        assert_eq!(
+            parsed_torrent.info.files.len(),
+            4,
+            "Should have 2 real files + 2 padding files"
+        );
+
         // Verify Paths
-        let paths: Vec<Vec<String>> = parsed_torrent.info.files.iter().map(|f| f.path.clone()).collect();
+        let paths: Vec<Vec<String>> = parsed_torrent
+            .info
+            .files
+            .iter()
+            .map(|f| f.path.clone())
+            .collect();
         assert!(paths.contains(&vec!["file_b.txt".to_string()]));
         assert!(paths.contains(&vec!["folder".to_string(), "file_a.txt".to_string()]));
 
@@ -200,5 +201,4 @@ mod tests {
         assert_eq!(len_sum, 32768); // 2 pieces * 16384
         assert_eq!(parsed_torrent.info.length, 32768);
     }
-
 }

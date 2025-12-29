@@ -45,7 +45,7 @@ pub enum TorrentCommand {
     #[cfg(feature = "pex")]
     SendPexPeers(Vec<String>),
 
-    DhtTorrent(Torrent, i64),
+    DhtTorrent(Box<Torrent>, i64),
 
     AnnounceResponse(String, TrackerResponse),
     AnnounceFailed(String, String),
@@ -59,6 +59,7 @@ pub enum TorrentCommand {
         proof: Vec<u8>,
     },
 
+    #[allow(dead_code)]
     RequestHash {
         piece_index: u32,
         base_layer: u32,
