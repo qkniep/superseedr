@@ -1312,8 +1312,6 @@ impl TorrentManager {
             }
 
             for file_info in &multi_file_info.files {
-                // [FIX] Skip Padding Files. They are virtual and do not map to Merkle Roots.
-                // In V2, they exist solely to push the *next* file to a piece boundary.
                 if file_info.is_padding {
                     continue;
                 }
@@ -1321,7 +1319,6 @@ impl TorrentManager {
                 let physical_path_str = file_info.path.to_string_lossy().to_string().replace("\\", "/");
                 let file_length = file_info.length;
 
-                // Robust path matching: find root hash assigned to this file path
                 let root_hash = path_to_root.iter()
                     .find(|(v2_path, _)| physical_path_str.ends_with(*v2_path))
                     .map(|(_, root)| root);
@@ -1336,21 +1333,12 @@ impl TorrentManager {
 
                 let file_pieces = if file_length > 0 { (file_length + piece_len - 1) / piece_len } else { 0 };
                 let layers = torrent.get_layer_hashes(root_hash);
-
-                // [FIX] Calculate Global Index directly from the file offset.
-                // This handles alignment implicitly because file_info.global_start_offset
-                // is already calculated correctly by MultiFileInfo (accounting for padding).
-                // This prevents the "drift" bug where skipping a padding file desyncs the piece index.
                 let start_piece_index = (file_info.global_start_offset / piece_len) as u32;
 
                 for i in 0..file_pieces {
                     let global_piece_index = start_piece_index + i as u32;
-                    
-                    // Calculate offsets for reading
                     let offset_in_file = i * piece_len;
                     let len_this_piece = std::cmp::min(piece_len, file_length.saturating_sub(offset_in_file));
-                    
-                    // We must read using the global offset logic to ensure we hit the correct physical location
                     let global_read_offset = file_info.global_start_offset + offset_in_file;
 
                     let piece_data = {
@@ -1368,7 +1356,6 @@ impl TorrentManager {
                     };
 
                     if !piece_data.is_empty() && !skip_hashing {
-                        // Multi-piece files use piece_layers; single-piece files use the root itself
                         let expected = if let Some(ref l) = layers {
                             let start = i as usize * 32;
                             l.get(start..start + 32).map(|s| s.to_vec())
@@ -1379,12 +1366,20 @@ impl TorrentManager {
                         };
 
                         if let Some(want) = expected {
+                            // --- REFACTORED: Use shared merkle verification ---
                             let is_valid = tokio::task::spawn_blocking(move || {
-                                // compute_v2_piece_root applies mandatory BEP 52 16KB padding
-                                // if the data is shorter than the piece length (tail blocks)
-                                let calculated = compute_v2_piece_root(&piece_data, piece_len as usize);
-                                calculated.as_slice() == want.as_slice()
+                                // We treat this as a "Proof-less" verification.
+                                // The 'want' hash is the expected root for this chunk.
+                                // hashing_context_len is passed as piece_len to ensure proper padding logic matches the V2 spec.
+                                merkle::verify_merkle_proof(
+                                    &want,
+                                    &piece_data,
+                                    0, // Relative index irrelevant for direct root comparison
+                                    &[], // Empty Proof
+                                    piece_len as usize
+                                )
                             }).await.unwrap_or(false);
+                            // --------------------------------------------------
 
                             if is_valid {
                                 completed_pieces.push(global_piece_index);
@@ -1402,8 +1397,6 @@ impl TorrentManager {
                 }
             }
             
-            // Sort and Deduplicate because multiple files might claim the same piece 
-            // (though in V2 pure alignment, this is less common, but safe to do)
             completed_pieces.sort();
             completed_pieces.dedup();
             
