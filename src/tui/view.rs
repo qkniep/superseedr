@@ -1222,7 +1222,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
             .constraints([
                 Constraint::Length(30), // Fixed space for Branding
                 Constraint::Min(0),     // Center takes all remaining space
-                Constraint::Length(18), // Fixed space for Port Status
+                Constraint::Length(21), // Fixed space for Port Status
             ])
             .split(footer_chunk)
     } else {
