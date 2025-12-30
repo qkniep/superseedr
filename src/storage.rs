@@ -83,7 +83,7 @@ pub async fn create_and_allocate_files(
     multi_file_info: &MultiFileInfo,
 ) -> Result<(), StorageError> {
     for file_info in &multi_file_info.files {
-        // SKIP PADDING FILES: Do not touch the disk for these.
+
         if file_info.is_padding {
             continue;
         }
@@ -131,12 +131,12 @@ pub async fn read_data_from_disk(
 
             if bytes_to_read_in_this_file > 0 {
                 if file_info.is_padding {
-                    // PADDING LOGIC: Return zeros. Do NOT read from disk.
+
                     // This maintains offset integrity without requiring a file on disk.
                     let zeros = vec![0u8; bytes_to_read_in_this_file];
                     buffer.extend_from_slice(&zeros);
                 } else {
-                    // STANDARD LOGIC: Read actual file.
+
                     let mut file = File::open(&file_info.path).await?;
                     file.seek(SeekFrom::Start(local_offset)).await?;
 
@@ -165,7 +165,7 @@ pub async fn write_data_to_disk(
     global_offset: u64,
     data_to_write: &[u8],
 ) -> Result<(), StorageError> {
-    
+
     let mut bytes_written = 0;
     let data_len = data_to_write.len();
 
@@ -183,25 +183,24 @@ pub async fn write_data_to_disk(
 
             if bytes_to_write_in_this_file > 0 {
                 if !file_info.is_padding {
-                    // STANDARD LOGIC: Write only if it is NOT a padding file.
+
                     let mut file = OpenOptions::new()
                         .write(true)
                         .create(true) // Ensure file exists if we race to write
                         .open(&file_info.path)
                         .await?;
-                    
+
                     file.seek(SeekFrom::Start(local_offset)).await?;
 
                     let data_slice =
                         &data_to_write[bytes_written..bytes_written + bytes_to_write_in_this_file];
-                    
+
                     file.write_all(data_slice).await?;
-                    
-                    // [FIX] CRITICAL: Force flush to OS/Disk.
+
                     // Without this, the OS might hold the data in memory, and if the app exits immediately
                     // (like in the test case), the data is lost.
                     file.flush().await?; 
-                    
+
                 } else {
                     tracing::error!(
                         "💾 [Storage] SKIP: Skipping {} bytes for Padding File {:?} @ Local {}", 
@@ -220,7 +219,6 @@ pub async fn write_data_to_disk(
         }
     }
 
-    // If we reach here, we ran out of files before writing all data
     tracing::error!(
         "💾 [Storage] ERROR: Write incomplete! Written: {}/{}. Global Offset: {}", 
         bytes_written, data_len, global_offset
@@ -378,13 +376,11 @@ mod tests {
         // NOT created on disk, and I/O operations transparently skip them.
         let (_dir, mfi) = setup_padding_file_scenario();
 
-        // 1. Verify Identification
         assert_eq!(mfi.files.len(), 3);
         assert!(!mfi.files[0].is_padding, "File 1 should not be padding");
         assert!(mfi.files[1].is_padding, "File 2 SHOULD be padding");
         assert!(!mfi.files[2].is_padding, "File 3 should not be padding");
 
-        // 2. Verify Allocation (Padding should NOT exist)
         create_and_allocate_files(&mfi).await.unwrap();
         assert!(
             tokio::fs::try_exists(&mfi.files[0].path).await.unwrap(),
@@ -399,7 +395,6 @@ mod tests {
             "Real file 2 must exist"
         );
 
-        // 3. Verify Writes (Spanning boundary)
         // We write 25 bytes starting at offset 0.
         // 0-9: Real File 1 (10 bytes)
         // 10-14: Padding (5 bytes) -> Discarded
@@ -407,7 +402,6 @@ mod tests {
         let data: Vec<u8> = (0..25).collect();
         write_data_to_disk(&mfi, 0, &data).await.unwrap();
 
-        // 4. Verify Reads (Spanning boundary)
         // Read back the 25 bytes.
         // We expect: [Real Data] + [Zeros] + [Real Data]
         let read_back = read_data_from_disk(&mfi, 0, 25).await.unwrap();

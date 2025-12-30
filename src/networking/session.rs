@@ -178,11 +178,9 @@ impl PeerSession {
             manager_tx: self.torrent_manager_tx.clone(),
         };
 
-        // 1. Split Stream
         let (mut stream_read_half, stream_write_half) = split(stream);
         let (error_tx, mut error_rx) = oneshot::channel();
 
-        // 2. Spawn Writer Task
         let global_ul_bucket_clone = self.global_ul_bucket.clone();
         let writer_shutdown_rx = self.shutdown_tx.subscribe();
         let writer_rx = self.writer_rx.take().ok_or("Writer RX missing")?;
@@ -196,7 +194,6 @@ impl PeerSession {
         ));
         let _writer_abort_guard = AbortOnDrop(writer_handle);
 
-        // 3. Perform Handshake (Synchronous Phase)
         // We do this BEFORE spawning the reader task so we can validate the connection.
         let handshake_response = match self.connection_type {
             ConnectionType::Outgoing => {
@@ -255,7 +252,6 @@ impl PeerSession {
         ));
         let _reader_abort_guard = AbortOnDrop(reader_handle);
 
-        // 5. Main Event Loop
         let mut keep_alive_timer = tokio::time::interval(Duration::from_secs(60));
         let inactivity_timeout = tokio::time::sleep(Duration::from_secs(120));
         tokio::pin!(inactivity_timeout);
@@ -557,7 +553,6 @@ impl PeerSession {
                     .try_send(Message::HashPiece(index, base_layer, 0, proof));
             }
 
-            // [CORRECTED] Removed 'root' from Message::HashReject construction
             TorrentCommand::SendHashReject {
                 root: _,
                 base_layer,
@@ -1011,10 +1006,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_performance_1000_blocks_sliding_window() {
-        // 1. Setup Session
+
         let (mut network, client_cmd_tx, mut manager_event_rx, _) = spawn_test_session().await;
 
-        // 2. Handshake
         let mut handshake_buf = vec![0u8; 68];
         network
             .read_exact(&mut handshake_buf)
@@ -1030,7 +1024,6 @@ mod tests {
             .await
             .expect("Handshake write failed");
 
-        // 3. Spawn the "Smart Peer"
         let (mut peer_read, mut peer_write) = tokio::io::split(network);
 
         tokio::spawn(async move {
@@ -1062,7 +1055,6 @@ mod tests {
             }
         });
 
-        // 4. Manager Startup
         let mut session_ready = false;
         while !session_ready {
             match timeout(Duration::from_secs(1), manager_event_rx.recv()).await {
@@ -1089,7 +1081,6 @@ mod tests {
             }
         }
 
-        // 5. Sliding Window Test
         const TOTAL_BLOCKS: u32 = 1000;
         const WINDOW_SIZE: u32 = 20;
         const BLOCK_SIZE: usize = 16384;
@@ -1145,7 +1136,6 @@ mod tests {
     async fn test_bug_repro_unsolicited_forwarding() {
         let (mut network, _client_cmd_tx, mut manager_rx, _) = spawn_test_session().await;
 
-        // 1. Handshake
         let mut handshake_buf = vec![0u8; 68];
         network.read_exact(&mut handshake_buf).await.unwrap();
         let mut response = vec![0u8; 68];
@@ -1165,13 +1155,11 @@ mod tests {
             }
         }
 
-        // 2. THE TRIGGER: Send a Block we NEVER requested
         // Piece 999 is definitely not in the session's tracker.
         let data = vec![0xAA; 16384];
         let piece_msg = generate_message(Message::Piece(999, 0, data)).unwrap();
         network.write_all(&piece_msg).await.unwrap();
 
-        // 3. ASSERTION
         // We listen to the Manager channel for a fixed window.
         // We MUST loop because the Session sends 'PeerId', 'SuccessfullyConnected', etc.
         // first. If we only recv() once, we pop 'PeerId', ignore it, and exit early
@@ -1250,11 +1238,9 @@ mod tests {
         const PIPELINE_DEPTH: u32 = 128;
         const BLOCK_SIZE: usize = 16384;
 
-        // 1. Setup Session using the DEBUG helper
         let (mut network, client_cmd_tx, mut manager_event_rx, session_handle) =
             spawn_debug_session().await;
 
-        // 2. Handshake
         let mut handshake_buf = vec![0u8; 68];
         network
             .read_exact(&mut handshake_buf)
@@ -1269,7 +1255,6 @@ mod tests {
             .await
             .expect("Handshake write failed");
 
-        // 3. Mock Peer (High Perf)
         let (mut peer_read, mut peer_write) = tokio::io::split(network);
         tokio::spawn(async move {
             let mut am_choking = true;
@@ -1302,7 +1287,6 @@ mod tests {
             }
         });
 
-        // 4. Wait for Ready
         // We add a check for the session handle here too, in case it dies during startup
         loop {
             tokio::select! {
@@ -1340,7 +1324,6 @@ mod tests {
             }
         }
 
-        // 5. Stress Test
         println!("Starting transfer of {} blocks...", TOTAL_BLOCKS);
         tokio::task::yield_now().await;
 
@@ -1408,9 +1391,8 @@ mod tests {
         );
     }
 
-    // =========================================================================
     // TEST 1: ROCKET (Growth to Max)
-    // =========================================================================
+
     #[tokio::test]
     async fn test_dynamic_window_growth_to_max() {
         let (mut network, client_cmd_tx, mut manager_event_rx, window_monitor) =
@@ -1490,9 +1472,8 @@ mod tests {
         );
     }
 
-    // =========================================================================
     // TEST 2: CONGESTION (Increase then Decrease)
-    // =========================================================================
+
     #[tokio::test]
     async fn test_dynamic_window_congestion_control() {
         let (mut network, client_cmd_tx, mut manager_event_rx, window_monitor) =
@@ -1607,9 +1588,8 @@ mod tests {
         );
     }
 
-    // =========================================================================
     // TEST 3: SUSTAIN (Steady State)
-    // =========================================================================
+
     #[tokio::test]
     async fn test_dynamic_window_steady_state() {
         let (mut network, client_cmd_tx, mut manager_event_rx, window_monitor) =
@@ -1739,7 +1719,6 @@ mod tests {
             }
         });
 
-        // 1. Start Session
         let _ = client_cmd_tx.send(TorrentCommand::ClientInterested).await;
         loop {
             if let Ok(Some(TorrentCommand::Unchoke(_))) =
@@ -1749,7 +1728,6 @@ mod tests {
             }
         }
 
-        // 2. Grow the Window (Ramp Up)
         let mut completed = 0;
         let mut inflight = 0;
         let start = Instant::now();
@@ -1787,7 +1765,6 @@ mod tests {
             PEER_BLOCK_IN_FLIGHT_LIMIT
         );
 
-        // 3. Trigger Choke
         println!("Triggering Peer Choke...");
         should_choke.store(true, Ordering::Relaxed);
 
@@ -1801,7 +1778,6 @@ mod tests {
             }
         }
 
-        // 4. ASSERT: Window should be reset immediately
         let choked_window = window_monitor.load(Ordering::Relaxed);
         println!("Window after Choke: {}", choked_window);
 
@@ -1810,7 +1786,6 @@ mod tests {
             "Window failed to reset to default on Choke!"
         );
 
-        // 5. Verify Unchoke / Resumption
         // The mock peer is programmed to unchoke automatically after 500ms
         loop {
             match timeout(Duration::from_secs(1), manager_event_rx.recv()).await {

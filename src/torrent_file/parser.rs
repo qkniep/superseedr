@@ -31,10 +31,9 @@ impl From<serde_bencode::Error> for ParseError {
 }
 
 pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
-    // 1. First, deserialize into a generic Value to extract the raw info dict.
+
     let generic_bencode: Value = de::from_bytes(bencode_data)?;
 
-    // 2. Extract the raw 'info' dictionary value for hashing.
     let info_dict_value = if let Value::Dict(mut top_level_dict) = generic_bencode.clone() {
         top_level_dict
             .remove("info".as_bytes())
@@ -43,19 +42,15 @@ pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
         return Err(ParseError::MissingInfoDict);
     };
 
-    // 3. Re-encode just the 'info' dictionary to get the exact bytes for the hash.
     let info_dict_bencode = serde_bencode::to_bytes(&info_dict_value)?;
 
-    // 4. Deserialize into the strongly-typed Torrent struct.
     let mut torrent: Torrent = de::from_bytes(bencode_data)?;
 
-    // --- V2 COMPATIBILITY LAYER ---
     // If this is a Pure V2 torrent, the 'files' list will be empty.
     // We polyfill 'info.files' here so Storage/UI work seamlessly.
     if torrent.info.files.is_empty() && torrent.info.file_tree.is_some() {
         let mut v2_roots = torrent.get_v2_roots(); // (PathString, u64, RootHash)
 
-        // 1. Sort roots FIRST to ensure canonical V2 order (Alphabetical by path)
         // This is critical so that offsets match the PieceManager's calculation.
         v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
 
@@ -65,7 +60,6 @@ pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
         for (path_str, length, _root) in v2_roots {
             let path_components: Vec<String> = path_str.split('/').map(|s| s.to_string()).collect();
 
-            // A. Add the Real File
             new_files.push(InfoFile {
                 length: length as i64,
                 path: path_components,
@@ -73,7 +67,6 @@ pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
                 attr: None,
             });
 
-            // B. Add Synthetic Padding File (Alignment)
             // In BitTorrent v2, files are aligned to piece boundaries.
             // If a file doesn't end exactly on a piece boundary, we insert a "padding file"
             // to fill the gap. This ensures the NEXT file starts at offset 0 of the NEXT piece.
@@ -93,7 +86,6 @@ pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
 
         torrent.info.files = new_files;
     }
-    // ------------------------------
 
     if torrent.info.length == 0 {
         torrent.info.length = torrent.info.total_length();

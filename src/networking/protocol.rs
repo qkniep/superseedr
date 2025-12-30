@@ -158,7 +158,7 @@ pub async fn writer_task<W>(
             res = write_rx.recv() => {
                 match res {
                     Some(first_msg) => {
-                        // 1. Serialize the first message
+
                         match generate_message(first_msg) {
                             Ok(bytes) => batch_buffer.extend_from_slice(&bytes),
                             Err(e) => {
@@ -167,7 +167,6 @@ pub async fn writer_task<W>(
                             }
                         }
 
-                        // 2. Greedy Batching:
                         // Check if more messages are immediately available in the channel.
                         // This reduces syscalls by writing multiple messages in one go.
                         // We cap the batch size (e.g., ~256KB) to ensure we don't hog memory
@@ -187,7 +186,6 @@ pub async fn writer_task<W>(
                             }
                         }
 
-                        // 3. Flush the batch to the socket
                         if !batch_buffer.is_empty() {
 
                             let len = batch_buffer.len();
@@ -235,11 +233,10 @@ pub async fn reader_task<R>(
                 match read_result {
                     Ok(0) => break, // EOF
                     Ok(n) => {
-                        // A. THROTTLE DOWNLOAD
+
                         // We "pay" for the bytes before processing them.
                         consume_tokens(&global_dl_bucket, n as f64).await;
 
-                        // B. BUFFER
                         processing_buf.extend_from_slice(&socket_buf[..n]);
 
                         // C. PARSE LOOP
@@ -424,7 +421,7 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
 pub fn parse_message_from_bytes(
     cursor: &mut std::io::Cursor<&Vec<u8>>,
 ) -> Result<Message, std::io::Error> {
-    // 1. Read Length Prefix (4 bytes)
+
     let mut len_buf = [0u8; 4];
 
     if std::io::Read::read_exact(cursor, &mut len_buf).is_err() {
@@ -438,7 +435,6 @@ pub fn parse_message_from_bytes(
         return Ok(Message::KeepAlive);
     }
 
-    // 2. Check if we have the full message payload
     let current_pos = cursor.position();
     let available_bytes = cursor.get_ref().len() as u64 - current_pos;
 
@@ -449,20 +445,17 @@ pub fn parse_message_from_bytes(
         return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
     }
 
-    // 3. Read Message ID (1 byte)
     let mut id_buf = [0u8; 1];
 
     std::io::Read::read_exact(cursor, &mut id_buf)?;
 
     let message_id = id_buf[0];
 
-    // 4. Read Payload (Len - 1 bytes)
     let payload_len = message_len as usize - 1;
     let mut payload = vec![0u8; payload_len];
 
     std::io::Read::read_exact(cursor, &mut payload)?;
 
-    // 5. Decode Message
     match message_id {
         // ... (rest of the function remains the same)
         0 => Ok(Message::Choke),
@@ -812,16 +805,13 @@ mod tests {
     /// This one helper function replaces all your TCP tests.
     /// It checks that a message can be serialized and then parsed back.
     async fn assert_message_roundtrip(msg: Message) {
-        // 1. Generate the message into bytes
+
         let bytes = generate_message(msg.clone()).unwrap();
 
-        // 2. Create an in-memory "reader" from those bytes
         let mut reader = &bytes[..];
 
-        // 3. Parse the message back (this works because of Step 1)
         let parsed_msg = parse_message(&mut reader).await.unwrap();
 
-        // 4. Assert they are identical
         assert_eq!(msg, parsed_msg);
     }
 
@@ -845,20 +835,17 @@ mod tests {
     /// Special test for the ExtendedHandshake
     #[tokio::test]
     async fn test_extended_handshake_parsing() {
-        // 1. Generate the ExtendedHandshake message
+
         let metadata_size = 12345;
         let msg = Message::ExtendedHandshake(Some(metadata_size));
         let generated_bytes = generate_message(msg).unwrap();
 
-        // 2. Parse it back using our generic parser
         let mut reader = &generated_bytes[..];
         let parsed = parse_message(&mut reader).await.unwrap();
 
-        // 3. It should parse as a Message::Extended with ID 0 (Handshake ID)
         if let Message::Extended(id, payload_bytes) = parsed {
             assert_eq!(id, ClientExtendedId::Handshake.id()); // ID is 0
 
-            // 4. Check the bencoded payload
             let payload: ExtendedHandshakePayload =
                 serde_bencode::from_bytes(&payload_bytes).unwrap();
 

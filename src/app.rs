@@ -922,7 +922,6 @@ impl App {
                                 false
                             };
 
-                        // Fallback: Rename to .added only if move failed AND it was in a watch folder
                         if !move_successful {
                             tracing_event!(
                                 Level::WARN,
@@ -941,7 +940,7 @@ impl App {
                         }
                     }
                 } else {
-                    // Handle case where no default download folder is set (Manual selection)
+
                     self.app_state.pending_torrent_path = Some(path.clone());
                     if let Ok(mut explorer) = FileExplorer::new() {
                         let initial_path = self
@@ -1981,7 +1980,6 @@ impl App {
                 return std::cmp::Ordering::Equal;
             };
 
-            // 1. Primary Sort (Existing)
             let ordering = match sort_by {
                 TorrentSortColumn::Name => a_torrent
                     .latest_state
@@ -2022,7 +2020,6 @@ impl App {
                 ordering
             };
 
-            // 2. Secondary Sort: Weighted Peer Activity
             // If primary sort is equal (e.g. both 0 DL), use activity score.
             primary_ordering.then_with(|| {
                 let calculate_weighted_activity = |t: &TorrentDisplayState| -> u64 {
@@ -2411,7 +2408,6 @@ impl App {
             }
         }
 
-        // 2. Check System Watch Path (Existing Logic)
         if let Some((watch_path, _)) = get_watch_path() {
             let Ok(entries) = fs::read_dir(watch_path) else {
                 return;
@@ -2585,12 +2581,11 @@ fn make_random_adjustment(mut limits: CalculatedLimits) -> (CalculatedLimits, St
     ];
 
     for attempt in 0..MAX_TRADE_ATTEMPTS {
-        // 1. Randomly shuffle to pick a Source and Destination
+
         parameters.shuffle(&mut rng);
         let source_param = parameters[0];
         let dest_param = parameters[1];
 
-        // 2. Get current values and bounds
         let source_val = get_limit(&limits, source_param);
         let dest_val = get_limit(&limits, dest_param);
 
@@ -2601,16 +2596,14 @@ fn make_random_adjustment(mut limits: CalculatedLimits) -> (CalculatedLimits, St
             ResourceType::Reserve => MIN_RESERVE,
         };
 
-        // 3. Calculate random step rate and amount to trade
         let step_rate = rng.random_range(MIN_STEP_RATE..=MAX_STEP_RATE);
         let amount_to_trade = ((source_val as f64 * step_rate).ceil() as usize).max(1);
 
-        // 4. Check if this specific trade is possible
         let can_give = source_val >= source_min.saturating_add(amount_to_trade);
 
         if can_give {
             // --- VALID TRADE FOUND ---
-            // 5. Perform the 1-for-1 trade
+
             set_limit(
                 &mut limits,
                 source_param,

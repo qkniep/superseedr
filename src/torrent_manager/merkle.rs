@@ -11,15 +11,13 @@ pub fn verify_merkle_proof(
     proof: &[u8],
     hashing_context_len: usize,
 ) -> bool {
-    // 1. Calculate the V2 Root of the data we have using the specific context length
+
     let calculated_root = compute_v2_piece_root(piece_data, hashing_context_len);
 
-    // 2. Local Verification (No Proof)
     if proof.is_empty() {
         return calculated_root.as_slice() == target_root_hash;
     }
 
-    // 3. Network Verification (Climb the Tree)
     let mut current_hash = calculated_root;
     let mut current_idx = relative_index;
 
@@ -46,20 +44,17 @@ pub fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
     // Determine target leaves (power of two) based on the context length
     let leaf_count = expected_len.div_ceil(BLOCK_SIZE).next_power_of_two();
 
-    // 1. Hash 16KB leafs
     let mut layer: Vec<[u8; 32]> = data
         .chunks(BLOCK_SIZE)
         .map(|chunk| Sha256::digest(chunk).into())
         .collect();
 
-    // 2. Pad the layer to the power-of-two leaf count
     // (This handles cases where the file implies more leaves than data provided)
     let empty_hash: [u8; 32] = [0u8; 32];
     while layer.len() < leaf_count {
         layer.push(empty_hash);
     }
 
-    // 3. Balanced Binary Reduction
     while layer.len() > 1 {
         layer = layer
             .chunks(2)
@@ -81,10 +76,9 @@ pub fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
 mod tests {
     use super::*;
 
-    // --- Original Test (Fixed Arguments) ---
     #[test]
     fn test_merkle_verification_relative_index_parity() {
-        // --- SETUP ---
+
         // We create a file with 2 blocks (32KB total).
         // Block 0: Left Node (Even index)
         // Block 1: Right Node (Odd index)
@@ -133,10 +127,9 @@ mod tests {
         );
     }
 
-    // --- Converted: test_v2_merkle_root_calculation ---
     #[test]
     fn test_v2_merkle_root_calculation() {
-        // 1. Create 32KB of deterministic data (2 blocks of 16KB)
+
         let block_size = 16_384;
         let piece_size = 32_768;
         let mut data = Vec::with_capacity(piece_size);
@@ -145,7 +138,6 @@ mod tests {
         data.extend_from_slice(&vec![0xAA; block_size]);
         data.extend_from_slice(&vec![0xBB; block_size]);
 
-        // 2. Manually Calculate Expected Root: Hash( Hash(Block1) + Hash(Block2) )
         let hash_1 = Sha256::digest(&data[0..block_size]);
         let hash_2 = Sha256::digest(&data[block_size..piece_size]);
 
@@ -154,10 +146,8 @@ mod tests {
         hasher.update(hash_2);
         let expected_root = hasher.finalize();
 
-        // 3. Run the Function Under Test
         let calculated_root = compute_v2_piece_root(&data, data.len());
 
-        // 4. Assert
         assert_eq!(
             calculated_root.as_slice(),
             expected_root.as_slice(),
@@ -165,19 +155,15 @@ mod tests {
         );
     }
 
-    // --- Converted: test_v2_merkle_root_single_block ---
     #[test]
     fn test_v2_merkle_root_single_block() {
-        // 1. Create 16KB data (Single Block)
+
         let data = vec![0xCC; 16_384];
 
-        // 2. Expected Root is just the SHA256 of the data (Leaf)
         let expected_root = Sha256::digest(&data);
 
-        // 3. Run Function
         let calculated_root = compute_v2_piece_root(&data, data.len());
 
-        // 4. Assert
         assert_eq!(
             calculated_root.as_slice(),
             expected_root.as_slice(),
@@ -185,7 +171,6 @@ mod tests {
         );
     }
 
-    // --- Converted: verify_tail_padding_fix ---
     #[test]
     fn verify_tail_padding_fix() {
         // Scenario: A file ends 976 bytes into a block.
@@ -206,10 +191,9 @@ mod tests {
         );
     }
 
-    // --- Converted: test_v2_network_verification_padding_accuracy ---
     #[test]
     fn test_v2_network_verification_padding_accuracy() {
-        // 1. SETUP DATA: Simulate a partial tail block (5000 bytes)
+
         let piece_len: usize = 16384; // The full block size in the system
         let actual_data_len: usize = 5000;
         let raw_data = vec![0xDD; actual_data_len];
@@ -217,7 +201,6 @@ mod tests {
         // Calculate CORRECT hash (NO DATA PADDING)
         let correct_leaf_hash = Sha256::digest(&raw_data).to_vec();
 
-        // 3. EXECUTE
         // We simulate the call verify_merkle_proof makes.
         // Note: hashing_context_len passed here is the full block size (16384),
         // but verify_merkle_proof currently uses the *data* length for leaf calculation.
@@ -238,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_v2_small_file_less_than_piece_len() {
-        // 1. SETUP: Torrent piece_length is 256KB, but file is only 16KB.
+
         let file_len: usize = 16384;
         let raw_data = vec![0xDD; file_len];
 
@@ -246,7 +229,6 @@ mod tests {
         // the file itself (padded to 16KB if it were smaller, but here it is exactly 16KB).
         let expected_file_root = Sha256::digest(&raw_data).to_vec();
 
-        // 3. EXECUTE: Trigger verification for Piece 0
         // FIX: We must pass `file_len` (16KB), NOT `262_144`.
         // If we passed 256KB, the existing code would pad it to 16 blocks.
         // The V2 logic requires that we use the file size as the context for small files.
@@ -255,10 +237,9 @@ mod tests {
         assert!(is_valid, "Small file verification failed. Logic likely padded 16KB file to 256KB piece boundary.");
     }
 
-    // --- Converted: test_v2_merkle_parity_regression ---
     #[test]
     fn test_v2_merkle_parity_regression() {
-        // 1. SETUP: Create a scenario where Global Index != Relative Index
+
         // File B starts at Global Piece 1, but it is the FIRST piece of that file (Rel 0).
         let piece_len: usize = 16384;
         let data_b0 = vec![0xAA; piece_len];
@@ -274,7 +255,6 @@ mod tests {
         hasher.update(&h1);
         let file_root = hasher.finalize().to_vec();
 
-        // 2. ACTION: Verify Piece 1 using a Network Proof (h1 is the sibling)
         // Global Index 1 (ODD). Relative Index 0 (EVEN).
         // It SHOULD perform: Hash(Current + Sibling) based on Relative Index.
         let proof = h1; // The sibling needed to climb from h0 to file_root
@@ -290,19 +270,15 @@ mod tests {
         );
     }
 
-    // --- Converted: test_v2_small_file_root_mismatch_regression ---
     #[test]
     fn test_v2_small_file_root_mismatch_regression() {
         let actual_file_len: usize = 26_704;
         let data = vec![0xEE; actual_file_len];
         let block_size = 16_384;
 
-        // --- BEP 52 COMPLIANT MANUAL CALCULATION ---
-        // 1. Hash the partial data AS-IS (No padding)
         let h0 = Sha256::digest(&data[0..block_size]); // First full 16KB block
         let h1 = Sha256::digest(&data[block_size..]); // Remaining 10,320 bytes
 
-        // 2. Combine them to form the 32KB Piece Root
         let mut hasher = Sha256::new();
         hasher.update(h0);
         hasher.update(h1);
@@ -364,12 +340,7 @@ mod tests {
         // Scenario: 16 Blocks (256KB). Depth 4.
         // We verify Block 14 (Index 14).
         // Path:
-        // 1. Sibling 15 (Right) -> Parent(14,15) is Index 7
-        // 2. Sibling 6 (Left)   -> Parent(6,7)   is Index 3
-        // 3. Sibling 2 (Left)   -> Parent(2,3)   is Index 1
-        // 4. Sibling 0 (Left)   -> Root(0,1)     is Index 0
 
-        // 1. Generate 16 blocks of random hashes
         let leaves: Vec<[u8; 32]> = (0..16)
             .map(|i| {
                 let mut h = Sha256::new();
@@ -378,7 +349,6 @@ mod tests {
             })
             .collect();
 
-        // 2. Build Tree Helper (simplified for test)
         fn hash_pair(a: &[u8], b: &[u8]) -> [u8; 32] {
             let mut h = Sha256::new();
             h.update(a);
@@ -391,7 +361,6 @@ mod tests {
         let l3: Vec<_> = l2.chunks(2).map(|c| hash_pair(&c[0], &c[1])).collect(); // 2 nodes
         let _root = hash_pair(&l3[0], &l3[1]);
 
-        // 3. Construct Proof for Index 14
         let mut proof = Vec::new();
         proof.extend_from_slice(&leaves[15]); // Sibling of 14
         proof.extend_from_slice(&l1[6]); // Sibling of parent(14,15) -> Index 7's sibling is 6
@@ -460,7 +429,6 @@ mod tests {
         let data = vec![0xAA; block_size];
         let root = Sha256::digest(&data);
 
-        // 1. Corrupt Data
         let mut corrupt_data = data.clone();
         corrupt_data[0] = 0xBB; // Flip one byte
         assert!(
@@ -468,7 +436,6 @@ mod tests {
             "Should fail with corrupt data"
         );
 
-        // 2. Corrupt Proof
         // Create a 2-block tree
         let data_sibling = vec![0xBB; block_size];
         let h_sibling = Sha256::digest(&data_sibling);

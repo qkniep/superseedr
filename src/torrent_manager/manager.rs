@@ -106,7 +106,6 @@ const HASH_LENGTH: usize = 20;
 const MAX_UPLOAD_REQUEST_ATTEMPTS: u32 = 7;
 const MAX_PIECE_WRITE_ATTEMPTS: u32 = 12;
 
-
 const BASE_BACKOFF_MS: u64 = 1000;
 const JITTER_MS: u64 = 100;
 
@@ -200,7 +199,6 @@ impl TorrentManager {
             );
         }
 
-        // Calculate Info Hash
         let info_hash = if torrent.info.meta_version == Some(2) {
             if !torrent.info.pieces.is_empty() {
                 // Hybrid Torrent (V1 compatible). Using SHA-1.
@@ -385,14 +383,12 @@ impl TorrentManager {
             global_ul_bucket,
         } = torrent_parameters;
 
-        // 1. Extract Hash Type and String
         // We support both 'btih' (v1) and 'btmh' (v2)
         let hash_type = magnet
             .hash_type()
             .ok_or("Magnet link missing 'xt' (hash type)")?;
         let hash_string = magnet.hash().ok_or("Magnet link missing hash value")?;
 
-        // 2. Decode based on Type
         let info_hash = if hash_type == "btmh" {
             // --- V2: Multihash (SHA2-256) ---
             // Format: <varint_code><varint_len><digest>
@@ -451,7 +447,6 @@ impl TorrentManager {
             hex::encode(&info_hash)
         );
 
-        // 3. Extract Trackers
         let trackers_set: HashSet<String> = magnet
             .trackers()
             .iter()
@@ -557,7 +552,6 @@ impl TorrentManager {
                     let command = *cmd;
                     let pid = peer_id.clone();
 
-                    // 1. Get a shutdown listener for this specific task
                     let _shutdown_rx = self.shutdown_tx.subscribe();
 
                     let capacity = tx.capacity();
@@ -781,7 +775,6 @@ impl TorrentManager {
                         length: data.len(),
                     };
 
-                    // Add a timeout to the write operation to detect hangs
                     let write_result = tokio::time::timeout(
                         std::time::Duration::from_secs(5),
                         Self::write_block_with_retry(
@@ -811,7 +804,7 @@ impl TorrentManager {
                                 .await;
                         }
                         Err(_) => {
-                            // Timeout handling
+
                             let _ = tx
                                 .send(TorrentCommand::PieceWriteFailed { piece_index })
                                 .await;
@@ -1300,7 +1293,7 @@ impl TorrentManager {
         _event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
-        // 1. Initialize Storage and allocate files if they don't exist
+
         tokio::select! {
             biased;
             _ = shutdown_rx.recv() => return Err(StorageError::Io(std::io::Error::other("Shutdown"))),
@@ -1310,9 +1303,8 @@ impl TorrentManager {
         let mut completed_pieces = Vec::new();
         let piece_len = torrent.info.piece_length as u64;
 
-        // =================================================================================
         // PATH A: BitTorrent V2 (Aligned File Validation)
-        // =================================================================================
+
         if torrent.info.meta_version == Some(2) {
             let v2_roots_list = torrent.get_v2_roots();
             let mut path_to_root: HashMap<String, Vec<u8>> = HashMap::new();
@@ -1442,9 +1434,9 @@ impl TorrentManager {
                 ))
                 .await;
         }
-        // =================================================================================
+
         // PATH B: V1 (Contiguous Stream Logic)
-        // =================================================================================
+
         else {
             let total_size = multi_file_info.total_size;
             let num_pieces = if piece_len > 0 {
@@ -1728,8 +1720,6 @@ impl TorrentManager {
             self.dht_task_handle = Some(handle);
         }
     }
-
-
 
     fn generate_bitfield(&mut self) -> Vec<u8> {
         let num_pieces = self.state.piece_manager.bitfield.len();
@@ -2121,9 +2111,9 @@ impl TorrentManager {
     }
 
     pub async fn run(mut self, is_paused: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // 1. Magnet (No Metadata): announce_immediately = true.
+
         //    We MUST find peers to get metadata.
-        // 2. File (Has Metadata): announce_immediately = false.
+
         //    We wait for validation to finish so we report accurate "Left" stats
         //    to the tracker (preventing bans on private trackers).
         let announce_immediately = self.state.torrent.is_none();
@@ -2202,7 +2192,6 @@ impl TorrentManager {
                         random_seed: rand::rng().random()
                     });
                 }
-
 
                 _ = pex_timer.tick(), if !self.state.is_paused => {
                     if self.state.peers.len() < 2 {
@@ -2291,11 +2280,8 @@ impl TorrentManager {
                         let peer_ip_port = peer_addr.to_string();
                         let incoming_hash = &handshake_response[28..48];
 
-                        // --- DYNAMIC DUAL SWARM VALIDATION ---
-                        // 1. Check Primary (Fastest, covers 99% of cases)
                         let matches_primary = self.state.info_hash == incoming_hash;
 
-                        // 2. Check Secondary (Calculate on-demand if needed)
                         let mut matches_secondary = false;
                         let mut calculated_v2_hash = Vec::new();
 
@@ -2321,13 +2307,11 @@ impl TorrentManager {
                             continue;
                         }
 
-                        // 3. Select Active Hash
                         let active_info_hash = if matches_secondary {
                             calculated_v2_hash
                         } else {
                             self.state.info_hash.clone()
                         };
-                        // -------------------------------------
 
                         event!(Level::DEBUG, peer_addr = %peer_ip_port, "NEW INCOMING PEER CONNECTION");
                         let torrent_manager_tx_clone = self.torrent_manager_tx.clone();
@@ -2348,7 +2332,6 @@ impl TorrentManager {
                             _ => Some(self.generate_bitfield())
                         };
 
-                        // Use the SELECTED hash, not just the default state hash
                         let session_info_hash = active_info_hash;
 
                         let torrent_metadata_length_clone = self.state.torrent_metadata_length;
@@ -2419,7 +2402,6 @@ impl TorrentManager {
 
                     match command {
 
-
                         TorrentCommand::SuccessfullyConnected(peer_id) => self.apply_action(Action::PeerSuccessfullyConnected { peer_id }),
                         TorrentCommand::PeerId(addr, id) => self.apply_action(Action::UpdatePeerId { peer_addr: addr, new_id: id }),
 
@@ -2430,7 +2412,6 @@ impl TorrentManager {
                                 continue;
                             }
 
-                            // 2. Check Length Consistency
                             // The protocol says 'length' is the count of hashes.
                             let actual_count = (proof.len() / 32) as u32;
                             if length != actual_count {
@@ -2438,7 +2419,6 @@ impl TorrentManager {
                                 // We can proceed using the actual proof length, but this is suspicious.
                             }
 
-                            // 1. Resolve Global Piece Index
                             let calculated_global_index = if let Some(torrent) = &self.state.torrent {
                                 let piece_len = torrent.info.piece_length as u64;
 
@@ -2527,7 +2507,7 @@ impl TorrentManager {
                             let mut rejected = true;
 
                             if let Some(torrent) = &self.state.torrent {
-                                // 1. RESOLVE ROOT: Find the root that covers this piece index
+
                                 if let Some(roots) = self.state.piece_to_roots.get(&index) {
                                     // A piece might map to multiple files (boundary piece).
                                     // We iterate to find the one that actually contains the data we want to serve.
@@ -2536,17 +2516,14 @@ impl TorrentManager {
                                     for (file_start_byte_offset, _len, resolved_root) in roots {
                                         if let Some(layer_bytes) = torrent.get_layer_hashes(resolved_root) {
 
-                                            // 1. Get Global Start Piece for this file
                                             let piece_len = torrent.info.piece_length as u64;
                                             let file_start_piece = (*file_start_byte_offset as u32) / (piece_len as u32);
 
-                                            // 2. Convert Global 'index' to File-Relative index
                                             // e.g. Requesting Piece 105. File starts at 100. Relative index is 5.
                                             if index < file_start_piece { continue; }
                                             let relative_start_idx = (index - file_start_piece) as usize;
                                             let relative_end_idx = relative_start_idx + length as usize;
 
-                                            // 3. Check Bounds against the FILE'S hash layer
                                             let total_hashes = layer_bytes.len() / 32;
 
                                             if relative_end_idx <= total_hashes {
@@ -2583,7 +2560,6 @@ impl TorrentManager {
                                 }
                             }
                         },
-
 
                         TorrentCommand::CancelUpload(peer_id, piece_index, block_offset, block_length) => {
                             self.apply_action(Action::CancelUpload {
@@ -2679,7 +2655,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_manager_event_loop_throughput() {
-        // 1. Setup Channels & Dependencies
+
         let (_incoming_peer_tx, incoming_peer_rx) = mpsc::channel(1000);
         let (manager_command_tx, manager_command_rx) = mpsc::channel(1000);
         let (metrics_tx, _) = broadcast::channel(1000);
@@ -2687,7 +2663,6 @@ mod tests {
         let (shutdown_tx, _) = broadcast::channel(1);
         let settings = Arc::new(Settings::default());
 
-        // 2. Setup Resource Manager (Infinite Resources)
         let mut limits = HashMap::new();
         limits.insert(
             crate::resource_manager::ResourceType::PeerConnection,
@@ -2707,11 +2682,9 @@ mod tests {
             ResourceManager::new(limits, shutdown_tx.clone());
         tokio::spawn(resource_manager.run());
 
-        // 3. Setup Buckets (Infinite Speed)
         let dl_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
         let ul_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
 
-        // 4. Handle DHT Dependency (Bind port 0 for test if feature enabled)
         let dht_handle = {
             #[cfg(feature = "dht")]
             {
@@ -2723,7 +2696,6 @@ mod tests {
             }
         };
 
-        // 5. Construct Manager via `from_magnet`
         // We use a dummy magnet link to initialize the state machine correctly.
         let magnet_link = "magnet:?xt=urn:btih:0000000000000000000000000000000000000000";
         let magnet = Magnet::new(magnet_link).unwrap();
@@ -2745,7 +2717,6 @@ mod tests {
         let manager =
             TorrentManager::from_magnet(params, magnet).expect("Failed to create manager");
 
-        // 6. The Firehose Setup
         let block_count = 100_000;
         let dummy_data = vec![0u8; 16384];
         let peer_id = "peer1".to_string();
@@ -2753,7 +2724,6 @@ mod tests {
         // Capture the internal sender so we can inject messages directly
         let tx = manager.torrent_manager_tx.clone();
 
-        // 7. Spawn the Manager (System Under Test)
         let manager_handle = tokio::spawn(async move {
             let start = Instant::now();
             // Run the loop (it will exit when it receives Shutdown command)
@@ -2761,7 +2731,6 @@ mod tests {
             start.elapsed()
         });
 
-        // 8. Blast Data (Background Task)
         tokio::spawn(async move {
             // We simulate 100,000 blocks arriving from the network layer.
             // This tests the "Fan-In" capability of the manager's channel and loop.
@@ -2780,7 +2749,6 @@ mod tests {
             let _ = manager_command_tx.send(ManagerCommand::Shutdown).await;
         });
 
-        // 9. Measure & Assert
         // We expect the manager to process all messages + shutdown.
         // We use a timeout to catch deadlocks.
         let result = tokio::time::timeout(Duration::from_secs(10), manager_handle).await;
@@ -2921,12 +2889,10 @@ mod resource_tests {
 
         let (manager, torrent_tx, manager_cmd_tx, _, _) = setup_test_harness();
 
-        // 1. Spawn Manager
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
         });
 
-        // 2. The Setup
         // We will send a Block (triggering work) and immediately a Shutdown.
         // If the Block processing is synchronous (blocking), the Shutdown will be delayed.
         let piece_index = 0;
@@ -2934,7 +2900,6 @@ mod resource_tests {
 
         let start = Instant::now();
 
-        // 3. Action
         // Send Block (Triggers VerifyPiece -> SHA1)
         torrent_tx
             .send(TorrentCommand::Block(
@@ -2949,14 +2914,12 @@ mod resource_tests {
         // Send Shutdown immediately after
         manager_cmd_tx.send(ManagerCommand::Shutdown).await.unwrap();
 
-        // 4. Measure
         // Wait for manager to exit
         let _ = tokio::time::timeout(Duration::from_secs(1), manager_handle)
             .await
             .unwrap();
         let duration = start.elapsed();
 
-        // 5. Assert
         // Logic:
         // - Channel send is instant.
         // - Loop picks up Block -> dispatches to 'spawn_blocking' -> loops again.
@@ -2979,7 +2942,6 @@ mod resource_tests {
         let (manager, torrent_tx, manager_cmd_tx, _shutdown_tx, resource_manager) =
             setup_test_harness();
 
-        // 1. Throttle Disk Writes
         // We start the resource manager but we DO NOT grant any write permits yet.
         // Effectively, the disk speed is 0 MB/s.
         tokio::spawn(resource_manager.run());
@@ -2987,12 +2949,10 @@ mod resource_tests {
         // Note: Ideally we'd modify limits here to be 0, but our mock RM starts fresh.
         // The current manager implementation spawns tasks that WAIT for permits.
 
-        // 2. Spawn Manager
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
         });
 
-        // 3. Flood Data (100 MB in 16KB blocks)
         let block_count = 6000; // ~100 MB
         let flood_start = Instant::now();
 
@@ -3011,7 +2971,6 @@ mod resource_tests {
             let _ = manager_cmd_tx.send(ManagerCommand::Shutdown).await;
         });
 
-        // 4. Measure Ingestion Speed
         let _ = sender_handle.await;
         let input_duration = flood_start.elapsed();
 
@@ -3023,7 +2982,6 @@ mod resource_tests {
             block_count, input_duration
         );
 
-        // 5. Assert Backpressure
         // If we ingest 100MB instantly (< 200ms) while the "Disk" is stalled,
         // it means we are buffering everything in RAM (spawning thousands of tasks).
         // A robust system would slow down ingestion (backpressure).
@@ -3175,12 +3133,10 @@ mod resource_tests {
                 };
                 buffer.extend_from_slice(&buf[..n]);
 
-                // 1. Process Handshake (Fixed 68 bytes)
                 if !handshake_received && buffer.len() >= 68 {
                     handshake_received = true;
                     println!("[MockPeer] Handshake Validated. Sending Response...");
 
-                    // A. Send Handshake
                     let mut h_resp = vec![0u8; 68];
                     h_resp[0] = 19;
                     h_resp[1..20].copy_from_slice(b"BitTorrent protocol");
@@ -3191,7 +3147,6 @@ mod resource_tests {
                     } // Dummy PeerID
                     tx.send(h_resp).await.unwrap();
 
-                    // B. Send Bitfield (0x80 = Piece 0 available)
                     let bitfield = vec![0x80u8];
                     let mut msg = Vec::new();
                     msg.extend_from_slice(&(1 + bitfield.len() as u32).to_be_bytes());
@@ -3202,7 +3157,6 @@ mod resource_tests {
                     buffer.drain(0..68);
                 }
 
-                // 2. Process Messages
                 while handshake_received && buffer.len() >= 4 {
                     let len = u32::from_be_bytes(buffer[0..4].try_into().unwrap()) as usize;
                     if buffer.len() < 4 + len {
@@ -3513,13 +3467,12 @@ mod resource_tests {
             let mut chunk_timestamps = vec![Instant::now()];
             let mut next_chunk_target = 10;
 
-            // 1. We accumulate the download volume manually
             let mut accumulated_download: u64 = 0;
 
             loop {
                 match timeout(Duration::from_secs(1), metrics_rx.recv()).await {
                     Ok(Ok(m)) => {
-                        // 2. Add the bytes from this tick to our total
+
                         accumulated_download += m.bytes_downloaded_this_tick;
 
                         // Print status occasionally
@@ -3533,7 +3486,6 @@ mod resource_tests {
                             );
                         }
 
-                        // [FIX] Use 'while' instead of 'if' to handle metric skips (e.g. jumping from 80 -> 100)
                         // This prevents timing artifacts where a skipped target is recorded late.
                         while m.number_of_pieces_completed >= next_chunk_target {
                             chunk_timestamps.push(Instant::now());
@@ -3635,10 +3587,8 @@ mod resource_tests {
         // GOAL: Verify that requesting a hash for a file that starts at offset > 0
         // correctly calculates the relative index into that file's piece layer.
 
-        // 1. Setup Environment
         let (mut manager, _, _, _, _) = setup_test_harness();
 
-        // 2. Construct a V2-style Torrent with 2 Files
         // Global Piece 0 -> File A
         // Global Piece 1 -> File B
         let piece_len = 16384;
@@ -3650,7 +3600,6 @@ mod resource_tests {
         let root_b = vec![0xBB; 32];
         let layer_b = vec![0x22; 32]; // Data for File B (Index 0)
 
-        // 3. Manually Inject State
         // Map Global Piece 0 -> Root A
         manager
             .state
@@ -3683,7 +3632,6 @@ mod resource_tests {
 
         manager.state.torrent = Some(torrent);
 
-        // 4. Register a Mock Peer
         let peer_id = "v2_tester".to_string();
         let (peer_tx, mut peer_rx) = mpsc::channel(10);
         manager.apply_action(Action::RegisterPeer {
@@ -3691,13 +3639,11 @@ mod resource_tests {
             tx: peer_tx,
         });
 
-        // 5. Spawn Manager
         let manager_tx = manager.torrent_manager_tx.clone();
         tokio::spawn(async move {
             let _ = manager.run(false).await;
         });
 
-        // 6. ACTION: Request Global Piece 1
         // This is the CRITICAL step. Piece 1 is the 2nd piece globally,
         // but it is the 1st piece (Index 0) of File B.
         let cmd = TorrentCommand::GetHashes {
@@ -3711,7 +3657,6 @@ mod resource_tests {
 
         manager_tx.send(cmd).await.unwrap();
 
-        // 7. ASSERTION
         let response = tokio::time::timeout(Duration::from_secs(1), peer_rx.recv())
             .await
             .expect("Timed out waiting for Hash response")
@@ -3749,7 +3694,6 @@ mod resource_tests {
         // GOAL: Verify that requesting a range extending beyond the file limits
         // results in a HashReject message, preventing buffer overflows or panics.
 
-        // 1. Setup
         let (mut manager, _, _, _, _) = setup_test_harness();
 
         // Single file, 10 pieces long (16KB * 10)
@@ -3790,7 +3734,6 @@ mod resource_tests {
             let _ = manager.run(false).await;
         });
 
-        // 2. ACTION: Request Valid Start (Index 8) but Invalid Length (5)
         // File has 10 pieces (Indices 0-9).
         // Requesting 8..13 (8 + 5) goes past the end (9).
         let cmd = TorrentCommand::GetHashes {
@@ -3804,7 +3747,6 @@ mod resource_tests {
 
         manager_tx.send(cmd).await.unwrap();
 
-        // 3. ASSERTION: Must Receive REJECT
         let response = tokio::time::timeout(Duration::from_secs(1), peer_rx.recv())
             .await
             .expect("Timed out")
@@ -3825,8 +3767,6 @@ mod resource_tests {
     #[tokio::test]
     async fn test_v2_seeding_boundary_edge_cases() {
         // GOAL: Precise boundary testing.
-        // 1. Verify we can fetch the EXACT last hash (Valid).
-        // 2. Verify fetching 1 hash past the end fails (Invalid).
 
         let (mut manager, _, _, _, _) = setup_test_harness();
 
@@ -4005,7 +3945,6 @@ mod resource_tests {
         let num_pieces = 1000;
         let piece_len = 1024;
 
-        // 1. Setup Data & V2 Proofs
         let data_chunk = vec![0xAA; piece_len];
         let leaf_hash = sha2::Sha256::digest(&data_chunk).to_vec();
 
@@ -4015,10 +3954,8 @@ mod resource_tests {
         let root_hash = hasher.finalize().to_vec();
         let proof = leaf_hash;
 
-        // 2. Setup Manager Harness
         let (mut manager, _torrent_tx, cmd_tx, _, _) = setup_scale_test_harness();
 
-        // 3. Create Hybrid Torrent (V1 Data + V2 Flag)
         let v1_piece_hash = sha1::Sha1::digest(&data_chunk).to_vec();
         let mut all_v1_hashes = Vec::new();
         for _ in 0..num_pieces {
@@ -4035,13 +3972,11 @@ mod resource_tests {
         // This ensures InitializeStorage uses the correct temp_dir
         manager.root_download_path = temp_dir.clone();
 
-        // 5. Initialize Manager State
         manager.apply_action(Action::MetadataReceived {
             torrent: Box::new(torrent),
             metadata_length: 12345,
         });
 
-        // 6. Post-Init Fixups
         manager.state.torrent_status = TorrentStatus::Standard;
 
         // Manually inject V2 Roots
@@ -4052,7 +3987,6 @@ mod resource_tests {
                 .insert(i as u32, vec![(0, piece_len as u64, root_hash.clone())]);
         }
 
-        // 7. Register Peer
         let peer_id = "scale_worker".to_string();
         let (p_tx, _) = mpsc::channel(100);
         manager.apply_action(Action::RegisterPeer {
@@ -4060,13 +3994,11 @@ mod resource_tests {
             tx: p_tx,
         });
 
-        // 8. Run Manager
         let tx = manager.torrent_manager_tx.clone();
         let run_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
         });
 
-        // 9. FLOOD LOOP (1000 Pieces)
         let start = Instant::now();
 
         for i in 0..num_pieces {
@@ -4091,7 +4023,6 @@ mod resource_tests {
             .unwrap();
         }
 
-        // 10. WAIT FOR COMPLETION
         let expected_size = (num_pieces * piece_len) as u64;
         let file_path = temp_dir.join("test_torrent");
 
@@ -4264,7 +4195,7 @@ mod resource_tests {
 
     #[tokio::test]
     async fn test_v2_multi_file_alignment_bug() {
-        // --- 1. SETUP ---
+
         let (mut manager, _, _, _, _) = setup_test_harness();
         let piece_len = 1024;
 
@@ -4311,7 +4242,7 @@ mod resource_tests {
 
     #[tokio::test]
     async fn test_v2_multi_file_alignment_bug_regression() {
-        // --- 1. SETUP ---
+
         let (mut manager, _, _, _, _) = setup_test_harness();
         let piece_len = 16384;
 
@@ -4395,14 +4326,12 @@ mod resource_tests {
     async fn test_v2_tail_piece_validation_accuracy() {
         use sha2::{Digest, Sha256};
 
-        // 1. Setup: 20,000 byte file
         // Piece 0: 16,384 bytes (Full)
         // Piece 1: 3,616 bytes (Partial tail)
         let piece_len: u64 = 16384;
         let file_len: u64 = 20000;
         let data = vec![0xEE; file_len as usize];
 
-        // 2. Exact Manual Calculation (Correct BEP 52 Logic)
         // Rule: Tail data is hashed AS-IS. Padding is only applied to tree nodes.
 
         // Piece 0: Full 16KB block
@@ -4420,7 +4349,6 @@ mod resource_tests {
         hasher.update(&hash_1);
         let root_v2 = hasher.finalize().to_vec();
 
-        // 3. Initialize Harness
         let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, rm_client) =
             setup_scale_test_harness();
         let temp_dir = std::env::temp_dir().join("v2_tail_fixed_bep52");
@@ -4429,7 +4357,6 @@ mod resource_tests {
         let file_path = temp_dir.join("v2_tail_file");
         std::fs::write(&file_path, &data).unwrap();
 
-        // 4. Configure V2 Metadata
         let mut torrent = create_dummy_torrent(2);
         torrent.info.name = "v2_tail_file".to_string();
         torrent.info.piece_length = piece_len as i64;
@@ -4470,7 +4397,6 @@ mod resource_tests {
             .piece_to_roots
             .insert(1, vec![(0, file_len, root_v2.clone())]);
 
-        // 5. Run Validation
         let result = TorrentManager::perform_validation(
             manager.multi_file_info.unwrap(),
             torrent,
@@ -4483,7 +4409,6 @@ mod resource_tests {
         .await
         .unwrap();
 
-        // 6. ASSERTIONS
         assert!(result.contains(&0), "Piece 0 failed validation.");
         assert!(
             result.contains(&1),
