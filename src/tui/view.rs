@@ -2275,7 +2275,7 @@ fn draw_welcome_screen(f: &mut Frame) {
     let text = vec![
         Line::from(Span::styled(
             "A BitTorrent Client in your Terminal",
-            Style::default(),
+            Style::default().add_modifier(Modifier::ITALIC),
         )),
         Line::from(""),
         Line::from(Span::styled(
@@ -2285,42 +2285,57 @@ fn draw_welcome_screen(f: &mut Frame) {
         Line::from(""),
         Line::from(vec![
             Span::styled(" 1. ", Style::default().fg(theme::GREEN)),
-            Span::raw("Paste (Ctrl+V) a "),
+            Span::raw("Paste ("),
+            Span::styled("Ctrl+V", Style::default().fg(theme::SKY).bold()),
+            Span::raw(") a "),
             Span::styled("magnet link", Style::default().fg(theme::PEACH)),
-            Span::raw(" or "),
-            Span::styled("`.torrent` file path", Style::default().fg(theme::PEACH)),
-            Span::raw("."),
+            Span::raw(" from your clipboard."),
         ]),
-        Line::from("    A file picker will appear to choose a download location for magnet links."),
-        Line::from(""),
         Line::from(vec![
             Span::styled(" 2. ", Style::default().fg(theme::GREEN)),
-            Span::raw("Use the CLI in another terminal while this TUI is running:"),
+            Span::raw("Press "),
+            Span::styled("[a]", Style::default().fg(theme::MAUVE).bold()),
+            Span::raw(" to open the file picker and select a "),
+            Span::styled("`.torrent`", Style::default().fg(theme::PEACH)),
+            Span::raw(" file."),
         ]),
-        Line::from(Span::styled(
-            "   $ superseedr \"magnet:?xt=urn:btih:...\"",
-            Style::default().fg(theme::SURFACE2),
-        )),
-        Line::from(Span::styled(
-            "   $ superseedr \"/path/to/my.torrent\"",
-            Style::default().fg(theme::SURFACE2),
-        )),
         Line::from(vec![
-            Span::raw("    Note: CLI requires a default download path. Press "),
-            Span::styled("[c]", Style::default().fg(theme::MAUVE)),
-            Span::raw(" to configure."),
+            Span::styled(" 3. ", Style::default().fg(theme::GREEN)),
+            Span::raw("Use the "),
+            Span::styled("CLI", Style::default().fg(theme::SKY).bold()),
+            Span::raw(" from another terminal: "),
+            Span::styled("`superseedr add <path_or_url>`", Style::default().fg(theme::SURFACE2)),
+        ]),
+        Line::from(vec![
+            Span::styled(" 4. ", Style::default().fg(theme::GREEN)),
+            Span::raw("Drop files into your "),
+            Span::styled("Watch Folder", Style::default().fg(theme::SKY).bold()),
+            Span::raw(" to add them automatically."),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" ★ Browser Support: ", Style::default().fg(theme::YELLOW).bold()),
+            Span::raw("To open magnet links directly from your browser,"),
+        ]),
+        Line::from(vec![
+            Span::raw("   natively install superseedr: "),
+            Span::styled("https://github.com/Jagalite/superseedr/releases", Style::default().fg(theme::BLUE).underlined()),
         ]),
         Line::from(""),
         Line::from(""),
         Line::from(vec![
             Span::styled(" [m] ", Style::default().fg(theme::TEAL)),
-            Span::styled("for manual/help", Style::default().fg(theme::SUBTEXT1)),
+            Span::styled("Manual/Help", Style::default().fg(theme::SUBTEXT1)),
             Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-            Span::styled("[Esc] ", Style::default().fg(theme::RED)),
-            Span::styled("to dismiss", Style::default().fg(theme::SUBTEXT1)),
+            Span::styled(" [c] ", Style::default().fg(theme::MAUVE)),
+            Span::styled("Config", Style::default().fg(theme::SUBTEXT1)),
+            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+            Span::styled(" [Esc] ", Style::default().fg(theme::RED)),
+            Span::styled("Dismiss", Style::default().fg(theme::SUBTEXT1)),
         ]),
     ];
 
+    // ... (rest of the centering and rendering logic remains the same)
     let text_height = text.len() as u16;
     let text_width = text.iter().map(|line| line.width()).max().unwrap_or(0) as u16;
     let horizontal_padding: u16 = 4;
@@ -2345,7 +2360,7 @@ fn draw_welcome_screen(f: &mut Frame) {
     let block = Block::default()
         .title(Span::styled(
             " Welcome to superseedr! ",
-            Style::default().fg(theme::MAUVE),
+            Style::default().fg(theme::MAUVE).bold(),
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::SURFACE2));

@@ -971,10 +971,9 @@ impl App {
                             } else {
                                 self.app_state.pending_torrent_path = Some(torrent_file_path);
                                 if let Ok(mut explorer) = FileExplorer::new() {
-                                    let initial_path =
-                                        self.find_most_common_download_path().or_else(|| {
-                                            UserDirs::new().map(|ud| ud.home_dir().to_path_buf())
-                                        });
+                                    let initial_path = UserDirs::new()
+                                        .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
+                                        .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()));
                                     if let Some(common_path) = initial_path {
                                         explorer.set_cwd(common_path).ok();
                                     }
