@@ -204,6 +204,15 @@ pub enum Effect {
         ip: String,
         port: u16,
     },
+    RequestHashes {
+        peer_id: String,
+        file_root: Vec<u8>,
+        piece_index: u32,
+        length: u32,
+        proof_layers: u32,
+        base_layer: u32,
+    },
+
     StartWebSeed {
         url: String,
     },
@@ -1258,8 +1267,25 @@ impl TorrentState {
                                     data: complete_data,
                                 });
                             } else {
-                                self.v2_pending_data
-                                    .insert(piece_index, (block_offset, complete_data));
+                                // Buffer v2 data and ask for proof.
+                                self.v2_pending_data.insert(piece_index, (block_offset, complete_data));
+
+                                let file_root = self.piece_to_roots.get(&piece_index)
+                                    .and_then(|roots| roots.first())
+                                    .map(|(_, _, root)| root.clone());
+
+                                if let Some(root) = file_root {
+                                    effects.push(Effect::RequestHashes {
+                                        peer_id: peer_id.clone(),
+                                        file_root: root,
+                                        piece_index,
+                                        length: 1,
+                                        proof_layers: 0,
+                                        base_layer: 0,
+                                    });
+                                } else {
+                                    debug_assert!(false, "State Logic Error: Buffered piece {} but no V2 root found!", piece_index);
+                                }
                             }
                         } else {
                             // Fallback attempt to V1 if possible
@@ -5212,6 +5238,353 @@ mod tests {
         if !request_found {
             panic!("Setup Failure: No requests generated.");
         }
+    }
+
+    #[test]
+    fn test_v2_triggers_hash_request_when_buffering() {
+        // 1. GIVEN: A pure V2 torrent state
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // Pure V2 (no V1 hashes)
+        torrent.info.piece_length = 16384;
+        
+        // Setup State
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.set_geometry(16384, 16384, HashMap::new(), false);
+        state.torrent_status = TorrentStatus::Standard;
+
+        // Map piece 0 to a file larger than one piece to force buffering
+        // (If file_len <= piece_len, it optimizes and verifies immediately)
+        let root = vec![0xAA; 32];
+        state.piece_to_roots.insert(0, vec![(0, 32768, root.clone())]);
+
+        let peer_id = "v2_seeder".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // 2. WHEN: We receive a block for this piece
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0u8; 16384], // Full piece
+        });
+
+        // 3. THEN: The state should buffer the data AND request hashes
+        
+        // Assert buffering happened
+        assert!(state.v2_pending_data.contains_key(&0), "Data should be buffered pending proof");
+
+        // Assert Effect was emitted
+        let request_sent = effects.iter().any(|e| {
+            matches!(e, Effect::RequestHashes { peer_id: id, piece_index: idx, .. } 
+                     if id == &peer_id && *idx == 0)
+        });
+
+        assert!(request_sent, "State failed to emit RequestHashes effect for buffered V2 data!");
+    }
+
+    #[test]
+    fn test_v2_magnet_scenario_requests_hashes_when_layers_missing() {
+        // 1. SETUP: Create a "Magnet-like" Torrent state
+        let mut state = create_empty_state();
+        let piece_len = 16384;
+        
+        // Construct a Torrent that has Info (Roots) but NO Piece Layers
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // Pure v2
+        torrent.info.piece_length = piece_len as i64;
+        
+        // CRITICAL: Ensure this is None. This simulates "Magnet Metadata Received".
+        // Real .torrent files would populate this, but Magnet links don't give it to us.
+        torrent.piece_layers = None; 
+
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.set_geometry(piece_len as u32, piece_len as u64, HashMap::new(), false);
+        state.torrent_status = TorrentStatus::Standard;
+
+        // 2. SETUP ROOTS: Map piece 0 to a File Root
+        // We use a file larger than piece_len (32KB) to force proof verification logic.
+        let file_root = vec![0xAA; 32];
+        let file_len = 32768; 
+        
+        // In a real app, 'calculate_v2_mapping' populates this from the Info Dict.
+        // Here we inject it manually to simulate that we know the Root.
+        state.piece_to_roots.insert(0, vec![(0, file_len, file_root.clone())]);
+
+        let peer_id = "magnet_peer".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // 3. EXECUTE: Peer sends us Data for Piece 0
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0u8; 16384], // Full piece
+        });
+
+        // 4. VERIFY: The State must Buffer + Request Hashes
+        // It cannot verify because 'piece_layers' is None, so it MUST ask the peer.
+        
+        // Check Buffering
+        assert!(state.v2_pending_data.contains_key(&0), "Data should be buffered because we have no local proof");
+
+        // Check Effect
+        let request_sent = effects.iter().any(|e| {
+            if let Effect::RequestHashes { 
+                peer_id: pid, 
+                file_root: root, 
+                piece_index, 
+                .. 
+            } = e {
+                // Verify we are asking the right peer for the right piece using the right root
+                pid == &peer_id && piece_index == &0 && root == &file_root
+            } else {
+                false
+            }
+        });
+
+        assert!(request_sent, "State failed to emit RequestHashes! It likely tried to verify locally and failed.");
+    }
+
+    #[test]
+    fn test_state_v1_metadata_workflow() {
+        use sha1::{Digest, Sha1};
+
+        // 1. SETUP: Empty State
+        let mut state = create_empty_state();
+        let num_pieces = 100; // Standard V1 swarm
+        let piece_len = 16384;
+        
+        // 2. CONSTRUCT V1 METADATA
+        // V1 puts all hashes into a single byte string inside the Info Dict.
+        let data_chunk = vec![0xAA; piece_len];
+        let piece_hash = Sha1::digest(&data_chunk).to_vec();
+        
+        let mut all_hashes = Vec::new();
+        for _ in 0..num_pieces {
+            all_hashes.extend_from_slice(&piece_hash);
+        }
+
+        let mut torrent = create_dummy_torrent(0);
+        torrent.info.meta_version = None; // V1
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.pieces = all_hashes; // <--- The V1 "Proof" is here immediately
+        torrent.info.length = (num_pieces * piece_len) as i64;
+
+        // 3. ACTION: METADATA RECEIVED
+        state.update(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 5000,
+        });
+
+        // CHECK: Bitfield resized correctly based on 'pieces' string length
+        assert_eq!(state.piece_manager.bitfield.len(), num_pieces);
+        assert_eq!(state.torrent_status, TorrentStatus::Validating);
+
+        // 4. ACTION: VALIDATION COMPLETE
+        state.update(Action::ValidationComplete { completed_pieces: vec![] });
+        assert_eq!(state.torrent_status, TorrentStatus::Standard);
+
+        // 5. EXECUTE DOWNLOAD (V1 Style)
+        let peer_id = "v1_worker".to_string();
+        add_peer(&mut state, &peer_id);
+
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: data_chunk.clone(),
+        });
+
+        // CHECK: V1 Optimization
+        // Unlike V2, we should NOT see 'RequestHashes'. 
+        // We SHOULD see 'VerifyPiece' immediately because we already have the hash.
+        let verify_sent = effects.iter().any(|e| matches!(e, Effect::VerifyPiece { piece_index: 0, .. }));
+        assert!(verify_sent, "V1 failed to trigger immediate verification using info-dict hashes");
+        
+        // Ensure no V2 requests leaked in
+        let v2_request = effects.iter().any(|e| matches!(e, Effect::RequestHashes { .. }));
+        assert!(!v2_request, "V1 torrent incorrectly triggered V2 hash request");
+    }
+
+    #[test]
+    fn test_state_hybrid_metadata_workflow() {
+        use std::collections::HashMap;
+        use serde_bencode::value::Value;
+        use sha1::{Digest, Sha1};
+
+        let mut state = create_empty_state();
+        let num_pieces = 50;
+        let piece_len = 16384;
+        
+        // 1. CONSTRUCT HYBRID TORRENT
+        // It has V1 'pieces' AND V2 'file_tree'
+        let data_chunk = vec![0xBB; piece_len];
+        let v1_hash = Sha1::digest(&data_chunk).to_vec();
+        
+        let mut v1_pieces = Vec::new();
+        for _ in 0..num_pieces {
+            v1_pieces.extend_from_slice(&v1_hash);
+        }
+
+        let mut torrent = create_dummy_torrent(0);
+        torrent.info.meta_version = Some(2); // Hybrid implies v2 support
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.pieces = v1_pieces; // V1 Data
+        
+        // V2 Data (File Tree)
+        let root_hash = vec![0xCC; 32];
+        let total_len = (num_pieces * piece_len) as i64;
+        
+        let mut file_meta = HashMap::new();
+        file_meta.insert("length".as_bytes().to_vec(), Value::Int(total_len));
+        file_meta.insert("pieces root".as_bytes().to_vec(), Value::Bytes(root_hash.clone()));
+        
+        let mut file_node = HashMap::new();
+        file_node.insert("".as_bytes().to_vec(), Value::Dict(file_meta));
+        
+        let mut root_node = HashMap::new();
+        root_node.insert("hybrid_file".as_bytes().to_vec(), Value::Dict(file_node));
+        
+        torrent.info.file_tree = Some(Value::Dict(root_node));
+
+        // 2. ACTION: METADATA RECEIVED
+        state.update(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 9999,
+        });
+        state.update(Action::ValidationComplete { completed_pieces: vec![] });
+
+        // 3. CHECK DUAL INITIALIZATION
+        // V1 Check: Bitfield correct?
+        assert_eq!(state.piece_manager.bitfield.len(), num_pieces);
+        
+        // V2 Check: Roots mapped?
+        assert!(state.piece_to_roots.contains_key(&0), "Hybrid failed to map V2 roots");
+        assert!(state.piece_to_roots.contains_key(&(num_pieces as u32 - 1)), "Hybrid failed to map end piece");
+
+        // 4. EXECUTE DOWNLOAD
+        let peer_id = "hybrid_worker".to_string();
+        add_peer(&mut state, &peer_id);
+
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: data_chunk,
+        });
+
+        // 5. VERIFY HYBRID BEHAVIOR
+        // It should prefer V1 verification (Immediate VerifyPiece) because it's faster
+        // than asking for V2 proofs.
+        let verify_v1 = effects.iter().any(|e| matches!(e, Effect::VerifyPiece { piece_index: 0, .. }));
+        assert!(verify_v1, "Hybrid failed to fallback to V1 verification");
+
+        // It should NOT buffer/request V2 hashes if V1 verification is possible
+        assert!(!state.v2_pending_data.contains_key(&0), "Hybrid inefficiently buffered data despite having V1 hashes");
+    }
+
+    #[test]
+    fn test_state_scale_1000_v2_metadata_workflow() {
+        use std::collections::HashMap;
+        use serde_bencode::value::Value; // Needed to construct the file tree
+
+        // 1. SETUP: Empty State
+        let mut state = create_empty_state();
+        let num_pieces = 1000;
+        let piece_len = 1024;
+        let total_len = (num_pieces as u64) * (piece_len as u64);
+        let root_hash = vec![0xAA; 32];
+
+        // 2. CONSTRUCT METADATA (Simulate Magnet Link Download)
+        // We start with a Torrent that has NO layers and NO pieces, just the File Tree.
+        let mut torrent = create_dummy_torrent(0); 
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // Pure V2
+        torrent.piece_layers = None;      // <--- Crucial: Forces proof requests
+
+        // Construct V2 File Tree: { "big_file": { "": { "length": ..., "pieces root": ... } } }
+        // This is what the State uses to populate 'piece_to_roots' during MetadataReceived
+        let mut file_meta = HashMap::new();
+        file_meta.insert("length".as_bytes().to_vec(), Value::Int(total_len as i64));
+        file_meta.insert("pieces root".as_bytes().to_vec(), Value::Bytes(root_hash.clone()));
+
+        let mut file_node = HashMap::new();
+        file_node.insert("".as_bytes().to_vec(), Value::Dict(file_meta));
+
+        let mut root_node = HashMap::new();
+        root_node.insert("big_file".as_bytes().to_vec(), Value::Dict(file_node));
+
+        torrent.info.file_tree = Some(Value::Dict(root_node));
+
+        // 3. ACTION: METADATA RECEIVED
+        let meta_effects = state.update(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 12345,
+        });
+
+        // CHECK: State successfully mapped the file tree to pieces
+        assert_eq!(state.torrent_status, TorrentStatus::Validating);
+        // The file is 1000 pieces long, so piece 0 and piece 999 must exist in the map
+        assert!(state.piece_to_roots.contains_key(&0), "Failed to map piece 0 from file tree");
+        assert!(state.piece_to_roots.contains_key(&999), "Failed to map piece 999 from file tree");
+        assert_eq!(state.piece_manager.bitfield.len(), 1000, "Incorrect piece count calculated");
+
+        // 4. ACTION: VALIDATION COMPLETE
+        // We must exit the 'Validating' state to accept incoming blocks
+        state.update(Action::ValidationComplete { completed_pieces: vec![] });
+        assert_eq!(state.torrent_status, TorrentStatus::Standard);
+
+        // 5. EXECUTE SCALE LOOP (1000 Blocks)
+        let peer_id = "v2_full_worker".to_string();
+        add_peer(&mut state, &peer_id);
+        
+        let data_chunk = vec![0u8; piece_len as usize];
+        let proof_chunk = vec![0xFF; 32];
+
+        for i in 0..num_pieces {
+            let piece_idx = i as u32;
+
+            // A. Incoming Block
+            let data_effects = state.update(Action::IncomingBlock {
+                peer_id: peer_id.clone(),
+                piece_index: piece_idx,
+                block_offset: 0,
+                data: data_chunk.clone(),
+            });
+
+            // CHECK: Buffer + Request Effect
+            assert!(state.v2_pending_data.contains_key(&piece_idx), "Piece {} not buffered", piece_idx);
+            
+            let request_correct = data_effects.iter().any(|e| {
+                // Ensure the Effect carries the Root Hash derived from our File Tree
+                matches!(e, Effect::RequestHashes { file_root, piece_index, .. } 
+                         if *piece_index == piece_idx && file_root == &root_hash)
+            });
+            assert!(request_correct, "Piece {} failed to emit RequestHashes with correct Root", piece_idx);
+
+            // B. Proof Received
+            let proof_effects = state.update(Action::MerkleProofReceived {
+                peer_id: peer_id.clone(),
+                piece_index: piece_idx,
+                proof: proof_chunk.clone(),
+            });
+
+            // CHECK: Verify Effect + Buffer Clear
+            let verify_triggered = proof_effects.iter().any(|e| {
+                matches!(e, Effect::VerifyPieceV2 { piece_index, .. } if *piece_index == piece_idx)
+            });
+            assert!(verify_triggered, "Piece {} failed to verify after proof", piece_idx);
+            assert!(!state.v2_pending_data.contains_key(&piece_idx), "Buffer leak for piece {}", piece_idx);
+        }
+        
+        // 6. FINAL CLEANUP CHECK
+        assert!(state.v2_pending_data.is_empty());
     }
 }
 

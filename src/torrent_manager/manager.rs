@@ -1211,6 +1211,26 @@ impl TorrentManager {
                     });
                 }
             }
+
+            Effect::RequestHashes { 
+                peer_id, 
+                file_root, 
+                piece_index, 
+                length, 
+                proof_layers, 
+                base_layer 
+            } => {
+                if let Some(peer) = self.state.peers.get(&peer_id) {
+                    let _ = peer.peer_tx.try_send(TorrentCommand::GetHashes {
+                        peer_id: peer_id.clone(),
+                        file_root,
+                        index: piece_index,
+                        length,
+                        proof_layers,
+                        base_layer,
+                    });
+                }
+            }
         }
     }
 
@@ -2667,6 +2687,7 @@ mod tests {
             Err(_) => panic!("Test timed out! Manager loop likely deadlocked processing blocks."),
         }
     }
+
 }
 
 #[cfg(test)]
@@ -4306,4 +4327,5 @@ mod resource_tests {
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
+
 }
