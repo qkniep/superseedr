@@ -236,78 +236,8 @@ impl TorrentManager {
         #[cfg(not(feature = "dht"))]
         let dht_trigger_tx = ();
 
-        let mut piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>)>> = HashMap::new();
-        let mut v2_piece_count: u64 = 0;
-        let piece_len = torrent.info.piece_length as u64;
-
-        if torrent.info.meta_version == Some(2) {
-            let mut v2_roots = torrent.get_v2_roots(); // Returns (path, length, root_hash)
-
-            // Critical: Sort files by path to ensure deterministic mapping across restarts.
-            // Bencoding dictionaries (file tree) are unordered in HashMap, but piece mapping
-            // relies on a stable, sorted order.
-            v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
-
-            event!(
-                Level::INFO,
-                "Init: Found {} V2 files from Merkle Tree.",
-                v2_roots.len()
-            );
-
-            // In V2, pieces are aligned to files. We track the cumulative piece index.
-            let mut current_piece_index = 0;
-
-            for (_path, length, root_hash) in v2_roots {
-                if length > 0 && piece_len > 0 {
-                    // Calculate pieces occupied by this file (including padding at the end)
-                    let file_pieces = length.div_ceil(piece_len);
-
-                    let start_piece = current_piece_index;
-                    let end_piece = current_piece_index + file_pieces;
-
-                    // The file logically starts at this byte offset in the aligned space
-                    let file_start_offset = current_piece_index * piece_len;
-
-                    for p in start_piece..end_piece {
-                        piece_to_roots.entry(p as u32).or_default().push((
-                            file_start_offset,
-                            length,
-                            root_hash.clone(),
-                        ));
-                    }
-
-                    current_piece_index += file_pieces;
-                }
-            }
-            v2_piece_count = current_piece_index;
-        }
-
-        let num_pieces = if !torrent.info.pieces.is_empty() {
-            // V1 / Hybrid: Use the explicit pieces string length
-            torrent.info.pieces.len() / 20
-        } else if v2_piece_count > 0 {
-            // Pure V2: Use the calculated aligned piece count
-            v2_piece_count as usize
-        } else {
-            // Fallback: V1 Single File or legacy calculation
-            let total_len = if !torrent.info.files.is_empty() {
-                torrent.info.files.iter().map(|f| f.length as u64).sum()
-            } else {
-                torrent.info.length as u64
-            };
-
-            if piece_len > 0 {
-                (total_len.div_ceil(piece_len)) as usize
-            } else {
-                0
-            }
-        };
-
-        event!(
-            Level::INFO,
-            "Init: Calculated num_pieces: {}. (V2 Aligned)",
-            num_pieces
-        );
+        let mapping = torrent.calculate_v2_mapping();
+        let num_pieces = torrent.total_piece_count(mapping.piece_count);
 
         let mut piece_manager = PieceManager::new();
         piece_manager.set_initial_fields(num_pieces, torrent_validation_status);
@@ -338,7 +268,7 @@ impl TorrentManager {
         );
 
         // Assign the populated map to state
-        state.piece_to_roots = piece_to_roots;
+        state.piece_to_roots = mapping.piece_to_roots;
 
         Ok(Self {
             state,
@@ -1416,8 +1346,7 @@ impl TorrentManager {
                         completed_pieces.push(global_piece_index);
                     }
 
-                    #[allow(clippy::manual_is_multiple_of)]
-                    if global_piece_index % 10 == 0 {
+                    if global_piece_index.is_multiple_of(10) {
                         let _ = manager_tx
                             .send(TorrentCommand::ValidationProgress(global_piece_index))
                             .await;
@@ -1497,8 +1426,7 @@ impl TorrentManager {
                     completed_pieces.push(piece_index);
                 }
 
-                #[allow(clippy::manual_is_multiple_of)]
-                if piece_index % 10 == 0 {
+                if piece_index.is_multiple_of(10) {
                     let _ = manager_tx
                         .send(TorrentCommand::ValidationProgress(piece_index))
                         .await;

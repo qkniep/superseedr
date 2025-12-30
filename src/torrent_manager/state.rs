@@ -2088,45 +2088,32 @@ impl TorrentState {
     }
 
     fn rebuild_v2_mappings(&mut self) -> (u64, HashMap<u32, u32>) {
-        self.piece_to_roots.clear();
-        let mut v2_piece_count = 0;
         let mut overrides = HashMap::new();
+        let mut v2_piece_count = 0;
 
         if let Some(torrent) = &self.torrent {
+            let mapping = torrent.calculate_v2_mapping();
+            self.piece_to_roots = mapping.piece_to_roots;
+            v2_piece_count = mapping.piece_count as u64;
+
+            // Populate tail piece overrides for V2 alignment
             if torrent.info.meta_version == Some(2) {
+                let piece_len = torrent.info.piece_length as u64;
                 let mut v2_roots = torrent.get_v2_roots();
-                v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
-
-                let piece_length = torrent.info.piece_length as u64;
-                let mut current_piece_index = 0;
-
-                for (_path, length, root_hash) in v2_roots {
-                    if length > 0 && piece_length > 0 {
-                        let file_pieces = length.div_ceil(piece_length);
-
-                        // Calculate Tail Length for this file
-                        let tail_len = length % piece_length;
+                v2_roots.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+                
+                let mut current_idx = 0;
+                for (_, length, _) in v2_roots {
+                    if length > 0 && piece_len > 0 {
+                        let file_pieces = length.div_ceil(piece_len);
+                        let tail_len = length % piece_len;
                         if tail_len > 0 {
-                            // The last piece of this file is shorter than standard
-                            let tail_piece_idx = current_piece_index + file_pieces - 1;
-                            overrides.insert(tail_piece_idx as u32, tail_len as u32);
+                            let tail_idx = current_idx + file_pieces - 1;
+                            overrides.insert(tail_idx as u32, tail_len as u32);
                         }
-
-                        let file_start_offset = current_piece_index * piece_length;
-                        let start_piece = current_piece_index;
-                        let end_piece = current_piece_index + file_pieces;
-
-                        for idx in start_piece..end_piece {
-                            self.piece_to_roots.entry(idx as u32).or_default().push((
-                                file_start_offset,
-                                length,
-                                root_hash.clone(),
-                            ));
-                        }
-                        current_piece_index += file_pieces;
+                        current_idx += file_pieces;
                     }
                 }
-                v2_piece_count = current_piece_index;
             }
         }
         (v2_piece_count, overrides)
