@@ -403,7 +403,7 @@ impl TorrentState {
             ..Default::default()
         };
 
-        // 2. [FIX] Populate V2 Maps Immediately
+        // Populate V2 Maps Immediately
         // This ensures AssignWork has the data it needs to clamp requests from the very start.
         let (v2_piece_count, piece_overrides) = state.rebuild_v2_mappings();
 
@@ -702,7 +702,7 @@ impl TorrentState {
                     return vec![Effect::DoNothing];
                 }
 
-                // [FIX] Prepare size calculation closure with disjoint borrows.
+                // Prepare size calculation closure with disjoint borrows.
                 let torrent_ref = &self.torrent;
                 let roots_ref = &self.piece_to_roots;
 
@@ -1250,9 +1250,7 @@ impl TorrentState {
                                     hashing_context_len,
                                 });
                             } else if let Some(proof) = self.v2_proofs.get(&piece_index) {
-                                // ... [Priority 2] ...
                                 effects.push(Effect::VerifyPieceV2 {
-                                    // ... (same params as your code) ...
                                     peer_id: peer_id.clone(),
                                     piece_index,
                                     proof: proof.clone(),
@@ -1268,8 +1266,6 @@ impl TorrentState {
                                 .as_ref()
                                 .is_some_and(|t| !t.info.pieces.is_empty())
                             {
-                                // [Priority 3]
-                                tracing::info!("⚠️ [State] Piece {} missing V2 Proof/Local Hash. Falling back to V1 verify.", piece_index);
                                 self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                                 effects.push(Effect::VerifyPiece {
                                     peer_id: peer_id.clone(),
@@ -1277,14 +1273,10 @@ impl TorrentState {
                                     data: complete_data,
                                 });
                             } else {
-                                // [Priority 4]
-                                tracing::warn!("⏸️ [State] Piece {} Buffered (Pure V2, Waiting for Proof). Data len: {}", piece_index, complete_data.len());
                                 self.v2_pending_data
                                     .insert(piece_index, (block_offset, complete_data));
                             }
                         } else {
-                            tracing::error!("❌ [State] CRITICAL: Piece {} has V2 roots, but OFFSET MATCH FAILED. Global Offset: {}", piece_index, global_offset);
-
                             // Fallback attempt to V1 if possible
                             self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                             effects.push(Effect::VerifyPiece {
@@ -1294,10 +1286,6 @@ impl TorrentState {
                             });
                         }
                     } else {
-                        tracing::info!(
-                            "📉 [State] Piece {} has NO V2 roots. Standard V1 Verify.",
-                            piece_index
-                        );
                         self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                         effects.push(Effect::VerifyPiece {
                             peer_id: peer_id.clone(),
@@ -1354,14 +1342,13 @@ impl TorrentState {
                             self.calculate_v2_verify_params(piece_index, data.len());
 
                         if let Some((file_start, file_len, root)) = matching_root_info {
-                            // [FIX] PRIORITY 1: Prefer Local Metadata (Leaf Hash)
                             // If we have the specific leaf hash in 'piece layers', use it.
                             let target_hash = if let Some(local_leaf) =
                                 self.get_local_v2_hash(piece_index, root, *file_start, *file_len)
                             {
                                 local_leaf
                             } else {
-                                // PRIORITY 2: Fallback to File Root (requires valid proof)
+                                // Fallback to File Root (requires valid proof)
                                 root.clone()
                             };
 
@@ -1441,7 +1428,7 @@ impl TorrentState {
 
                 let mut effects = Vec::new();
 
-                // [FIX/DEBUG] Allow idempotency. If it's already done, just clean up the peer.
+                // Allow idempotency. If it's already done, just clean up the peer.
                 if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done)
                 {
                     if let Some(peer) = self.peers.get_mut(&peer_id) {
@@ -1464,7 +1451,6 @@ impl TorrentState {
                     peer_id: peer_id.clone(),
                 }));
 
-                // ... (rest of the existing cancellation logic) ...
                 for other_peer in peers_to_cancel {
                     if other_peer != peer_id {
                         if let Some(peer) = self.peers.get_mut(&other_peer) {

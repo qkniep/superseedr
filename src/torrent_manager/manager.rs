@@ -200,15 +200,15 @@ impl TorrentManager {
             );
         }
 
-        // --- Info Hash Calculation ---
+        // Calculate Info Hash
         let info_hash = if torrent.info.meta_version == Some(2) {
             if !torrent.info.pieces.is_empty() {
-                tracing::info!("Init: Hybrid Torrent detected (V1 compatible). Using SHA-1.");
+                // Hybrid Torrent (V1 compatible). Using SHA-1.
                 let mut hasher = sha1::Sha1::new();
                 hasher.update(&torrent.info_dict_bencode);
                 hasher.finalize().to_vec()
             } else {
-                tracing::info!("Init: Pure V2 Torrent detected. Using SHA-256 (Truncated).");
+                // Pure V2 Torrent. Using SHA-256 (Truncated).
                 let mut hasher = sha2::Sha256::new();
                 hasher.update(&torrent.info_dict_bencode);
                 hasher.finalize()[0..20].to_vec()
@@ -238,7 +238,6 @@ impl TorrentManager {
         #[cfg(not(feature = "dht"))]
         let dht_trigger_tx = ();
 
-        // --- 1. PRE-CALCULATE V2 ROOTS & TOTAL PIECES ---
         let mut piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>)>> = HashMap::new();
         let mut v2_piece_count: u64 = 0;
         let piece_len = torrent.info.piece_length as u64;
@@ -260,7 +259,7 @@ impl TorrentManager {
             // In V2, pieces are aligned to files. We track the cumulative piece index.
             let mut current_piece_index = 0;
 
-            for (path, length, root_hash) in v2_roots {
+            for (_path, length, root_hash) in v2_roots {
                 if length > 0 && piece_len > 0 {
                     // Calculate pieces occupied by this file (including padding at the end)
                     let file_pieces = length.div_ceil(piece_len);
@@ -279,21 +278,12 @@ impl TorrentManager {
                         ));
                     }
 
-                    tracing::debug!(
-                        "Mapped '{}' (len {}) to pieces {}..{} (Aligned)",
-                        path,
-                        length,
-                        start_piece,
-                        end_piece
-                    );
-
                     current_piece_index += file_pieces;
                 }
             }
             v2_piece_count = current_piece_index;
         }
 
-        // --- 2. Calculate Piece Count ---
         let num_pieces = if !torrent.info.pieces.is_empty() {
             // V1 / Hybrid: Use the explicit pieces string length
             torrent.info.pieces.len() / 20
@@ -320,7 +310,6 @@ impl TorrentManager {
             "Init: Calculated num_pieces: {}. (V2 Aligned)",
             num_pieces
         );
-        tracing::info!("🔥 Calculated Info Hash: {}", hex::encode(&info_hash));
 
         let mut piece_manager = PieceManager::new();
         piece_manager.set_initial_fields(num_pieces, torrent_validation_status);
@@ -669,17 +658,6 @@ impl TorrentManager {
                     let verification_task = tokio::task::spawn_blocking(move || {
                         if let Some(expected) = expected_hash {
                             let hash = sha1::Sha1::digest(&data);
-
-                            let hash_hex = hex::encode(hash);
-                            let expected_hex = hex::encode(&expected);
-                            tracing::info!(
-                                "🔍 V1 Verify Piece {}: Len={} | Calc={} | Expect={}",
-                                piece_index,
-                                data.len(),
-                                hash_hex,
-                                expected_hex
-                            );
-
                             if hash.as_slice() == expected.as_slice() {
                                 return Ok(data);
                             }
@@ -731,9 +709,7 @@ impl TorrentManager {
                 let peer_id_for_msg = peer_id.clone();
                 let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-                // LOGIC IS NOW SIMPLIFIED - No lookups, just execution
                 tokio::spawn(async move {
-                    // 1. Sanitize Buffer
                     if valid_length < data.len() {
                         data[valid_length..].fill(0);
                     }
@@ -775,7 +751,6 @@ impl TorrentManager {
                 piece_index,
                 data,
             } => {
-                // ... (existing lookup code) ...
                 let multi_file_info = match self.multi_file_info.as_ref() {
                     Some(m) => m.clone(),
                     None => {
@@ -791,14 +766,6 @@ impl TorrentManager {
                     }
                 };
                 let global_offset = piece_index as u64 * piece_length;
-
-                if piece_index == 132 || piece_index == 133 {
-                    tracing::error!(
-                        "💿 [Manager] Dispatching Write for Piece {}. Calculated Global Offset: {}",
-                        piece_index,
-                        global_offset
-                    );
-                }
 
                 let tx = self.torrent_manager_tx.clone();
                 let event_tx = self.manager_event_tx.clone();
@@ -831,10 +798,6 @@ impl TorrentManager {
 
                     match write_result {
                         Ok(Ok(_)) => {
-                            tracing::info!(
-                                "💿 [Task] Piece {} write SUCCESS. Sending confirmation.",
-                                piece_index
-                            );
                             let _ = tx
                                 .send(TorrentCommand::PieceWrittenToDisk {
                                     peer_id: peer_id_clone,
@@ -842,17 +805,16 @@ impl TorrentManager {
                                 })
                                 .await;
                         }
-                        Ok(Err(e)) => {
-                            tracing::error!("💿 [Task] Piece {} write FAILED: {}", piece_index, e);
+                        Ok(Err(_)) => {
                             let _ = tx
                                 .send(TorrentCommand::PieceWriteFailed { piece_index })
                                 .await;
                         }
                         Err(_) => {
-                            tracing::error!(
-                                "💿 [Task] Piece {} write TIMED OUT (Possible Deadlock/Starvation)",
-                                piece_index
-                            );
+                            // Timeout handling
+                            let _ = tx
+                                .send(TorrentCommand::PieceWriteFailed { piece_index })
+                                .await;
                         }
                     }
                 });
@@ -1433,7 +1395,6 @@ impl TorrentManager {
                         };
 
                         if let Some(want) = expected {
-                            // --- REFACTORED: Use shared merkle verification ---
                             let is_valid = tokio::task::spawn_blocking(move || {
                                 // We treat this as a "Proof-less" verification.
                                 // The 'want' hash is the expected root for this chunk.
@@ -1448,7 +1409,6 @@ impl TorrentManager {
                             })
                             .await
                             .unwrap_or(false);
-                            // --------------------------------------------------
 
                             if is_valid {
                                 completed_pieces.push(global_piece_index);
