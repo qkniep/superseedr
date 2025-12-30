@@ -1219,9 +1219,9 @@ impl TorrentState {
                             self.calculate_v2_verify_params(piece_index, complete_data.len());
 
                         if let Some((file_start, file_len, root)) = matching_root_info {
-                            if let Some(target_hash) =
-                                self.get_local_v2_hash(piece_index, root, *file_start, *file_len)
-                            {
+                            if let Some(target_hash) = self.torrent.as_ref().and_then(|t| 
+                                t.get_v2_hash_layer(piece_index, *file_start, *file_len, 1, root)
+                            ) {
                                 self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                                 effects.push(Effect::VerifyPieceV2 {
                                     peer_id: peer_id.clone(),
@@ -1326,15 +1326,9 @@ impl TorrentState {
                             self.calculate_v2_verify_params(piece_index, data.len());
 
                         if let Some((file_start, file_len, root)) = matching_root_info {
-                            // If we have the specific leaf hash in 'piece layers', use it.
-                            let target_hash = if let Some(local_leaf) =
-                                self.get_local_v2_hash(piece_index, root, *file_start, *file_len)
-                            {
-                                local_leaf
-                            } else {
-                                // Fallback to File Root (requires valid proof)
-                                root.clone()
-                            };
+                            let target_hash = self.torrent.as_ref()
+                                .and_then(|t| t.get_v2_hash_layer(piece_index, *file_start, *file_len, 1, root))
+                                .unwrap_or_else(|| root.clone());
 
                             return vec![Effect::VerifyPieceV2 {
                                 peer_id,
@@ -2052,39 +2046,6 @@ impl TorrentState {
 
             Action::FatalError => self.update(Action::Pause),
         }
-    }
-
-    fn get_local_v2_hash(
-        &self,
-        global_piece_index: u32,
-        root: &[u8],
-        file_start_offset: u64,
-        file_len: u64,
-    ) -> Option<Vec<u8>> {
-        let torrent = self.torrent.as_ref()?;
-        let piece_len = torrent.info.piece_length as u64;
-        if piece_len == 0 {
-            return None;
-        }
-
-        if file_len <= piece_len {
-            return Some(root.to_vec());
-        }
-
-        if let Some(layer_bytes) = torrent.get_layer_hashes(root) {
-            let global_bytes = global_piece_index as u64 * piece_len;
-            if global_bytes >= file_start_offset {
-                let relative_index = ((global_bytes - file_start_offset) / piece_len) as usize;
-                let start = relative_index * 32;
-                let end = start + 32;
-
-                if end <= layer_bytes.len() {
-                    return Some(layer_bytes[start..end].to_vec());
-                }
-            }
-        }
-
-        None
     }
 
     fn rebuild_v2_mappings(&mut self) -> (u64, HashMap<u32, u32>) {

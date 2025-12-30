@@ -1679,6 +1679,8 @@ mod tests {
         tokio::spawn(async move {
             let mut am_choking = true;
             let dummy_data = vec![0xAA; 16384];
+            // Capture start time to coordinate the "Ramp Up"
+            let start_time = std::time::Instant::now();
 
             while let Ok(Ok(msg)) =
                 timeout(Duration::from_secs(30), parse_message(&mut peer_read)).await
@@ -1708,7 +1710,14 @@ mod tests {
                     Message::Request(i, b, _) => {
                         // If we are currently choked, we ignore requests (simulate real peer)
                         if !am_choking {
-                            // Fast response to encourage window growth
+                            // --- FIX: RAMP UP SIMULATION ---
+                            // For the first 2 seconds, be slow. Then go full speed.
+                            // This ensures the Session sees an INCREASING speed curve (Speed T2 > Speed T1),
+                            // which is the mandatory trigger for window growth logic.
+                            if start_time.elapsed() < Duration::from_secs(2) {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            
                             let piece =
                                 generate_message(Message::Piece(i, b, dummy_data.clone())).unwrap();
                             let _ = peer_write.write_all(&piece).await;
@@ -1732,7 +1741,7 @@ mod tests {
         let mut inflight = 0;
         let start = Instant::now();
 
-        // Pump blocks for 4 seconds to trigger growth
+        // Pump blocks for 8 seconds (covers the 2s slow phase + 6s fast phase)
         while start.elapsed() < Duration::from_secs(8) {
             while inflight < 100 {
                 let _ = client_cmd_tx
@@ -1769,7 +1778,6 @@ mod tests {
         should_choke.store(true, Ordering::Relaxed);
 
         // Wait for the Choke event to propagate
-        // We look for the Manager to receive the 'Choke' command from the session
         loop {
             match timeout(Duration::from_secs(1), manager_event_rx.recv()).await {
                 Ok(Some(TorrentCommand::Choke(_))) => break,
@@ -1797,4 +1805,5 @@ mod tests {
 
         println!("Received Unchoke, test passed.");
     }
+
 }

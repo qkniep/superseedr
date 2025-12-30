@@ -2424,67 +2424,28 @@ impl TorrentManager {
                         },
                         TorrentCommand::RequestUpload(peer_id, piece_index, block_offset, block_length) => self.apply_action(Action::RequestUpload { peer_id, piece_index, block_offset, length: block_length }),
 
-                        TorrentCommand::GetHashes {
-                            peer_id,
-                            file_root: _,
-                            base_layer,
-                            index,
-                            length,
-                            proof_layers: _,
-                        } => {
-                            let mut rejected = true;
-
-                            if let Some(torrent) = &self.state.torrent {
-
-                                if let Some(roots) = self.state.piece_to_roots.get(&index) {
-                                    // A piece might map to multiple files (boundary piece).
-                                    // We iterate to find the one that actually contains the data we want to serve.
-                                    // (Simplification: We take the first match that has valid bounds).
-
-                                    for (file_start_byte_offset, _len, resolved_root) in roots {
-                                        if let Some(layer_bytes) = torrent.get_layer_hashes(resolved_root) {
-
-                                            let piece_len = torrent.info.piece_length as u64;
-                                            let file_start_piece = (*file_start_byte_offset as u32) / (piece_len as u32);
-
-                                            // e.g. Requesting Piece 105. File starts at 100. Relative index is 5.
-                                            if index < file_start_piece { continue; }
-                                            let relative_start_idx = (index - file_start_piece) as usize;
-                                            let relative_end_idx = relative_start_idx + length as usize;
-
-                                            let total_hashes = layer_bytes.len() / 32;
-
-                                            if relative_end_idx <= total_hashes {
-                                                let start_byte = relative_start_idx * 32;
-                                                let end_byte = relative_end_idx * 32;
-                                                let proof_data = layer_bytes[start_byte..end_byte].to_vec();
-
-                                                if let Some(peer) = self.state.peers.get(&peer_id) {
-                                                    let _ = peer.peer_tx.try_send(TorrentCommand::SendHashPiece {
-                                                        peer_id: peer_id.clone(),
-                                                        root: resolved_root.clone(),
-                                                        base_layer,
-                                                        index, // Protocol expects Global Index to correlate response
-                                                        proof: proof_data,
-                                                    });
-                                                    rejected = false;
-                                                    break; // Found the file and sent data
-                                                }
-                                            }
+                        TorrentCommand::GetHashes { peer_id, index, length, base_layer, .. } => {
+                            let mut sent = false;
+                            if let (Some(torrent), Some(roots)) = (&self.state.torrent, self.state.piece_to_roots.get(&index)) {
+                                for (file_offset, file_len, root) in roots {
+                                    if let Some(proof_data) = torrent.get_v2_hash_layer(index, *file_offset, *file_len, length, root) {
+                                        if let Some(peer) = self.state.peers.get(&peer_id) {
+                                            let _ = peer.peer_tx.try_send(TorrentCommand::SendHashPiece {
+                                                peer_id: peer_id.clone(),
+                                                root: root.clone(),
+                                                base_layer,
+                                                index, 
+                                                proof: proof_data,
+                                            });
+                                            sent = true;
+                                            break; 
                                         }
                                     }
                                 }
                             }
-
-                            if rejected {
+                            if !sent {
                                 if let Some(peer) = self.state.peers.get(&peer_id) {
-                                    let _ = peer.peer_tx.try_send(TorrentCommand::SendHashReject {
-                                        peer_id,
-                                        root: vec![],
-                                        base_layer,
-                                        index,
-                                        length,
-                                    });
+                                    let _ = peer.peer_tx.try_send(TorrentCommand::SendHashReject { peer_id, root: vec![], base_layer, index, length });
                                 }
                             }
                         },

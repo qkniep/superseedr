@@ -9,7 +9,6 @@ use serde_bencode::value::Value;
 
 use std::collections::HashMap;
 
-
 pub struct V2Mapping {
     /// Maps global piece indices to a list of file roots/offsets
     pub piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>)>>,
@@ -17,7 +16,7 @@ pub struct V2Mapping {
     pub piece_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Torrent {
     // This field is special and not directly in the bencode source.
     // We will populate it manually after deserialization.
@@ -54,8 +53,6 @@ pub struct Torrent {
     pub piece_layers: Option<Value>,
 }
 
-
-
 impl Torrent {
     pub fn get_v2_roots(&self) -> Vec<(String, u64, Vec<u8>)> {
         let mut results = Vec::new();
@@ -81,7 +78,7 @@ impl Torrent {
 
         // V2 pieces are aligned to file boundaries
         if self.info.meta_version == Some(2) && piece_len > 0 {
-            let mut v2_roots = self.get_v2_roots(); 
+            let mut v2_roots = self.get_v2_roots();
 
             // Critical: Sort files by path to ensure deterministic mapping
             v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
@@ -124,8 +121,63 @@ impl Torrent {
             // Fallback: Standard length calculation
             let total_len = self.info.total_length() as u64;
             let pl = self.info.piece_length as u64;
-            if pl > 0 { total_len.div_ceil(pl) as usize } else { 0 }
+            if pl > 0 {
+                total_len.div_ceil(pl) as usize
+            } else {
+                0
+            }
         }
+    }
+
+    pub fn get_v2_hash_layer(
+        &self,
+        piece_index: u32,
+        file_start_offset: u64,
+        file_length: u64,
+        requested_length: u32,
+        resolved_root: &[u8],
+    ) -> Option<Vec<u8>> {
+        let piece_len = self.info.piece_length as u64;
+        if piece_len == 0 {
+            return None;
+        }
+
+        // Calculate where the file starts in piece-space and the request's relative bounds
+        let file_start_piece = (file_start_offset as u32) / (piece_len as u32);
+        if piece_index < file_start_piece {
+            return None;
+        }
+
+        let relative_start_idx = (piece_index - file_start_piece) as usize;
+        let relative_end_idx = relative_start_idx + requested_length as usize;
+
+        // 1. Try to retrieve explicit layers first.
+        // This handles Multi-piece files AND test mocks that inject layers for single files.
+        if let Some(layer_bytes) = self.get_layer_hashes(resolved_root) {
+            let total_hashes_in_layer = layer_bytes.len() / 32;
+
+            if relative_end_idx <= total_hashes_in_layer {
+                let start_byte = relative_start_idx * 32;
+                let end_byte = relative_end_idx * 32;
+                return Some(layer_bytes[start_byte..end_byte].to_vec());
+            } else {
+                // The requested range exceeds what is available in the layer.
+                return None;
+            }
+        }
+
+        // 2. Fallback: BEP 52 Optimization for Single Piece Files.
+        // "Note that for files that fit in one piece, the 'pieces root' is the digest of the file."
+        // We only use this if no explicit layer was found.
+        if file_length <= piece_len {
+            // A single piece file has exactly 1 hash (index 0).
+            // We must verify the request matches this limit.
+            if relative_start_idx == 0 && requested_length == 1 {
+                return Some(resolved_root.to_vec());
+            }
+        }
+
+        None
     }
 }
 
@@ -166,7 +218,7 @@ fn traverse_file_tree(
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Info {
     #[serde(rename = "piece length")]
     pub piece_length: i64,
@@ -218,7 +270,7 @@ impl Info {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct InfoFile {
     pub length: i64,
 
@@ -305,41 +357,67 @@ mod tests {
         let mut meta = HashMap::new();
         meta.insert("length".as_bytes().to_vec(), Value::Int(length));
         meta.insert("pieces root".as_bytes().to_vec(), Value::Bytes(root));
-        
+
         let mut leaf = HashMap::new();
         leaf.insert(vec![], Value::Dict(meta));
         Value::Dict(leaf)
     }
 
+    // Helper to create a multi-file V2 torrent with layers for testing
+    fn create_test_torrent_with_layers() -> Torrent {
+        let mut torrent = Torrent {
+            info: create_test_info(Some(2)),
+            ..Torrent::default()
+        };
+        torrent.info.piece_length = 16384;
+
+        let root_a = vec![0xAA; 32];
+        let root_b = vec![0xBB; 32];
+
+        // Setup File Tree: a.txt (16KB), b.txt (16KB)
+        let mut tree = HashMap::new();
+        tree.insert(
+            "a.txt".as_bytes().to_vec(),
+            build_v2_file_node(16384, root_a.clone()),
+        );
+        tree.insert(
+            "b.txt".as_bytes().to_vec(),
+            build_v2_file_node(16384, root_b.clone()),
+        );
+        torrent.info.file_tree = Some(Value::Dict(tree));
+
+        // Setup Piece Layers: Each root gets a mock 32-byte layer hash
+        let mut layers = HashMap::new();
+        layers.insert(root_a, Value::Bytes(vec![0x11; 32]));
+        layers.insert(root_b, Value::Bytes(vec![0x22; 32]));
+        torrent.piece_layers = Some(Value::Dict(layers));
+
+        torrent
+    }
+
     #[test]
     fn test_v2_piece_count_calculation() {
-        // Setup: 2 files, each 1000 bytes. Piece length 16384.
-        // In V2, files are aligned to piece boundaries, so this should be 2 pieces.
         let mut torrent = Torrent {
-            info_dict_bencode: vec![],
             info: create_test_info(Some(2)),
-            announce: None,
-            announce_list: None,
-            url_list: None,
-            creation_date: None,
-            comment: None,
-            created_by: None,
-            encoding: None,
-            piece_layers: None,
+            ..Torrent::default()
         };
 
         let mut tree = HashMap::new();
-        tree.insert("a.txt".as_bytes().to_vec(), build_v2_file_node(1000, vec![0xAA; 32]));
-        tree.insert("b.txt".as_bytes().to_vec(), build_v2_file_node(1000, vec![0xBB; 32]));
+        tree.insert(
+            "a.txt".as_bytes().to_vec(),
+            build_v2_file_node(1000, vec![0xAA; 32]),
+        );
+        tree.insert(
+            "b.txt".as_bytes().to_vec(),
+            build_v2_file_node(1000, vec![0xBB; 32]),
+        );
         torrent.info.file_tree = Some(Value::Dict(tree));
 
         let mapping = torrent.calculate_v2_mapping();
-        
-        // Assertions
+
         assert_eq!(mapping.piece_count, 2);
         assert_eq!(torrent.total_piece_count(mapping.piece_count), 2);
-        
-        // Verify Piece 0 belongs to File A and Piece 1 to File B
+
         let roots_0 = mapping.piece_to_roots.get(&0).unwrap();
         let roots_1 = mapping.piece_to_roots.get(&1).unwrap();
         assert_eq!(roots_0[0].2, vec![0xAA; 32]);
@@ -348,94 +426,139 @@ mod tests {
 
     #[test]
     fn test_hybrid_piece_count_prioritizes_v1_string() {
-        // Setup: Hybrid torrent with a V1 pieces string (length for 10 pieces)
-        // and a V2 mapping that suggests 5 pieces.
         let mut torrent = Torrent {
-            info_dict_bencode: vec![],
             info: create_test_info(Some(2)),
-            announce: None,
-            announce_list: None,
-            url_list: None,
-            creation_date: None,
-            comment: None,
-            created_by: None,
-            encoding: None,
-            piece_layers: None,
+            ..Torrent::default()
         };
-        
-        // V1 pieces string: 20 bytes * 10 pieces
+
         torrent.info.pieces = vec![0u8; 200];
-        
-        // V2 mapping says 5 pieces
         let v2_count = 5;
-        
-        // The result MUST be 10 because the swarm uses V1 piece indices in Hybrid mode.
         assert_eq!(torrent.total_piece_count(v2_count), 10);
     }
 
     #[test]
     fn test_deterministic_v2_sorting() {
-        // Setup: Add files in a specific order. The sorting should ensure they are
-        // mapped to pieces alphabetically regardless of insertion order.
         let mut torrent = Torrent {
-            info_dict_bencode: vec![],
             info: create_test_info(Some(2)),
-            announce: None,
-            announce_list: None,
-            url_list: None,
-            creation_date: None,
-            comment: None,
-            created_by: None,
-            encoding: None,
-            piece_layers: None,
+            ..Torrent::default()
         };
 
         let mut tree = HashMap::new();
-        // Insert 'z.txt' then 'a.txt'. 
-        // Use 0x5A (ASCII 'Z') instead of the invalid 0xZZ.
-        tree.insert("z.txt".as_bytes().to_vec(), build_v2_file_node(1000, vec![0x5A; 32]));
-        tree.insert("a.txt".as_bytes().to_vec(), build_v2_file_node(1000, vec![0xAA; 32]));
+        // Use 0x5A (ASCII 'Z') instead of invalid literal
+        tree.insert(
+            "z.txt".as_bytes().to_vec(),
+            build_v2_file_node(1000, vec![0x5A; 32]),
+        );
+        tree.insert(
+            "a.txt".as_bytes().to_vec(),
+            build_v2_file_node(1000, vec![0xAA; 32]),
+        );
         torrent.info.file_tree = Some(Value::Dict(tree));
 
         let mapping = torrent.calculate_v2_mapping();
-        
-        // Piece 0 must be 'a.txt' (0xAA) due to alphabetical sorting
-        let roots_0 = mapping.piece_to_roots.get(&0).expect("Piece 0 mapping missing");
+
+        let roots_0 = mapping.piece_to_roots.get(&0).expect("Piece 0 missing");
         assert_eq!(roots_0[0].2, vec![0xAA; 32]);
-        
-        // Piece 1 must be 'z.txt' (0x5A)
-        let roots_1 = mapping.piece_to_roots.get(&1).expect("Piece 1 mapping missing");
+
+        let roots_1 = mapping.piece_to_roots.get(&1).expect("Piece 1 missing");
         assert_eq!(roots_1[0].2, vec![0x5A; 32]);
     }
 
     #[test]
     fn test_v2_mapping_with_empty_files() {
-        // Setup: V2 file tree with one empty file and one real file.
-        // Empty files do not have piece roots and should not increment piece index.
         let mut torrent = Torrent {
-            info_dict_bencode: vec![],
             info: create_test_info(Some(2)),
-            announce: None,
-            announce_list: None,
-            url_list: None,
-            creation_date: None,
-            comment: None,
-            created_by: None,
-            encoding: None,
-            piece_layers: None,
+            ..Torrent::default()
         };
 
         let mut tree = HashMap::new();
-        // "empty.txt" length 0
-        tree.insert("empty.txt".as_bytes().to_vec(), build_v2_file_node(0, vec![0x00; 32]));
-        // "real.txt" length 1000
-        tree.insert("real.txt".as_bytes().to_vec(), build_v2_file_node(1000, vec![0xAA; 32]));
+        tree.insert(
+            "empty.txt".as_bytes().to_vec(),
+            build_v2_file_node(0, vec![0x00; 32]),
+        );
+        tree.insert(
+            "real.txt".as_bytes().to_vec(),
+            build_v2_file_node(1000, vec![0xAA; 32]),
+        );
         torrent.info.file_tree = Some(Value::Dict(tree));
 
         let mapping = torrent.calculate_v2_mapping();
-        
-        // Only 1 piece should exist (for real.txt)
+
         assert_eq!(mapping.piece_count, 1);
         assert_eq!(mapping.piece_to_roots.get(&0).unwrap()[0].2, vec![0xAA; 32]);
+    }
+
+    #[test]
+    fn test_get_v2_hash_layer_with_offset() {
+        let torrent = create_test_torrent_with_layers();
+        let root_b = vec![0xBB; 32];
+
+        let result = torrent.get_v2_hash_layer(1, 16384, 16384, 1, &root_b);
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().len(), 32);
+
+        let too_long = torrent.get_v2_hash_layer(1, 16384, 16384, 100, &root_b);
+        assert!(too_long.is_none());
+    }
+
+    #[test]
+    fn test_get_v2_hash_layer_bep52_single_piece() {
+        let mut info = create_test_info(Some(2));
+        info.piece_length = 16384;
+
+        let t = Torrent {
+            info,
+            ..Torrent::default()
+        };
+
+        let root_a = vec![0xAA; 32];
+        let result = t.get_v2_hash_layer(0, 0, 500, 1, &root_a);
+        assert_eq!(result.unwrap(), root_a);
+    }
+
+    #[test]
+    fn test_get_v2_hash_layer_bounds_check() {
+        let mut info = create_test_info(Some(2));
+        info.piece_length = 16384;
+        let t = Torrent {
+            info,
+            ..Torrent::default()
+        };
+        let root = vec![0xAA; 32];
+
+        // Requesting 100 hashes from a file that fits in 1 piece (and thus has 1 hash) should fail
+        let result = t.get_v2_hash_layer(0, 0, 500, 100, &root);
+        assert!(
+            result.is_none(),
+            "Should reject request for 100 hashes from single-piece file"
+        );
+    }
+
+    #[test]
+    fn test_get_v2_hash_layer_mock_priority() {
+        let mut info = create_test_info(Some(2));
+        info.piece_length = 16384;
+        let mut t = Torrent {
+            info,
+            ..Torrent::default()
+        };
+
+        let root = vec![0xAA; 32];
+        let layer_data = vec![0xBB; 32]; // Different from root
+
+        // Mock layer injection
+        let mut layer_map = HashMap::new();
+        layer_map.insert(root.clone(), Value::Bytes(layer_data.clone()));
+        t.piece_layers = Some(Value::Dict(layer_map));
+
+        // Request hash for single piece file
+        // If logic is correct, it finds the layer first and returns 0xBB
+        // If regression exists, it hits the "single piece optimization" and returns root (0xAA)
+        let result = t.get_v2_hash_layer(0, 0, 500, 1, &root).unwrap();
+        assert_eq!(
+            result, layer_data,
+            "Should prioritize explicit layers over root fallback"
+        );
     }
 }
