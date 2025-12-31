@@ -2463,49 +2463,31 @@ impl TorrentManager {
                         TorrentCommand::SuccessfullyConnected(peer_id) => self.apply_action(Action::PeerSuccessfullyConnected { peer_id }),
                         TorrentCommand::PeerId(addr, id) => self.apply_action(Action::UpdatePeerId { peer_addr: addr, new_id: id }),
 
-                        TorrentCommand::MerkleHashData { peer_id, root, piece_index, base_layer, length, proof } => {
-                            let actual_count = (proof.len() / 32) as u32;
-                            if length != actual_count {
-                                event!(Level::WARN, "Peer {} sent malformed hash proof: Header says len={}, Payload has len={}", peer_id, length, actual_count);
-                            }
-
-                            let calculated_global_index = if let Some(torrent) = &self.state.torrent {
+                        TorrentCommand::MerkleHashData { peer_id, root, piece_index, proof, .. } => {
+                            if let Some(torrent) = &self.state.torrent {
                                 let piece_len = torrent.info.piece_length as u64;
-                                // Get all V2 roots to find the offset of the matching file
                                 let mut v2_roots = torrent.get_v2_roots(); 
                                 v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
                                 
-                                let mut file_start_bytes = 0;
-                                let mut found = false;
+                                let mut current_file_start = 0;
 
-                                // Sum lengths of all files *preceding* the one matching 'root'
                                 for (_, len, r) in v2_roots {
                                     if r == root {
-                                        found = true;
-                                        break;
+                                        // Find where this file starts in piece units
+                                        let file_start_piece = (current_file_start / piece_len) as u32;
+                                        let global_idx = file_start_piece + piece_index;
+
+                                        self.apply_action(Action::MerkleProofReceived {
+                                            peer_id: peer_id.clone(),
+                                            piece_index: global_idx,
+                                            proof: proof.clone(),
+                                        });
                                     }
-                                    file_start_bytes += len;
+                                    // Multi-file V2 files are always piece-aligned
+                                    current_file_start += len.div_ceil(piece_len) * piece_len;
                                 }
-
-                                if found {
-                                    let start_piece = (file_start_bytes / piece_len) as u32;
-                                    start_piece + piece_index
-                                } else {
-                                    event!(Level::WARN, "Received Merkle Proof for unknown root: {:?}", hex::encode(&root));
-                                    piece_index 
-                                }
-                            } else {
-                                piece_index 
-                            };
-
-                            event!(Level::TRACE, "Verifying V2 Proof: Root={:?} RelOffset={} -> GlobalPiece={}", hex::encode(&root), piece_index, calculated_global_index);
-
-                            self.apply_action(Action::MerkleProofReceived {
-                                peer_id,
-                                piece_index: calculated_global_index,
-                                proof,
-                            });
-                        },
+                            }
+                        }
 
                         #[cfg(feature = "pex")]
                         TorrentCommand::AddPexPeers(_peer_id, new_peers) => {

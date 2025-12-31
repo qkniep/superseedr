@@ -1362,7 +1362,8 @@ impl TorrentState {
                     if let Some(roots) = self.piece_to_roots.get(&piece_index) {
                         let piece_len = self.torrent.as_ref()
                             .map(|t| t.info.piece_length as u64)
-                            .unwrap_or(0);
+                            .unwrap_or(65536);
+                        
                         let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
 
                         let matching_root_info = roots.iter()
@@ -1370,22 +1371,22 @@ impl TorrentState {
                             .max_by_key(|(start, _, _, _)| *start);
 
                         if let Some((file_start, file_len, file_root, _)) = matching_root_info {
-                            let (valid_length, relative_index, hashing_context_len) =
+                            let (valid_length, _, hashing_context_len) =
                                 self.calculate_v2_verify_params(piece_index, data.len());
 
-                            // 1. Resolve the trusted Piece Hash (Base 1) from the .torrent metadata
+                            // 1. Calculate the RELATIVE index for this specific file
+                            let offset_in_file = global_offset.saturating_sub(*file_start);
+                            let actual_relative_index = (offset_in_file / piece_len) as u32;
+
+                            // 2. Resolve the trusted hash using the relative index
                             let local_piece_hash = self.torrent.as_ref().and_then(|t| 
-                                t.get_v2_hash_layer(piece_index, *file_start, *file_len, 1, file_root)
+                                t.get_v2_hash_layer(actual_relative_index, *file_start, *file_len, 1, file_root)
                             );
 
-                            // 2. Logic Selection:
-                            // If the peer sent exactly one 32-byte hash (Layers=0), we treat it as the target.
-                            // Otherwise, we use the File Root as the target and the peer's data as siblings.
+                            // 3. Define variables outside the selection block to fix E0425
                             let (verification_target, verification_proof) = if proof.len() == 32 {
-                                // Target is either our trusted local hash or the peer's claimed hash
                                 (local_piece_hash.unwrap_or_else(|| proof.clone()), Vec::new())
                             } else {
-                                // Target is the File Root; proof contains the siblings
                                 (file_root.clone(), proof)
                             };
 
@@ -1397,7 +1398,7 @@ impl TorrentState {
                                 root_hash: verification_target,
                                 _file_start_offset: *file_start,
                                 valid_length,
-                                relative_index,
+                                relative_index: actual_relative_index, // Pass relative index for tree climbing
                                 hashing_context_len,
                             }];
                         }
