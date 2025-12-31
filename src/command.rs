@@ -52,7 +52,7 @@ pub enum TorrentCommand {
 
     MerkleHashData {
         peer_id: String,
-        file_index: u32,
+        root: Vec<u8>,
         piece_index: u32,
         base_layer: u32,
         length: u32,
@@ -75,6 +75,7 @@ pub enum TorrentCommand {
         length: u32,
         proof_layers: u32,
     },
+
     SendHashPiece {
         peer_id: String,
         root: Vec<u8>,
@@ -82,6 +83,7 @@ pub enum TorrentCommand {
         index: u32,
         proof: Vec<u8>,
     },
+
     SendHashReject {
         peer_id: String,
         root: Vec<u8>,

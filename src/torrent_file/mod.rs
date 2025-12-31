@@ -10,9 +10,7 @@ use serde_bencode::value::Value;
 use std::collections::HashMap;
 
 pub struct V2Mapping {
-    /// Maps global piece indices to a list of file roots/offsets
-    pub piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>)>>,
-    /// Total count of aligned pieces for a Pure V2 torrent
+    pub piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>, u32)>>,
     pub piece_count: usize,
 }
 
@@ -72,18 +70,16 @@ impl Torrent {
     }
 
     pub fn calculate_v2_mapping(&self) -> V2Mapping {
-        let mut piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>)>> = HashMap::new();
+        let mut piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>, u32)>> = HashMap::new();
         let piece_len = self.info.piece_length as u64;
         let mut current_piece_index = 0;
 
-        // V2 pieces are aligned to file boundaries
         if self.info.meta_version == Some(2) && piece_len > 0 {
             let mut v2_roots = self.get_v2_roots();
-
-            // Critical: Sort files by path to ensure deterministic mapping
             v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
 
-            for (_path, length, root_hash) in v2_roots {
+            // Added .enumerate() to capture file_index
+            for (file_index, (_path, length, root_hash)) in v2_roots.into_iter().enumerate() {
                 if length > 0 {
                     let file_pieces = length.div_ceil(piece_len);
                     let file_start_offset = current_piece_index * piece_len;
@@ -96,6 +92,7 @@ impl Torrent {
                             file_start_offset,
                             length,
                             root_hash.clone(),
+                            file_index as u32, // Store file_index
                         ));
                     }
                     current_piece_index += file_pieces;

@@ -163,7 +163,7 @@ impl PeerSession {
         }
     }
 
-    #[instrument(skip(self, stream, current_bitfield))]
+    #[instrument(skip(self, stream, handshake_response, current_bitfield))]
     pub async fn run<S>(
         mut self,
         stream: S,
@@ -373,35 +373,35 @@ impl PeerSession {
                         Message::Handshake(..) => {}
                         Message::ExtendedHandshake(_) => {}
 
-                        Message::HashRequest(root_idx, base, offset, length) => {
+                        Message::HashRequest(root, base, offset, length, proof_layers) => {
                             let _ = self.torrent_manager_tx.try_send(TorrentCommand::GetHashes {
                                 peer_id: self.peer_ip_port.clone(),
-                                file_root: vec![], // Manager resolves this
+                                file_root: root.clone(),
                                 base_layer: base,
-                                index: offset,     // 'offset' is the start index they want
+                                index: offset,
                                 length,
-                                proof_layers: 0,   // Not provided in basic request
+                                proof_layers,
                             });
-                            // We log the root_idx so it's not unused
-                            tracing::trace!("Peer requested hashes for RootID: {}", root_idx);
+                            tracing::trace!("Peer requested hashes for Root: {:?}", hex::encode(&root));
                         }
 
-                        Message::HashPiece(root_idx, base, offset, proof) => {
+                        Message::HashPiece(root, base, offset, proof) => {
                             let _ = self.torrent_manager_tx.try_send(
                                 TorrentCommand::MerkleHashData {
                                     peer_id: self.peer_ip_port.clone(),
-                                    file_index: root_idx,
+                                    root: root.clone(),
                                     piece_index: offset,
                                     base_layer: base,
                                     length: proof.len() as u32 / 32,
                                     proof,
                                 }
                             );
-                            tracing::trace!("Received HashPiece for RootID: {}", root_idx);
+                            tracing::info!("Received HashPiece for Root: {:?}", hex::encode(&root));
                         }
 
-                        Message::HashReject(root_idx, _, offset, _) => {
-                            tracing::debug!("Peer {} rejected hash request for RootID {} @ Offset {}", self.peer_ip_port, root_idx, offset);
+                        Message::HashReject(root, _, offset, _, _proof_layers) => {
+                            tracing::info!("Peer {} rejected hash request for Root {:?} @ Offset {}", 
+                                self.peer_ip_port, hex::encode(&root), offset);
                         }
                     }
                 },
@@ -544,32 +544,48 @@ impl PeerSession {
                 let _ = self.writer_tx.try_send(Message::Have(idx));
             }
             TorrentCommand::SendHashPiece {
-                root: _,
+                root,
                 base_layer,
                 index,
                 proof,
                 ..
             } => {
-                // Protocol expects: HashPiece(u32, u32, u32, Vec<u8>)
-                // We map them to: index, base, offset, proof
                 let _ = self
                     .writer_tx
-                    .try_send(Message::HashPiece(index, base_layer, 0, proof));
+                    .try_send(Message::HashPiece(root, base_layer, index, proof));
             }
 
-            TorrentCommand::SendHashReject {
-                root: _,
+            TorrentCommand::SendHashReject { root, base_layer, index, length, .. } => {
+                let _ = self
+                    .writer_tx
+                    .try_send(Message::HashReject(root, base_layer, index, length, 0));
+            },
+
+            TorrentCommand::GetHashes {
+                file_root,
                 base_layer,
                 index,
                 length,
+                proof_layers,
                 ..
             } => {
-                // Protocol expects: HashReject(u32, u32, u32, u32)
-                let _ = self
-                    .writer_tx
-                    .try_send(Message::HashReject(index, base_layer, 0, length));
+                let _ = self.writer_tx.try_send(Message::HashRequest(
+                    file_root.clone(),
+                    base_layer,
+                    index,
+                    length,
+                    proof_layers 
+                ));
+                
+                tracing::info!(
+                    "Sent HashRequest to {}: Root={:?}, Base={}, Idx={}, Len={}", 
+                    self.peer_ip_port, hex::encode(&file_root), base_layer, index, length
+                );
             }
-            _ => {}
+
+            _ => {
+
+            }
         }
         Ok(true)
     }

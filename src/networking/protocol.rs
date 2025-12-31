@@ -117,10 +117,9 @@ pub enum Message {
     ExtendedHandshake(Option<i64>),
     Extended(u8, Vec<u8>),
 
-    // --- BEP 52 (BitTorrent v2) ---
-    HashRequest(u32, u32, u32, u32),   // index, base, offset, length
-    HashReject(u32, u32, u32, u32),    // index, base, offset, length
-    HashPiece(u32, u32, u32, Vec<u8>), // index, base, offset, proof_data
+    HashRequest(Vec<u8>, u32, u32, u32, u32), // root, base, offset, length, proof_layers
+    HashReject(Vec<u8>, u32, u32, u32, u32),
+    HashPiece(Vec<u8>, u32, u32, Vec<u8>),    // root, base, offset, proof_data
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -382,39 +381,46 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
             Ok(message_bytes)
         }
 
-        Message::HashRequest(index, base, offset, length) => {
+        Message::HashRequest(root, base, offset, length, proof_layers) => {
             let mut buffer = Vec::new();
-            let len = 1 + 4 + 4 + 4 + 4; // ID (1) + 4x u32 (16)
+            // Length: 1 (ID) + 32 (Root) + 16 (4 * u32) = 49 bytes
+            let len = 1 + 32 + 4 + 4 + 4 + 4;
             buffer.extend_from_slice(&(len as u32).to_be_bytes());
             buffer.push(21);
-            buffer.extend_from_slice(&index.to_be_bytes());
+            buffer.extend_from_slice(&root); // Write 32-byte Root
             buffer.extend_from_slice(&base.to_be_bytes());
             buffer.extend_from_slice(&offset.to_be_bytes());
             buffer.extend_from_slice(&length.to_be_bytes());
+            buffer.extend_from_slice(&proof_layers.to_be_bytes());
             Ok(buffer)
         }
-        Message::HashPiece(index, base, offset, data) => {
+
+        Message::HashPiece(root, base, offset, data) => {
             let mut buffer = Vec::new();
-            let len = 1 + 4 + 4 + 4 + data.len();
+            // Length: 1 (ID) + 32 (Root) + 8 (2 * u32) + Data
+            let len = 1 + 32 + 4 + 4 + data.len();
             buffer.extend_from_slice(&(len as u32).to_be_bytes());
             buffer.push(22);
-            buffer.extend_from_slice(&index.to_be_bytes());
+            buffer.extend_from_slice(&root); // Write 32-byte Root
             buffer.extend_from_slice(&base.to_be_bytes());
             buffer.extend_from_slice(&offset.to_be_bytes());
             buffer.extend_from_slice(&data);
             Ok(buffer)
         }
-        Message::HashReject(index, base, offset, length) => {
+        Message::HashReject(root, base, offset, length, proof_layers) => {
             let mut buffer = Vec::new();
-            let len = 1 + 4 + 4 + 4 + 4;
+            // Length: 1 (ID) + 32 (Root) + 16 (4 * u32) = 49 bytes
+            let len = 1 + 32 + 4 + 4 + 4 + 4;
             buffer.extend_from_slice(&(len as u32).to_be_bytes());
             buffer.push(23);
-            buffer.extend_from_slice(&index.to_be_bytes());
+            buffer.extend_from_slice(&root); // Write 32-byte Root
             buffer.extend_from_slice(&base.to_be_bytes());
             buffer.extend_from_slice(&offset.to_be_bytes());
             buffer.extend_from_slice(&length.to_be_bytes());
+            buffer.extend_from_slice(&proof_layers.to_be_bytes());
             Ok(buffer)
         }
+
     }
 }
 
@@ -549,44 +555,61 @@ pub fn parse_message_from_bytes(
             Ok(Message::Extended(extended_id, extended_payload))
         }
         21 => {
-            if payload.len() != 16 {
+            if payload.len() != 48 {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
-                    "Invalid HashRequest length",
+                    format!("Invalid HashRequest length: {}", payload.len()),
                 ));
             }
-            let index = read_be_u32(&payload, 0)?;
-            let base = read_be_u32(&payload, 4)?;
-            let offset = read_be_u32(&payload, 8)?;
-            let length = read_be_u32(&payload, 12)?;
-            Ok(Message::HashRequest(index, base, offset, length))
+            let root = payload[0..32].to_vec(); // Read Root
+            let base = read_be_u32(&payload, 32)?;
+            let offset = read_be_u32(&payload, 36)?;
+            let length = read_be_u32(&payload, 40)?;
+            let proof_layers = read_be_u32(&payload, 44)?;
+            Ok(Message::HashRequest(root, base, offset, length, proof_layers))
         }
         22 => {
-            if payload.len() < 12 {
+            if payload.len() < 40 {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
                     "Invalid HashPiece length",
                 ));
             }
-            let index = read_be_u32(&payload, 0)?;
-            let base = read_be_u32(&payload, 4)?;
-            let offset = read_be_u32(&payload, 8)?;
-            let data = payload[12..].to_vec();
-            Ok(Message::HashPiece(index, base, offset, data))
-        }
+            let root = payload[0..32].to_vec();
+            let base = read_be_u32(&payload, 32)?;
+            let offset = read_be_u32(&payload, 36)?;
+            
+            let mut data = payload[40..].to_vec();
+
+            if !data.is_empty() && data.len() % 32 != 0 {
+                let remainder = data.len() % 32;
+                if remainder == 4 {
+                    // Likely [Count: 4] [Hashes...]
+                    data = data[4..].to_vec();
+                    tracing::debug!("Trimmed 4-byte prefix from HashPiece proof");
+                } else if remainder == 8 {
+                    // Likely [Length: 4] [Count: 4] [Hashes...]
+                    data = data[8..].to_vec();
+                    tracing::debug!("Trimmed 8-byte prefix from HashPiece proof");
+                }
+            }
+
+            Ok(Message::HashPiece(root, base, offset, data))
+        },
         23 => {
-            if payload.len() != 16 {
+            if payload.len() != 48 {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
-                    "Invalid HashReject length",
+                    format!("Invalid HashReject length: {}", payload.len()),
                 ));
             }
-            let index = read_be_u32(&payload, 0)?;
-            let base = read_be_u32(&payload, 4)?;
-            let offset = read_be_u32(&payload, 8)?;
-            let length = read_be_u32(&payload, 12)?;
-            Ok(Message::HashReject(index, base, offset, length))
-        }
+            let root = payload[0..32].to_vec(); 
+            let base = read_be_u32(&payload, 32)?;
+            let offset = read_be_u32(&payload, 36)?;
+            let length = read_be_u32(&payload, 40)?;
+            let proof_layers = read_be_u32(&payload, 44)?; // Read extra field
+            Ok(Message::HashReject(root, base, offset, length, proof_layers))
+        },
         _ => {
             // Unknown ID
             let msg = format!("Unknown message ID: {}", message_id);

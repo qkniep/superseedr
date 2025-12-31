@@ -624,7 +624,7 @@ impl TorrentManager {
                 proof,
                 mut data,
                 root_hash,
-                _file_start_offset: _,
+                _file_start_offset,
                 valid_length,
                 relative_index,
                 hashing_context_len,
@@ -633,18 +633,56 @@ impl TorrentManager {
                 let peer_id_for_msg = peer_id.clone();
                 let mut shutdown_rx = self.shutdown_tx.subscribe();
 
+                tracing::info!(
+                    piece_index, 
+                    peer_id = %peer_id_for_msg,
+                    "SPAWNING V2 Verification. Root={:?}", 
+                    hex::encode(&root_hash)
+                );
+
                 tokio::spawn(async move {
+                    // Handle padding
                     if valid_length < data.len() {
+                        tracing::debug!(piece_index, "Padding data: {} -> {}", valid_length, data.len());
                         data[valid_length..].fill(0);
                     }
 
-                    let verification_task = tokio::task::spawn_blocking(move || {
+                    // The CPU Intensive Task
+                    // Note: 'mut' is required so we can borrow it mutably in the select loop
+                    let mut verification_task = tokio::task::spawn_blocking(move || {
+                        let start = Instant::now();
+                        
+                        // --- DEBUG: HASH DUMP ---
+                        // We calculate the leaf hash manually to see if the data looks valid
+                        // (e.g. is it all zeros? does it match what we expect?)
+                        use sha2::{Digest, Sha256};
+                        let leaf_hash = Sha256::digest(&data).to_vec();
+
+                        tracing::warn!(
+                            piece_index,
+                            "🔍 V2 DEBUG: \n  Root:      {}\n  Leaf(Data): {}\n  Proof:     {}\n  RelIndex:  {}\n  Context:   {}\n  DataLen:   {}",
+                            hex::encode(&root_hash),
+                            hex::encode(&leaf_hash),
+                            hex::encode(&proof),
+                            relative_index,
+                            hashing_context_len,
+                            data.len()
+                        );
+                        // ------------------------
+
                         let is_valid = merkle::verify_merkle_proof(
                             &root_hash,
                             &data,
                             relative_index,
                             &proof,
                             hashing_context_len,
+                        );
+
+                        tracing::info!(
+                            piece_index,
+                            valid = is_valid,
+                            duration = ?start.elapsed(),
+                            "V2 CPU Verification Finished"
                         );
 
                         if is_valid {
@@ -654,11 +692,46 @@ impl TorrentManager {
                         }
                     });
 
-                    let result = tokio::select! {
-                        biased;
-                        _ = shutdown_rx.recv() => return,
-                        res = verification_task => res.unwrap_or(Err(())),
+                    // Loop to handle broadcast lag without aborting the task
+                    let result = loop {
+                        tokio::select! {
+                            biased;
+                            res = shutdown_rx.recv() => {
+                                match res {
+                                    // If legitimate shutdown signal or channel closed -> Abort
+                                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                        tracing::warn!(piece_index, "Verification aborted by shutdown signal");
+                                        return;
+                                    }
+                                    // If Lagged -> Log and continue loop (waiting on verification_task again)
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                        tracing::trace!(piece_index, skipped, "Ignoring broadcast lag, continuing verification...");
+                                        continue; 
+                                    }
+                                }
+                            },
+                            // Use &mut here to borrow the task instead of moving it. 
+                            // This allows the loop to reuse it if the other branch hits 'continue'.
+                            res = &mut verification_task => {
+                                break match res {
+                                    Ok(inner_res) => inner_res,
+                                    Err(join_err) => {
+                                        if join_err.is_panic() {
+                                            tracing::error!(piece_index, "🔥 Verification Task PANICKED!");
+                                        } else {
+                                            tracing::error!(piece_index, "Verification Task Cancelled");
+                                        }
+                                        Err(())
+                                    }
+                                };
+                            }
+                        };
                     };
+
+                    match &result {
+                        Ok(_) => tracing::info!(piece_index, "Sending PieceVerified (Success) -> Manager"),
+                        Err(_) => tracing::warn!(piece_index, "Sending PieceVerified (Failure) -> Manager"),
+                    }
 
                     let _ = tx
                         .send(TorrentCommand::PieceVerified {
@@ -1215,6 +1288,7 @@ impl TorrentManager {
             Effect::RequestHashes { 
                 peer_id, 
                 file_root, 
+                file_index: _,
                 piece_index, 
                 length, 
                 proof_layers, 
@@ -1224,6 +1298,7 @@ impl TorrentManager {
                     let _ = peer.peer_tx.try_send(TorrentCommand::GetHashes {
                         peer_id: peer_id.clone(),
                         file_root,
+                        //file_index,
                         index: piece_index,
                         length,
                         proof_layers,
@@ -2353,43 +2428,46 @@ impl TorrentManager {
                         TorrentCommand::SuccessfullyConnected(peer_id) => self.apply_action(Action::PeerSuccessfullyConnected { peer_id }),
                         TorrentCommand::PeerId(addr, id) => self.apply_action(Action::UpdatePeerId { peer_addr: addr, new_id: id }),
 
-                        TorrentCommand::MerkleHashData { peer_id, file_index, piece_index, base_layer, length, proof } => {
-
+                        TorrentCommand::MerkleHashData { peer_id, root, piece_index, base_layer, length, proof } => {
                             if base_layer != 0 {
                                 event!(Level::WARN, "Peer {} sent hash proof with base_layer={} (expected 0). Ignoring.", peer_id, base_layer);
                                 continue;
                             }
-
-                            // The protocol says 'length' is the count of hashes.
                             let actual_count = (proof.len() / 32) as u32;
                             if length != actual_count {
                                 event!(Level::WARN, "Peer {} sent malformed hash proof: Header says len={}, Payload has len={}", peer_id, length, actual_count);
-                                // We can proceed using the actual proof length, but this is suspicious.
                             }
 
                             let calculated_global_index = if let Some(torrent) = &self.state.torrent {
                                 let piece_len = torrent.info.piece_length as u64;
+                                // Get all V2 roots to find the offset of the matching file
+                                let mut v2_roots = torrent.get_v2_roots(); 
+                                v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
+                                
+                                let mut file_start_bytes = 0;
+                                let mut found = false;
 
-                                // Calculate byte offset where this file starts
-                                let file_start_bytes = if !torrent.info.files.is_empty() {
-                                    // Multi-file: Sum lengths of all preceding files
-                                    torrent.info.files.iter()
-                                        .take(file_index as usize)
-                                        .map(|f| f.length as u64)
-                                        .sum::<u64>()
+                                // Sum lengths of all files *preceding* the one matching 'root'
+                                for (_, len, r) in v2_roots {
+                                    if r == root {
+                                        found = true;
+                                        break;
+                                    }
+                                    file_start_bytes += len;
+                                }
+
+                                if found {
+                                    let start_piece = (file_start_bytes / piece_len) as u32;
+                                    start_piece + piece_index
                                 } else {
-                                    // Single-file: Start is always 0
-                                    0
-                                };
-
-                                // Global Index = (File Start / Piece Len) + Relative Offset
-                                let start_piece = (file_start_bytes / piece_len) as u32;
-                                start_piece + piece_index
+                                    event!(Level::WARN, "Received Merkle Proof for unknown root: {:?}", hex::encode(&root));
+                                    piece_index 
+                                }
                             } else {
-                                piece_index // Fallback (shouldn't happen without metadata)
+                                piece_index 
                             };
 
-                            event!(Level::TRACE, "Verifying V2 Proof: File={} RelOffset={} -> GlobalPiece={}", file_index, piece_index, calculated_global_index);
+                            event!(Level::TRACE, "Verifying V2 Proof: Root={:?} RelOffset={} -> GlobalPiece={}", hex::encode(&root), piece_index, calculated_global_index);
 
                             self.apply_action(Action::MerkleProofReceived {
                                 peer_id,
@@ -2444,10 +2522,18 @@ impl TorrentManager {
                         },
                         TorrentCommand::RequestUpload(peer_id, piece_index, block_offset, block_length) => self.apply_action(Action::RequestUpload { peer_id, piece_index, block_offset, length: block_length }),
 
-                        TorrentCommand::GetHashes { peer_id, index, length, base_layer, .. } => {
+                        TorrentCommand::GetHashes { peer_id, index, length, base_layer, file_root, .. } => {
                             let mut sent = false;
+                            
                             if let (Some(torrent), Some(roots)) = (&self.state.torrent, self.state.piece_to_roots.get(&index)) {
-                                for (file_offset, file_len, root) in roots {
+                                // Iterate roots for this piece index
+                                for (file_offset, file_len, root, _f_idx) in roots {
+                                    
+                                    // MATCH BY ROOT HASH (32 bytes)
+                                    if !file_root.is_empty() && *root != file_root {
+                                        continue;
+                                    }
+
                                     if let Some(proof_data) = torrent.get_v2_hash_layer(index, *file_offset, *file_len, length, root) {
                                         if let Some(peer) = self.state.peers.get(&peer_id) {
                                             let _ = peer.peer_tx.try_send(TorrentCommand::SendHashPiece {
@@ -2465,7 +2551,13 @@ impl TorrentManager {
                             }
                             if !sent {
                                 if let Some(peer) = self.state.peers.get(&peer_id) {
-                                    let _ = peer.peer_tx.try_send(TorrentCommand::SendHashReject { peer_id, root: vec![], base_layer, index, length });
+                                    let _ = peer.peer_tx.try_send(TorrentCommand::SendHashReject { 
+                                        peer_id, 
+                                        root: file_root, 
+                                        base_layer, 
+                                        index, 
+                                        length 
+                                    });
                                 }
                             }
                         },
@@ -3532,12 +3624,12 @@ mod resource_tests {
         manager
             .state
             .piece_to_roots
-            .insert(0, vec![(0, piece_len as u64, root_a.clone())]);
+            .insert(0, vec![(0, piece_len as u64, root_a.clone(), 0)]);
         // Map Global Piece 1 -> Root B (File starts at byte 16384)
         manager
             .state
             .piece_to_roots
-            .insert(1, vec![(16384, piece_len as u64, root_b.clone())]);
+            .insert(1, vec![(16384, piece_len as u64, root_b.clone(), 0)]);
 
         // Inject the piece_layers into the Torrent struct
         let mut torrent = create_dummy_torrent(2);
@@ -3635,7 +3727,7 @@ mod resource_tests {
         manager
             .state
             .piece_to_roots
-            .insert(0, vec![(0, piece_len as u64, root.clone())]);
+            .insert(0, vec![(0, piece_len as u64, root.clone(), 0)]);
 
         let mut torrent = create_dummy_torrent(10);
         torrent.info.piece_length = piece_len as i64;
@@ -3708,7 +3800,7 @@ mod resource_tests {
             manager
                 .state
                 .piece_to_roots
-                .insert(i, vec![(0, piece_len as u64, root.clone())]);
+                .insert(i, vec![(0, piece_len as u64, root.clone(), 0)]);
         }
 
         let mut torrent = create_dummy_torrent(5);
@@ -3912,7 +4004,7 @@ mod resource_tests {
             manager
                 .state
                 .piece_to_roots
-                .insert(i as u32, vec![(0, piece_len as u64, root_hash.clone())]);
+                .insert(i as u32, vec![(0, piece_len as u64, root_hash.clone(), 0)]);
         }
 
         let peer_id = "scale_worker".to_string();
@@ -3941,7 +4033,7 @@ mod resource_tests {
 
             tx.send(TorrentCommand::MerkleHashData {
                 peer_id: peer_id.clone(),
-                file_index: 0,
+                root: root_hash.clone(), // Add this (required by definition)
                 piece_index: i as u32,
                 base_layer: 0,
                 length: 1,
@@ -4020,7 +4112,7 @@ mod resource_tests {
             manager
                 .state
                 .piece_to_roots
-                .insert(i as u32, vec![(0, piece_len as u64, root_hash.clone())]);
+                .insert(i as u32, vec![(0, piece_len as u64, root_hash.clone(), 0)]);
         }
 
         if manager.state.piece_manager.bitfield.is_empty() {
@@ -4061,11 +4153,12 @@ mod resource_tests {
 
             tx.send(TorrentCommand::MerkleHashData {
                 peer_id: peer_id.clone(),
-                file_index: 0,
+                root: root_hash.clone(), // Add this (required by definition)
                 piece_index: i as u32,
                 base_layer: 0,
                 length: 1,
                 proof: proof.clone(),
+                // file_index: 0, // REMOVE THIS LINE
             })
             .await
             .unwrap();
@@ -4319,11 +4412,11 @@ mod resource_tests {
         manager
             .state
             .piece_to_roots
-            .insert(0, vec![(0, file_len, root_v2.clone())]);
+            .insert(0, vec![(0, file_len, root_v2.clone(), 0)]);
         manager
             .state
             .piece_to_roots
-            .insert(1, vec![(0, file_len, root_v2.clone())]);
+            .insert(1, vec![(0, file_len, root_v2.clone(), 0)]);
 
         let result = TorrentManager::perform_validation(
             manager.multi_file_info.unwrap(),
