@@ -640,6 +640,19 @@ impl TorrentManager {
                     hex::encode(&root_hash)
                 );
 
+if piece_index == 0 {
+    let torrent_hash = "b6e9dbecafdaec66b6e2c0c746bfb7d6b1bdbd6763505c40e789ed666ad6ce";
+    tracing::warn!("PIECE 0 COMPARISON:");
+    tracing::warn!("  LOCAL HASH: {}", torrent_hash);
+    tracing::warn!("  PEER PROOF (First 32): {}", hex::encode(&proof[0..32]));
+    
+    if hex::encode(&proof[0..32]) == torrent_hash {
+        tracing::warn!("  MATCH! The proof starts with the correct leaf.");
+    } else {
+        tracing::error!("  MISMATCH! The peer is sending something else.");
+    }
+}
+
                 tokio::spawn(async move {
                     // Handle padding
                     if valid_length < data.len() {
@@ -669,7 +682,42 @@ impl TorrentManager {
                             data.len()
                         );
                         // ------------------------
+                        //
+                        //// --- MANUAL MERKLE LOGGING ---
+                        if data.len() == 32768 {
+                            // 1. Hash the two 16 KiB leaves
+                            let h0 = Sha256::digest(&data[0..16384]);
+                            let h1 = Sha256::digest(&data[16384..32768]);
+                            
+                            // 2. Combine them (Layer 1)
+                            let mut combined = [0u8; 64];
+                            combined[0..32].copy_from_slice(&h0);
+                            combined[32..64].copy_from_slice(&h1);
+                            let base_1_node = Sha256::digest(&combined);
 
+                            tracing::warn!(
+                                "DIAGNOSTIC HASH for Piece {}: {}",
+                                piece_index,
+                                hex::encode(base_1_node)
+                            );
+                            
+                            // Check if this matches the peer's proof (which we know is 3110...)
+                            if hex::encode(base_1_node) == "3110d284c11473725f2c6bb5dd05b1fd9beaae7304f2fb3e257cc18070e760af" {
+                                tracing::warn!("✅ MATCH FOUND! The hierarchical hash matches the torrent metadata.");
+                            }
+                        }
+    // -----------------------------
+
+                        // --- DIAGNOSTIC CHECK --- let expected_hashes = (hashing_context_len as f64).log2().ceil() as usize;
+                        let expected_hashes = (hashing_context_len as f64).log2().ceil() as usize;
+                        if proof.len() < expected_hashes * 32 && hashing_context_len > data.len() {
+                            tracing::error!(
+                                piece_index, 
+                                "PROOF TOO SHORT: Got {} bytes, need {} bytes for context {}", 
+                                proof.len(), expected_hashes * 32, hashing_context_len
+                            );
+                        }
+                        // ------------------------
                         let is_valid = merkle::verify_merkle_proof(
                             &root_hash,
                             &data,
@@ -685,7 +733,7 @@ impl TorrentManager {
                             "V2 CPU Verification Finished"
                         );
 
-                        if is_valid {
+                        i is_valid {
                             Ok(data)
                         } else {
                             Err(())
@@ -2429,10 +2477,6 @@ impl TorrentManager {
                         TorrentCommand::PeerId(addr, id) => self.apply_action(Action::UpdatePeerId { peer_addr: addr, new_id: id }),
 
                         TorrentCommand::MerkleHashData { peer_id, root, piece_index, base_layer, length, proof } => {
-                            if base_layer != 0 {
-                                event!(Level::WARN, "Peer {} sent hash proof with base_layer={} (expected 0). Ignoring.", peer_id, base_layer);
-                                continue;
-                            }
                             let actual_count = (proof.len() / 32) as u32;
                             if length != actual_count {
                                 event!(Level::WARN, "Peer {} sent malformed hash proof: Header says len={}, Payload has len={}", peer_id, length, actual_count);

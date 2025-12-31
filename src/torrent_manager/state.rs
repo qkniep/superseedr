@@ -1275,22 +1275,30 @@ impl TorrentState {
 
                                 let root_info = self.piece_to_roots.get(&piece_index)
                                     .and_then(|roots| roots.first())
-                                    .map(|(_, _, root, file_index)| (root.clone(), *file_index));
+                                    .map(|(f_start, f_len, r, f_idx)| (*f_start, *f_len, r.clone(), *f_idx));
 
-                                if let Some((root, file_index)) = root_info {
-                                    tracing::info!(piece_index, peer_id, "Emitting Effect::RequestHashes");
+                                if let Some((file_start, file_len, root, file_index)) = root_info {
+                                    let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(16384);
+                                    
+                                    // 1. BitTorrent v2 Merkle trees use 16KiB blocks as the base layer 
+                                    let total_blocks_in_file = file_len.div_ceil(16384);
+                                    let proof_layers = (total_blocks_in_file as f64).log2().ceil() as u32;
+
+                                    // 2. Calculate the index of the first 16KiB block in this piece, relative to the file
+                                    let global_piece_offset = piece_index as u64 * piece_len;
+                                    let relative_block_index = (global_piece_offset - file_start) / 16384;
+
+                                    tracing::info!(piece_index, relative_block_index, proof_layers, "Requesting Proof for Block 0 of Piece");
+                                    
                                     effects.push(Effect::RequestHashes {
                                         peer_id: peer_id.clone(),
                                         file_root: root,
-                                        file_index, // <--- Pass the index
-                                        piece_index,
+                                        file_index, 
+                                        piece_index: relative_block_index as u32, // Protocol expects block index, not piece index
                                         length: 1,
-                                        proof_layers: 0,
-                                        base_layer: 0,
+                                        proof_layers, 
+                                        base_layer: 0, // Request from the leaf (16KiB) level for peer compatibility
                                     });
-                                }
-                                else {
-                                    debug_assert!(false, "State Logic Error: Buffered piece {} but no V2 root found!", piece_index);
                                 }
                             }
                         } else {
