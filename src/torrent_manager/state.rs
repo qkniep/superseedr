@@ -1234,31 +1234,33 @@ impl TorrentState {
                             if let Some(target_hash) = self.torrent.as_ref().and_then(|t| 
                                 t.get_v2_hash_layer(piece_index, *file_start, *file_len, 1, root)
                             ) {
-                                self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
+                                // SCENARIO: We have the piece-layer hash locally in .torrent
                                 effects.push(Effect::VerifyPieceV2 {
                                     peer_id: peer_id.clone(),
                                     piece_index,
-                                    proof: Vec::new(),
+                                    proof: Vec::new(),      // No proof needed, we have the target hash
                                     data: complete_data,
-                                    root_hash: target_hash,
+                                    root_hash: target_hash, // Target is the PIECE hash
                                     _file_start_offset: *file_start,
                                     valid_length,
-                                    relative_index,
+                                    relative_index,         // relative_index is ignored by merkle.rs if proof is empty
                                     hashing_context_len,
                                 });
                             } else if let Some(proof) = self.v2_proofs.get(&piece_index) {
+                                // SCENARIO: We got a proof from the peer
                                 effects.push(Effect::VerifyPieceV2 {
                                     peer_id: peer_id.clone(),
                                     piece_index,
                                     proof: proof.clone(),
+                                    root_hash: root.clone(), // Target is the FILE ROOT
                                     data: complete_data,
-                                    root_hash: root.clone(),
                                     _file_start_offset: *file_start,
                                     valid_length,
-                                    relative_index,
+                                    relative_index,          // relative_index is REQUIRED to climb the tree
                                     hashing_context_len,
                                 });
-                            } else if self
+                            }
+                            else if self
                                 .torrent
                                 .as_ref()
                                 .is_some_and(|t| !t.info.pieces.is_empty())
@@ -1335,47 +1337,47 @@ impl TorrentState {
                 piece_index,
                 proof,
             } => {
-tracing::info!(piece_index, peer_id, proof_len=proof.len(), "Merkle Proof received.");
-                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done)
-                {
+                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
                     return vec![Effect::DoNothing];
                 }
 
-                self.v2_proofs.insert(piece_index, proof.clone());
-
-                // Retrieve data AND offset
                 if let Some((block_offset, data)) = self.v2_pending_data.remove(&piece_index) {
-tracing::info!(piece_index, "Found buffered data for proof. Triggering VerifyPieceV2."); // [INSTRUMENTATION]
-                    self.verifying_pieces.insert(piece_index);
-
-                    // REPEAT LOOKUP LOGIC
                     if let Some(roots) = self.piece_to_roots.get(&piece_index) {
-                        let piece_len = self
-                            .torrent
-                            .as_ref()
+                        let piece_len = self.torrent.as_ref()
                             .map(|t| t.info.piece_length as u64)
                             .unwrap_or(0);
                         let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
 
-                        let matching_root_info = roots
-                            .iter()
+                        let matching_root_info = roots.iter()
                             .filter(|(start, _, _, _)| *start <= global_offset)
                             .max_by_key(|(start, _, _, _)| *start);
 
-                        let (valid_length, relative_index, hashing_context_len) =
-                            self.calculate_v2_verify_params(piece_index, data.len());
+                        if let Some((file_start, file_len, file_root, _)) = matching_root_info {
+                            let (valid_length, relative_index, hashing_context_len) =
+                                self.calculate_v2_verify_params(piece_index, data.len());
 
-                        if let Some((file_start, file_len, root, _)) = matching_root_info {
-                            let target_hash = self.torrent.as_ref()
-                                .and_then(|t| t.get_v2_hash_layer(piece_index, *file_start, *file_len, 1, root))
-                                .unwrap_or_else(|| root.clone());
+                            // 1. Resolve the trusted Piece Hash (Base 1) from the .torrent metadata
+                            let local_piece_hash = self.torrent.as_ref().and_then(|t| 
+                                t.get_v2_hash_layer(piece_index, *file_start, *file_len, 1, file_root)
+                            );
+
+                            // 2. Logic Selection:
+                            // If the peer sent exactly one 32-byte hash (Layers=0), we treat it as the target.
+                            // Otherwise, we use the File Root as the target and the peer's data as siblings.
+                            let (verification_target, verification_proof) = if proof.len() == 32 {
+                                // Target is either our trusted local hash or the peer's claimed hash
+                                (local_piece_hash.unwrap_or_else(|| proof.clone()), Vec::new())
+                            } else {
+                                // Target is the File Root; proof contains the siblings
+                                (file_root.clone(), proof)
+                            };
 
                             return vec![Effect::VerifyPieceV2 {
                                 peer_id,
                                 piece_index,
-                                proof,
+                                proof: verification_proof,
                                 data,
-                                root_hash: target_hash,
+                                root_hash: verification_target,
                                 _file_start_offset: *file_start,
                                 valid_length,
                                 relative_index,
@@ -1383,9 +1385,6 @@ tracing::info!(piece_index, "Found buffered data for proof. Triggering VerifyPie
                             }];
                         }
                     }
-                }
-                else {
-tracing::warn!(piece_index, "Proof received but NO buffered data found (orphaned proof)."); // [INSTRUMENTATION]
                 }
                 vec![Effect::DoNothing]
             }

@@ -5,25 +5,36 @@ use sha2::{Digest, Sha256};
 
 /// Verifies a V2 Merkle proof against a target root.
 pub fn verify_merkle_proof(
-    target_root_hash: &[u8],
+    target_hash: &[u8],      // When Layers=0, this is the Piece Hash from the torrent
     piece_data: &[u8],
     relative_index: u32,
-    proof: &[u8],
+    proof: &[u8],            // This is empty if we requested Layers=0
     hashing_context_len: usize,
 ) -> bool {
+    // 1. Calculate the hierarchical Merkle hash for the downloaded data
+    let calculated_node_hash = compute_v2_piece_root(piece_data, hashing_context_len);
 
-    let calculated_root = compute_v2_piece_root(piece_data, hashing_context_len);
-
+    // 2. If no sibling path was provided, the calculated hash must match the target directly
     if proof.is_empty() {
-        return calculated_root.as_slice() == target_root_hash;
+        let is_valid = calculated_node_hash.as_slice() == target_hash;
+        if !is_valid {
+            tracing::error!(
+                "Merkle Mismatch (Direct): Calculated {} != Target {}",
+                hex::encode(calculated_node_hash),
+                hex::encode(target_hash)
+            );
+        }
+        return is_valid;
     }
 
-    let mut current_hash = calculated_root;
+    // 3. Otherwise, climb the tree using siblings
+    let mut current_hash = calculated_node_hash;
     let mut current_idx = relative_index;
 
     for sibling in proof.chunks(32) {
         let mut hasher = Sha256::new();
-        if current_idx.is_multiple_of(2) {
+        // Standard Merkle parity: Even is Left, Odd is Right
+        if current_idx % 2 == 0 {
             hasher.update(current_hash);
             hasher.update(sibling);
         } else {
@@ -34,8 +45,9 @@ pub fn verify_merkle_proof(
         current_idx /= 2;
     }
 
-    current_hash.as_slice() == target_root_hash
+    current_hash.as_slice() == target_hash
 }
+
 
 /// Computes the V2 root of a data block, handling padding logic.
 pub fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
@@ -452,5 +464,85 @@ mod tests {
             !verify_merkle_proof(&parent_root, &data, 0, &bad_proof, block_size),
             "Should fail with corrupt proof"
         );
+    }
+
+    #[test]
+    fn test_v2_verification_layer_zero_direct_match() {
+        // SCENARIO: We requested Base 1, Layers 0. 
+        // The peer sent us a 32-byte hash (target) that should match our data hash.
+        let block_size = 16_384;
+        let data_0 = vec![0xAA; block_size];
+        let data_1 = vec![0xBB; block_size];
+        let mut piece_data = Vec::new();
+        piece_data.extend_from_slice(&data_0);
+        piece_data.extend_from_slice(&data_1);
+
+        // 1. Manually calculate what the Piece Hash (Base 1) should be
+        let h0 = Sha256::digest(&data_0);
+        let h1 = Sha256::digest(&data_1);
+        let mut hasher = Sha256::new();
+        hasher.update(h0);
+        hasher.update(h1);
+        let expected_piece_hash: [u8; 32] = hasher.finalize().into();
+
+        // 2. Simulate the verify_merkle_proof call with proof=[] (Layers=0)
+        let is_valid = verify_merkle_proof(
+            &expected_piece_hash, // The target is the Piece Hash from the torrent
+            &piece_data,
+            0,                    // relative_index is irrelevant for empty proof
+            &[],                  // Empty proof (Layers=0)
+            32_768,               // Context is the full 32KiB piece
+        );
+
+        assert!(is_valid, "Direct verification (Layers=0) failed for 32KiB piece.");
+    }
+
+    #[test]
+    fn test_v2_verification_piece_mismatch_fails() {
+        // SCENARIO: Data is corrupt or the target hash is wrong.
+        let block_size = 16_384;
+        let piece_data = vec![0xCC; block_size * 2]; // 32KiB of same data
+        let wrong_target = vec![0x00; 32];           // Dummy hash that won't match
+
+        let is_valid = verify_merkle_proof(
+            &wrong_target,
+            &piece_data,
+            0,
+            &[], 
+            32_768,
+        );
+
+        assert!(!is_valid, "Verification should have failed for incorrect target hash.");
+    }
+
+    #[test]
+    fn test_v2_verification_context_padding_consistency() {
+        // SCENARIO: Verifying a partial tail piece (e.g., 20KB) against its node.
+        // Rule: Data is hashed as-is, but the tree height is determined by context.
+        let block_size = 16_384;
+        let data_0 = vec![0x11; block_size];
+        let data_1 = vec![0x22; 4096]; // Partial block (4KiB)
+        let mut piece_data = Vec::new();
+        piece_data.extend_from_slice(&data_0);
+        piece_data.extend_from_slice(&data_1);
+
+        // 1. Calculate ground truth node
+        let h0 = Sha256::digest(&data_0);
+        let h1 = Sha256::digest(&data_1); // Partial blocks hashed as-is
+        let mut hasher = Sha256::new();
+        hasher.update(h0);
+        hasher.update(h1);
+        let expected_node: [u8; 32] = hasher.finalize().into();
+
+        // 2. Test
+        let is_valid = verify_merkle_proof(
+            &expected_node,
+            &piece_data,
+            0,
+            &[],
+            32_768, // Still use 32KiB context to force a 2-leaf tree
+        );
+
+        assert!(is_valid, "Partial piece verification failed.");
     }
 }

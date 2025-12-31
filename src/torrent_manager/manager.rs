@@ -640,19 +640,6 @@ impl TorrentManager {
                     hex::encode(&root_hash)
                 );
 
-if piece_index == 0 {
-    let torrent_hash = "b6e9dbecafdaec66b6e2c0c746bfb7d6b1bdbd6763505c40e789ed666ad6ce";
-    tracing::warn!("PIECE 0 COMPARISON:");
-    tracing::warn!("  LOCAL HASH: {}", torrent_hash);
-    tracing::warn!("  PEER PROOF (First 32): {}", hex::encode(&proof[0..32]));
-    
-    if hex::encode(&proof[0..32]) == torrent_hash {
-        tracing::warn!("  MATCH! The proof starts with the correct leaf.");
-    } else {
-        tracing::error!("  MISMATCH! The peer is sending something else.");
-    }
-}
-
                 tokio::spawn(async move {
                     // Handle padding
                     if valid_length < data.len() {
