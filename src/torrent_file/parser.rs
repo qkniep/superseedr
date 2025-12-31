@@ -30,8 +30,75 @@ impl From<serde_bencode::Error> for ParseError {
     }
 }
 
-pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
+pub fn polyfill_v2_files(torrent: &mut Torrent) {
+    if torrent.info.files.is_empty() && torrent.info.file_tree.is_some() {
+        let mut v2_roots = torrent.get_v2_roots();
+        
+        // Critical: Sort to match PieceManager's deterministic order
+        v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
 
+        let mut new_files = Vec::new();
+        let piece_len = torrent.info.piece_length as u64;
+
+        for (path_str, length, _root) in v2_roots {
+            let path_components: Vec<String> = path_str.split('/').map(|s| s.to_string()).collect();
+
+            new_files.push(crate::torrent_file::InfoFile {
+                length: length as i64,
+                path: path_components,
+                md5sum: None,
+                attr: None,
+            });
+
+            // Insert BEP 52 Padding Files
+            if piece_len > 0 {
+                let remainder = length % piece_len;
+                if remainder > 0 {
+                    let padding_len = piece_len - remainder;
+                    new_files.push(crate::torrent_file::InfoFile {
+                        length: padding_len as i64,
+                        path: vec![".pad".to_string(), padding_len.to_string()],
+                        md5sum: None,
+                        attr: Some("p".to_string()),
+                    });
+                }
+            }
+        }
+        torrent.info.files = new_files;
+    }
+}
+
+pub fn from_info_bytes(info_bytes: &[u8]) -> Result<Torrent, ParseError> {
+    // 1. Deserialize the Info struct directly
+    let info: crate::torrent_file::Info = serde_bencode::from_bytes(info_bytes)?;
+
+    // 2. Wrap it in a Torrent struct with defaults
+    let mut torrent = Torrent {
+        info_dict_bencode: info_bytes.to_vec(),
+        info,
+        announce: None,
+        announce_list: None,
+        url_list: None,
+        creation_date: None,
+        comment: None,
+        created_by: None,
+        encoding: None,
+        piece_layers: None, 
+    };
+
+    // 3. UNIFIED LOGIC: Hydrate V2 files
+    polyfill_v2_files(&mut torrent);
+
+    // 4. Ensure total length is calculated
+    if torrent.info.length == 0 {
+        torrent.info.length = torrent.info.total_length();
+    }
+
+    Ok(torrent)
+}
+
+// [UPDATE EXISTING FUNCTION]
+pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
     let generic_bencode: Value = de::from_bytes(bencode_data)?;
 
     let info_dict_value = if let Value::Dict(mut top_level_dict) = generic_bencode.clone() {
@@ -43,49 +110,9 @@ pub fn from_bytes(bencode_data: &[u8]) -> Result<Torrent, ParseError> {
     };
 
     let info_dict_bencode = serde_bencode::to_bytes(&info_dict_value)?;
-
     let mut torrent: Torrent = de::from_bytes(bencode_data)?;
 
-    // If this is a Pure V2 torrent, the 'files' list will be empty.
-    // We polyfill 'info.files' here so Storage/UI work seamlessly.
-    if torrent.info.files.is_empty() && torrent.info.file_tree.is_some() {
-        let mut v2_roots = torrent.get_v2_roots(); // (PathString, u64, RootHash)
-
-        // This is critical so that offsets match the PieceManager's calculation.
-        v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
-
-        let mut new_files = Vec::new();
-        let piece_len = torrent.info.piece_length as u64;
-
-        for (path_str, length, _root) in v2_roots {
-            let path_components: Vec<String> = path_str.split('/').map(|s| s.to_string()).collect();
-
-            new_files.push(InfoFile {
-                length: length as i64,
-                path: path_components,
-                md5sum: None,
-                attr: None,
-            });
-
-            // In BitTorrent v2, files are aligned to piece boundaries.
-            // If a file doesn't end exactly on a piece boundary, we insert a "padding file"
-            // to fill the gap. This ensures the NEXT file starts at offset 0 of the NEXT piece.
-            if piece_len > 0 {
-                let remainder = length % piece_len;
-                if remainder > 0 {
-                    let padding_len = piece_len - remainder;
-                    new_files.push(InfoFile {
-                        length: padding_len as i64,
-                        path: vec![".pad".to_string(), padding_len.to_string()],
-                        md5sum: None,
-                        attr: Some("p".to_string()), // Mark as padding (BEP 47)
-                    });
-                }
-            }
-        }
-
-        torrent.info.files = new_files;
-    }
+    polyfill_v2_files(&mut torrent);
 
     if torrent.info.length == 0 {
         torrent.info.length = torrent.info.total_length();

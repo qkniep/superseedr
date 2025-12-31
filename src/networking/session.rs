@@ -270,7 +270,11 @@ impl PeerSession {
                 // KeepAlive
                 _ = keep_alive_timer.tick() => { let _ = self.writer_tx.try_send(Message::KeepAlive); },
 
-                _ = speed_adjustment_timer.tick() => { self.adjust_window_size(); },
+                _ = speed_adjustment_timer.tick() => { 
+                    if !self.adjust_window_size() {
+                        break 'session Ok(());
+                    }
+                },
 
                 // INCOMING MESSAGES (From Reader Task)
                 Some(msg) = peer_msg_rx.recv() => {
@@ -673,27 +677,20 @@ impl PeerSession {
                         self.peer_torrent_metadata_pieces.extend(metadata_binary);
 
                         if torrent_metadata_len_usize == self.peer_torrent_metadata_pieces.len() {
-                            if let Ok(dht_info) =
-                                serde_bencode::from_bytes(&self.peer_torrent_metadata_pieces[..])
-                            {
-                                let _ =
-                                    self.torrent_manager_tx.try_send(TorrentCommand::DhtTorrent(
-                                        Box::new(Torrent {
-                                            info_dict_bencode: self
-                                                .peer_torrent_metadata_pieces
-                                                .clone(),
-                                            info: dht_info,
-                                            announce: None,
-                                            announce_list: None,
-                                            url_list: None,
-                                            creation_date: None,
-                                            comment: None,
-                                            created_by: None,
-                                            encoding: None,
-                                            piece_layers: None,
-                                        }),
+                            tracing::info!("Session {} received full metadata. Attempting parse...", self.peer_ip_port);
+
+                            // Use the robust parser that handles V2 hydration
+                            match crate::torrent_file::parser::from_info_bytes(&self.peer_torrent_metadata_pieces) {
+                                Ok(torrent) => {
+                                    tracing::info!("METADATA SUCCESS: Parsed & Hydrated Info Dict.");
+                                    let _ = self.torrent_manager_tx.try_send(TorrentCommand::DhtTorrent(
+                                        Box::new(torrent),
                                         torrent_metadata_len,
                                     ));
+                                }
+                                Err(e) => {
+                                    tracing::error!("METADATA FAILURE: Parser rejected info dict: {:?}", e);
+                                }
                             }
                         } else {
                             self.peer_torrent_metadata_piece_count += 1;
@@ -716,7 +713,7 @@ impl PeerSession {
         Ok(())
     }
 
-    fn adjust_window_size(&mut self) {
+    fn adjust_window_size(&mut self) -> bool {
         let available_permits = self.block_request_limit_semaphore.available_permits();
         let in_flight = self.current_window_size.saturating_sub(available_permits);
 
@@ -726,10 +723,7 @@ impl PeerSession {
                 self.peer_ip_port,
                 in_flight
             );
-            let _ = self
-                .torrent_manager_tx
-                .try_send(TorrentCommand::Disconnect(self.peer_ip_port.clone()));
-            return;
+            return false;
         }
 
         let speed = self.blocks_received_interval as f64;
@@ -765,6 +759,8 @@ impl PeerSession {
         if self.prev_speed == 0.0 || speed > 0.0 {
             self.prev_speed = speed;
         }
+
+        true
     }
 
     fn shrink_window(&mut self) {
