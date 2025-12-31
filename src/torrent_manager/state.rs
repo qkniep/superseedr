@@ -1080,10 +1080,12 @@ impl TorrentState {
 
                     let total_pieces = self.piece_manager.bitfield.len();
 
-                    if peer.bitfield.len() > total_pieces {
-                        peer.bitfield.truncate(total_pieces);
-                    } else if peer.bitfield.len() < total_pieces {
-                        peer.bitfield.resize(total_pieces, false);
+                    if total_pieces > 0 {
+                        if peer.bitfield.len() > total_pieces {
+                            peer.bitfield.truncate(total_pieces);
+                        } else if peer.bitfield.len() < total_pieces {
+                            peer.bitfield.resize(total_pieces, false);
+                        }
                     }
                 }
 
@@ -5585,6 +5587,76 @@ mod tests {
         
         // 6. FINAL CLEANUP CHECK
         assert!(state.v2_pending_data.is_empty());
+    }
+
+    #[test]
+    fn test_repro_magnet_bitfield_truncation() {
+        // GIVEN: A state initialized like a Magnet link (No metadata, 0 pieces known)
+        let mut state = create_empty_state();
+        state.torrent = None;
+        state.torrent_status = TorrentStatus::AwaitingMetadata;
+        // Explicitly set piece manager to 0 to mimic "don't know size yet"
+        state.piece_manager.set_initial_fields(0, false);
+
+        let peer_id = "magnet_seeder".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // WHEN: Peer sends a Bitfield BEFORE we have metadata
+        // Scenario: 8 pieces, peer has all of them (0xFF = 11111111)
+        state.update(Action::PeerBitfieldReceived {
+            peer_id: peer_id.clone(),
+            bitfield: vec![0xFF],
+        });
+
+        // CHECK 1: The peer's bitfield should NOT be truncated to 0.
+        // It should hold the raw bits until we know better.
+        let peer_pre = state.peers.get(&peer_id).unwrap();
+        assert!(
+            !peer_pre.bitfield.is_empty(),
+            "BUG REPRODUCED: Peer bitfield was truncated/wiped because we had 0 pieces!"
+        );
+
+        // WHEN: Metadata finally arrives (defining 8 pieces)
+        let mut torrent = create_dummy_torrent(8);
+        torrent.info.piece_length = 16384;
+        torrent.info.length = 16384 * 8;
+
+        state.update(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 123,
+        });
+
+        // CRITICAL STEP: MetadataReceived puts us in 'Validating'.
+        // AssignWork ignores everything during 'Validating'.
+        // We must complete validation to enter 'Standard' mode and calculate interest.
+        state.update(Action::ValidationComplete {
+            completed_pieces: vec![], // We found nothing locally
+        });
+
+        // THEN: The peer should still be seen as a Seeder (having all pieces)
+        let peer_post = state.peers.get(&peer_id).unwrap();
+
+        assert_eq!(
+            peer_post.bitfield.len(),
+            8,
+            "Bitfield should be resized to correct piece count"
+        );
+        assert!(
+            peer_post.bitfield.iter().all(|&b| b),
+            "Peer data lost! Expected all TRUE, got {:?}",
+            peer_post.bitfield
+        );
+
+        // Final sanity check: Manager should be interested
+        state.update(Action::AssignWork {
+            peer_id: peer_id.clone(),
+        });
+        let peer_final = state.peers.get(&peer_id).unwrap();
+
+        assert!(
+            peer_final.am_interested,
+            "We should be interested in the seeder (failed if bitfield was wiped)"
+        );
     }
 }
 
