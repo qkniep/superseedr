@@ -1278,28 +1278,26 @@ impl TorrentState {
                                     .map(|(f_start, f_len, r, f_idx)| (*f_start, *f_len, r.clone(), *f_idx));
 
                                 if let Some((file_start, file_len, root, file_index)) = root_info {
-                                    let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(16384);
-                                    
-                                    // 1. BitTorrent v2 Merkle trees use 16KiB blocks as the base layer 
-                                    let total_blocks_in_file = file_len.div_ceil(16384);
-                                    let proof_layers = (total_blocks_in_file as f64).log2().ceil() as u32;
-
-                                    // 2. Calculate the index of the first 16KiB block in this piece, relative to the file
+                                    let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(32768);
                                     let global_piece_offset = piece_index as u64 * piece_len;
                                     let relative_block_index = (global_piece_offset - file_start) / 16384;
 
-                                    tracing::info!(piece_index, relative_block_index, proof_layers, "Requesting Proof for Block 0 of Piece");
+                                    let request_base = 1; 
+                                    let request_index = relative_block_index / 2;
                                     
+                                    let required_layers = 0; 
+
                                     effects.push(Effect::RequestHashes {
                                         peer_id: peer_id.clone(),
                                         file_root: root,
                                         file_index, 
-                                        piece_index: relative_block_index as u32, // Protocol expects block index, not piece index
+                                        piece_index: request_index as u32, 
                                         length: 1,
-                                        proof_layers, 
-                                        base_layer: 0, // Request from the leaf (16KiB) level for peer compatibility
+                                        proof_layers: required_layers, 
+                                        base_layer: request_base, 
                                     });
                                 }
+
                             }
                         } else {
                             // Fallback attempt to V1 if possible

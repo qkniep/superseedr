@@ -561,7 +561,6 @@ impl PeerSession {
                     .try_send(Message::HashReject(root, base_layer, index, length, 0));
             },
 
-            /*
             TorrentCommand::GetHashes {
                 file_root,
                 base_layer,
@@ -581,40 +580,6 @@ impl PeerSession {
                 tracing::info!(
                     "Sent HashRequest to {}: Root={:?}, Base={}, Idx={}, Len={}", 
                     self.peer_ip_port, hex::encode(&file_root), base_layer, index, length
-                );
-            }
-            */
-
-            TorrentCommand::GetHashes {
-                file_root,
-                // We ignore the incoming base_layer, index, and proof_layers for this test
-                ..
-            } => {
-                // --- DEBUG HARDCODED VALUES ---
-                // Since original failing index was 504 at Base 0, 
-                // we use Index 252 at Base 1 (32KiB piece layer).
-                let debug_base = 1;      
-                let debug_index = 252;   
-                let debug_len = 1;
-                let debug_proof = 0; 
-                // ------------------------------
-
-                let _ = self.writer_tx.try_send(Message::HashRequest(
-                    file_root.clone(),
-                    debug_base,
-                    debug_index,
-                    debug_len,
-                    debug_proof 
-                ));
-                
-                tracing::info!(
-                    "DEBUG HashRequest to {}: Root={:?}, Base={}, Idx={}, Len={}, Proof={}", 
-                    self.peer_ip_port, 
-                    hex::encode(&file_root), 
-                    debug_base, 
-                    debug_index, 
-                    debug_len,
-                    debug_proof
                 );
             }
 

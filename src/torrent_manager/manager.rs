@@ -702,7 +702,7 @@ if piece_index == 0 {
                             );
                             
                             // Check if this matches the peer's proof (which we know is 3110...)
-                            if hex::encode(base_1_node) == "3110d284c11473725f2c6bb5dd05b1fd9beaae7304f2fb3e257cc18070e760af" {
+                            if hex::encode(base_1_node) == hex::encode(&proof) {
                                 tracing::warn!("✅ MATCH FOUND! The hierarchical hash matches the torrent metadata.");
                             }
                         }
@@ -733,7 +733,7 @@ if piece_index == 0 {
                             "V2 CPU Verification Finished"
                         );
 
-                        i is_valid {
+                        if is_valid {
                             Ok(data)
                         } else {
                             Err(())
