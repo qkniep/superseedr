@@ -2485,14 +2485,32 @@ impl TorrentManager {
                         },
 
                         TorrentCommand::DhtTorrent(torrent, metadata_length) => {
+
                             #[cfg(all(feature = "dht", feature = "pex"))]
                             if torrent.info.private == Some(1) {
                                 break Ok(());
                             }
 
-                            let mut hasher = Sha1::new();
-                            hasher.update(&torrent.info_dict_bencode);
-                            if hasher.finalize().as_slice() != self.state.info_hash.as_slice() {
+                            let calculated_hash = if torrent.info.meta_version == Some(2) {
+                                // V2: Use SHA-256 and truncate to 20 bytes
+                                use sha2::{Digest, Sha256};
+                                let mut hasher = Sha256::new();
+                                hasher.update(&torrent.info_dict_bencode);
+                                hasher.finalize()[0..20].to_vec()
+                            } else {
+                                // V1: Use SHA-1
+                                let mut hasher = Sha1::new();
+                                hasher.update(&torrent.info_dict_bencode);
+                                hasher.finalize().to_vec()
+                            };
+
+                            if calculated_hash != self.state.info_hash {
+                                tracing::warn!(
+                                    "Metadata Hash Mismatch! Expected: {:?}, Got: {:?} (MetaVersion: {:?})", 
+                                    hex::encode(&self.state.info_hash), 
+                                    hex::encode(&calculated_hash),
+                                    torrent.info.meta_version
+                                );
                                 continue;
                             }
 
