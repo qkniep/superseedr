@@ -313,6 +313,13 @@ impl TorrentManager {
             global_ul_bucket,
         } = torrent_parameters;
 
+
+        event!(
+            Level::INFO,
+            "Magnet: {:?}",
+            magnet
+        );
+
         // We support both 'btih' (v1) and 'btmh' (v2)
         let hash_type = magnet
             .hash_type()
@@ -1280,7 +1287,6 @@ impl TorrentManager {
             Effect::RequestHashes {
                 peer_id,
                 file_root,
-                file_index: _,
                 piece_index,
                 length,
                 proof_layers,

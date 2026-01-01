@@ -207,7 +207,6 @@ pub enum Effect {
     RequestHashes {
         peer_id: String,
         file_root: Vec<u8>,
-        file_index: u32,
         piece_index: u32,
         length: u32,
         proof_layers: u32,
@@ -1282,7 +1281,7 @@ impl TorrentState {
                                         (*f_start, *f_len, r.clone(), *f_idx)
                                     });
 
-                                if let Some((_file_start, _file_len, root, file_index)) = root_info
+                                if let Some((_file_start, _file_len, root, _file_index)) = root_info
                                 {
                                     let piece_len = self
                                         .torrent
@@ -1318,7 +1317,6 @@ impl TorrentState {
                                     effects.push(Effect::RequestHashes {
                                         peer_id: peer_id.clone(),
                                         file_root: root.clone(),
-                                        file_index,
                                         piece_index: request_index as u32,
                                         length: 1,
                                         proof_layers: required_layers,
@@ -1668,46 +1666,25 @@ impl TorrentState {
                 torrent,
                 metadata_length,
             } => {
-                if self.torrent.is_some() {
-                    return vec![Effect::DoNothing];
-                }
+            if self.torrent.is_some() { return vec![Effect::DoNothing]; }
 
                 self.torrent = Some(*torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
 
                 let (v2_piece_count, piece_overrides) = self.rebuild_v2_mappings();
 
-                // --- 2. CALCULATE PIECE COUNT (V2 Aligned) ---
                 let num_pieces = if !torrent.info.pieces.is_empty() {
                     torrent.info.pieces.len() / 20
-                } else if v2_piece_count > 0 {
-                    v2_piece_count as usize
                 } else {
-                    // ... (rest of the fallback logic remains the same) ...
-                    let total_len: u64 = if !torrent.info.files.is_empty() {
-                        torrent.info.files.iter().map(|f| f.length as u64).sum()
-                    } else {
-                        torrent.info.length as u64
-                    };
-
-                    let pl = torrent.info.piece_length as u64;
-                    if pl > 0 {
-                        (total_len.div_ceil(pl)) as usize
-                    } else {
-                        0
-                    }
+                    v2_piece_count as usize
                 };
 
-                // --- 3. INITIALIZE PIECE MANAGER ---
                 self.piece_manager = PieceManager::new();
-                self.piece_manager
-                    .set_initial_fields(num_pieces, self.torrent_validation_status);
+                self.piece_manager.set_initial_fields(num_pieces, self.torrent_validation_status);
 
                 let total_len: u64 = if torrent.info.meta_version == Some(2) {
-                    // V2: Geometry is determined by the number of aligned pieces
                     (num_pieces as u64) * (torrent.info.piece_length as u64)
                 } else {
-                    // V1: Geometry is the sum of file lengths (Packed)
                     if torrent.info.files.is_empty() {
                         torrent.info.length as u64
                     } else {
@@ -1721,8 +1698,6 @@ impl TorrentState {
                     piece_overrides,
                     self.torrent_validation_status,
                 );
-
-                // --- 4. RESIZE PEER BITFIELDS ---
 
                 for peer in self.peers.values_mut() {
                     if peer.bitfield.len() > num_pieces {
@@ -2094,31 +2069,30 @@ impl TorrentState {
         }
     }
 
-    fn rebuild_v2_mappings(&mut self) -> (u64, HashMap<u32, u32>) {
+    fn rebuild_v2_mappings(&mut self) -> (u32, HashMap<u32, u32>) {
         let mut overrides = HashMap::new();
-        let mut v2_piece_count = 0;
+        let mut v2_piece_count: u32 = 0;
 
         if let Some(torrent) = &self.torrent {
             let mapping = torrent.calculate_v2_mapping();
             self.piece_to_roots = mapping.piece_to_roots;
-            v2_piece_count = mapping.piece_count as u64;
+            v2_piece_count = mapping.piece_count as u32;
 
-            // Populate tail piece overrides for V2 alignment
             if torrent.info.meta_version == Some(2) {
                 let piece_len = torrent.info.piece_length as u64;
                 let mut v2_roots = torrent.get_v2_roots();
                 v2_roots.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-
+                
                 let mut current_idx = 0;
                 for (_, length, _) in v2_roots {
                     if length > 0 && piece_len > 0 {
                         let file_pieces = length.div_ceil(piece_len);
-                        let tail_len = length % piece_len;
+                        let tail_len = (length % piece_len) as u32;
                         if tail_len > 0 {
-                            let tail_idx = current_idx + file_pieces - 1;
-                            overrides.insert(tail_idx as u32, tail_len as u32);
+                            let tail_idx = (current_idx + file_pieces - 1) as u32;
+                            overrides.insert(tail_idx, tail_len);
                         }
-                        current_idx += file_pieces;
+                        current_idx += file_pieces as u64;
                     }
                 }
             }
@@ -4262,14 +4236,29 @@ mod tests {
     fn test_scale_1000_blocks_pure_v2() {
         let mut state = create_empty_state();
         let num_pieces = 1000;
-        let piece_len = 1024; // Defined here for scope visibility
+        let piece_len = 1024;
+        let total_len = (num_pieces as i64) * (piece_len as i64);
 
-        let mut torrent = create_dummy_torrent(num_pieces);
+        let mut torrent = create_dummy_torrent(0);
         torrent.info.piece_length = piece_len as i64;
-        torrent.info.length = (num_pieces as i64) * (piece_len as i64);
+        torrent.info.length = total_len;
         torrent.info.meta_version = Some(2);
         torrent.info.pieces = Vec::new();
 
+        // Setup V2 File Tree to ensure rebuild_v2_mappings populates piece_to_roots
+        let root = vec![0xBB; 32];
+        let mut file_meta = HashMap::new();
+        file_meta.insert("length".as_bytes().to_vec(), serde_bencode::value::Value::Int(total_len));
+        file_meta.insert("pieces root".as_bytes().to_vec(), serde_bencode::value::Value::Bytes(root.clone()));
+
+        let mut file_node = HashMap::new();
+        file_node.insert("".as_bytes().to_vec(), serde_bencode::value::Value::Dict(file_meta));
+
+        let mut root_node = HashMap::new();
+        root_node.insert("test_torrent".as_bytes().to_vec(), serde_bencode::value::Value::Dict(file_node));
+        torrent.info.file_tree = Some(serde_bencode::value::Value::Dict(root_node));
+
+        // Calling this will now correctly build piece_to_roots for you
         state.update(Action::MetadataReceived {
             torrent: Box::new(torrent.clone()),
             metadata_length: 5000,
@@ -5594,7 +5583,7 @@ mod tests {
         torrent.info.file_tree = Some(Value::Dict(root_node));
 
         // 3. ACTION: METADATA RECEIVED
-        let meta_effects = state.update(Action::MetadataReceived {
+        let _meta_effects = state.update(Action::MetadataReceived {
             torrent: Box::new(torrent),
             metadata_length: 12345,
         });
