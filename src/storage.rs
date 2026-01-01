@@ -83,7 +83,6 @@ pub async fn create_and_allocate_files(
     multi_file_info: &MultiFileInfo,
 ) -> Result<(), StorageError> {
     for file_info in &multi_file_info.files {
-
         if file_info.is_padding {
             continue;
         }
@@ -131,12 +130,10 @@ pub async fn read_data_from_disk(
 
             if bytes_to_read_in_this_file > 0 {
                 if file_info.is_padding {
-
                     // This maintains offset integrity without requiring a file on disk.
                     let zeros = vec![0u8; bytes_to_read_in_this_file];
                     buffer.extend_from_slice(&zeros);
                 } else {
-
                     let mut file = File::open(&file_info.path).await?;
                     file.seek(SeekFrom::Start(local_offset)).await?;
 
@@ -165,7 +162,6 @@ pub async fn write_data_to_disk(
     global_offset: u64,
     data_to_write: &[u8],
 ) -> Result<(), StorageError> {
-
     let mut bytes_written = 0;
     let data_len = data_to_write.len();
 
@@ -183,7 +179,6 @@ pub async fn write_data_to_disk(
 
             if bytes_to_write_in_this_file > 0 {
                 if !file_info.is_padding {
-
                     let mut file = OpenOptions::new()
                         .write(true)
                         .create(true) // Ensure file exists if we race to write
@@ -199,8 +194,7 @@ pub async fn write_data_to_disk(
 
                     // Without this, the OS might hold the data in memory, and if the app exits immediately
                     // (like in the test case), the data is lost.
-                    file.flush().await?; 
-
+                    file.flush().await?;
                 } else {
                 }
 
@@ -214,8 +208,10 @@ pub async fn write_data_to_disk(
     }
 
     tracing::error!(
-        "💾 [Storage] ERROR: Write incomplete! Written: {}/{}. Global Offset: {}", 
-        bytes_written, data_len, global_offset
+        "💾 [Storage] ERROR: Write incomplete! Written: {}/{}. Global Offset: {}",
+        bytes_written,
+        data_len,
+        global_offset
     );
 
     Err(StorageError::Io(std::io::Error::new(

@@ -235,7 +235,6 @@ impl BlockManager {
     }
 
     pub fn get_block_range(&self, piece_idx: u32) -> (u32, u32) {
-
         let piece_len = self.calculate_piece_size(piece_idx);
         let blocks_in_piece = self.blocks_in_piece(piece_len);
 
@@ -247,7 +246,6 @@ impl BlockManager {
     }
 
     fn calculate_piece_size(&self, piece_idx: u32) -> u32 {
-
         if let Some(&len) = self.piece_lengths.get(&piece_idx) {
             return len;
         }
@@ -679,7 +677,6 @@ mod tests {
 
     #[test]
     fn test_endgame_duplicate_completion_suppression() {
-
         let mut bm = BlockManager::new();
         let piece_len = 32768;
         let total_len = 32768;

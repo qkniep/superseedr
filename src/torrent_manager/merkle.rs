@@ -5,10 +5,10 @@ use sha2::{Digest, Sha256};
 
 /// Verifies a V2 Merkle proof against a target root.
 pub fn verify_merkle_proof(
-    target_hash: &[u8],      // When Layers=0, this is the Piece Hash from the torrent
+    target_hash: &[u8], // When Layers=0, this is the Piece Hash from the torrent
     piece_data: &[u8],
     relative_index: u32,
-    proof: &[u8],            // This is empty if we requested Layers=0
+    proof: &[u8], // This is empty if we requested Layers=0
     hashing_context_len: usize,
 ) -> bool {
     // 1. Calculate the hierarchical Merkle hash for the downloaded data
@@ -34,7 +34,7 @@ pub fn verify_merkle_proof(
     for sibling in proof.chunks(32) {
         let mut hasher = Sha256::new();
         // Standard Merkle parity: Even is Left, Odd is Right
-        if current_idx % 2 == 0 {
+        if current_idx.is_multiple_of(2) {
             hasher.update(current_hash);
             hasher.update(sibling);
         } else {
@@ -47,7 +47,6 @@ pub fn verify_merkle_proof(
 
     current_hash.as_slice() == target_hash
 }
-
 
 /// Computes the V2 root of a data block, handling padding logic.
 pub fn compute_v2_piece_root(data: &[u8], expected_len: usize) -> [u8; 32] {
@@ -90,7 +89,6 @@ mod tests {
 
     #[test]
     fn test_merkle_verification_relative_index_parity() {
-
         // We create a file with 2 blocks (32KB total).
         // Block 0: Left Node (Even index)
         // Block 1: Right Node (Odd index)
@@ -141,7 +139,6 @@ mod tests {
 
     #[test]
     fn test_v2_merkle_root_calculation() {
-
         let block_size = 16_384;
         let piece_size = 32_768;
         let mut data = Vec::with_capacity(piece_size);
@@ -169,7 +166,6 @@ mod tests {
 
     #[test]
     fn test_v2_merkle_root_single_block() {
-
         let data = vec![0xCC; 16_384];
 
         let expected_root = Sha256::digest(&data);
@@ -205,7 +201,6 @@ mod tests {
 
     #[test]
     fn test_v2_network_verification_padding_accuracy() {
-
         let piece_len: usize = 16384; // The full block size in the system
         let actual_data_len: usize = 5000;
         let raw_data = vec![0xDD; actual_data_len];
@@ -233,7 +228,6 @@ mod tests {
 
     #[test]
     fn test_v2_small_file_less_than_piece_len() {
-
         let file_len: usize = 16384;
         let raw_data = vec![0xDD; file_len];
 
@@ -251,7 +245,6 @@ mod tests {
 
     #[test]
     fn test_v2_merkle_parity_regression() {
-
         // File B starts at Global Piece 1, but it is the FIRST piece of that file (Rel 0).
         let piece_len: usize = 16384;
         let data_b0 = vec![0xAA; piece_len];
@@ -468,7 +461,7 @@ mod tests {
 
     #[test]
     fn test_v2_verification_layer_zero_direct_match() {
-        // SCENARIO: We requested Base 1, Layers 0. 
+        // SCENARIO: We requested Base 1, Layers 0.
         // The peer sent us a 32-byte hash (target) that should match our data hash.
         let block_size = 16_384;
         let data_0 = vec![0xAA; block_size];
@@ -489,12 +482,15 @@ mod tests {
         let is_valid = verify_merkle_proof(
             &expected_piece_hash, // The target is the Piece Hash from the torrent
             &piece_data,
-            0,                    // relative_index is irrelevant for empty proof
-            &[],                  // Empty proof (Layers=0)
-            32_768,               // Context is the full 32KiB piece
+            0,      // relative_index is irrelevant for empty proof
+            &[],    // Empty proof (Layers=0)
+            32_768, // Context is the full 32KiB piece
         );
 
-        assert!(is_valid, "Direct verification (Layers=0) failed for 32KiB piece.");
+        assert!(
+            is_valid,
+            "Direct verification (Layers=0) failed for 32KiB piece."
+        );
     }
 
     #[test]
@@ -502,17 +498,14 @@ mod tests {
         // SCENARIO: Data is corrupt or the target hash is wrong.
         let block_size = 16_384;
         let piece_data = vec![0xCC; block_size * 2]; // 32KiB of same data
-        let wrong_target = vec![0x00; 32];           // Dummy hash that won't match
+        let wrong_target = vec![0x00; 32]; // Dummy hash that won't match
 
-        let is_valid = verify_merkle_proof(
-            &wrong_target,
-            &piece_data,
-            0,
-            &[], 
-            32_768,
+        let is_valid = verify_merkle_proof(&wrong_target, &piece_data, 0, &[], 32_768);
+
+        assert!(
+            !is_valid,
+            "Verification should have failed for incorrect target hash."
         );
-
-        assert!(!is_valid, "Verification should have failed for incorrect target hash.");
     }
 
     #[test]

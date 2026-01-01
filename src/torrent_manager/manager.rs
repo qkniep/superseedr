@@ -634,16 +634,21 @@ impl TorrentManager {
                 let mut shutdown_rx = self.shutdown_tx.subscribe();
 
                 tracing::info!(
-                    piece_index, 
+                    piece_index,
                     peer_id = %peer_id_for_msg,
-                    "SPAWNING V2 Verification. Root={:?}", 
+                    "SPAWNING V2 Verification. Root={:?}",
                     hex::encode(&root_hash)
                 );
 
                 tokio::spawn(async move {
                     // Handle padding
                     if valid_length < data.len() {
-                        tracing::debug!(piece_index, "Padding data: {} -> {}", valid_length, data.len());
+                        tracing::debug!(
+                            piece_index,
+                            "Padding data: {} -> {}",
+                            valid_length,
+                            data.len()
+                        );
                         data[valid_length..].fill(0);
                     }
 
@@ -651,7 +656,7 @@ impl TorrentManager {
                     // Note: 'mut' is required so we can borrow it mutably in the select loop
                     let mut verification_task = tokio::task::spawn_blocking(move || {
                         let start = Instant::now();
-                        
+
                         let is_valid = merkle::verify_merkle_proof(
                             &root_hash,
                             &data,
@@ -688,11 +693,11 @@ impl TorrentManager {
                                     // If Lagged -> Log and continue loop (waiting on verification_task again)
                                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                                         tracing::trace!(piece_index, skipped, "Ignoring broadcast lag, continuing verification...");
-                                        continue; 
+                                        continue;
                                     }
                                 }
                             },
-                            // Use &mut here to borrow the task instead of moving it. 
+                            // Use &mut here to borrow the task instead of moving it.
                             // This allows the loop to reuse it if the other branch hits 'continue'.
                             res = &mut verification_task => {
                                 break match res {
@@ -711,8 +716,14 @@ impl TorrentManager {
                     };
 
                     match &result {
-                        Ok(_) => tracing::info!(piece_index, "Sending PieceVerified (Success) -> Manager"),
-                        Err(_) => tracing::warn!(piece_index, "Sending PieceVerified (Failure) -> Manager"),
+                        Ok(_) => tracing::info!(
+                            piece_index,
+                            "Sending PieceVerified (Success) -> Manager"
+                        ),
+                        Err(_) => tracing::warn!(
+                            piece_index,
+                            "Sending PieceVerified (Failure) -> Manager"
+                        ),
                     }
 
                     let _ = tx
@@ -789,7 +800,6 @@ impl TorrentManager {
                                 .await;
                         }
                         Err(_) => {
-
                             let _ = tx
                                 .send(TorrentCommand::PieceWriteFailed { piece_index })
                                 .await;
@@ -1267,14 +1277,14 @@ impl TorrentManager {
                 }
             }
 
-            Effect::RequestHashes { 
-                peer_id, 
-                file_root, 
+            Effect::RequestHashes {
+                peer_id,
+                file_root,
                 file_index: _,
-                piece_index, 
-                length, 
-                proof_layers, 
-                base_layer 
+                piece_index,
+                length,
+                proof_layers,
+                base_layer,
             } => {
                 if let Some(peer) = self.state.peers.get(&peer_id) {
                     let _ = peer.peer_tx.try_send(TorrentCommand::GetHashes {
@@ -1300,7 +1310,6 @@ impl TorrentManager {
         _event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
-
         tokio::select! {
             biased;
             _ = shutdown_rx.recv() => return Err(StorageError::Io(std::io::Error::other("Shutdown"))),
@@ -1440,9 +1449,7 @@ impl TorrentManager {
                 ))
                 .await;
         }
-
         // PATH B: V1 (Contiguous Stream Logic)
-
         else {
             let total_size = multi_file_info.total_size;
             let num_pieces = if piece_len > 0 {
@@ -2116,7 +2123,6 @@ impl TorrentManager {
     }
 
     pub async fn run(mut self, is_paused: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
-
         //    We MUST find peers to get metadata.
 
         //    We wait for validation to finish so we report accurate "Left" stats
@@ -2413,9 +2419,9 @@ impl TorrentManager {
                         TorrentCommand::MerkleHashData { peer_id, root, piece_index, proof, .. } => {
                             if let Some(torrent) = &self.state.torrent {
                                 let piece_len = torrent.info.piece_length as u64;
-                                let mut v2_roots = torrent.get_v2_roots(); 
+                                let mut v2_roots = torrent.get_v2_roots();
                                 v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
-                                
+
                                 let mut current_file_start = 0;
 
                                 for (_, len, r) in v2_roots {
@@ -2484,11 +2490,11 @@ impl TorrentManager {
 
                         TorrentCommand::GetHashes { peer_id, index, length, base_layer, file_root, .. } => {
                             let mut sent = false;
-                            
+
                             if let (Some(torrent), Some(roots)) = (&self.state.torrent, self.state.piece_to_roots.get(&index)) {
                                 // Iterate roots for this piece index
                                 for (file_offset, file_len, root, _f_idx) in roots {
-                                    
+
                                     // MATCH BY ROOT HASH (32 bytes)
                                     if !file_root.is_empty() && *root != file_root {
                                         continue;
@@ -2500,23 +2506,23 @@ impl TorrentManager {
                                                 peer_id: peer_id.clone(),
                                                 root: root.clone(),
                                                 base_layer,
-                                                index, 
+                                                index,
                                                 proof: proof_data,
                                             });
                                             sent = true;
-                                            break; 
+                                            break;
                                         }
                                     }
                                 }
                             }
                             if !sent {
                                 if let Some(peer) = self.state.peers.get(&peer_id) {
-                                    let _ = peer.peer_tx.try_send(TorrentCommand::SendHashReject { 
-                                        peer_id, 
-                                        root: file_root, 
-                                        base_layer, 
-                                        index, 
-                                        length 
+                                    let _ = peer.peer_tx.try_send(TorrentCommand::SendHashReject {
+                                        peer_id,
+                                        root: file_root,
+                                        base_layer,
+                                        index,
+                                        length
                                     });
                                 }
                             }
@@ -2558,8 +2564,8 @@ impl TorrentManager {
 
                             if calculated_hash != self.state.info_hash {
                                 tracing::warn!(
-                                    "Metadata Hash Mismatch! Expected: {:?}, Got: {:?} (MetaVersion: {:?})", 
-                                    hex::encode(&self.state.info_hash), 
+                                    "Metadata Hash Mismatch! Expected: {:?}, Got: {:?} (MetaVersion: {:?})",
+                                    hex::encode(&self.state.info_hash),
                                     hex::encode(&calculated_hash),
                                     torrent.info.meta_version
                                 );
@@ -2634,7 +2640,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_manager_event_loop_throughput() {
-
         let (_incoming_peer_tx, incoming_peer_rx) = mpsc::channel(1000);
         let (manager_command_tx, manager_command_rx) = mpsc::channel(1000);
         let (metrics_tx, _) = broadcast::channel(1000);
@@ -2757,7 +2762,6 @@ mod tests {
             Err(_) => panic!("Test timed out! Manager loop likely deadlocked processing blocks."),
         }
     }
-
 }
 
 #[cfg(test)]
@@ -3452,7 +3456,6 @@ mod resource_tests {
             loop {
                 match timeout(Duration::from_secs(1), metrics_rx.recv()).await {
                     Ok(Ok(m)) => {
-
                         accumulated_download += m.bytes_downloaded_this_tick;
 
                         // Print status occasionally
@@ -4176,7 +4179,6 @@ mod resource_tests {
 
     #[tokio::test]
     async fn test_v2_multi_file_alignment_bug() {
-
         let (mut manager, _, _, _, _) = setup_test_harness();
         let piece_len = 1024;
 
@@ -4223,7 +4225,6 @@ mod resource_tests {
 
     #[tokio::test]
     async fn test_v2_multi_file_alignment_bug_regression() {
-
         let (mut manager, _, _, _, _) = setup_test_harness();
         let piece_len = 16384;
 
@@ -4398,5 +4399,4 @@ mod resource_tests {
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
-
 }

@@ -1154,7 +1154,6 @@ impl TorrentState {
                 block_offset,
                 data,
             } => {
-
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
                 }
@@ -1231,19 +1230,19 @@ impl TorrentState {
                             self.calculate_v2_verify_params(piece_index, complete_data.len());
 
                         if let Some((file_start, file_len, root, _)) = matching_root_info {
-                            if let Some(target_hash) = self.torrent.as_ref().and_then(|t| 
+                            if let Some(target_hash) = self.torrent.as_ref().and_then(|t| {
                                 t.get_v2_hash_layer(piece_index, *file_start, *file_len, 1, root)
-                            ) {
+                            }) {
                                 // SCENARIO: We have the piece-layer hash locally in .torrent
                                 effects.push(Effect::VerifyPieceV2 {
                                     peer_id: peer_id.clone(),
                                     piece_index,
-                                    proof: Vec::new(),      // No proof needed, we have the target hash
+                                    proof: Vec::new(), // No proof needed, we have the target hash
                                     data: complete_data,
                                     root_hash: target_hash, // Target is the PIECE hash
                                     _file_start_offset: *file_start,
                                     valid_length,
-                                    relative_index,         // relative_index is ignored by merkle.rs if proof is empty
+                                    relative_index, // relative_index is ignored by merkle.rs if proof is empty
                                     hashing_context_len,
                                 });
                             } else if let Some(proof) = self.v2_proofs.get(&piece_index) {
@@ -1256,11 +1255,10 @@ impl TorrentState {
                                     data: complete_data,
                                     _file_start_offset: *file_start,
                                     valid_length,
-                                    relative_index,          // relative_index is REQUIRED to climb the tree
+                                    relative_index, // relative_index is REQUIRED to climb the tree
                                     hashing_context_len,
                                 });
-                            }
-                            else if self
+                            } else if self
                                 .torrent
                                 .as_ref()
                                 .is_some_and(|t| !t.info.pieces.is_empty())
@@ -1273,50 +1271,60 @@ impl TorrentState {
                                 });
                             } else {
                                 // Buffer v2 data and ask for proof.
-                                self.v2_pending_data.insert(piece_index, (block_offset, complete_data));
+                                self.v2_pending_data
+                                    .insert(piece_index, (block_offset, complete_data));
 
-                                let root_info = self.piece_to_roots.get(&piece_index)
+                                let root_info = self
+                                    .piece_to_roots
+                                    .get(&piece_index)
                                     .and_then(|roots| roots.first())
-                                    .map(|(f_start, f_len, r, f_idx)| (*f_start, *f_len, r.clone(), *f_idx));
+                                    .map(|(f_start, f_len, r, f_idx)| {
+                                        (*f_start, *f_len, r.clone(), *f_idx)
+                                    });
 
-                                if let Some((_file_start, _file_len, root, file_index)) = root_info {
-                                        let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(32768);
-                                        
-                                        // 1. Calculate Base Layer safely.
-                                        // Only use Base 1+ if piece_len >= 16384. 
-                                        // Trailing zeros on (1) is 0, on (2) is 1, etc.
-                                        let request_base = if piece_len >= 16384 {
-                                            (piece_len / 16384).trailing_zeros()
-                                        } else {
-                                            0
-                                        };
-                                        
-                                        // 2. RESTORE TEST COMPATIBILITY: 
-                                        // If piece_len < 16384 (like your test's 1024), we must use the piece_index 
-                                        // directly to keep them distinct.
-                                        // If piece_len >= 16384, we use the relative block logic for real swarms.
-                                        let request_index = if piece_len >= 16384 {
-                                            let global_piece_offset = piece_index as u64 * piece_len;
-                                            let offset_in_file = global_piece_offset.saturating_sub(*file_start);
-                                            let relative_block_index = offset_in_file / 16384;
-                                            relative_block_index >> request_base
-                                        } else {
-                                            piece_index as u64
-                                        };
-                                        
-                                        let required_layers = 0; 
+                                if let Some((_file_start, _file_len, root, file_index)) = root_info
+                                {
+                                    let piece_len = self
+                                        .torrent
+                                        .as_ref()
+                                        .map(|t| t.info.piece_length as u64)
+                                        .unwrap_or(32768);
 
-                                        effects.push(Effect::RequestHashes {
-                                            peer_id: peer_id.clone(),
-                                            file_root: root.clone(),
-                                            file_index, 
-                                            piece_index: request_index as u32, 
-                                            length: 1,
-                                            proof_layers: required_layers, 
-                                            base_layer: request_base, 
-                                        });
-                                    }
+                                    // 1. Calculate Base Layer safely.
+                                    // Only use Base 1+ if piece_len >= 16384.
+                                    // Trailing zeros on (1) is 0, on (2) is 1, etc.
+                                    let request_base = if piece_len >= 16384 {
+                                        (piece_len / 16384).trailing_zeros()
+                                    } else {
+                                        0
+                                    };
 
+                                    // 2. RESTORE TEST COMPATIBILITY:
+                                    // If piece_len < 16384 (like your test's 1024), we must use the piece_index
+                                    // directly to keep them distinct.
+                                    // If piece_len >= 16384, we use the relative block logic for real swarms.
+                                    let request_index = if piece_len >= 16384 {
+                                        let global_piece_offset = piece_index as u64 * piece_len;
+                                        let offset_in_file =
+                                            global_piece_offset.saturating_sub(*file_start);
+                                        let relative_block_index = offset_in_file / 16384;
+                                        relative_block_index >> request_base
+                                    } else {
+                                        piece_index as u64
+                                    };
+
+                                    let required_layers = 0;
+
+                                    effects.push(Effect::RequestHashes {
+                                        peer_id: peer_id.clone(),
+                                        file_root: root.clone(),
+                                        file_index,
+                                        piece_index: request_index as u32,
+                                        length: 1,
+                                        proof_layers: required_layers,
+                                        base_layer: request_base,
+                                    });
+                                }
                             }
                         } else {
                             // Fallback attempt to V1 if possible
@@ -1354,19 +1362,23 @@ impl TorrentState {
                 piece_index,
                 proof,
             } => {
-                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
+                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done)
+                {
                     return vec![Effect::DoNothing];
                 }
 
                 if let Some((block_offset, data)) = self.v2_pending_data.remove(&piece_index) {
                     if let Some(roots) = self.piece_to_roots.get(&piece_index) {
-                        let piece_len = self.torrent.as_ref()
+                        let piece_len = self
+                            .torrent
+                            .as_ref()
                             .map(|t| t.info.piece_length as u64)
                             .unwrap_or(65536);
-                        
+
                         let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
 
-                        let matching_root_info = roots.iter()
+                        let matching_root_info = roots
+                            .iter()
                             .filter(|(start, _, _, _)| *start <= global_offset)
                             .max_by_key(|(start, _, _, _)| *start);
 
@@ -1379,13 +1391,22 @@ impl TorrentState {
                             let actual_relative_index = (offset_in_file / piece_len) as u32;
 
                             // 2. Resolve the trusted hash using the relative index
-                            let local_piece_hash = self.torrent.as_ref().and_then(|t| 
-                                t.get_v2_hash_layer(actual_relative_index, *file_start, *file_len, 1, file_root)
-                            );
+                            let local_piece_hash = self.torrent.as_ref().and_then(|t| {
+                                t.get_v2_hash_layer(
+                                    actual_relative_index,
+                                    *file_start,
+                                    *file_len,
+                                    1,
+                                    file_root,
+                                )
+                            });
 
                             // 3. Define variables outside the selection block to fix E0425
                             let (verification_target, verification_proof) = if proof.len() == 32 {
-                                (local_piece_hash.unwrap_or_else(|| proof.clone()), Vec::new())
+                                (
+                                    local_piece_hash.unwrap_or_else(|| proof.clone()),
+                                    Vec::new(),
+                                )
                             } else {
                                 (file_root.clone(), proof)
                             };
@@ -1453,7 +1474,6 @@ impl TorrentState {
                 peer_id,
                 piece_index,
             } => {
-
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
                 }
@@ -2088,7 +2108,7 @@ impl TorrentState {
                 let piece_len = torrent.info.piece_length as u64;
                 let mut v2_roots = torrent.get_v2_roots();
                 v2_roots.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-                
+
                 let mut current_idx = 0;
                 for (_, length, _) in v2_roots {
                     if length > 0 && piece_len > 0 {
@@ -2730,7 +2750,6 @@ mod tests {
 
     #[test]
     fn test_invariant_pending_removed_on_disk_write() {
-
         let mut state = create_empty_state();
         let torrent = create_dummy_torrent(20);
         state.torrent = Some(torrent);
@@ -3290,7 +3309,6 @@ mod tests {
 
     #[test]
     fn test_state_scale_2k_blocks_simulation() {
-
         let num_pieces = 2000;
         let piece_len = 16_384;
 
@@ -3440,7 +3458,6 @@ mod tests {
 
     #[test]
     fn test_debug_3_blocks_trace() {
-
         let num_pieces = 3;
         let piece_len = 16_384;
 
@@ -3590,7 +3607,6 @@ mod tests {
 
     #[test]
     fn test_reproduce_gap_duplicate_bug() {
-
         let mut state = super::tests::create_empty_state();
         let piece_len = 16384 * 3;
         let torrent = super::tests::create_dummy_torrent(1);
@@ -3655,7 +3671,6 @@ mod tests {
 
     #[test]
     fn test_assign_work_is_sequential() {
-
         let mut state = create_empty_state();
         let piece_len = 16_384 * 10;
         let torrent = create_dummy_torrent(1);
@@ -3727,7 +3742,6 @@ mod tests {
 
     #[test]
     fn test_assign_work_multi_piece_saturation() {
-
         // We need > 50 blocks to test the MAX_PIPELINE_DEPTH limit.
         let mut state = create_empty_state();
         let piece_len = 16_384 * 4;
@@ -3844,7 +3858,10 @@ mod tests {
 
         state.piece_to_roots.insert(
             0,
-            vec![(0, 16384, root_a.clone(), 0), (16384, 16384, root_b.clone(), 0)],
+            vec![
+                (0, 16384, root_a.clone(), 0),
+                (16384, 16384, root_b.clone(), 0),
+            ],
         );
         state.v2_proofs.insert(0, vec![0xFF; 32]); // Proof ready
 
@@ -4065,7 +4082,9 @@ mod tests {
             .set_geometry(4, 4, HashMap::new(), false);
 
         // FIX: Set file_len (8) > piece_len (4) to force the V2 workflow (buffer + proof)
-        state.piece_to_roots.insert(0, vec![(0, 8, vec![0xAA; 32], 0)]);
+        state
+            .piece_to_roots
+            .insert(0, vec![(0, 8, vec![0xAA; 32], 0)]);
 
         state.update(Action::IncomingBlock {
             peer_id: "peer1".into(),
@@ -4612,7 +4631,7 @@ mod tests {
             .any(|e| matches!(e, Effect::VerifyPieceV2 { .. }));
 
         assert!(verified_data_v1 || verified_data_v2 || verified_proof_v2,
-            "Case 1 Fail: Should have verified via V1/V2 (data) OR V2 (proof). DataV1: {}, DataV2: {}, ProofV2: {}", 
+            "Case 1 Fail: Should have verified via V1/V2 (data) OR V2 (proof). DataV1: {}, DataV2: {}, ProofV2: {}",
             verified_data_v1, verified_data_v2, verified_proof_v2);
     }
 
@@ -5226,7 +5245,7 @@ mod tests {
                             // Without the V2 map, this will be 16384 (Full Block) -> FAIL
                             assert_eq!(
                                 len, tail_size,
-                                "BUG REPRODUCED: Requested {} (full) instead of {} (tail). V2 roots missing.", 
+                                "BUG REPRODUCED: Requested {} (full) instead of {} (tail). V2 roots missing.",
                                 len, tail_size
                             );
                         }
@@ -5248,17 +5267,21 @@ mod tests {
         torrent.info.meta_version = Some(2);
         torrent.info.pieces = Vec::new(); // Pure V2 (no V1 hashes)
         torrent.info.piece_length = 16384;
-        
+
         // Setup State
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
-        state.piece_manager.set_geometry(16384, 16384, HashMap::new(), false);
+        state
+            .piece_manager
+            .set_geometry(16384, 16384, HashMap::new(), false);
         state.torrent_status = TorrentStatus::Standard;
 
         // Map piece 0 to a file larger than one piece to force buffering
         // (If file_len <= piece_len, it optimizes and verifies immediately)
         let root = vec![0xAA; 32];
-        state.piece_to_roots.insert(0, vec![(0, 32768, root.clone(), 0)]);
+        state
+            .piece_to_roots
+            .insert(0, vec![(0, 32768, root.clone(), 0)]);
 
         let peer_id = "v2_seeder".to_string();
         add_peer(&mut state, &peer_id);
@@ -5272,17 +5295,23 @@ mod tests {
         });
 
         // 3. THEN: The state should buffer the data AND request hashes
-        
+
         // Assert buffering happened
-        assert!(state.v2_pending_data.contains_key(&0), "Data should be buffered pending proof");
+        assert!(
+            state.v2_pending_data.contains_key(&0),
+            "Data should be buffered pending proof"
+        );
 
         // Assert Effect was emitted
         let request_sent = effects.iter().any(|e| {
-            matches!(e, Effect::RequestHashes { peer_id: id, piece_index: idx, .. } 
+            matches!(e, Effect::RequestHashes { peer_id: id, piece_index: idx, .. }
                      if id == &peer_id && *idx == 0)
         });
 
-        assert!(request_sent, "State failed to emit RequestHashes effect for buffered V2 data!");
+        assert!(
+            request_sent,
+            "State failed to emit RequestHashes effect for buffered V2 data!"
+        );
     }
 
     #[test]
@@ -5290,30 +5319,34 @@ mod tests {
         // 1. SETUP: Create a "Magnet-like" Torrent state
         let mut state = create_empty_state();
         let piece_len = 16384;
-        
+
         // Construct a Torrent that has Info (Roots) but NO Piece Layers
         let mut torrent = create_dummy_torrent(1);
         torrent.info.meta_version = Some(2);
         torrent.info.pieces = Vec::new(); // Pure v2
         torrent.info.piece_length = piece_len as i64;
-        
+
         // CRITICAL: Ensure this is None. This simulates "Magnet Metadata Received".
         // Real .torrent files would populate this, but Magnet links don't give it to us.
-        torrent.piece_layers = None; 
+        torrent.piece_layers = None;
 
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
-        state.piece_manager.set_geometry(piece_len as u32, piece_len as u64, HashMap::new(), false);
+        state
+            .piece_manager
+            .set_geometry(piece_len as u32, piece_len as u64, HashMap::new(), false);
         state.torrent_status = TorrentStatus::Standard;
 
         // 2. SETUP ROOTS: Map piece 0 to a File Root
         // We use a file larger than piece_len (32KB) to force proof verification logic.
         let file_root = vec![0xAA; 32];
-        let file_len = 32768; 
-        
+        let file_len = 32768;
+
         // In a real app, 'calculate_v2_mapping' populates this from the Info Dict.
         // Here we inject it manually to simulate that we know the Root.
-        state.piece_to_roots.insert(0, vec![(0, file_len, file_root.clone(), 0)]);
+        state
+            .piece_to_roots
+            .insert(0, vec![(0, file_len, file_root.clone(), 0)]);
 
         let peer_id = "magnet_peer".to_string();
         add_peer(&mut state, &peer_id);
@@ -5328,18 +5361,22 @@ mod tests {
 
         // 4. VERIFY: The State must Buffer + Request Hashes
         // It cannot verify because 'piece_layers' is None, so it MUST ask the peer.
-        
+
         // Check Buffering
-        assert!(state.v2_pending_data.contains_key(&0), "Data should be buffered because we have no local proof");
+        assert!(
+            state.v2_pending_data.contains_key(&0),
+            "Data should be buffered because we have no local proof"
+        );
 
         // Check Effect
         let request_sent = effects.iter().any(|e| {
-            if let Effect::RequestHashes { 
-                peer_id: pid, 
-                file_root: root, 
-                piece_index, 
-                .. 
-            } = e {
+            if let Effect::RequestHashes {
+                peer_id: pid,
+                file_root: root,
+                piece_index,
+                ..
+            } = e
+            {
                 // Verify we are asking the right peer for the right piece using the right root
                 pid == &peer_id && piece_index == &0 && root == &file_root
             } else {
@@ -5347,7 +5384,10 @@ mod tests {
             }
         });
 
-        assert!(request_sent, "State failed to emit RequestHashes! It likely tried to verify locally and failed.");
+        assert!(
+            request_sent,
+            "State failed to emit RequestHashes! It likely tried to verify locally and failed."
+        );
     }
 
     #[test]
@@ -5358,12 +5398,12 @@ mod tests {
         let mut state = create_empty_state();
         let num_pieces = 100; // Standard V1 swarm
         let piece_len = 16384;
-        
+
         // 2. CONSTRUCT V1 METADATA
         // V1 puts all hashes into a single byte string inside the Info Dict.
         let data_chunk = vec![0xAA; piece_len];
         let piece_hash = Sha1::digest(&data_chunk).to_vec();
-        
+
         let mut all_hashes = Vec::new();
         for _ in 0..num_pieces {
             all_hashes.extend_from_slice(&piece_hash);
@@ -5386,7 +5426,9 @@ mod tests {
         assert_eq!(state.torrent_status, TorrentStatus::Validating);
 
         // 4. ACTION: VALIDATION COMPLETE
-        state.update(Action::ValidationComplete { completed_pieces: vec![] });
+        state.update(Action::ValidationComplete {
+            completed_pieces: vec![],
+        });
         assert_eq!(state.torrent_status, TorrentStatus::Standard);
 
         // 5. EXECUTE DOWNLOAD (V1 Style)
@@ -5401,31 +5443,41 @@ mod tests {
         });
 
         // CHECK: V1 Optimization
-        // Unlike V2, we should NOT see 'RequestHashes'. 
+        // Unlike V2, we should NOT see 'RequestHashes'.
         // We SHOULD see 'VerifyPiece' immediately because we already have the hash.
-        let verify_sent = effects.iter().any(|e| matches!(e, Effect::VerifyPiece { piece_index: 0, .. }));
-        assert!(verify_sent, "V1 failed to trigger immediate verification using info-dict hashes");
-        
+        let verify_sent = effects
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPiece { piece_index: 0, .. }));
+        assert!(
+            verify_sent,
+            "V1 failed to trigger immediate verification using info-dict hashes"
+        );
+
         // Ensure no V2 requests leaked in
-        let v2_request = effects.iter().any(|e| matches!(e, Effect::RequestHashes { .. }));
-        assert!(!v2_request, "V1 torrent incorrectly triggered V2 hash request");
+        let v2_request = effects
+            .iter()
+            .any(|e| matches!(e, Effect::RequestHashes { .. }));
+        assert!(
+            !v2_request,
+            "V1 torrent incorrectly triggered V2 hash request"
+        );
     }
 
     #[test]
     fn test_state_hybrid_metadata_workflow() {
-        use std::collections::HashMap;
         use serde_bencode::value::Value;
         use sha1::{Digest, Sha1};
+        use std::collections::HashMap;
 
         let mut state = create_empty_state();
         let num_pieces = 50;
         let piece_len = 16384;
-        
+
         // 1. CONSTRUCT HYBRID TORRENT
         // It has V1 'pieces' AND V2 'file_tree'
         let data_chunk = vec![0xBB; piece_len];
         let v1_hash = Sha1::digest(&data_chunk).to_vec();
-        
+
         let mut v1_pieces = Vec::new();
         for _ in 0..num_pieces {
             v1_pieces.extend_from_slice(&v1_hash);
@@ -5435,21 +5487,24 @@ mod tests {
         torrent.info.meta_version = Some(2); // Hybrid implies v2 support
         torrent.info.piece_length = piece_len as i64;
         torrent.info.pieces = v1_pieces; // V1 Data
-        
+
         // V2 Data (File Tree)
         let root_hash = vec![0xCC; 32];
         let total_len = (num_pieces * piece_len) as i64;
-        
+
         let mut file_meta = HashMap::new();
         file_meta.insert("length".as_bytes().to_vec(), Value::Int(total_len));
-        file_meta.insert("pieces root".as_bytes().to_vec(), Value::Bytes(root_hash.clone()));
-        
+        file_meta.insert(
+            "pieces root".as_bytes().to_vec(),
+            Value::Bytes(root_hash.clone()),
+        );
+
         let mut file_node = HashMap::new();
         file_node.insert("".as_bytes().to_vec(), Value::Dict(file_meta));
-        
+
         let mut root_node = HashMap::new();
         root_node.insert("hybrid_file".as_bytes().to_vec(), Value::Dict(file_node));
-        
+
         torrent.info.file_tree = Some(Value::Dict(root_node));
 
         // 2. ACTION: METADATA RECEIVED
@@ -5457,15 +5512,23 @@ mod tests {
             torrent: Box::new(torrent),
             metadata_length: 9999,
         });
-        state.update(Action::ValidationComplete { completed_pieces: vec![] });
+        state.update(Action::ValidationComplete {
+            completed_pieces: vec![],
+        });
 
         // 3. CHECK DUAL INITIALIZATION
         // V1 Check: Bitfield correct?
         assert_eq!(state.piece_manager.bitfield.len(), num_pieces);
-        
+
         // V2 Check: Roots mapped?
-        assert!(state.piece_to_roots.contains_key(&0), "Hybrid failed to map V2 roots");
-        assert!(state.piece_to_roots.contains_key(&(num_pieces as u32 - 1)), "Hybrid failed to map end piece");
+        assert!(
+            state.piece_to_roots.contains_key(&0),
+            "Hybrid failed to map V2 roots"
+        );
+        assert!(
+            state.piece_to_roots.contains_key(&(num_pieces as u32 - 1)),
+            "Hybrid failed to map end piece"
+        );
 
         // 4. EXECUTE DOWNLOAD
         let peer_id = "hybrid_worker".to_string();
@@ -5481,17 +5544,22 @@ mod tests {
         // 5. VERIFY HYBRID BEHAVIOR
         // It should prefer V1 verification (Immediate VerifyPiece) because it's faster
         // than asking for V2 proofs.
-        let verify_v1 = effects.iter().any(|e| matches!(e, Effect::VerifyPiece { piece_index: 0, .. }));
+        let verify_v1 = effects
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPiece { piece_index: 0, .. }));
         assert!(verify_v1, "Hybrid failed to fallback to V1 verification");
 
         // It should NOT buffer/request V2 hashes if V1 verification is possible
-        assert!(!state.v2_pending_data.contains_key(&0), "Hybrid inefficiently buffered data despite having V1 hashes");
+        assert!(
+            !state.v2_pending_data.contains_key(&0),
+            "Hybrid inefficiently buffered data despite having V1 hashes"
+        );
     }
 
     #[test]
     fn test_state_scale_1000_v2_metadata_workflow() {
-        use std::collections::HashMap;
-        use serde_bencode::value::Value; // Needed to construct the file tree
+        use serde_bencode::value::Value;
+        use std::collections::HashMap; // Needed to construct the file tree
 
         // 1. SETUP: Empty State
         let mut state = create_empty_state();
@@ -5502,17 +5570,20 @@ mod tests {
 
         // 2. CONSTRUCT METADATA (Simulate Magnet Link Download)
         // We start with a Torrent that has NO layers and NO pieces, just the File Tree.
-        let mut torrent = create_dummy_torrent(0); 
+        let mut torrent = create_dummy_torrent(0);
         torrent.info.piece_length = piece_len as i64;
         torrent.info.meta_version = Some(2);
         torrent.info.pieces = Vec::new(); // Pure V2
-        torrent.piece_layers = None;      // <--- Crucial: Forces proof requests
+        torrent.piece_layers = None; // <--- Crucial: Forces proof requests
 
         // Construct V2 File Tree: { "big_file": { "": { "length": ..., "pieces root": ... } } }
         // This is what the State uses to populate 'piece_to_roots' during MetadataReceived
         let mut file_meta = HashMap::new();
         file_meta.insert("length".as_bytes().to_vec(), Value::Int(total_len as i64));
-        file_meta.insert("pieces root".as_bytes().to_vec(), Value::Bytes(root_hash.clone()));
+        file_meta.insert(
+            "pieces root".as_bytes().to_vec(),
+            Value::Bytes(root_hash.clone()),
+        );
 
         let mut file_node = HashMap::new();
         file_node.insert("".as_bytes().to_vec(), Value::Dict(file_meta));
@@ -5531,19 +5602,31 @@ mod tests {
         // CHECK: State successfully mapped the file tree to pieces
         assert_eq!(state.torrent_status, TorrentStatus::Validating);
         // The file is 1000 pieces long, so piece 0 and piece 999 must exist in the map
-        assert!(state.piece_to_roots.contains_key(&0), "Failed to map piece 0 from file tree");
-        assert!(state.piece_to_roots.contains_key(&999), "Failed to map piece 999 from file tree");
-        assert_eq!(state.piece_manager.bitfield.len(), 1000, "Incorrect piece count calculated");
+        assert!(
+            state.piece_to_roots.contains_key(&0),
+            "Failed to map piece 0 from file tree"
+        );
+        assert!(
+            state.piece_to_roots.contains_key(&999),
+            "Failed to map piece 999 from file tree"
+        );
+        assert_eq!(
+            state.piece_manager.bitfield.len(),
+            1000,
+            "Incorrect piece count calculated"
+        );
 
         // 4. ACTION: VALIDATION COMPLETE
         // We must exit the 'Validating' state to accept incoming blocks
-        state.update(Action::ValidationComplete { completed_pieces: vec![] });
+        state.update(Action::ValidationComplete {
+            completed_pieces: vec![],
+        });
         assert_eq!(state.torrent_status, TorrentStatus::Standard);
 
         // 5. EXECUTE SCALE LOOP (1000 Blocks)
         let peer_id = "v2_full_worker".to_string();
         add_peer(&mut state, &peer_id);
-        
+
         let data_chunk = vec![0u8; piece_len as usize];
         let proof_chunk = vec![0xFF; 32];
 
@@ -5559,14 +5642,22 @@ mod tests {
             });
 
             // CHECK: Buffer + Request Effect
-            assert!(state.v2_pending_data.contains_key(&piece_idx), "Piece {} not buffered", piece_idx);
-            
+            assert!(
+                state.v2_pending_data.contains_key(&piece_idx),
+                "Piece {} not buffered",
+                piece_idx
+            );
+
             let request_correct = data_effects.iter().any(|e| {
                 // Ensure the Effect carries the Root Hash derived from our File Tree
-                matches!(e, Effect::RequestHashes { file_root, piece_index, .. } 
+                matches!(e, Effect::RequestHashes { file_root, piece_index, .. }
                          if *piece_index == piece_idx && file_root == &root_hash)
             });
-            assert!(request_correct, "Piece {} failed to emit RequestHashes with correct Root", piece_idx);
+            assert!(
+                request_correct,
+                "Piece {} failed to emit RequestHashes with correct Root",
+                piece_idx
+            );
 
             // B. Proof Received
             let proof_effects = state.update(Action::MerkleProofReceived {
@@ -5579,10 +5670,18 @@ mod tests {
             let verify_triggered = proof_effects.iter().any(|e| {
                 matches!(e, Effect::VerifyPieceV2 { piece_index, .. } if *piece_index == piece_idx)
             });
-            assert!(verify_triggered, "Piece {} failed to verify after proof", piece_idx);
-            assert!(!state.v2_pending_data.contains_key(&piece_idx), "Buffer leak for piece {}", piece_idx);
+            assert!(
+                verify_triggered,
+                "Piece {} failed to verify after proof",
+                piece_idx
+            );
+            assert!(
+                !state.v2_pending_data.contains_key(&piece_idx),
+                "Buffer leak for piece {}",
+                piece_idx
+            );
         }
-        
+
         // 6. FINAL CLEANUP CHECK
         assert!(state.v2_pending_data.is_empty());
     }
@@ -5660,7 +5759,6 @@ mod tests {
 
 #[cfg(test)]
 fn check_invariants(state: &TorrentState) {
-
     // CATEGORY 1: Data Consistency (The "Is the Math Right?" Check)
 
     // The global session total MUST be >= the sum of currently connected peers.
@@ -5978,7 +6076,6 @@ mod prop_tests {
     }
 
     fn inject_reordering_faults(actions: Vec<Action>, seed: u64) -> Vec<Action> {
-
         // We use a fixed seed from Proptest so failures are reproducible
         let mut rng = StdRng::seed_from_u64(seed);
 
@@ -6388,7 +6485,6 @@ mod prop_tests {
             // Case 1: The Endgame Transition
             // Force queue to empty, then verify redundant requests behavior
             Just(vec![
-
                 Action::PeerSuccessfullyConnected {
                     peer_id: peer_id.clone()
                 },
@@ -6399,11 +6495,9 @@ mod prop_tests {
                     peer_id: peer_id.clone(),
                     piece_index: 0
                 },
-
                 Action::AssignWork {
                     peer_id: peer_id.clone()
                 },
-
                 // (We would need to manually manipulate the state queue in the test runner
                 //  for this to work perfectly, or send a specific sequence here).
             ]),
@@ -6623,7 +6717,6 @@ mod prop_tests {
         let id = "bad_actor".to_string();
 
         prop_oneof![
-
             // Expectation: Data should be dropped or peer disconnected, no panic.
             Just(vec![
                 Action::PeerSuccessfullyConnected {
@@ -6639,7 +6732,6 @@ mod prop_tests {
                     data: vec![0; 100]
                 }
             ]),
-
             // Expectation: Request ignored, strict clients might disconnect peer.
             Just(vec![
                 Action::PeerSuccessfullyConnected {
@@ -6655,7 +6747,6 @@ mod prop_tests {
                     length: 16384
                 }
             ]),
-
             // Expectation: State handles map collisions gracefully.
             Just(vec![
                 Action::PeerSuccessfullyConnected {
@@ -6675,7 +6766,6 @@ mod prop_tests {
                     data: vec![1]
                 }
             ]),
-
             // Expectation: Client accepts the byte into a buffer OR drops it. MUST NOT PANIC.
             // Malicious peers do this to exhaust memory 1 byte at a time.
             (0..20u32).prop_map(|idx| {
@@ -7393,7 +7483,7 @@ mod prop_tests {
                 assert_eq!(
                     sut_status_norm,
                     model_status_norm,
-                    "Status Mismatch! SUT: {:?} (Normalized), Model: {:?} (Normalized). Action: {:?}", 
+                    "Status Mismatch! SUT: {:?} (Normalized), Model: {:?} (Normalized). Action: {:?}",
                     sut.torrent_status, expected_state.status, transition
                 );
 

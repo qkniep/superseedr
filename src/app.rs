@@ -940,7 +940,6 @@ impl App {
                         }
                     }
                 } else {
-
                     self.app_state.pending_torrent_path = Some(path.clone());
                     if let Ok(mut explorer) = FileExplorer::new() {
                         let initial_path = self
@@ -973,7 +972,9 @@ impl App {
                                 if let Ok(mut explorer) = FileExplorer::new() {
                                     let initial_path = UserDirs::new()
                                         .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
-                                        .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()));
+                                        .or_else(|| {
+                                            UserDirs::new().map(|ud| ud.home_dir().to_path_buf())
+                                        });
                                     if let Some(common_path) = initial_path {
                                         explorer.set_cwd(common_path).ok();
                                     }
@@ -2580,7 +2581,6 @@ fn make_random_adjustment(mut limits: CalculatedLimits) -> (CalculatedLimits, St
     ];
 
     for attempt in 0..MAX_TRADE_ATTEMPTS {
-
         parameters.shuffle(&mut rng);
         let source_param = parameters[0];
         let dest_param = parameters[1];

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::torrent_file::{InfoFile, Torrent};
+use crate::torrent_file::Torrent;
 use serde_bencode::de;
 use serde_bencode::value::Value;
 
@@ -33,7 +33,7 @@ impl From<serde_bencode::Error> for ParseError {
 pub fn polyfill_v2_files(torrent: &mut Torrent) {
     if torrent.info.files.is_empty() && torrent.info.file_tree.is_some() {
         let mut v2_roots = torrent.get_v2_roots();
-        
+
         // Critical: Sort to match PieceManager's deterministic order
         v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
 
@@ -83,7 +83,7 @@ pub fn from_info_bytes(info_bytes: &[u8]) -> Result<Torrent, ParseError> {
         comment: None,
         created_by: None,
         encoding: None,
-        piece_layers: None, 
+        piece_layers: None,
     };
 
     // 3. UNIFIED LOGIC: Hydrate V2 files

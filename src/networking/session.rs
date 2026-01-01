@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::torrent_file::Torrent;
-
 use super::protocol::{
     reader_task, writer_task, BlockInfo, ClientExtendedId, ExtendedHandshakePayload, Message,
     MetadataMessage,
@@ -270,7 +268,7 @@ impl PeerSession {
                 // KeepAlive
                 _ = keep_alive_timer.tick() => { let _ = self.writer_tx.try_send(Message::KeepAlive); },
 
-                _ = speed_adjustment_timer.tick() => { 
+                _ = speed_adjustment_timer.tick() => {
                     if !self.adjust_window_size() {
                         break 'session Ok(());
                     }
@@ -400,7 +398,7 @@ impl PeerSession {
                         }
 
                         Message::HashReject(root, _, offset, _, _proof_layers) => {
-                            tracing::info!("Peer {} rejected hash request for Root {:?} @ Offset {}", 
+                            tracing::info!("Peer {} rejected hash request for Root {:?} @ Offset {}",
                                 self.peer_ip_port, hex::encode(&root), offset);
                         }
                     }
@@ -555,11 +553,17 @@ impl PeerSession {
                     .try_send(Message::HashPiece(root, base_layer, index, proof));
             }
 
-            TorrentCommand::SendHashReject { root, base_layer, index, length, .. } => {
+            TorrentCommand::SendHashReject {
+                root,
+                base_layer,
+                index,
+                length,
+                ..
+            } => {
                 let _ = self
                     .writer_tx
                     .try_send(Message::HashReject(root, base_layer, index, length, 0));
-            },
+            }
 
             TorrentCommand::GetHashes {
                 file_root,
@@ -574,18 +578,20 @@ impl PeerSession {
                     base_layer,
                     index,
                     length,
-                    proof_layers 
+                    proof_layers,
                 ));
-                
+
                 tracing::info!(
-                    "Sent HashRequest to {}: Root={:?}, Base={}, Idx={}, Len={}", 
-                    self.peer_ip_port, hex::encode(&file_root), base_layer, index, length
+                    "Sent HashRequest to {}: Root={:?}, Base={}, Idx={}, Len={}",
+                    self.peer_ip_port,
+                    hex::encode(&file_root),
+                    base_layer,
+                    index,
+                    length
                 );
             }
 
-            _ => {
-
-            }
+            _ => {}
         }
         Ok(true)
     }
@@ -693,19 +699,31 @@ impl PeerSession {
                         self.peer_torrent_metadata_pieces.extend(metadata_binary);
 
                         if torrent_metadata_len_usize == self.peer_torrent_metadata_pieces.len() {
-                            tracing::info!("Session {} received full metadata. Attempting parse...", self.peer_ip_port);
+                            tracing::info!(
+                                "Session {} received full metadata. Attempting parse...",
+                                self.peer_ip_port
+                            );
 
                             // Use the robust parser that handles V2 hydration
-                            match crate::torrent_file::parser::from_info_bytes(&self.peer_torrent_metadata_pieces) {
+                            match crate::torrent_file::parser::from_info_bytes(
+                                &self.peer_torrent_metadata_pieces,
+                            ) {
                                 Ok(torrent) => {
-                                    tracing::info!("METADATA SUCCESS: Parsed & Hydrated Info Dict.");
-                                    let _ = self.torrent_manager_tx.try_send(TorrentCommand::DhtTorrent(
-                                        Box::new(torrent),
-                                        torrent_metadata_len,
-                                    ));
+                                    tracing::info!(
+                                        "METADATA SUCCESS: Parsed & Hydrated Info Dict."
+                                    );
+                                    let _ = self.torrent_manager_tx.try_send(
+                                        TorrentCommand::DhtTorrent(
+                                            Box::new(torrent),
+                                            torrent_metadata_len,
+                                        ),
+                                    );
                                 }
                                 Err(e) => {
-                                    tracing::error!("METADATA FAILURE: Parser rejected info dict: {:?}", e);
+                                    tracing::error!(
+                                        "METADATA FAILURE: Parser rejected info dict: {:?}",
+                                        e
+                                    );
                                 }
                             }
                         } else {
@@ -1018,7 +1036,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_performance_1000_blocks_sliding_window() {
-
         let (mut network, client_cmd_tx, mut manager_event_rx, _) = spawn_test_session().await;
 
         let mut handshake_buf = vec![0u8; 68];
@@ -1729,7 +1746,7 @@ mod tests {
                             if start_time.elapsed() < Duration::from_secs(2) {
                                 tokio::time::sleep(Duration::from_millis(10)).await;
                             }
-                            
+
                             let piece =
                                 generate_message(Message::Piece(i, b, dummy_data.clone())).unwrap();
                             let _ = peer_write.write_all(&piece).await;
@@ -1817,5 +1834,4 @@ mod tests {
 
         println!("Received Unchoke, test passed.");
     }
-
 }

@@ -2304,7 +2304,10 @@ fn draw_welcome_screen(f: &mut Frame) {
             Span::raw("Use the "),
             Span::styled("CLI", Style::default().fg(theme::SKY).bold()),
             Span::raw(" from another terminal: "),
-            Span::styled("`superseedr add <path_or_url>`", Style::default().fg(theme::SURFACE2)),
+            Span::styled(
+                "`superseedr add <path_or_url>`",
+                Style::default().fg(theme::SURFACE2),
+            ),
         ]),
         Line::from(vec![
             Span::styled(" 4. ", Style::default().fg(theme::GREEN)),
@@ -2314,12 +2317,18 @@ fn draw_welcome_screen(f: &mut Frame) {
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" ★ Browser Support: ", Style::default().fg(theme::YELLOW).bold()),
+            Span::styled(
+                " ★ Browser Support: ",
+                Style::default().fg(theme::YELLOW).bold(),
+            ),
             Span::raw("To open magnet links directly from your browser,"),
         ]),
         Line::from(vec![
             Span::raw("   natively install superseedr: "),
-            Span::styled("https://github.com/Jagalite/superseedr/releases", Style::default().fg(theme::BLUE).underlined()),
+            Span::styled(
+                "https://github.com/Jagalite/superseedr/releases",
+                Style::default().fg(theme::BLUE).underlined(),
+            ),
         ]),
         Line::from(""),
         Line::from(""),

@@ -50,7 +50,6 @@ impl PieceManager {
         piece_overrides: HashMap<u32, u32>,
         validation_complete: bool,
     ) {
-
         self.block_manager.set_geometry(
             piece_length,
             total_length,
@@ -85,7 +84,6 @@ impl PieceManager {
         block_data: &[u8],
         piece_size: usize,
     ) -> Option<Vec<u8>> {
-
         if self.block_manager.piece_length == 0 {
             let estimated_total = (piece_index as u64 + 1) * piece_size as u64;
             self.set_geometry(piece_size as u32, estimated_total, HashMap::new(), false);
@@ -159,7 +157,6 @@ impl PieceManager {
     where
         I: Iterator<Item = &'a Vec<bool>> + Clone,
     {
-
         self.block_manager.update_rarity(all_peer_bitfields);
 
         // We only want to expose rarity for pieces we actually Need or are Pending.

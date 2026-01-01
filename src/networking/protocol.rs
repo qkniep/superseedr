@@ -119,7 +119,7 @@ pub enum Message {
 
     HashRequest(Vec<u8>, u32, u32, u32, u32), // root, base, offset, length, proof_layers
     HashReject(Vec<u8>, u32, u32, u32, u32),
-    HashPiece(Vec<u8>, u32, u32, Vec<u8>),    // root, base, offset, proof_data
+    HashPiece(Vec<u8>, u32, u32, Vec<u8>), // root, base, offset, proof_data
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -383,18 +383,17 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
 
         Message::HashRequest(root, base, offset, length, proof_layers) => {
             let mut buffer = Vec::with_capacity(53); // 4 (len) + 1 (id) + 32 (root) + 16 (4*u32)
-            
+
             // 49 bytes: ID + root (32) + base + offset + length + proof_layers
             let payload_len: u32 = 49;
             buffer.extend_from_slice(&payload_len.to_be_bytes());
-            
+
             buffer.push(21); // HashRequest ID
             buffer.extend_from_slice(&root); // 32 bytes
             buffer.extend_from_slice(&base.to_be_bytes());
             buffer.extend_from_slice(&offset.to_be_bytes());
             buffer.extend_from_slice(&length.to_be_bytes());
             buffer.extend_from_slice(&proof_layers.to_be_bytes());
-
 
             Ok(buffer)
         }
@@ -424,14 +423,12 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
             buffer.extend_from_slice(&proof_layers.to_be_bytes());
             Ok(buffer)
         }
-
     }
 }
 
 pub fn parse_message_from_bytes(
     cursor: &mut std::io::Cursor<&Vec<u8>>,
 ) -> Result<Message, std::io::Error> {
-
     let mut len_buf = [0u8; 4];
 
     if std::io::Read::read_exact(cursor, &mut len_buf).is_err() {
@@ -570,7 +567,13 @@ pub fn parse_message_from_bytes(
             let offset = read_be_u32(&payload, 36)?;
             let length = read_be_u32(&payload, 40)?;
             let proof_layers = read_be_u32(&payload, 44)?;
-            Ok(Message::HashRequest(root, base, offset, length, proof_layers))
+            Ok(Message::HashRequest(
+                root,
+                base,
+                offset,
+                length,
+                proof_layers,
+            ))
         }
         22 => {
             if payload.len() < 40 {
@@ -582,10 +585,10 @@ pub fn parse_message_from_bytes(
             let root = payload[0..32].to_vec();
             let base = read_be_u32(&payload, 32)?;
             let offset = read_be_u32(&payload, 36)?;
-            
+
             let mut data = payload[40..].to_vec();
 
-            if !data.is_empty() && data.len() % 32 != 0 {
+            if !data.is_empty() && !data.len().is_multiple_of(32) {
                 let remainder = data.len() % 32;
                 if remainder == 4 {
                     // Likely [Count: 4] [Hashes...]
@@ -599,7 +602,7 @@ pub fn parse_message_from_bytes(
             }
 
             Ok(Message::HashPiece(root, base, offset, data))
-        },
+        }
         23 => {
             if payload.len() != 48 {
                 return Err(Error::new(
@@ -607,15 +610,20 @@ pub fn parse_message_from_bytes(
                     format!("Invalid HashReject length: {}", payload.len()),
                 ));
             }
-            let root = payload[0..32].to_vec(); 
+            let root = payload[0..32].to_vec();
             let base = read_be_u32(&payload, 32)?;
             let offset = read_be_u32(&payload, 36)?;
             let length = read_be_u32(&payload, 40)?;
             let proof_layers = read_be_u32(&payload, 44)?; // Read extra field
 
-
-            Ok(Message::HashReject(root, base, offset, length, proof_layers))
-        },
+            Ok(Message::HashReject(
+                root,
+                base,
+                offset,
+                length,
+                proof_layers,
+            ))
+        }
         _ => {
             // Unknown ID
             let msg = format!("Unknown message ID: {}", message_id);
@@ -834,7 +842,6 @@ mod tests {
     /// This one helper function replaces all your TCP tests.
     /// It checks that a message can be serialized and then parsed back.
     async fn assert_message_roundtrip(msg: Message) {
-
         let bytes = generate_message(msg.clone()).unwrap();
 
         let mut reader = &bytes[..];
@@ -864,7 +871,6 @@ mod tests {
     /// Special test for the ExtendedHandshake
     #[tokio::test]
     async fn test_extended_handshake_parsing() {
-
         let metadata_size = 12345;
         let msg = Message::ExtendedHandshake(Some(metadata_size));
         let generated_bytes = generate_message(msg).unwrap();
