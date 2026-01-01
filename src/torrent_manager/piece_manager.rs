@@ -50,8 +50,6 @@ impl PieceManager {
         piece_overrides: HashMap<u32, u32>,
         validation_complete: bool,
     ) {
-        tracing::info!("📏 [PieceManager] Applying Geometry: total_len {}, global_piece_len {}, overrides_count {}", 
-        total_length, piece_length, piece_overrides.len());
 
         self.block_manager.set_geometry(
             piece_length,
@@ -90,10 +88,6 @@ impl PieceManager {
 
         if self.block_manager.piece_length == 0 {
             let estimated_total = (piece_index as u64 + 1) * piece_size as u64;
-            tracing::info!(
-                "⚠️ [PieceManager] WARNING: Falling back to inferred geometry for piece {}",
-                piece_index
-            );
             self.set_geometry(piece_size as u32, estimated_total, HashMap::new(), false);
         }
 

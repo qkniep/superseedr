@@ -384,7 +384,7 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
         Message::HashRequest(root, base, offset, length, proof_layers) => {
             let mut buffer = Vec::with_capacity(53); // 4 (len) + 1 (id) + 32 (root) + 16 (4*u32)
             
-            // Length: 1 (ID) + 32 (Root) + 4 (base) + 4 (offset) + 4 (length) + 4 (proof_layers) = 49
+            // 49 bytes: ID + root (32) + base + offset + length + proof_layers
             let payload_len: u32 = 49;
             buffer.extend_from_slice(&payload_len.to_be_bytes());
             
@@ -395,11 +395,6 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
             buffer.extend_from_slice(&length.to_be_bytes());
             buffer.extend_from_slice(&proof_layers.to_be_bytes());
 
-            event!(
-                Level::INFO,
-                "SENDING HashRequest: Root={}, Base={}, Offset={}, Len={}, Layers={}, RawBytes={:02x?}",
-                hex::encode(&root), base, offset, length, proof_layers, buffer
-            );
 
             Ok(buffer)
         }
@@ -618,11 +613,6 @@ pub fn parse_message_from_bytes(
             let length = read_be_u32(&payload, 40)?;
             let proof_layers = read_be_u32(&payload, 44)?; // Read extra field
 
-event!(
-        Level::WARN,
-        "RECEIVED HashReject: Root={:?}, Base={}, Offset={}, Len={}, Layers={}",
-        hex::encode(&root), base, offset, length, proof_layers
-    );
 
             Ok(Message::HashReject(root, base, offset, length, proof_layers))
         },

@@ -202,12 +202,6 @@ pub async fn write_data_to_disk(
                     file.flush().await?; 
 
                 } else {
-                    tracing::error!(
-                        "💾 [Storage] SKIP: Skipping {} bytes for Padding File {:?} @ Local {}", 
-                        bytes_to_write_in_this_file, 
-                        file_info.path, 
-                        local_offset
-                    );
                 }
 
                 bytes_written += bytes_to_write_in_this_file;

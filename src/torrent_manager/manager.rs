@@ -652,59 +652,6 @@ impl TorrentManager {
                     let mut verification_task = tokio::task::spawn_blocking(move || {
                         let start = Instant::now();
                         
-                        // --- DEBUG: HASH DUMP ---
-                        // We calculate the leaf hash manually to see if the data looks valid
-                        // (e.g. is it all zeros? does it match what we expect?)
-                        use sha2::{Digest, Sha256};
-                        let leaf_hash = Sha256::digest(&data).to_vec();
-
-                        tracing::warn!(
-                            piece_index,
-                            "🔍 V2 DEBUG: \n  Root:      {}\n  Leaf(Data): {}\n  Proof:     {}\n  RelIndex:  {}\n  Context:   {}\n  DataLen:   {}",
-                            hex::encode(&root_hash),
-                            hex::encode(&leaf_hash),
-                            hex::encode(&proof),
-                            relative_index,
-                            hashing_context_len,
-                            data.len()
-                        );
-                        // ------------------------
-                        //
-                        //// --- MANUAL MERKLE LOGGING ---
-                        if data.len() == 32768 {
-                            // 1. Hash the two 16 KiB leaves
-                            let h0 = Sha256::digest(&data[0..16384]);
-                            let h1 = Sha256::digest(&data[16384..32768]);
-                            
-                            // 2. Combine them (Layer 1)
-                            let mut combined = [0u8; 64];
-                            combined[0..32].copy_from_slice(&h0);
-                            combined[32..64].copy_from_slice(&h1);
-                            let base_1_node = Sha256::digest(&combined);
-
-                            tracing::warn!(
-                                "DIAGNOSTIC HASH for Piece {}: {}",
-                                piece_index,
-                                hex::encode(base_1_node)
-                            );
-                            
-                            // Check if this matches the peer's proof (which we know is 3110...)
-                            if hex::encode(base_1_node) == hex::encode(&proof) {
-                                tracing::warn!("✅ MATCH FOUND! The hierarchical hash matches the torrent metadata.");
-                            }
-                        }
-    // -----------------------------
-
-                        // --- DIAGNOSTIC CHECK --- let expected_hashes = (hashing_context_len as f64).log2().ceil() as usize;
-                        let expected_hashes = (hashing_context_len as f64).log2().ceil() as usize;
-                        if proof.len() < expected_hashes * 32 && hashing_context_len > data.len() {
-                            tracing::error!(
-                                piece_index, 
-                                "PROOF TOO SHORT: Got {} bytes, need {} bytes for context {}", 
-                                proof.len(), expected_hashes * 32, hashing_context_len
-                            );
-                        }
-                        // ------------------------
                         let is_valid = merkle::verify_merkle_proof(
                             &root_hash,
                             &data,
