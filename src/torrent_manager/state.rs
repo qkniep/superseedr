@@ -282,7 +282,6 @@ pub enum ChokeStatus {
 #[derive(Debug, Clone)]
 pub struct TorrentState {
     pub info_hash: Vec<u8>,
-    pub alt_info_hash: Option<Vec<u8>>,
     pub torrent: Option<Torrent>,
     pub torrent_metadata_length: Option<i64>,
     pub is_paused: bool,
@@ -315,7 +314,6 @@ impl Default for TorrentState {
     fn default() -> Self {
         Self {
             info_hash: Vec::new(),
-            alt_info_hash: None,
             torrent: None,
             torrent_metadata_length: None,
             is_paused: false,
@@ -350,7 +348,6 @@ impl Default for TorrentState {
 impl TorrentState {
     pub fn new(
         info_hash: Vec<u8>,
-        alt_info_hash: Option<Vec<u8>>,
         torrent: Option<Torrent>,
         torrent_metadata_length: Option<i64>,
         piece_manager: PieceManager,
@@ -400,7 +397,6 @@ impl TorrentState {
 
         let mut state = Self {
             info_hash,
-            alt_info_hash,
             torrent,
             torrent_metadata_length,
             torrent_status,

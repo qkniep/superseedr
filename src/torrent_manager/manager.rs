@@ -219,15 +219,6 @@ impl TorrentManager {
             hasher.finalize().to_vec()
         };
 
-        let alt_info_hash = if torrent.info.meta_version == Some(2) && !torrent.info.pieces.is_empty() {
-            // Store the V2 hash as the alternate
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(&torrent.info_dict_bencode);
-            Some(hasher.finalize()[0..20].to_vec())
-        } else {
-            None
-        };
-
         let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(1000);
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -270,7 +261,6 @@ impl TorrentManager {
 
         let mut state = TorrentState::new(
             info_hash.to_vec(),
-            alt_info_hash,
             Some(torrent),
             Some(torrent_length as i64),
             piece_manager,
@@ -330,7 +320,7 @@ impl TorrentManager {
         // Pure V1: info_hash = v1, alt = None
         // Pure V2: info_hash = v2, alt = None
         // Hybrid:  info_hash = v1, alt = v2 (based on your current preference)
-        let (info_hash, alt_info_hash) = match (v1_hash, v2_hash) {
+        let (info_hash, _v2_info_hash) = match (v1_hash, v2_hash) {
             (Some(v1), Some(v2)) => (v1, Some(v2)), // Hybrid
             (Some(v1), None) => (v1, None),         // Pure V1
             (None, Some(v2)) => (v2, None),         // Pure V2
@@ -389,7 +379,6 @@ impl TorrentManager {
 
         let state = TorrentState::new(
             info_hash,
-            alt_info_hash,
             None,
             None,
             PieceManager::new(),
@@ -2674,7 +2663,7 @@ mod tests {
         };
 
         let manager =
-            TorrentManager::from_magnet(params, magnet).expect("Failed to create manager");
+            TorrentManager::from_magnet(params, magnet, &magnet_link).expect("Failed to create manager");
 
         let block_count = 100_000;
         let dummy_data = vec![0u8; 16384];
@@ -2806,8 +2795,9 @@ mod resource_tests {
         let dl_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
         let ul_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
 
+        let magnet_link = "magnet:?xt=urn:btih:0000000000000000000000000000000000000000";
         let magnet =
-            Magnet::new("magnet:?xt=urn:btih:0000000000000000000000000000000000000000").unwrap();
+            Magnet::new(&magnet_link).unwrap();
 
         let dht_handle = {
             #[cfg(feature = "dht")]
@@ -2834,7 +2824,7 @@ mod resource_tests {
             global_ul_bucket: ul_bucket,
         };
 
-        let manager = TorrentManager::from_magnet(params, magnet).unwrap();
+        let manager = TorrentManager::from_magnet(params, magnet, &magnet_link).unwrap();
 
         let torrent_tx = manager.torrent_manager_tx.clone();
 
@@ -3858,8 +3848,9 @@ mod resource_tests {
         let dl_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
         let ul_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
 
+        let magnet_link = "magnet:?xt=urn:btih:0000000000000000000000000000000000000000";
         let magnet =
-            Magnet::new("magnet:?xt=urn:btih:0000000000000000000000000000000000000000").unwrap();
+            Magnet::new(&magnet_link).unwrap();
 
         let dht_handle = {
             #[cfg(feature = "dht")]
@@ -3886,7 +3877,7 @@ mod resource_tests {
             global_ul_bucket: ul_bucket,
         };
 
-        let manager = TorrentManager::from_magnet(params, magnet).unwrap();
+        let manager = TorrentManager::from_magnet(params, magnet, &magnet_link).unwrap();
         let torrent_tx = manager.torrent_manager_tx.clone();
 
         // Return 'rm_client' instead of 'resource_manager'

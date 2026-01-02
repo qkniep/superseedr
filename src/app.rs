@@ -868,15 +868,14 @@ impl App {
             let mut buffer = vec![0u8; 68];
             if (stream.read_exact(&mut buffer).await).is_ok() {
                 let peer_info_hash = &buffer[28..48];
-tracing::info!("INCOMING HANDSHAKE: Received Hash: {}", hex::encode(peer_info_hash));
 
                 if let Some(torrent_manager_tx) =
-                    torrent_manager_incoming_peer_txs_clone.get(peer_info_hash.clone())
+                    torrent_manager_incoming_peer_txs_clone.get(peer_info_hash)
                 {
                     let torrent_manager_tx_clone = torrent_manager_tx.clone();
                     let _ = torrent_manager_tx_clone.send((stream, buffer)).await;
                 } else {
-                    tracing::warn!("ROUTING FAIL: No manager registered for hash: {}", hex::encode(peer_info_hash));
+                    tracing::trace!("ROUTING FAIL: No manager registered for hash: {}", hex::encode(peer_info_hash));
                 }
             }
         });
