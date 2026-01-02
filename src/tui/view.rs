@@ -2612,11 +2612,14 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
                     Cell::from("Delete torrent (D includes downloaded files)"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
-                // --- Adding Torrents ---
                 Row::new(vec![Cell::from(Span::styled(
                     "Adding Torrents",
                     Style::default().fg(theme::YELLOW),
                 ))]),
+                Row::new(vec![
+                    Cell::from(Span::styled("a", Style::default().fg(theme::GREEN))),
+                    Cell::from("Open file picker to add a .torrent file"),
+                ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Paste | v",
