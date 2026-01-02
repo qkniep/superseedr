@@ -1666,7 +1666,9 @@ impl TorrentState {
                 torrent,
                 metadata_length,
             } => {
-            if self.torrent.is_some() { return vec![Effect::DoNothing]; }
+                if self.torrent.is_some() {
+                    return vec![Effect::DoNothing];
+                }
 
                 self.torrent = Some(*torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
@@ -1680,7 +1682,8 @@ impl TorrentState {
                 };
 
                 self.piece_manager = PieceManager::new();
-                self.piece_manager.set_initial_fields(num_pieces, self.torrent_validation_status);
+                self.piece_manager
+                    .set_initial_fields(num_pieces, self.torrent_validation_status);
 
                 let total_len: u64 = if torrent.info.meta_version == Some(2) {
                     (num_pieces as u64) * (torrent.info.piece_length as u64)
@@ -2082,7 +2085,7 @@ impl TorrentState {
                 let piece_len = torrent.info.piece_length as u64;
                 let mut v2_roots = torrent.get_v2_roots();
                 v2_roots.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-                
+
                 let mut current_idx = 0;
                 for (_, length, _) in v2_roots {
                     if length > 0 && piece_len > 0 {
@@ -4248,14 +4251,26 @@ mod tests {
         // Setup V2 File Tree to ensure rebuild_v2_mappings populates piece_to_roots
         let root = vec![0xBB; 32];
         let mut file_meta = HashMap::new();
-        file_meta.insert("length".as_bytes().to_vec(), serde_bencode::value::Value::Int(total_len));
-        file_meta.insert("pieces root".as_bytes().to_vec(), serde_bencode::value::Value::Bytes(root.clone()));
+        file_meta.insert(
+            "length".as_bytes().to_vec(),
+            serde_bencode::value::Value::Int(total_len),
+        );
+        file_meta.insert(
+            "pieces root".as_bytes().to_vec(),
+            serde_bencode::value::Value::Bytes(root.clone()),
+        );
 
         let mut file_node = HashMap::new();
-        file_node.insert("".as_bytes().to_vec(), serde_bencode::value::Value::Dict(file_meta));
+        file_node.insert(
+            "".as_bytes().to_vec(),
+            serde_bencode::value::Value::Dict(file_meta),
+        );
 
         let mut root_node = HashMap::new();
-        root_node.insert("test_torrent".as_bytes().to_vec(), serde_bencode::value::Value::Dict(file_node));
+        root_node.insert(
+            "test_torrent".as_bytes().to_vec(),
+            serde_bencode::value::Value::Dict(file_node),
+        );
         torrent.info.file_tree = Some(serde_bencode::value::Value::Dict(root_node));
 
         // Calling this will now correctly build piece_to_roots for you

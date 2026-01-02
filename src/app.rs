@@ -875,7 +875,10 @@ impl App {
                     let torrent_manager_tx_clone = torrent_manager_tx.clone();
                     let _ = torrent_manager_tx_clone.send((stream, buffer)).await;
                 } else {
-                    tracing::trace!("ROUTING FAIL: No manager registered for hash: {}", hex::encode(peer_info_hash));
+                    tracing::trace!(
+                        "ROUTING FAIL: No manager registered for hash: {}",
+                        hex::encode(peer_info_hash)
+                    );
                 }
             }
         });
@@ -2288,7 +2291,8 @@ impl App {
         };
 
         let (v1_hash, v2_hash) = parse_hybrid_hashes(&magnet_link);
-        let info_hash = v1_hash.clone()
+        let info_hash = v1_hash
+            .clone()
             .or_else(|| v2_hash.clone())
             .expect("Magnet link missing both btih and btmh hashes");
 
@@ -2672,12 +2676,14 @@ fn aggregate_peers_to_availability(peers: &[PeerInfo], total_pieces: usize) -> V
 }
 
 pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
-    let v1 = magnet_link.split('&')
+    let v1 = magnet_link
+        .split('&')
         .find(|part| part.contains("xt=urn:btih:"))
         .and_then(|part| part.split(':').last())
         .and_then(|h| decode_info_hash(h).ok());
 
-    let v2 = magnet_link.split('&')
+    let v2 = magnet_link
+        .split('&')
         .find(|part| part.contains("xt=urn:btmh:"))
         .and_then(|part| part.split(':').last())
         .and_then(|h| decode_info_hash(h).ok());

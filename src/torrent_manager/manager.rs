@@ -71,7 +71,7 @@ use magnet_url::Magnet;
 
 use urlencoding::decode;
 
-use sha1::{Digest, Sha1};
+use sha1::Digest;
 use tokio::fs;
 use tokio::net::TcpStream;
 use tokio::signal;
@@ -2508,7 +2508,7 @@ impl TorrentManager {
                                     // Strip V2 fields so the rest of the app sees a standard V1 torrent
                                     torrent.info.meta_version = None;
                                     torrent.info.file_tree = None;
-                                    torrent.piece_layers = None; 
+                                    torrent.piece_layers = None;
                                 }
 
                                 let calculated_hash = if torrent.info.meta_version == Some(2) {
@@ -2658,8 +2658,8 @@ mod tests {
             global_ul_bucket: ul_bucket,
         };
 
-        let manager =
-            TorrentManager::from_magnet(params, magnet, &magnet_link).expect("Failed to create manager");
+        let manager = TorrentManager::from_magnet(params, magnet, magnet_link)
+            .expect("Failed to create manager");
 
         let block_count = 100_000;
         let dummy_data = vec![0u8; 16384];
@@ -2792,8 +2792,7 @@ mod resource_tests {
         let ul_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
 
         let magnet_link = "magnet:?xt=urn:btih:0000000000000000000000000000000000000000";
-        let magnet =
-            Magnet::new(&magnet_link).unwrap();
+        let magnet = Magnet::new(magnet_link).unwrap();
 
         let dht_handle = {
             #[cfg(feature = "dht")]
@@ -2820,7 +2819,7 @@ mod resource_tests {
             global_ul_bucket: ul_bucket,
         };
 
-        let manager = TorrentManager::from_magnet(params, magnet, &magnet_link).unwrap();
+        let manager = TorrentManager::from_magnet(params, magnet, magnet_link).unwrap();
 
         let torrent_tx = manager.torrent_manager_tx.clone();
 
@@ -3292,7 +3291,7 @@ mod resource_tests {
 
         let mut manager = TorrentManager::from_torrent(params, torrent.clone()).unwrap();
         let _info_hash = {
-            let mut hasher = Sha1::new();
+            let mut hasher = sha1::Sha1::new();
             hasher.update(&torrent.info_dict_bencode);
             hasher.finalize().to_vec()
         };
@@ -3845,8 +3844,7 @@ mod resource_tests {
         let ul_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
 
         let magnet_link = "magnet:?xt=urn:btih:0000000000000000000000000000000000000000";
-        let magnet =
-            Magnet::new(&magnet_link).unwrap();
+        let magnet = Magnet::new(magnet_link).unwrap();
 
         let dht_handle = {
             #[cfg(feature = "dht")]
@@ -3873,7 +3871,7 @@ mod resource_tests {
             global_ul_bucket: ul_bucket,
         };
 
-        let manager = TorrentManager::from_magnet(params, magnet, &magnet_link).unwrap();
+        let manager = TorrentManager::from_magnet(params, magnet, magnet_link).unwrap();
         let torrent_tx = manager.torrent_manager_tx.clone();
 
         // Return 'rm_client' instead of 'resource_manager'

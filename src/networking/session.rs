@@ -699,7 +699,6 @@ impl PeerSession {
                         self.peer_torrent_metadata_pieces.extend(metadata_binary);
 
                         if torrent_metadata_len_usize == self.peer_torrent_metadata_pieces.len() {
-
                             match crate::torrent_file::parser::from_info_bytes(
                                 &self.peer_torrent_metadata_pieces,
                             ) {
