@@ -3,6 +3,7 @@
 
 use crate::app::PeerInfo;
 use crate::app::TorrentMetrics;
+use crate::app::decode_info_hash;
 
 use crate::torrent_manager::merkle;
 
@@ -218,6 +219,15 @@ impl TorrentManager {
             hasher.finalize().to_vec()
         };
 
+        let alt_info_hash = if torrent.info.meta_version == Some(2) && !torrent.info.pieces.is_empty() {
+            // Store the V2 hash as the alternate
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&torrent.info_dict_bencode);
+            Some(hasher.finalize()[0..20].to_vec())
+        } else {
+            None
+        };
+
         let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(1000);
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -260,6 +270,7 @@ impl TorrentManager {
 
         let mut state = TorrentState::new(
             info_hash.to_vec(),
+            alt_info_hash,
             Some(torrent),
             Some(torrent_length as i64),
             piece_manager,
@@ -298,6 +309,7 @@ impl TorrentManager {
     pub fn from_magnet(
         torrent_parameters: TorrentParameters,
         magnet: Magnet,
+        raw_magnet_str: &str,
     ) -> Result<Self, String> {
         let TorrentParameters {
             dht_handle,
@@ -313,73 +325,20 @@ impl TorrentManager {
             global_ul_bucket,
         } = torrent_parameters;
 
+        let (v1_hash, v2_hash) = crate::app::parse_hybrid_hashes(raw_magnet_str);
 
-        event!(
-            Level::INFO,
-            "Magnet: {:?}",
-            magnet
-        );
-
-        // We support both 'btih' (v1) and 'btmh' (v2)
-        let hash_type = magnet
-            .hash_type()
-            .ok_or("Magnet link missing 'xt' (hash type)")?;
-        let hash_string = magnet.hash().ok_or("Magnet link missing hash value")?;
-
-        let info_hash = if hash_type == "btmh" {
-            // --- V2: Multihash (SHA2-256) ---
-            // Format: <varint_code><varint_len><digest>
-            // For SHA2-256, this is 0x12 (code) 0x20 (length) followed by 32 bytes.
-            // Total length: 34 bytes.
-
-            // Decode string (Handle both Hex and Base32 representations)
-            let bytes = if hash_string.len() > 50 {
-                // Hex Encoded (34 bytes * 2 = 68 chars)
-                hex::decode(hash_string).map_err(|e| format!("Invalid v2 hex: {}", e))?
-            } else {
-                // Base32 Encoded (Standard for some magnet generators)
-                BASE32
-                    .decode(hash_string.to_uppercase().as_bytes())
-                    .map_err(|e| format!("Invalid v2 base32: {}", e))?
-            };
-
-            // Verify Multihash Prefix
-            if bytes.len() != 34 || bytes[0] != 0x12 || bytes[1] != 0x20 {
-                return Err(format!(
-                    "Unsupported multihash format: {:?}. Only SHA2-256 (0x12 0x20) is supported.",
-                    bytes
-                ));
-            }
-
-            // BEP 52: The info-hash for V2 is the first 20 bytes of the SHA-256 hash.
-            // The multihash structure is [0x12, 0x20, ...32 bytes of hash...].
-            // So we skip the first 2 bytes, then take the next 20.
-            event!(Level::INFO, "Initialized from V2 Magnet (btmh).");
-            bytes[2..22].to_vec()
-        } else if hash_type == "btih" {
-            // --- V1: SHA-1 ---
-            event!(Level::INFO, "Initialized from V1 Magnet (btih).");
-            if hash_string.len() == 40 {
-                hex::decode(hash_string).map_err(|e| e.to_string())?
-            } else if hash_string.len() == 32 {
-                BASE32
-                    .decode(hash_string.to_uppercase().as_bytes())
-                    .map_err(|e| e.to_string())?
-            } else {
-                return Err(format!(
-                    "Invalid v1 info_hash length: {}",
-                    hash_string.len()
-                ));
-            }
-        } else {
-            return Err(format!(
-                "Unsupported magnet hash type 'xt=urn:{}'",
-                hash_type
-            ));
+        // Pure V1: info_hash = v1, alt = None
+        // Pure V2: info_hash = v2, alt = None
+        // Hybrid:  info_hash = v1, alt = v2 (based on your current preference)
+        let (info_hash, alt_info_hash) = match (v1_hash, v2_hash) {
+            (Some(v1), Some(v2)) => (v1, Some(v2)), // Hybrid
+            (Some(v1), None) => (v1, None),         // Pure V1
+            (None, Some(v2)) => (v2, None),         // Pure V2
+            _ => return Err("No valid hashes found".into()),
         };
 
         event!(
-            Level::DEBUG,
+            Level::INFO,
             "Active INFO HASH: {:?}",
             hex::encode(&info_hash)
         );
@@ -430,6 +389,7 @@ impl TorrentManager {
 
         let state = TorrentState::new(
             info_hash,
+            alt_info_hash,
             None,
             None,
             PieceManager::new(),
@@ -2548,40 +2508,49 @@ impl TorrentManager {
                             }
                         },
 
-                        TorrentCommand::DhtTorrent(torrent, metadata_length) => {
+                            TorrentCommand::DhtTorrent(torrent, metadata_length) => {
+                                #[cfg(all(feature = "dht", feature = "pex"))]
+                                if torrent.info.private == Some(1) {
+                                    break Ok(());
+                                }
 
-                            #[cfg(all(feature = "dht", feature = "pex"))]
-                            if torrent.info.private == Some(1) {
-                                break Ok(());
-                            }
+                                let mut torrent = *torrent;
 
-                            let calculated_hash = if torrent.info.meta_version == Some(2) {
-                                // V2: Use SHA-256 and truncate to 20 bytes
-                                use sha2::{Digest, Sha256};
-                                let mut hasher = Sha256::new();
-                                hasher.update(&torrent.info_dict_bencode);
-                                hasher.finalize()[0..20].to_vec()
-                            } else {
-                                // V1: Use SHA-1
-                                let mut hasher = Sha1::new();
-                                hasher.update(&torrent.info_dict_bencode);
-                                hasher.finalize().to_vec()
-                            };
+                                // 1. Identify if this is a Hybrid, if so, use v1 protocol
+                                let is_hybrid = !torrent.info.pieces.is_empty() && torrent.info.meta_version == Some(2);
+                                if is_hybrid {
+                                    tracing::info!("HYBRID DETECTED: Forcing V1-only treatment for simplicity.");
+                                    // Strip V2 fields so the rest of the app sees a standard V1 torrent
+                                    torrent.info.meta_version = None;
+                                    torrent.info.file_tree = None;
+                                    torrent.piece_layers = None; 
+                                }
 
-                            if calculated_hash != self.state.info_hash {
-                                tracing::warn!(
-                                    "Metadata Hash Mismatch! Expected: {:?}, Got: {:?} (MetaVersion: {:?})",
-                                    hex::encode(&self.state.info_hash),
-                                    hex::encode(&calculated_hash),
-                                    torrent.info.meta_version
-                                );
-                                continue;
-                            }
+                                let calculated_hash = if torrent.info.meta_version == Some(2) {
+                                    use sha2::{Digest, Sha256};
+                                    let mut hasher = Sha256::new();
+                                    hasher.update(&torrent.info_dict_bencode);
+                                    hasher.finalize()[0..20].to_vec()
+                                } else {
+                                    let mut hasher = sha1::Sha1::new();
+                                    hasher.update(&torrent.info_dict_bencode);
+                                    hasher.finalize().to_vec()
+                                };
 
-                            self.apply_action(Action::MetadataReceived {
-                                torrent: Box::new(*torrent), metadata_length
-                            });
-                        },
+                                if calculated_hash == self.state.info_hash {
+                                    tracing::info!("METADATA VALIDATED: Proceeding with metadata hydration.");
+                                    self.apply_action(Action::MetadataReceived {
+                                        torrent: Box::new(torrent),
+                                        metadata_length,
+                                    });
+                                } else {
+                                    tracing::warn!(
+                                        "Metadata Hash Mismatch! Expected: {:?}, Got: {:?}",
+                                        hex::encode(&self.state.info_hash),
+                                        hex::encode(&calculated_hash)
+                                    );
+                                }
+                            },
 
                         TorrentCommand::AnnounceResponse(url, response) => {
                             self.apply_action(Action::TrackerResponse {

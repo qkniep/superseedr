@@ -868,11 +868,15 @@ impl App {
             let mut buffer = vec![0u8; 68];
             if (stream.read_exact(&mut buffer).await).is_ok() {
                 let peer_info_hash = &buffer[28..48];
+tracing::info!("INCOMING HANDSHAKE: Received Hash: {}", hex::encode(peer_info_hash));
+
                 if let Some(torrent_manager_tx) =
-                    torrent_manager_incoming_peer_txs_clone.get(peer_info_hash)
+                    torrent_manager_incoming_peer_txs_clone.get(peer_info_hash.clone())
                 {
                     let torrent_manager_tx_clone = torrent_manager_tx.clone();
                     let _ = torrent_manager_tx_clone.send((stream, buffer)).await;
+                } else {
+                    tracing::warn!("ROUTING FAIL: No manager registered for hash: {}", hex::encode(peer_info_hash));
                 }
             }
         });
@@ -2284,21 +2288,10 @@ impl App {
             }
         };
 
-        let hash_string = match magnet.hash() {
-            Some(hash) => hash,
-            None => {
-                tracing_event!(Level::ERROR, "Magnet link is missing info_hash");
-                return;
-            }
-        };
-
-        let info_hash = match decode_info_hash(hash_string) {
-            Ok(hash) => hash,
-            Err(e) => {
-                tracing_event!(Level::ERROR, "Failed to decode info_hash: {}", e);
-                return;
-            }
-        };
+        let (v1_hash, v2_hash) = parse_hybrid_hashes(&magnet_link);
+        let info_hash = v1_hash.clone()
+            .or_else(|| v2_hash.clone())
+            .expect("Magnet link missing both btih and btmh hashes");
 
         if self.app_state.torrents.contains_key(&info_hash) {
             tracing_event!(Level::INFO, "Ignoring already present torrent from magnet");
@@ -2348,7 +2341,7 @@ impl App {
             global_ul_bucket: global_ul_bucket_clone,
         };
 
-        match TorrentManager::from_magnet(torrent_params, magnet) {
+        match TorrentManager::from_magnet(torrent_params, magnet, &magnet_link) {
             Ok(torrent_manager) => {
                 tokio::spawn(async move {
                     let _ = torrent_manager
@@ -2677,4 +2670,18 @@ fn aggregate_peers_to_availability(peers: &[PeerInfo], total_pieces: usize) -> V
         }
     }
     availability
+}
+
+pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    let v1 = magnet_link.split('&')
+        .find(|part| part.contains("xt=urn:btih:"))
+        .and_then(|part| part.split(':').last())
+        .and_then(|h| decode_info_hash(h).ok());
+
+    let v2 = magnet_link.split('&')
+        .find(|part| part.contains("xt=urn:btmh:"))
+        .and_then(|part| part.split(':').last())
+        .and_then(|h| decode_info_hash(h).ok());
+
+    (v1, v2)
 }
