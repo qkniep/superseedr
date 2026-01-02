@@ -1438,13 +1438,22 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
 
     let legend_line = Line::from(vec![
         Span::styled("Connected:", Style::default().fg(color_connected)),
-        Span::raw(connected_count.to_string()),
+        Span::styled(
+            connected_count.to_string(),
+            Style::default().fg(color_connected),
+        ),
         Span::raw(" "),
         Span::styled("Discovered:", Style::default().fg(color_discovered)),
-        Span::raw(discovered_count.to_string()),
+        Span::styled(
+            discovered_count.to_string(),
+            Style::default().fg(color_discovered),
+        ),
         Span::raw(" "),
         Span::styled("Disconnected:", Style::default().fg(color_disconnected)),
-        Span::raw(disconnected_count.to_string()),
+        Span::styled(
+            disconnected_count.to_string(),
+            Style::default().fg(color_disconnected),
+        ),
         Span::raw(" "),
     ]);
 
@@ -2284,7 +2293,7 @@ fn draw_welcome_screen(f: &mut Frame) {
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" 1. ", Style::default().fg(theme::GREEN)),
+            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
             Span::raw("Paste ("),
             Span::styled("Ctrl+V", Style::default().fg(theme::SKY).bold()),
             Span::raw(") a "),
@@ -2292,7 +2301,16 @@ fn draw_welcome_screen(f: &mut Frame) {
             Span::raw(" from your clipboard."),
         ]),
         Line::from(vec![
-            Span::styled(" 2. ", Style::default().fg(theme::GREEN)),
+            Span::raw("      - "),
+            Span::styled(
+                "e.g. \"magnet:?xt=urn:btih:...\"",
+                Style::default()
+                    .fg(theme::SURFACE2)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
             Span::raw("Press "),
             Span::styled("[a]", Style::default().fg(theme::MAUVE).bold()),
             Span::raw(" to open the file picker and select a "),
@@ -2300,17 +2318,29 @@ fn draw_welcome_screen(f: &mut Frame) {
             Span::raw(" file."),
         ]),
         Line::from(vec![
-            Span::styled(" 3. ", Style::default().fg(theme::GREEN)),
+            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
             Span::raw("Use the "),
             Span::styled("CLI", Style::default().fg(theme::SKY).bold()),
-            Span::raw(" from another terminal: "),
+            Span::raw(" from another terminal:"),
+        ]),
+        // Sub-bullet 1: CLI Magnet
+        Line::from(vec![
+            Span::raw("      - magnet: "),
             Span::styled(
-                "`superseedr add <path_or_url>`",
+                "superseedr add \"magnet:?xt=urn:btih:...\"",
+                Style::default().fg(theme::SURFACE2),
+            ),
+        ]),
+        // Sub-bullet 2: CLI Torrent File
+        Line::from(vec![
+            Span::raw("      - file:   "),
+            Span::styled(
+                "superseedr add \"/path/to/my.torrent\"",
                 Style::default().fg(theme::SURFACE2),
             ),
         ]),
         Line::from(vec![
-            Span::styled(" 4. ", Style::default().fg(theme::GREEN)),
+            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
             Span::raw("Drop files into your "),
             Span::styled("Watch Folder", Style::default().fg(theme::SKY).bold()),
             Span::raw(" to add them automatically."),
@@ -2318,7 +2348,7 @@ fn draw_welcome_screen(f: &mut Frame) {
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                " ★ Browser Support: ",
+                "Browser Support: ",
                 Style::default().fg(theme::YELLOW).bold(),
             ),
             Span::raw("To open magnet links directly from your browser,"),
@@ -2338,6 +2368,9 @@ fn draw_welcome_screen(f: &mut Frame) {
             Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
             Span::styled(" [c] ", Style::default().fg(theme::MAUVE)),
             Span::styled("Config", Style::default().fg(theme::SUBTEXT1)),
+            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+            Span::styled(" [q] ", Style::default().fg(theme::RED)), // Added Quit command
+            Span::styled("Quit", Style::default().fg(theme::SUBTEXT1)),
             Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
             Span::styled(" [Esc] ", Style::default().fg(theme::RED)),
             Span::styled("Dismiss", Style::default().fg(theme::SUBTEXT1)),
