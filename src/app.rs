@@ -2679,13 +2679,13 @@ pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8
     let v1 = magnet_link
         .split('&')
         .find(|part| part.contains("xt=urn:btih:"))
-        .and_then(|part| part.split(':').last())
+        .and_then(|part| part.split(':').next_back())
         .and_then(|h| decode_info_hash(h).ok());
 
     let v2 = magnet_link
         .split('&')
         .find(|part| part.contains("xt=urn:btmh:"))
-        .and_then(|part| part.split(':').last())
+        .and_then(|part| part.split(':').next_back())
         .and_then(|h| decode_info_hash(h).ok());
 
     (v1, v2)

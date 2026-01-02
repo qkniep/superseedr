@@ -181,7 +181,8 @@ pub async fn write_data_to_disk(
                 if !file_info.is_padding {
                     let mut file = OpenOptions::new()
                         .write(true)
-                        .create(true) // Ensure file exists if we race to write
+                        .create(true)
+                        .truncate(false)
                         .open(&file_info.path)
                         .await?;
 
@@ -195,7 +196,6 @@ pub async fn write_data_to_disk(
                     // Without this, the OS might hold the data in memory, and if the app exits immediately
                     // (like in the test case), the data is lost.
                     file.flush().await?;
-                } else {
                 }
 
                 bytes_written += bytes_to_write_in_this_file;
