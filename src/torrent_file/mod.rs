@@ -9,8 +9,16 @@ use serde_bencode::value::Value;
 
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct V2RootInfo {
+    pub file_offset: u64,
+    pub length: u64,
+    pub root_hash: Vec<u8>,
+    pub file_index: u32,
+}
+
 pub struct V2Mapping {
-    pub piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>, u32)>>,
+    pub piece_to_roots: HashMap<u32, Vec<V2RootInfo>>,
     pub piece_count: usize,
 }
 
@@ -70,7 +78,7 @@ impl Torrent {
     }
 
     pub fn calculate_v2_mapping(&self) -> V2Mapping {
-        let mut piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>, u32)>> = HashMap::new();
+        let mut piece_to_roots: HashMap<u32, Vec<V2RootInfo>> = HashMap::new();
         let piece_len = self.info.piece_length as u64;
         let mut current_piece_index = 0;
 
@@ -78,7 +86,6 @@ impl Torrent {
             let mut v2_roots = self.get_v2_roots();
             v2_roots.sort_by(|(path_a, _, _), (path_b, _, _)| path_a.cmp(path_b));
 
-            // Added .enumerate() to capture file_index
             for (file_index, (_path, length, root_hash)) in v2_roots.into_iter().enumerate() {
                 if length > 0 {
                     let file_pieces = length.div_ceil(piece_len);
@@ -88,12 +95,12 @@ impl Torrent {
                     let end_piece = (current_piece_index + file_pieces) as u32;
 
                     for p in start_piece..end_piece {
-                        piece_to_roots.entry(p).or_default().push((
-                            file_start_offset,
+                        piece_to_roots.entry(p).or_default().push(V2RootInfo {
+                            file_offset: file_start_offset,
                             length,
-                            root_hash.clone(),
-                            file_index as u32, // Store file_index
-                        ));
+                            root_hash: root_hash.clone(),
+                            file_index: file_index as u32,
+                        });
                     }
                     current_piece_index += file_pieces;
                 }

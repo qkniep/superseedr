@@ -2443,19 +2443,22 @@ impl TorrentManager {
                             let mut sent = false;
 
                             if let (Some(torrent), Some(roots)) = (&self.state.torrent, self.state.piece_to_roots.get(&index)) {
-                                // Iterate roots for this piece index
-                                for (file_offset, file_len, root, _f_idx) in roots {
-
-                                    // MATCH BY ROOT HASH (32 bytes)
-                                    if !file_root.is_empty() && *root != file_root {
+                                for root_info in roots {
+                                    if !file_root.is_empty() && root_info.root_hash != file_root {
                                         continue;
                                     }
 
-                                    if let Some(proof_data) = torrent.get_v2_hash_layer(index, *file_offset, *file_len, length, root) {
+                                    if let Some(proof_data) = torrent.get_v2_hash_layer(
+                                        index, 
+                                        root_info.file_offset, 
+                                        root_info.length, 
+                                        length, 
+                                        &root_info.root_hash
+                                    ) {
                                         if let Some(peer) = self.state.peers.get(&peer_id) {
                                             let _ = peer.peer_tx.try_send(TorrentCommand::SendHashPiece {
                                                 peer_id: peer_id.clone(),
-                                                root: root.clone(),
+                                                root: root_info.root_hash.clone(),
                                                 base_layer,
                                                 index,
                                                 proof: proof_data,

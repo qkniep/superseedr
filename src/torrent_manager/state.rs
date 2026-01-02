@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 use std::mem::Discriminant;
 use std::sync::Arc;
 
-use crate::torrent_file::Torrent;
+use crate::torrent_file::{Torrent, V2RootInfo};
 use crate::torrent_manager::piece_manager::PieceManager;
 use crate::torrent_manager::piece_manager::PieceStatus;
 use std::collections::{HashMap, HashSet};
@@ -307,7 +307,7 @@ pub struct TorrentState {
     pub has_started_announce_sent: bool,
     pub v2_proofs: HashMap<u32, Vec<u8>>,
     pub v2_pending_data: HashMap<u32, (u32, Vec<u8>)>,
-    pub piece_to_roots: HashMap<u32, Vec<(u64, u64, Vec<u8>, u32)>>,
+    pub piece_to_roots: HashMap<u32, Vec<V2RootInfo>>,
     pub verifying_pieces: HashSet<u32>,
 }
 impl Default for TorrentState {
@@ -359,41 +359,6 @@ impl TorrentState {
         } else {
             TorrentStatus::AwaitingMetadata
         };
-
-        if let Some(ref t) = torrent {
-            let _total_len: u64 = if t.info.meta_version == Some(2) {
-                // V2: Geometry is aligned to piece boundaries
-                let num_pieces = if !t.info.pieces.is_empty() {
-                    t.info.pieces.len() / 20
-                } else {
-                    // Calculate from file tree if pieces string is empty (Pure V2)
-                    let piece_len = t.info.piece_length as u64;
-                    let _count = 0;
-                    // We can reuse the same logic or helper as manager.rs
-                    // A simple approximation if you don't want to re-traverse the tree
-                    // is to rely on the fact that manager.rs likely calculated num_pieces
-                    // correctly before passing piece_manager in.
-
-                    // HOWEVER, safely recalculating is better:
-                    let v2_roots = t.get_v2_roots();
-                    let mut c = 0;
-                    for (_, length, _) in v2_roots {
-                        if length > 0 && piece_len > 0 {
-                            c += length.div_ceil(piece_len);
-                        }
-                    }
-                    c as usize
-                };
-                (num_pieces as u64) * (t.info.piece_length as u64)
-            } else {
-                // V1: Geometry is the sum of files (Packed)
-                if t.info.files.is_empty() {
-                    t.info.length as u64
-                } else {
-                    t.info.files.iter().map(|f| f.length as u64).sum()
-                }
-            };
-        }
 
         let mut state = Self {
             info_hash,
@@ -455,14 +420,14 @@ impl TorrentState {
             // V2 Logic: Clamp size to the specific file length
             if let Some(roots) = self.piece_to_roots.get(&piece_index) {
                 // In V2, pieces align to files. We check the mapped file for this piece.
-                if let Some((file_start, file_len, _, _)) = roots.first() {
+                if let Some(root_info) = roots.first() {
                     let global_piece_start = piece_index as u64 * piece_len;
 
                     // Calculate offset relative to the start of this specific file
-                    let offset_in_file = global_piece_start.saturating_sub(*file_start);
+                    let offset_in_file = global_piece_start.saturating_sub(root_info.file_offset);
 
                     // The piece cannot exceed the remaining bytes in this file
-                    let remaining_in_file = file_len.saturating_sub(offset_in_file);
+                    let remaining_in_file = root_info.length.saturating_sub(offset_in_file);
 
                     return std::cmp::min(piece_len, remaining_in_file) as usize;
                 }
@@ -716,10 +681,10 @@ impl TorrentState {
                     if let Some(torrent) = torrent_ref {
                         let piece_len = torrent.info.piece_length as u64;
                         if let Some(roots) = roots_ref.get(&piece_index) {
-                            if let Some((file_start, file_len, _, _)) = roots.first() {
+                            if let Some(root_info) = roots.first() {
                                 let global_piece_start = piece_index as u64 * piece_len;
-                                let offset_in_file = global_piece_start.saturating_sub(*file_start);
-                                let remaining_in_file = file_len.saturating_sub(offset_in_file);
+                                let offset_in_file = global_piece_start.saturating_sub(root_info.file_offset);
+                                let remaining_in_file = root_info.length.saturating_sub(offset_in_file);
                                 return Some(std::cmp::min(piece_len, remaining_in_file) as u32);
                             }
                         }
@@ -1222,26 +1187,26 @@ impl TorrentState {
 
                         let matching_root_info = roots
                             .iter()
-                            .filter(|(start, _, _, _)| *start <= global_offset)
-                            .max_by_key(|(start, _, _, _)| *start);
+                            .filter(|r| r.file_offset <= global_offset)
+                            .max_by_key(|r| r.file_offset);
 
                         let (valid_length, relative_index, hashing_context_len) =
                             self.calculate_v2_verify_params(piece_index, complete_data.len());
 
-                        if let Some((file_start, file_len, root, _)) = matching_root_info {
+                        if let Some(root_info) = matching_root_info {
                             if let Some(target_hash) = self.torrent.as_ref().and_then(|t| {
-                                t.get_v2_hash_layer(piece_index, *file_start, *file_len, 1, root)
+                                t.get_v2_hash_layer(piece_index, root_info.file_offset, root_info.length, 1, &root_info.root_hash)
                             }) {
-                                // SCENARIO: We have the piece-layer hash locally in .torrent
+                                // SCENARIO: We have the piece-layer hash locally
                                 effects.push(Effect::VerifyPieceV2 {
                                     peer_id: peer_id.clone(),
                                     piece_index,
-                                    proof: Vec::new(), // No proof needed, we have the target hash
+                                    proof: Vec::new(),
                                     data: complete_data,
-                                    root_hash: target_hash, // Target is the PIECE hash
-                                    _file_start_offset: *file_start,
+                                    root_hash: target_hash,
+                                    _file_start_offset: root_info.file_offset,
                                     valid_length,
-                                    relative_index, // relative_index is ignored by merkle.rs if proof is empty
+                                    relative_index,
                                     hashing_context_len,
                                 });
                             } else if let Some(proof) = self.v2_proofs.get(&piece_index) {
@@ -1250,18 +1215,15 @@ impl TorrentState {
                                     peer_id: peer_id.clone(),
                                     piece_index,
                                     proof: proof.clone(),
-                                    root_hash: root.clone(), // Target is the FILE ROOT
+                                    root_hash: root_info.root_hash.clone(),
                                     data: complete_data,
-                                    _file_start_offset: *file_start,
+                                    _file_start_offset: root_info.file_offset,
                                     valid_length,
-                                    relative_index, // relative_index is REQUIRED to climb the tree
+                                    relative_index,
                                     hashing_context_len,
                                 });
-                            } else if self
-                                .torrent
-                                .as_ref()
-                                .is_some_and(|t| !t.info.pieces.is_empty())
-                            {
+                            } else if self.torrent.as_ref().is_some_and(|t| !t.info.pieces.is_empty()) {
+                                // Fallback for Hybrid torrents
                                 self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                                 effects.push(Effect::VerifyPiece {
                                     peer_id: peer_id.clone(),
@@ -1270,61 +1232,35 @@ impl TorrentState {
                                 });
                             } else {
                                 // Buffer v2 data and ask for proof.
-                                self.v2_pending_data
-                                    .insert(piece_index, (block_offset, complete_data));
+                                self.v2_pending_data.insert(piece_index, (block_offset, complete_data));
 
-                                let root_info = self
-                                    .piece_to_roots
-                                    .get(&piece_index)
-                                    .and_then(|roots| roots.first())
-                                    .map(|(f_start, f_len, r, f_idx)| {
-                                        (*f_start, *f_len, r.clone(), *f_idx)
-                                    });
+                                let root_info_opt = self.piece_to_roots.get(&piece_index).and_then(|roots| roots.first());
 
-                                if let Some((_file_start, _file_len, root, _file_index)) = root_info
-                                {
-                                    let piece_len = self
-                                        .torrent
-                                        .as_ref()
-                                        .map(|t| t.info.piece_length as u64)
-                                        .unwrap_or(32768);
+                                if let Some(r_info) = root_info_opt {
+                                    let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(32768);
+                                    let request_base = if piece_len >= 16384 { (piece_len / 16384).trailing_zeros() } else { 0 };
 
-                                    // 1. Calculate Base Layer safely.
-                                    // Only use Base 1+ if piece_len >= 16384.
-                                    // Trailing zeros on (1) is 0, on (2) is 1, etc.
-                                    let request_base = if piece_len >= 16384 {
-                                        (piece_len / 16384).trailing_zeros()
-                                    } else {
-                                        0
-                                    };
-
-                                    // 2. RESTORE TEST COMPATIBILITY:
-                                    // If piece_len < 16384 (like your test's 1024), we must use the piece_index
-                                    // directly to keep them distinct.
-                                    // If piece_len >= 16384, we use the relative block logic for real swarms.
                                     let request_index = if piece_len >= 16384 {
                                         let global_piece_offset = piece_index as u64 * piece_len;
-                                        let offset_in_file =
-                                            global_piece_offset.saturating_sub(*file_start);
+                                        let offset_in_file = global_piece_offset.saturating_sub(r_info.file_offset);
                                         let relative_block_index = offset_in_file / 16384;
                                         relative_block_index >> request_base
                                     } else {
                                         piece_index as u64
                                     };
 
-                                    let required_layers = 0;
-
                                     effects.push(Effect::RequestHashes {
                                         peer_id: peer_id.clone(),
-                                        file_root: root.clone(),
+                                        file_root: r_info.root_hash.clone(),
                                         piece_index: request_index as u32,
                                         length: 1,
-                                        proof_layers: required_layers,
+                                        proof_layers: 0,
                                         base_layer: request_base,
                                     });
                                 }
                             }
-                        } else {
+                        }
+                        else {
                             // Fallback attempt to V1 if possible
                             self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                             effects.push(Effect::VerifyPiece {
@@ -1377,47 +1313,41 @@ impl TorrentState {
 
                         let matching_root_info = roots
                             .iter()
-                            .filter(|(start, _, _, _)| *start <= global_offset)
-                            .max_by_key(|(start, _, _, _)| *start);
+                            .filter(|r| r.file_offset <= global_offset)
+                            .max_by_key(|r| r.file_offset);
 
-                        if let Some((file_start, file_len, file_root, _)) = matching_root_info {
+                        if let Some(root_info) = matching_root_info {
                             let (valid_length, _, hashing_context_len) =
                                 self.calculate_v2_verify_params(piece_index, data.len());
 
-                            // 1. Calculate the RELATIVE index for this specific file
-                            let offset_in_file = global_offset.saturating_sub(*file_start);
+                            let offset_in_file = global_offset.saturating_sub(root_info.file_offset);
                             let actual_relative_index = (offset_in_file / piece_len) as u32;
 
-                            // 2. Resolve the trusted hash using the relative index
                             let local_piece_hash = self.torrent.as_ref().and_then(|t| {
                                 t.get_v2_hash_layer(
                                     actual_relative_index,
-                                    *file_start,
-                                    *file_len,
+                                    root_info.file_offset,
+                                    root_info.length,
                                     1,
-                                    file_root,
+                                    &root_info.root_hash,
                                 )
                             });
 
-                            // 3. Define variables outside the selection block to fix E0425
                             let (verification_target, verification_proof) = if proof.len() == 32 {
-                                (
-                                    local_piece_hash.unwrap_or_else(|| proof.clone()),
-                                    Vec::new(),
-                                )
+                                (local_piece_hash.unwrap_or_else(|| proof.clone()), Vec::new())
                             } else {
-                                (file_root.clone(), proof)
+                                (root_info.root_hash.clone(), proof)
                             };
-
-                            return vec![Effect::VerifyPieceV2 {
+                            
+                             return vec![Effect::VerifyPieceV2 {
                                 peer_id,
                                 piece_index,
                                 proof: verification_proof,
                                 data,
                                 root_hash: verification_target,
-                                _file_start_offset: *file_start,
+                                _file_start_offset: root_info.file_offset,
                                 valid_length,
-                                relative_index: actual_relative_index, // Pass relative index for tree climbing
+                                relative_index: actual_relative_index,
                                 hashing_context_len,
                             }];
                         }
@@ -2103,28 +2033,18 @@ impl TorrentState {
 
     fn calculate_v2_verify_params(&self, piece_index: u32, data_len: usize) -> (usize, u32, usize) {
         if let Some(roots) = self.piece_to_roots.get(&piece_index) {
-            // In V2, pieces are aligned to files. We check the mapped file for this piece.
-            if let Some((file_start, file_len, _, _)) = roots.first() {
-                let piece_len = self
-                    .torrent
-                    .as_ref()
-                    .map(|t| t.info.piece_length as u64)
-                    .unwrap_or(0);
+            if let Some(root_info) = roots.first() {
+                let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(0);
 
                 let piece_start_global = piece_index as u64 * piece_len;
-                let offset_in_file = piece_start_global.saturating_sub(*file_start);
-                let remaining = file_len.saturating_sub(offset_in_file);
+                let offset_in_file = piece_start_global.saturating_sub(root_info.file_offset);
+                let remaining = root_info.length.saturating_sub(offset_in_file);
 
                 let valid_length = std::cmp::min(data_len as u64, remaining) as usize;
-
-                // Calculate relative index (offset / piece_len)
                 let relative_index = (offset_in_file / piece_len) as u32;
 
-                // Determine context length for the Merkle tree height
-                // If the file is smaller than one piece, the tree height is determined by file_len.
-                // Otherwise, it is determined by piece_len.
-                let hashing_context_len = if *file_len <= piece_len {
-                    *file_len as usize
+                let hashing_context_len = if root_info.length <= piece_len {
+                    root_info.length as usize
                 } else {
                     piece_len as usize
                 };
@@ -2132,7 +2052,6 @@ impl TorrentState {
                 return (valid_length, relative_index, hashing_context_len);
             }
         }
-        // Fallback defaults
         (data_len, 0, data_len)
     }
 }
