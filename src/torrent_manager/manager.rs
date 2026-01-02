@@ -51,7 +51,7 @@ use crate::tracker::client::{
 
 use rand::Rng;
 
-use crate::torrent_file::{Torrent, V2RootInfo};
+use crate::torrent_file::Torrent;
 
 use std::error::Error;
 
@@ -2733,6 +2733,8 @@ mod resource_tests {
     use crate::config::Settings;
     use crate::resource_manager::{ResourceManager, ResourceType};
     use crate::token_bucket::TokenBucket;
+    #[cfg(test)]
+    use crate::torrent_file::V2RootInfo;
     use crate::torrent_manager::{ManagerCommand, TorrentParameters};
     use magnet_url::Magnet;
     use std::collections::HashMap;
