@@ -394,7 +394,7 @@ impl PeerSession {
                                     proof,
                                 }
                             );
-                            tracing::info!("Received HashPiece for Root: {:?}", hex::encode(&root));
+                            tracing::debug!("Received HashPiece for Root: {:?}", hex::encode(&root));
                         }
 
                         Message::HashReject(root, _, offset, _, _proof_layers) => {
@@ -581,7 +581,7 @@ impl PeerSession {
                     proof_layers,
                 ));
 
-                tracing::info!(
+                tracing::debug!(
                     "Sent HashRequest to {}: Root={:?}, Base={}, Idx={}, Len={}",
                     self.peer_ip_port,
                     hex::encode(&file_root),
@@ -699,19 +699,11 @@ impl PeerSession {
                         self.peer_torrent_metadata_pieces.extend(metadata_binary);
 
                         if torrent_metadata_len_usize == self.peer_torrent_metadata_pieces.len() {
-                            tracing::info!(
-                                "Session {} received full metadata. Attempting parse...",
-                                self.peer_ip_port
-                            );
 
-                            // Use the robust parser that handles V2 hydration
                             match crate::torrent_file::parser::from_info_bytes(
                                 &self.peer_torrent_metadata_pieces,
                             ) {
                                 Ok(torrent) => {
-                                    tracing::info!(
-                                        "METADATA SUCCESS: Parsed & Hydrated Info Dict."
-                                    );
                                     let _ = self.torrent_manager_tx.try_send(
                                         TorrentCommand::DhtTorrent(
                                             Box::new(torrent),

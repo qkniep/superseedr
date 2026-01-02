@@ -3,7 +3,6 @@
 
 use crate::app::PeerInfo;
 use crate::app::TorrentMetrics;
-use crate::app::decode_info_hash;
 
 use crate::torrent_manager::merkle;
 
@@ -71,8 +70,6 @@ use std::time::Instant;
 use magnet_url::Magnet;
 
 use urlencoding::decode;
-
-use data_encoding::BASE32;
 
 use sha1::{Digest, Sha1};
 use tokio::fs;
@@ -589,7 +586,7 @@ impl TorrentManager {
                 let peer_id_for_msg = peer_id.clone();
                 let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-                tracing::info!(
+                tracing::debug!(
                     piece_index,
                     peer_id = %peer_id_for_msg,
                     "SPAWNING V2 Verification. Root={:?}",
@@ -609,7 +606,6 @@ impl TorrentManager {
                     }
 
                     // The CPU Intensive Task
-                    // Note: 'mut' is required so we can borrow it mutably in the select loop
                     let mut verification_task = tokio::task::spawn_blocking(move || {
                         let start = Instant::now();
 
@@ -621,7 +617,7 @@ impl TorrentManager {
                             hashing_context_len,
                         );
 
-                        tracing::info!(
+                        tracing::debug!(
                             piece_index,
                             valid = is_valid,
                             duration = ?start.elapsed(),
@@ -672,7 +668,7 @@ impl TorrentManager {
                     };
 
                     match &result {
-                        Ok(_) => tracing::info!(
+                        Ok(_) => tracing::debug!(
                             piece_index,
                             "Sending PieceVerified (Success) -> Manager"
                         ),
@@ -2527,7 +2523,7 @@ impl TorrentManager {
                                 };
 
                                 if calculated_hash == self.state.info_hash {
-                                    tracing::info!("METADATA VALIDATED: Proceeding with metadata hydration.");
+                                    tracing::info!("METADATA VALIDATED - {}: Proceeding with metadata hydration.", hex::encode(calculated_hash));
                                     self.apply_action(Action::MetadataReceived {
                                         torrent: Box::new(torrent),
                                         metadata_length,

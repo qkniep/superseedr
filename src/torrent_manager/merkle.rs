@@ -18,7 +18,7 @@ pub fn verify_merkle_proof(
     if proof.is_empty() {
         let is_valid = calculated_node_hash.as_slice() == target_hash;
         if !is_valid {
-            tracing::error!(
+            tracing::debug!(
                 "Merkle Mismatch (Direct): Calculated {} != Target {}",
                 hex::encode(calculated_node_hash),
                 hex::encode(target_hash)
