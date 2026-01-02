@@ -68,7 +68,9 @@ pub struct BlockManager {
     // V2: Files are mapped by index to their geometry and root hash
     pub files: Vec<FileInfo>,
 
-    // --- V1 COMPATIBILITY ---
+    // This allows pieces to be shorter than standard length even if they aren't the global last piece.
+    pub piece_lengths: HashMap<u32, u32>,
+
     pub legacy_buffers: HashMap<u32, LegacyAssembler>,
 
     // --- GEOMETRY ---
@@ -90,11 +92,14 @@ impl BlockManager {
         v1_hashes: Vec<[u8; 20]>,
         // Map of file_index -> (size, root_hash)
         v2_file_info: Vec<(u64, [u8; 32])>,
+
+        piece_overrides: HashMap<u32, u32>,
         validation_complete: bool,
     ) {
         self.piece_length = piece_length;
         self.total_length = total_length;
         self.piece_hashes_v1 = v1_hashes;
+        self.piece_lengths = piece_overrides;
 
         // Construct File Layout
         let mut current_offset = 0;
@@ -114,8 +119,6 @@ impl BlockManager {
         self.total_blocks = (total_length as f64 / BLOCK_SIZE as f64).ceil() as u32;
         self.block_bitfield = vec![validation_complete; self.total_blocks as usize];
     }
-
-    // --- DECISION LOGIC ---
 
     /// Determines what to do with an incoming block:
     /// 1. If it maps to a V2 file, return VerifyV2 (Caller must handle async hashing).
@@ -234,6 +237,7 @@ impl BlockManager {
     pub fn get_block_range(&self, piece_idx: u32) -> (u32, u32) {
         let piece_len = self.calculate_piece_size(piece_idx);
         let blocks_in_piece = self.blocks_in_piece(piece_len);
+
         let piece_start_offset = piece_idx as u64 * self.piece_length as u64;
         let start_blk = (piece_start_offset / BLOCK_SIZE as u64) as u32;
         let actual_start_blk = std::cmp::min(start_blk, self.total_blocks);
@@ -242,6 +246,10 @@ impl BlockManager {
     }
 
     fn calculate_piece_size(&self, piece_idx: u32) -> u32 {
+        if let Some(&len) = self.piece_lengths.get(&piece_idx) {
+            return len;
+        }
+
         let offset = piece_idx as u64 * self.piece_length as u64;
         let remaining = self.total_length.saturating_sub(offset);
         std::cmp::min(self.piece_length as u64, remaining) as u32
@@ -252,8 +260,10 @@ impl BlockManager {
         let piece_index = (global_offset / self.piece_length as u64) as u32;
         let byte_offset_in_piece = (global_offset % self.piece_length as u64) as u32;
 
-        let remaining_len = self.total_length.saturating_sub(global_offset);
-        let length = std::cmp::min(BLOCK_SIZE as u64, remaining_len) as u32;
+        let valid_piece_len = self.calculate_piece_size(piece_index);
+        let remaining_in_piece =
+            (valid_piece_len as u64).saturating_sub(byte_offset_in_piece as u64);
+        let length = std::cmp::min(BLOCK_SIZE as u64, remaining_in_piece) as u32;
 
         BlockAddress {
             piece_index,
@@ -422,7 +432,14 @@ mod tests {
         let piece_count = (total_len as f64 / piece_len as f64).ceil() as usize;
         let v1_hashes = vec![[0; 20]; piece_count];
         let mut manager = BlockManager::new();
-        manager.set_geometry(piece_len, total_len, v1_hashes, vec![], false);
+        manager.set_geometry(
+            piece_len,
+            total_len,
+            v1_hashes,
+            vec![],
+            HashMap::new(),
+            false,
+        );
         manager
     }
 
@@ -490,7 +507,6 @@ mod tests {
         let total_len = piece_len as u64 * 2;
         let manager = setup_manager(piece_len, total_len);
 
-        // 1. First block of the first piece (Piece 0, Block 0)
         let global_idx_0 = 0;
         let addr_0 = manager.inflate_address(global_idx_0);
         assert_eq!(addr_0.piece_index, 0);
@@ -499,7 +515,6 @@ mod tests {
         assert_eq!(addr_0.length, BLK_SIZE);
         assert_eq!(manager.flatten_address(addr_0), global_idx_0);
 
-        // 2. Last block of the first piece (Piece 0, Block 3)
         let global_idx_3 = 3;
         let addr_3 = manager.inflate_address(global_idx_3);
         assert_eq!(addr_3.piece_index, 0);
@@ -508,7 +523,6 @@ mod tests {
         assert_eq!(addr_3.length, BLK_SIZE);
         assert_eq!(manager.flatten_address(addr_3), global_idx_3);
 
-        // 3. First block of the second piece (Piece 1, Block 0)
         let global_idx_4 = 4;
         let addr_4 = manager.inflate_address(global_idx_4);
         assert_eq!(addr_4.piece_index, 1);
@@ -569,7 +583,7 @@ mod tests {
     fn test_decision_routing_v1_only() {
         let mut bm = BlockManager::new();
         // V1 Setup: No V2 file info provided
-        bm.set_geometry(16384, 16384 * 10, vec![], vec![], false);
+        bm.set_geometry(16384, 16384 * 10, vec![], vec![], HashMap::new(), false);
 
         let addr = bm.inflate_address(0); // Block 0
         let decision = bm.handle_incoming_block_decision(addr);
@@ -590,9 +604,8 @@ mod tests {
         let v2_info = vec![(32768, root_a), (16384, root_b)];
 
         // Total len = 48KB
-        bm.set_geometry(16384, 49152, vec![], v2_info, false);
+        bm.set_geometry(16384, 49152, vec![], v2_info, HashMap::new(), false);
 
-        // 1. Test Block inside File A (Offset 0)
         let addr_a1 = bm.inflate_address(0); // Block 0
         let dec_a1 = bm.handle_incoming_block_decision(addr_a1);
 
@@ -609,7 +622,6 @@ mod tests {
             _ => panic!("Expected VerifyV2 for File A"),
         }
 
-        // 2. Test Block inside File B (Offset 32768, Global Block 2)
         let addr_b = bm.inflate_address(2); // Block 2
         let dec_b = bm.handle_incoming_block_decision(addr_b);
 
@@ -634,9 +646,8 @@ mod tests {
         // File starts at 0, ends at 16385 (1 block + 1 byte)
         let v2_info = vec![(16385, root)];
 
-        bm.set_geometry(16384, 16385, vec![], v2_info, false);
+        bm.set_geometry(16384, 16385, vec![], v2_info, HashMap::new(), false);
 
-        // 1. First full block
         let addr_0 = bm.inflate_address(0);
         let dec_0 = bm.handle_incoming_block_decision(addr_0);
         assert!(matches!(
@@ -647,7 +658,6 @@ mod tests {
             }
         ));
 
-        // 2. Second partial block (starts at 16384)
         // Global offset 16384 is inside the file range [0, 16385)
         let addr_1 = bm.inflate_address(1);
         let dec_1 = bm.handle_incoming_block_decision(addr_1);
@@ -667,12 +677,11 @@ mod tests {
 
     #[test]
     fn test_endgame_duplicate_completion_suppression() {
-        // 1. Setup a BlockManager with 1 piece consisting of 2 blocks (32KB total)
         let mut bm = BlockManager::new();
         let piece_len = 32768;
         let total_len = 32768;
         // v1_hashes and v2_file_info can be empty for this logic test
-        bm.set_geometry(piece_len, total_len, vec![], vec![], false);
+        bm.set_geometry(piece_len, total_len, vec![], vec![], HashMap::new(), false);
 
         let block_size = 16384;
         let data_block_0 = vec![1u8; block_size];
@@ -686,22 +695,18 @@ mod tests {
             .inflate_address_from_overlay(0, block_size as u32, block_size as u32)
             .unwrap();
 
-        // 2. Receive Block 0 (Piece Incomplete)
         let res1 = bm.handle_v1_block_buffering(addr_0, &data_block_0);
         assert!(res1.is_none(), "First block should not trigger completion");
 
-        // 3. Receive Block 1 (Piece Completes)
         let res2 = bm.handle_v1_block_buffering(addr_1, &data_block_1);
         assert!(
             res2.is_some(),
             "Second block SHOULD trigger completion and return data"
         );
 
-        // 4. SIMULATE THE BUG: Receive Block 1 again (Duplicate from another peer)
         // In the old code, this would return Some(data) again, triggering a verification storm.
         let res3 = bm.handle_v1_block_buffering(addr_1, &data_block_1);
 
-        // 5. ASSERT THE FIX
         assert!(
             res3.is_none(),
             "Duplicate block received after completion MUST return None to prevent double-verification"
@@ -712,10 +717,11 @@ mod tests {
 #[cfg(test)]
 mod comprehensive_tests {
     use crate::torrent_manager::block_manager::BlockManager;
+    use std::collections::HashMap;
 
     fn create_manager(piece_len: u32, total_len: u64) -> BlockManager {
         let mut bm = BlockManager::new();
-        bm.set_geometry(piece_len, total_len, vec![], vec![], false);
+        bm.set_geometry(piece_len, total_len, vec![], vec![], HashMap::new(), false);
         bm
     }
 
@@ -794,10 +800,11 @@ mod comprehensive_tests {
 #[cfg(test)]
 mod security_tests {
     use crate::torrent_manager::block_manager::BlockManager;
+    use std::collections::HashMap;
 
     fn create_manager(piece_len: u32, total_len: u64) -> BlockManager {
         let mut bm = BlockManager::new();
-        bm.set_geometry(piece_len, total_len, vec![], vec![], false);
+        bm.set_geometry(piece_len, total_len, vec![], vec![], HashMap::new(), false);
         bm
     }
 
@@ -807,7 +814,6 @@ mod security_tests {
         let total_len = 65536;
         let bm = create_manager(piece_len, total_len);
 
-        // 1. Request overflow: Byte offset + length > piece length
         // Offset 32760, length 10 (Sums to 32770 > 32768)
         let res = bm.inflate_address_from_overlay(0, 32760, 10);
         assert!(
@@ -815,11 +821,9 @@ mod security_tests {
             "Should reject block extending past piece boundary"
         );
 
-        // 2. Request massive length
         let res = bm.inflate_address_from_overlay(0, 0, u32::MAX);
         assert!(res.is_none(), "Should reject length > piece size");
 
-        // 3. Request valid boundary hit
         let res = bm.inflate_address_from_overlay(0, 32767, 1);
         assert!(res.is_some(), "Should accept last byte of piece");
     }
@@ -833,12 +837,10 @@ mod security_tests {
         let data = vec![1u8; 16384];
         let addr = bm.inflate_address_from_overlay(0, 0, 16384).unwrap();
 
-        // 1. First arrival
         let res1 = bm.handle_v1_block_buffering(addr, &data);
         assert!(res1.is_some()); // Completes the piece immediately
         bm.commit_v1_piece(0); // Mark globally done
 
-        // 2. Duplicate arrival (Simulate peer sending after we verified)
         // inflate_address might succeed, but processing should handle logic
 
         // We simulate logic in PieceManager: check bitfield first
@@ -863,26 +865,24 @@ mod security_tests {
 #[cfg(test)]
 mod state_tests {
     use crate::torrent_manager::block_manager::BlockManager;
+    use std::collections::HashMap;
 
     #[test]
     fn test_revert_piece_clears_bits() {
         let mut bm = BlockManager::new();
         let piece_len = 32768; // 2 blocks
         let total_len = 32768;
-        bm.set_geometry(piece_len, total_len, vec![], vec![], false);
+        bm.set_geometry(piece_len, total_len, vec![], vec![], HashMap::new(), false);
 
-        // 1. Mark both blocks as done
         bm.commit_v1_piece(0);
         assert!(bm.block_bitfield[0]);
         assert!(bm.block_bitfield[1]);
         assert!(bm.legacy_buffers.is_empty());
 
-        // 2. Revert (Disk write failure)
         bm.revert_v1_piece_completion(0);
         assert!(!bm.block_bitfield[0], "Block 0 bit not cleared");
         assert!(!bm.block_bitfield[1], "Block 1 bit not cleared");
 
-        // 3. Verify we can start over
         let data = vec![0u8; 16384];
         let addr = bm.inflate_address_from_overlay(0, 0, 16384).unwrap();
         let res = bm.handle_v1_block_buffering(addr, &data);
@@ -896,27 +896,32 @@ mod state_tests {
 #[cfg(test)]
 mod selection_tests {
     use crate::torrent_manager::block_manager::BlockManager;
+    use std::collections::HashMap;
 
     #[test]
     fn test_pick_blocks_standard_vs_endgame() {
         let mut bm = BlockManager::new();
         // 1 piece, 4 blocks
         let piece_len = 16384 * 4;
-        bm.set_geometry(piece_len, piece_len as u64, vec![], vec![], false);
+        bm.set_geometry(
+            piece_len,
+            piece_len as u64,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
 
         let peer_bitfield = vec![true]; // Peer has Piece 0
         let rarest = vec![0];
 
-        // 1. Mark block 0 as PENDING (assigned to Peer A)
         bm.mark_pending(0);
 
-        // 2. Peer B wants work.
         // Standard Mode: Should skip Block 0, pick Block 1
         let picks_std = bm.pick_blocks_for_peer(&peer_bitfield, 1, &rarest, false);
         assert_eq!(picks_std.len(), 1);
         assert_eq!(picks_std[0].block_index, 1); // Skips 0
 
-        // 3. Peer C wants work.
         // Endgame Mode: Should duplicate Block 0 if needed, or pick others.
         // Our logic: pick unacquired blocks. If unacquired is pending,
         // skip in standard, take in endgame.

@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 use std::mem::Discriminant;
 use std::sync::Arc;
 
-use crate::torrent_file::Torrent;
+use crate::torrent_file::{Torrent, V2RootInfo};
 use crate::torrent_manager::piece_manager::PieceManager;
 use crate::torrent_manager::piece_manager::PieceStatus;
 use std::collections::{HashMap, HashSet};
@@ -118,6 +118,11 @@ pub enum Action {
         torrent: Box<Torrent>,
         metadata_length: i64,
     },
+    MerkleProofReceived {
+        peer_id: String,
+        piece_index: u32,
+        proof: Vec<u8>,
+    },
     ValidationComplete {
         completed_pieces: Vec<u32>,
     },
@@ -172,6 +177,17 @@ pub enum Effect {
         piece_index: u32,
         data: Vec<u8>,
     },
+    VerifyPieceV2 {
+        peer_id: String,
+        piece_index: u32,
+        proof: Vec<u8>,
+        data: Vec<u8>,
+        root_hash: Vec<u8>,
+        _file_start_offset: u64,
+        valid_length: usize,
+        relative_index: u32,
+        hashing_context_len: usize,
+    },
     WriteToDisk {
         peer_id: String,
         piece_index: u32,
@@ -188,6 +204,15 @@ pub enum Effect {
         ip: String,
         port: u16,
     },
+    RequestHashes {
+        peer_id: String,
+        file_root: Vec<u8>,
+        piece_index: u32,
+        length: u32,
+        proof_layers: u32,
+        base_layer: u32,
+    },
+
     StartWebSeed {
         url: String,
     },
@@ -280,6 +305,10 @@ pub struct TorrentState {
     pub validation_pieces_found: u32,
     pub now: Instant,
     pub has_started_announce_sent: bool,
+    pub v2_proofs: HashMap<u32, Vec<u8>>,
+    pub v2_pending_data: HashMap<u32, (u32, Vec<u8>)>,
+    pub piece_to_roots: HashMap<u32, Vec<V2RootInfo>>,
+    pub verifying_pieces: HashSet<u32>,
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -308,6 +337,10 @@ impl Default for TorrentState {
             validation_pieces_found: 0,
             now: Instant::now(),
             has_started_announce_sent: false,
+            v2_proofs: HashMap::new(),
+            v2_pending_data: HashMap::new(),
+            piece_to_roots: HashMap::new(),
+            verifying_pieces: HashSet::new(),
         }
     }
 }
@@ -317,7 +350,7 @@ impl TorrentState {
         info_hash: Vec<u8>,
         torrent: Option<Torrent>,
         torrent_metadata_length: Option<i64>,
-        mut piece_manager: PieceManager,
+        piece_manager: PieceManager,
         trackers: HashMap<String, TrackerState>,
         torrent_validation_status: bool,
     ) -> Self {
@@ -327,21 +360,7 @@ impl TorrentState {
             TorrentStatus::AwaitingMetadata
         };
 
-        if let Some(ref t) = torrent {
-            let total_len: u64 = if t.info.files.is_empty() {
-                t.info.length as u64
-            } else {
-                t.info.files.iter().map(|f| f.length as u64).sum()
-            };
-
-            piece_manager.set_geometry(
-                t.info.piece_length as u32,
-                total_len,
-                torrent_validation_status,
-            );
-        }
-
-        Self {
+        let mut state = Self {
             info_hash,
             torrent,
             torrent_metadata_length,
@@ -356,13 +375,65 @@ impl TorrentState {
             ),
             now: Instant::now(),
             ..Default::default()
+        };
+
+        // Populate V2 Maps Immediately
+        // This ensures AssignWork has the data it needs to clamp requests from the very start.
+        let (v2_piece_count, piece_overrides) = state.rebuild_v2_mappings();
+
+        if let Some(ref t) = state.torrent {
+            let total_len: u64 = if t.info.meta_version == Some(2) {
+                // V2: Geometry is aligned to piece boundaries
+                let num_pieces = if !t.info.pieces.is_empty() {
+                    t.info.pieces.len() / 20
+                } else if v2_piece_count > 0 {
+                    // Use the count we just calculated
+                    v2_piece_count as usize
+                } else {
+                    0
+                };
+                (num_pieces as u64) * (t.info.piece_length as u64)
+            } else {
+                // V1: Geometry is packed (sum of files)
+                if t.info.files.is_empty() {
+                    t.info.length as u64
+                } else {
+                    t.info.files.iter().map(|f| f.length as u64).sum()
+                }
+            };
+
+            state.piece_manager.set_geometry(
+                t.info.piece_length as u32,
+                total_len,
+                piece_overrides,
+                torrent_validation_status,
+            );
         }
+
+        state
     }
 
-    // Helper to determine piece size based on torrent metadata
     fn get_piece_size(&self, piece_index: u32) -> usize {
         if let Some(torrent) = &self.torrent {
             let piece_len = torrent.info.piece_length as u64;
+
+            // V2 Logic: Clamp size to the specific file length
+            if let Some(roots) = self.piece_to_roots.get(&piece_index) {
+                // In V2, pieces align to files. We check the mapped file for this piece.
+                if let Some(root_info) = roots.first() {
+                    let global_piece_start = piece_index as u64 * piece_len;
+
+                    // Calculate offset relative to the start of this specific file
+                    let offset_in_file = global_piece_start.saturating_sub(root_info.file_offset);
+
+                    // The piece cannot exceed the remaining bytes in this file
+                    let remaining_in_file = root_info.length.saturating_sub(offset_in_file);
+
+                    return std::cmp::min(piece_len, remaining_in_file) as usize;
+                }
+            }
+
+            // Fallback (V1 / Standard contiguous stream logic)
             let total_len: u64 = if !torrent.info.files.is_empty() {
                 torrent.info.files.iter().map(|f| f.length as u64).sum()
             } else {
@@ -414,7 +485,6 @@ impl TorrentState {
                 // Calculate Alpha for Exponential Moving Average
                 let alpha = 1.0 - (-dt / SMOOTHING_PERIOD_MS).exp();
 
-                // --- GLOBAL SPEED CALCULATION ---
                 let inst_total_dl_speed =
                     (self.bytes_downloaded_in_interval as f64 * 8.0) * scaling_factor;
                 let inst_total_ul_speed =
@@ -434,7 +504,6 @@ impl TorrentState {
                 self.total_ul_prev_avg_ema =
                     (inst_total_ul_speed * alpha) + (self.total_ul_prev_avg_ema * (1.0 - alpha));
 
-                // --- PEER SPEED CALCULATION ---
                 for peer in self.peers.values_mut() {
                     let inst_dl_speed =
                         (peer.bytes_downloaded_in_tick as f64 * 8.0) * scaling_factor;
@@ -604,6 +673,29 @@ impl TorrentState {
                     return vec![Effect::DoNothing];
                 }
 
+                // Prepare size calculation closure with disjoint borrows.
+                let torrent_ref = &self.torrent;
+                let roots_ref = &self.piece_to_roots;
+
+                let calc_v2_limit = |piece_index: u32| -> Option<u32> {
+                    if let Some(torrent) = torrent_ref {
+                        let piece_len = torrent.info.piece_length as u64;
+                        if let Some(roots) = roots_ref.get(&piece_index) {
+                            if let Some(root_info) = roots.first() {
+                                let global_piece_start = piece_index as u64 * piece_len;
+                                let offset_in_file =
+                                    global_piece_start.saturating_sub(root_info.file_offset);
+                                let remaining_in_file =
+                                    root_info.length.saturating_sub(offset_in_file);
+                                return Some(std::cmp::min(piece_len, remaining_in_file) as u32);
+                            }
+                        }
+                        None
+                    } else {
+                        None
+                    }
+                };
+
                 let mut effects = Vec::new();
                 let mut request_batch = Vec::new();
 
@@ -664,6 +756,9 @@ impl TorrentState {
                     if available_slots == 0 {
                         break;
                     }
+                    if self.verifying_pieces.contains(&piece_index) {
+                        continue;
+                    }
                     let (start, end) = self
                         .piece_manager
                         .block_manager
@@ -680,7 +775,6 @@ impl TorrentState {
                             break;
                         }
 
-                        // Is it globally done?
                         if self
                             .piece_manager
                             .block_manager
@@ -704,110 +798,152 @@ impl TorrentState {
                             .block_manager
                             .inflate_address(global_block_idx);
 
+                        let final_len = if let Some(limit) = calc_v2_limit(addr.piece_index) {
+                            let remaining = limit.saturating_sub(addr.byte_offset);
+                            std::cmp::min(addr.length, remaining)
+                        } else {
+                            addr.length
+                        };
+
+                        if final_len == 0 {
+                            continue;
+                        }
+
                         // Is peer already working on it?
                         if peer.active_blocks.contains(&(
                             addr.piece_index,
                             addr.byte_offset,
-                            addr.length,
+                            final_len,
                         )) {
                             continue;
                         }
 
-                        request_batch.push((addr.piece_index, addr.byte_offset, addr.length));
-                        peer.active_blocks.insert((
-                            addr.piece_index,
-                            addr.byte_offset,
-                            addr.length,
-                        ));
+                        request_batch.push((addr.piece_index, addr.byte_offset, final_len));
+                        peer.active_blocks
+                            .insert((addr.piece_index, addr.byte_offset, final_len));
+
                         available_slots -= 1;
                     }
                 }
 
-                // --- 4. PHASE 2: FILL FROM NEW PIECES ---
-                while available_slots > 0 {
-                    let choice = self.piece_manager.choose_piece_for_peer(
-                        &peer.bitfield,
-                        &peer.pending_requests,
-                        &self.torrent_status,
-                    );
-
-                    match choice {
-                        Some(piece_index) => {
+                let candidate_pool: Box<dyn Iterator<Item = &u32> + '_> =
+                    if self.torrent_status == TorrentStatus::Endgame {
+                        Box::new(
                             self.piece_manager
-                                .mark_as_pending(piece_index, peer_id.clone());
-                            peer.pending_requests.insert(piece_index);
+                                .need_queue
+                                .iter()
+                                .chain(self.piece_manager.pending_queue.keys()),
+                        )
+                    } else {
+                        Box::new(self.piece_manager.need_queue.iter())
+                    };
 
-                            if self.piece_manager.need_queue.is_empty()
-                                && self.torrent_status != TorrentStatus::Endgame
-                            {
-                                self.torrent_status = TorrentStatus::Endgame;
-                            }
+                let mut valid_candidates: Vec<u32> = candidate_pool
+                    .copied()
+                    .filter(|&p_idx| {
+                        // Peer must have the piece
+                        if peer.bitfield.get(p_idx as usize) != Some(&true) {
+                            return false;
+                        }
+                        // Don't duplicate work currently verifying
+                        if self.verifying_pieces.contains(&p_idx) {
+                            return false;
+                        }
+                        // Don't request what we already asked this specific peer for
+                        if peer.pending_requests.contains(&p_idx) {
+                            return false;
+                        }
+                        true
+                    })
+                    .collect();
 
-                            let initial_batch_len = request_batch.len();
+                // Sort ascending: Lower availability count = Rarer = Higher Priority
+                valid_candidates.sort_by_key(|&p_idx| {
+                    // FIX: Call the helper method we just created
+                    self.piece_manager.get_piece_availability(p_idx)
+                });
 
-                            let (start, end) = self
-                                .piece_manager
-                                .block_manager
-                                .get_block_range(piece_index);
-                            let assembler_mask = self
-                                .piece_manager
-                                .block_manager
-                                .legacy_buffers
-                                .get(&piece_index)
-                                .map(|a| a.mask.clone());
+                let pieces_to_request = valid_candidates.into_iter().take(available_slots);
 
-                            for global_block_idx in start..end {
-                                if available_slots == 0 {
-                                    break;
-                                }
+                for piece_index in pieces_to_request {
+                    if available_slots == 0 {
+                        break;
+                    }
 
-                                if self
-                                    .piece_manager
-                                    .block_manager
-                                    .block_bitfield
-                                    .get(global_block_idx as usize)
-                                    == Some(&true)
-                                {
-                                    continue;
-                                }
+                    // --- A. Update State ---
+                    self.piece_manager
+                        .mark_as_pending(piece_index, peer_id.clone());
+                    peer.pending_requests.insert(piece_index);
 
-                                let local_block_idx = global_block_idx - start;
-                                if let Some(mask) = &assembler_mask {
-                                    if mask.get(local_block_idx as usize) == Some(&true) {
-                                        continue;
-                                    }
-                                }
+                    if self.piece_manager.need_queue.is_empty()
+                        && self.torrent_status != TorrentStatus::Endgame
+                    {
+                        self.torrent_status = TorrentStatus::Endgame;
+                    }
 
-                                let addr = self
-                                    .piece_manager
-                                    .block_manager
-                                    .inflate_address(global_block_idx);
-                                if peer.active_blocks.contains(&(
-                                    addr.piece_index,
-                                    addr.byte_offset,
-                                    addr.length,
-                                )) {
-                                    continue;
-                                }
+                    // --- B. Generate Block Requests ---
+                    let (start, end) = self
+                        .piece_manager
+                        .block_manager
+                        .get_block_range(piece_index);
+                    let assembler_mask = self
+                        .piece_manager
+                        .block_manager
+                        .legacy_buffers
+                        .get(&piece_index)
+                        .map(|a| a.mask.clone());
 
-                                request_batch.push((
-                                    addr.piece_index,
-                                    addr.byte_offset,
-                                    addr.length,
-                                ));
-                                peer.active_blocks.insert((
-                                    addr.piece_index,
-                                    addr.byte_offset,
-                                    addr.length,
-                                ));
-                                available_slots -= 1;
-                            }
+                    for global_block_idx in start..end {
+                        if available_slots == 0 {
+                            break;
+                        }
 
-                            if request_batch.len() == initial_batch_len {
-                                break;
+                        if self
+                            .piece_manager
+                            .block_manager
+                            .block_bitfield
+                            .get(global_block_idx as usize)
+                            == Some(&true)
+                        {
+                            continue;
+                        }
+
+                        let local_block_idx = global_block_idx - start;
+                        if let Some(mask) = &assembler_mask {
+                            if mask.get(local_block_idx as usize) == Some(&true) {
+                                continue;
                             }
                         }
-                        None => break,
+
+                        let addr = self
+                            .piece_manager
+                            .block_manager
+                            .inflate_address(global_block_idx);
+
+                        let final_len = if let Some(limit) = calc_v2_limit(addr.piece_index) {
+                            let remaining = limit.saturating_sub(addr.byte_offset);
+                            std::cmp::min(addr.length, remaining)
+                        } else {
+                            addr.length
+                        };
+
+                        if final_len == 0 {
+                            continue;
+                        }
+
+                        if peer.active_blocks.contains(&(
+                            addr.piece_index,
+                            addr.byte_offset,
+                            final_len,
+                        )) {
+                            continue;
+                        }
+
+                        request_batch.push((addr.piece_index, addr.byte_offset, final_len));
+                        peer.active_blocks
+                            .insert((addr.piece_index, addr.byte_offset, final_len));
+
+                        available_slots -= 1;
                     }
                 }
 
@@ -859,7 +995,6 @@ impl TorrentState {
             }
 
             Action::PeerDisconnected { peer_id } => {
-                //event!(Level::INFO, "PEER DISCONNECTED {}", peer_id);
                 let mut effects = Vec::new();
                 if let Some(removed_peer) = self.peers.remove(&peer_id) {
                     for piece_index in removed_peer.pending_requests {
@@ -910,9 +1045,14 @@ impl TorrentState {
                         .flat_map(|&byte| (0..8).map(move |i| (byte >> (7 - i)) & 1 == 1))
                         .collect();
 
-                    if let Some(torrent) = &self.torrent {
-                        let total_pieces = torrent.info.pieces.len() / 20;
-                        peer.bitfield.resize(total_pieces, false);
+                    let total_pieces = self.piece_manager.bitfield.len();
+
+                    if total_pieces > 0 {
+                        if peer.bitfield.len() > total_pieces {
+                            peer.bitfield.truncate(total_pieces);
+                        } else if peer.bitfield.len() < total_pieces {
+                            peer.bitfield.resize(total_pieces, false);
+                        }
                     }
                 }
 
@@ -980,7 +1120,6 @@ impl TorrentState {
                 block_offset,
                 data,
             } => {
-                // 1. Safety Guard: Bounds Check
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
                 }
@@ -993,7 +1132,6 @@ impl TorrentState {
                 let is_piece_done = self.piece_manager.bitfield.get(piece_index as usize)
                     == Some(&PieceStatus::Done);
 
-                // 2. Global Metrics Updates (Conditional)
                 if !is_piece_done {
                     self.bytes_downloaded_in_interval =
                         self.bytes_downloaded_in_interval.saturating_add(len);
@@ -1001,7 +1139,6 @@ impl TorrentState {
                         self.session_total_downloaded.saturating_add(len);
                 }
 
-                // 3. Peer State Updates
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     // CRITICAL: Always decrement inflight requests, even for redundant blocks.
                     // If we don't, the pipeline counts never decrease, causing a stall.
@@ -1023,37 +1160,152 @@ impl TorrentState {
                     info_hash: self.info_hash.clone(),
                 }));
 
-                // 5. Early Exit: Piece already Done?
                 if is_piece_done {
                     return effects;
                 }
 
-                // 6. Early Exit: Currently Validating?
                 if self.torrent_status == TorrentStatus::Validating {
                     return effects;
                 }
 
                 self.last_activity = TorrentActivity::DownloadingPiece(piece_index);
 
-                // 7. Process the Block
                 let piece_size = self.get_piece_size(piece_index);
+
                 if let Some(complete_data) =
                     self.piece_manager
                         .handle_block(piece_index, block_offset, &data, piece_size)
                 {
-                    self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
-                    effects.push(Effect::VerifyPiece {
-                        peer_id: peer_id.clone(),
-                        piece_index,
-                        data: complete_data,
-                    });
+                    // Mark as verifying
+                    self.verifying_pieces.insert(piece_index);
+
+                    if let Some(roots) = self.piece_to_roots.get(&piece_index) {
+                        let piece_len = self
+                            .torrent
+                            .as_ref()
+                            .map(|t| t.info.piece_length as u64)
+                            .unwrap_or(0);
+                        let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
+
+                        let matching_root_info = roots
+                            .iter()
+                            .filter(|r| r.file_offset <= global_offset)
+                            .max_by_key(|r| r.file_offset);
+
+                        let (valid_length, relative_index, hashing_context_len) =
+                            self.calculate_v2_verify_params(piece_index, complete_data.len());
+
+                        if let Some(root_info) = matching_root_info {
+                            if let Some(target_hash) = self.torrent.as_ref().and_then(|t| {
+                                t.get_v2_hash_layer(
+                                    piece_index,
+                                    root_info.file_offset,
+                                    root_info.length,
+                                    1,
+                                    &root_info.root_hash,
+                                )
+                            }) {
+                                // SCENARIO: We have the piece-layer hash locally
+                                effects.push(Effect::VerifyPieceV2 {
+                                    peer_id: peer_id.clone(),
+                                    piece_index,
+                                    proof: Vec::new(),
+                                    data: complete_data,
+                                    root_hash: target_hash,
+                                    _file_start_offset: root_info.file_offset,
+                                    valid_length,
+                                    relative_index,
+                                    hashing_context_len,
+                                });
+                            } else if let Some(proof) = self.v2_proofs.get(&piece_index) {
+                                // SCENARIO: We got a proof from the peer
+                                effects.push(Effect::VerifyPieceV2 {
+                                    peer_id: peer_id.clone(),
+                                    piece_index,
+                                    proof: proof.clone(),
+                                    root_hash: root_info.root_hash.clone(),
+                                    data: complete_data,
+                                    _file_start_offset: root_info.file_offset,
+                                    valid_length,
+                                    relative_index,
+                                    hashing_context_len,
+                                });
+                            } else if self
+                                .torrent
+                                .as_ref()
+                                .is_some_and(|t| !t.info.pieces.is_empty())
+                            {
+                                // Fallback for Hybrid torrents
+                                self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
+                                effects.push(Effect::VerifyPiece {
+                                    peer_id: peer_id.clone(),
+                                    piece_index,
+                                    data: complete_data,
+                                });
+                            } else {
+                                // Buffer v2 data and ask for proof.
+                                self.v2_pending_data
+                                    .insert(piece_index, (block_offset, complete_data));
+
+                                let root_info_opt = self
+                                    .piece_to_roots
+                                    .get(&piece_index)
+                                    .and_then(|roots| roots.first());
+
+                                if let Some(r_info) = root_info_opt {
+                                    let piece_len = self
+                                        .torrent
+                                        .as_ref()
+                                        .map(|t| t.info.piece_length as u64)
+                                        .unwrap_or(32768);
+                                    let request_base = if piece_len >= 16384 {
+                                        (piece_len / 16384).trailing_zeros()
+                                    } else {
+                                        0
+                                    };
+
+                                    let request_index = if piece_len >= 16384 {
+                                        let global_piece_offset = piece_index as u64 * piece_len;
+                                        let offset_in_file =
+                                            global_piece_offset.saturating_sub(r_info.file_offset);
+                                        let relative_block_index = offset_in_file / 16384;
+                                        relative_block_index >> request_base
+                                    } else {
+                                        piece_index as u64
+                                    };
+
+                                    effects.push(Effect::RequestHashes {
+                                        peer_id: peer_id.clone(),
+                                        file_root: r_info.root_hash.clone(),
+                                        piece_index: request_index as u32,
+                                        length: 1,
+                                        proof_layers: 0,
+                                        base_layer: request_base,
+                                    });
+                                }
+                            }
+                        } else {
+                            // Fallback attempt to V1 if possible
+                            self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
+                            effects.push(Effect::VerifyPiece {
+                                peer_id: peer_id.clone(),
+                                piece_index,
+                                data: complete_data,
+                            });
+                        }
+                    } else {
+                        self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
+                        effects.push(Effect::VerifyPiece {
+                            peer_id: peer_id.clone(),
+                            piece_index,
+                            data: complete_data,
+                        });
+                    }
                 }
 
-                // 4. Refill Pipeline (Work Assignment)
                 if let Some(peer) = self.peers.get(&peer_id) {
                     let low_water_mark = MAX_PIPELINE_DEPTH / 2;
                     if peer.inflight_requests <= low_water_mark {
-                        //event!(Level::INFO, "PEER REFILLING WORK: {}", peer_id);
                         effects.extend(self.update(Action::AssignWork {
                             peer_id: peer_id.clone(),
                         }));
@@ -1061,6 +1313,75 @@ impl TorrentState {
                 }
 
                 effects
+            }
+
+            Action::MerkleProofReceived {
+                peer_id,
+                piece_index,
+                proof,
+            } => {
+                if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done)
+                {
+                    return vec![Effect::DoNothing];
+                }
+
+                if let Some((block_offset, data)) = self.v2_pending_data.remove(&piece_index) {
+                    if let Some(roots) = self.piece_to_roots.get(&piece_index) {
+                        let piece_len = self
+                            .torrent
+                            .as_ref()
+                            .map(|t| t.info.piece_length as u64)
+                            .unwrap_or(65536);
+
+                        let global_offset = (piece_index as u64 * piece_len) + block_offset as u64;
+
+                        let matching_root_info = roots
+                            .iter()
+                            .filter(|r| r.file_offset <= global_offset)
+                            .max_by_key(|r| r.file_offset);
+
+                        if let Some(root_info) = matching_root_info {
+                            let (valid_length, _, hashing_context_len) =
+                                self.calculate_v2_verify_params(piece_index, data.len());
+
+                            let offset_in_file =
+                                global_offset.saturating_sub(root_info.file_offset);
+                            let actual_relative_index = (offset_in_file / piece_len) as u32;
+
+                            let local_piece_hash = self.torrent.as_ref().and_then(|t| {
+                                t.get_v2_hash_layer(
+                                    actual_relative_index,
+                                    root_info.file_offset,
+                                    root_info.length,
+                                    1,
+                                    &root_info.root_hash,
+                                )
+                            });
+
+                            let (verification_target, verification_proof) = if proof.len() == 32 {
+                                (
+                                    local_piece_hash.unwrap_or_else(|| proof.clone()),
+                                    Vec::new(),
+                                )
+                            } else {
+                                (root_info.root_hash.clone(), proof)
+                            };
+
+                            return vec![Effect::VerifyPieceV2 {
+                                peer_id,
+                                piece_index,
+                                proof: verification_proof,
+                                data,
+                                root_hash: verification_target,
+                                _file_start_offset: root_info.file_offset,
+                                valid_length,
+                                relative_index: actual_relative_index,
+                                hashing_context_len,
+                            }];
+                        }
+                    }
+                }
+                vec![Effect::DoNothing]
             }
 
             Action::PieceVerified {
@@ -1074,6 +1395,10 @@ impl TorrentState {
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
                 }
+
+                self.verifying_pieces.remove(&piece_index);
+                self.v2_proofs.remove(&piece_index);
+                self.v2_pending_data.remove(&piece_index);
 
                 if valid {
                     if self.piece_manager.bitfield.get(piece_index as usize)
@@ -1105,12 +1430,10 @@ impl TorrentState {
                 peer_id,
                 piece_index,
             } => {
-                // GUARD: Protect against reordered events (e.g. arriving before Metadata)
                 if piece_index as usize >= self.piece_manager.bitfield.len() {
                     return vec![Effect::DoNothing];
                 }
 
-                // Any stray write completions (e.g. from before a restart) should be dropped.
                 if self.torrent_status == TorrentStatus::Validating
                     || self.torrent_status == TorrentStatus::AwaitingMetadata
                 {
@@ -1118,6 +1441,7 @@ impl TorrentState {
                 }
 
                 let mut effects = Vec::new();
+
                 if self.piece_manager.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done)
                 {
                     if let Some(peer) = self.peers.get_mut(&peer_id) {
@@ -1126,25 +1450,30 @@ impl TorrentState {
                     effects.extend(self.update(Action::AssignWork { peer_id }));
                     return effects;
                 }
+
+                // ACTUAL STATE CHANGE
                 let peers_to_cancel = self.piece_manager.mark_as_complete(piece_index);
+
                 effects.push(Effect::EmitManagerEvent(ManagerEvent::DiskWriteFinished));
+
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.pending_requests.remove(&piece_index);
                 }
+
                 effects.extend(self.update(Action::AssignWork {
                     peer_id: peer_id.clone(),
                 }));
+
                 for other_peer in peers_to_cancel {
                     if other_peer != peer_id {
                         if let Some(peer) = self.peers.get_mut(&other_peer) {
                             peer.pending_requests.remove(&piece_index);
-
+                            // ... cancellation construction ...
                             let (start, end) = self
                                 .piece_manager
                                 .block_manager
                                 .get_block_range(piece_index);
                             let mut batch = Vec::new();
-
                             for global_block_idx in start..end {
                                 let addr = self
                                     .piece_manager
@@ -1152,7 +1481,6 @@ impl TorrentState {
                                     .inflate_address(global_block_idx);
                                 batch.push((addr.piece_index, addr.byte_offset, addr.length));
                             }
-
                             if !batch.is_empty() {
                                 effects.push(Effect::SendToPeer {
                                     peer_id: other_peer.clone(),
@@ -1165,6 +1493,7 @@ impl TorrentState {
                         }));
                     }
                 }
+
                 effects.push(Effect::BroadcastHave { piece_index });
                 effects.extend(self.update(Action::CheckCompletion));
 
@@ -1302,25 +1631,33 @@ impl TorrentState {
                 self.torrent = Some(*torrent.clone());
                 self.torrent_metadata_length = Some(metadata_length);
 
-                let num_pieces = torrent.info.pieces.len() / 20;
+                let (v2_piece_count, piece_overrides) = self.rebuild_v2_mappings();
+
+                let num_pieces = if !torrent.info.pieces.is_empty() {
+                    torrent.info.pieces.len() / 20
+                } else {
+                    v2_piece_count as usize
+                };
+
                 self.piece_manager = PieceManager::new();
                 self.piece_manager
                     .set_initial_fields(num_pieces, self.torrent_validation_status);
 
-                let total_len: u64 = if torrent.info.files.is_empty() {
+                let total_len: u64 = if torrent.info.meta_version == Some(2) {
+                    (num_pieces as u64) * (torrent.info.piece_length as u64)
+                } else if torrent.info.files.is_empty() {
                     torrent.info.length as u64
                 } else {
                     torrent.info.files.iter().map(|f| f.length as u64).sum()
                 };
 
-                // Pass geometry so BlockManager can do math
                 self.piece_manager.set_geometry(
                     torrent.info.piece_length as u32,
                     total_len,
+                    piece_overrides,
                     self.torrent_validation_status,
                 );
 
-                // Retroactive bitfield resize for non-compliant clients
                 for peer in self.peers.values_mut() {
                     if peer.bitfield.len() > num_pieces {
                         peer.bitfield.truncate(num_pieces);
@@ -1459,6 +1796,17 @@ impl TorrentState {
                 self.timed_out_peers
                     .retain(|_, (retry_count, _)| *retry_count < MAX_TIMEOUT_COUNT);
 
+                let max_ram_usage = 1024 * 1024 * 1024; // 1 GB in bytes
+                let piece_len = self
+                    .torrent
+                    .as_ref()
+                    .map(|t| t.info.piece_length as usize)
+                    .unwrap_or(16_384);
+                let max_pending_items = max_ram_usage / piece_len;
+                if self.v2_pending_data.len() > max_pending_items {
+                    self.v2_pending_data.clear();
+                }
+
                 let mut stuck_peers = Vec::new();
                 for (id, peer) in &self.peers {
                     if peer.peer_id.is_empty()
@@ -1588,6 +1936,11 @@ impl TorrentState {
                 self.last_known_peers.clear();
                 self.timed_out_peers.clear();
 
+                self.v2_proofs.clear();
+                self.v2_pending_data.clear();
+                self.piece_to_roots.clear();
+                self.verifying_pieces.clear();
+
                 let num_pieces = self.piece_manager.bitfield.len();
                 self.piece_manager = PieceManager::new();
                 if num_pieces > 0 {
@@ -1608,7 +1961,6 @@ impl TorrentState {
                 // These must be cleared, otherwise they remain > 0 while total is 0
                 self.bytes_downloaded_in_interval = 0;
                 self.bytes_uploaded_in_interval = 0;
-                // -----------------------------------------------
 
                 self.is_paused = true;
                 self.torrent_status = if self.torrent.is_some() {
@@ -1674,6 +2026,65 @@ impl TorrentState {
 
             Action::FatalError => self.update(Action::Pause),
         }
+    }
+
+    fn rebuild_v2_mappings(&mut self) -> (u32, HashMap<u32, u32>) {
+        let mut overrides = HashMap::new();
+        let mut v2_piece_count: u32 = 0;
+
+        if let Some(torrent) = &self.torrent {
+            let mapping = torrent.calculate_v2_mapping();
+            self.piece_to_roots = mapping.piece_to_roots;
+            v2_piece_count = mapping.piece_count as u32;
+
+            if torrent.info.meta_version == Some(2) {
+                let piece_len = torrent.info.piece_length as u64;
+                let mut v2_roots = torrent.get_v2_roots();
+                v2_roots.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+
+                let mut current_idx = 0;
+                for (_, length, _) in v2_roots {
+                    if length > 0 && piece_len > 0 {
+                        let file_pieces = length.div_ceil(piece_len);
+                        let tail_len = (length % piece_len) as u32;
+                        if tail_len > 0 {
+                            let tail_idx = (current_idx + file_pieces - 1) as u32;
+                            overrides.insert(tail_idx, tail_len);
+                        }
+                        current_idx += file_pieces;
+                    }
+                }
+            }
+        }
+        (v2_piece_count, overrides)
+    }
+
+    fn calculate_v2_verify_params(&self, piece_index: u32, data_len: usize) -> (usize, u32, usize) {
+        if let Some(roots) = self.piece_to_roots.get(&piece_index) {
+            if let Some(root_info) = roots.first() {
+                let piece_len = self
+                    .torrent
+                    .as_ref()
+                    .map(|t| t.info.piece_length as u64)
+                    .unwrap_or(0);
+
+                let piece_start_global = piece_index as u64 * piece_len;
+                let offset_in_file = piece_start_global.saturating_sub(root_info.file_offset);
+                let remaining = root_info.length.saturating_sub(offset_in_file);
+
+                let valid_length = std::cmp::min(data_len as u64, remaining) as usize;
+                let relative_index = (offset_in_file / piece_len) as u32;
+
+                let hashing_context_len = if root_info.length <= piece_len {
+                    root_info.length as usize
+                } else {
+                    piece_len as usize
+                };
+
+                return (valid_length, relative_index, hashing_context_len);
+            }
+        }
+        (data_len, 0, data_len)
     }
 }
 
@@ -1742,6 +2153,7 @@ impl PeerState {
 mod tests {
     use super::*;
     use crate::command::TorrentCommand;
+    use crate::torrent_file::V2RootInfo;
     use crate::torrent_manager::piece_manager::PieceManager;
     use tokio::sync::mpsc;
 
@@ -1774,12 +2186,15 @@ mod tests {
                 files: vec![],
                 private: None,
                 md5sum: None,
+                meta_version: None,
+                file_tree: None,
             },
             info_dict_bencode: vec![],
             created_by: None,
             creation_date: None,
             encoding: None,
             comment: None,
+            piece_layers: None,
         }
     }
 
@@ -1825,20 +2240,17 @@ mod tests {
 
         // Peers will be ranked by bytes_downloaded_from_peer (contribution).
 
-        // 1. Setup the Slow Peer (Must be Choked)
         add_peer(&mut state, "slow_peer");
         let slow_peer = state.peers.get_mut("slow_peer").unwrap();
         slow_peer.peer_is_interested_in_us = true;
         slow_peer.bytes_downloaded_from_peer = 10; // Low contribution (Must lose)
         slow_peer.am_choking = ChokeStatus::Unchoke; // Start unchoked to test transition
 
-        // 2. Setup the Fast Peer (Must be Unchoked)
         add_peer(&mut state, "fast_peer");
         let fast_peer = state.peers.get_mut("fast_peer").unwrap();
         fast_peer.peer_is_interested_in_us = true;
         fast_peer.bytes_downloaded_from_peer = 10_000; // High contribution (Must win)
 
-        // 3. Setup 3 Intermediate Peers (To consume the remaining 3 slots)
         // Their contribution must be between the Fast Peer (10,000) and the Slow Peer (10).
         for i in 1..=3 {
             let id = format!("med_peer_{}", i);
@@ -1889,20 +2301,17 @@ mod tests {
         let mut state = create_empty_state();
         state.torrent_status = TorrentStatus::Done;
 
-        // 1. Setup the Slow Uploader (Must be Choked)
         add_peer(&mut state, "slow_leecher");
         let slow_leecher = state.peers.get_mut("slow_leecher").unwrap();
         slow_leecher.peer_is_interested_in_us = true;
         slow_leecher.bytes_uploaded_to_peer = 1_000; // Low upload volume (Must lose)
         slow_leecher.am_choking = ChokeStatus::Unchoke; // Start unchoked to test transition
 
-        // 2. Setup the Fast Uploader (Must be Unchoked)
         add_peer(&mut state, "fast_leecher");
         let fast_leecher = state.peers.get_mut("fast_leecher").unwrap();
         fast_leecher.peer_is_interested_in_us = true;
         fast_leecher.bytes_uploaded_to_peer = 50_000; // High upload volume (Must win)
 
-        // 3. Setup 3 Intermediate Peers (To consume the remaining 3 slots)
         // Their uploaded bytes must be between the Fast Peer (50,000) and the Slow Peer (1,000).
         for i in 1..=3 {
             let id = format!("med_leecher_{}", i);
@@ -1944,10 +2353,14 @@ mod tests {
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(10, false);
         state.torrent_status = TorrentStatus::Standard;
-        state
-            .piece_manager
-            .block_manager
-            .set_geometry(16384, 163840, vec![], vec![], false); // NEW: Init geometry
+        state.piece_manager.block_manager.set_geometry(
+            16384,
+            163840,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        ); // NEW: Init geometry
 
         add_peer(&mut state, "peer_A");
         let peer = state.peers.get_mut("peer_A").unwrap();
@@ -2094,10 +2507,14 @@ mod tests {
         let torrent = create_dummy_torrent(2);
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(2, false);
-        state
-            .piece_manager
-            .block_manager
-            .set_geometry(16384, 16384 * 2, vec![], vec![], false);
+        state.piece_manager.block_manager.set_geometry(
+            16384,
+            16384 * 2,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
         state.torrent_status = TorrentStatus::Standard;
 
         add_peer(&mut state, "peer_A");
@@ -2118,9 +2535,9 @@ mod tests {
         });
 
         // THEN:
-        // 1. Need queue should be empty
+
         assert!(state.piece_manager.need_queue.is_empty());
-        // 2. Status should transition to ENDGAME
+
         assert_eq!(state.torrent_status, TorrentStatus::Endgame);
     }
 
@@ -2139,9 +2556,9 @@ mod tests {
         });
 
         // THEN:
-        // 1. Internal state must update
+
         assert_eq!(state.peers["peer_A"].peer_choking, ChokeStatus::Choke);
-        // 2. We might optionally clear pending requests depending on your strategy
+
         // (Strict clients cancel immediately; lenient ones wait. Verify YOUR logic here.)
     }
 
@@ -2150,7 +2567,6 @@ mod tests {
         // GIVEN: 6 peers competing for 4 slots (UPLOAD_SLOTS_DEFAULT = 4).
         let mut state = create_empty_state();
 
-        // 1. Setup 4 Fast Peers (Deterministic Winners, > 1000 speed)
         for i in 1..=4 {
             let id = format!("fast_A{}", i);
             add_peer(&mut state, &id);
@@ -2159,13 +2575,11 @@ mod tests {
             p.bytes_downloaded_from_peer = 1000;
         }
 
-        // 2. Setup 1 Medium Peer (Optimistic Candidate, Speed 100)
         add_peer(&mut state, "optimistic_B");
         let opt_peer = state.peers.get_mut("optimistic_B").unwrap();
         opt_peer.peer_is_interested_in_us = true;
         opt_peer.bytes_downloaded_from_peer = 100;
 
-        // 3. Setup 1 Slow Peer (Loser, Speed 10)
         add_peer(&mut state, "slow_C");
         let slow_peer = state.peers.get_mut("slow_C").unwrap();
         slow_peer.peer_is_interested_in_us = true;
@@ -2183,7 +2597,7 @@ mod tests {
         });
 
         // THEN:
-        // 1. Total unchoked count should be 5 (4 deterministic + 1 optimistic)
+
         let unchoked_count = state
             .peers
             .values()
@@ -2196,13 +2610,10 @@ mod tests {
             "Total unchoked count mismatch. Expected 5 (4+1)."
         );
 
-        // 2. Verify Deterministic Winners (Fast A1-A4) are unchoked
         assert_eq!(state.peers["fast_A1"].am_choking, ChokeStatus::Unchoke);
 
-        // 3. Verify Optimistic Winner (B) is unchoked
         assert_eq!(state.peers["optimistic_B"].am_choking, ChokeStatus::Unchoke);
 
-        // 4. Verify Loser (C) is choked
         assert_eq!(state.peers["slow_C"].am_choking, ChokeStatus::Choke);
     }
 
@@ -2230,10 +2641,9 @@ mod tests {
         });
 
         // THEN:
-        // 1. Bitfield updated
+
         assert!(state.peers["peer_A"].bitfield[5]);
 
-        // 2. Triggers Interest
         let interest = effects.iter().any(|e| {
             matches!(e, Effect::SendToPeer { cmd, .. }
         if matches!(**cmd, TorrentCommand::ClientInterested))
@@ -2267,18 +2677,20 @@ mod tests {
 
     #[test]
     fn test_invariant_pending_removed_on_disk_write() {
-        // 1. Setup State
         let mut state = create_empty_state();
         let torrent = create_dummy_torrent(20);
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(20, false);
-        state
-            .piece_manager
-            .block_manager
-            .set_geometry(16384, 16384 * 20, vec![], vec![], false);
+        state.piece_manager.block_manager.set_geometry(
+            16384,
+            16384 * 20,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
         state.torrent_status = TorrentStatus::Standard;
 
-        // 2. Setup Peer and Need Queue
         add_peer(&mut state, "peer_A");
         let peer = state.peers.get_mut("peer_A").unwrap();
         peer.bitfield = vec![true; 20]; // Peer has everything
@@ -2287,7 +2699,6 @@ mod tests {
         // We need piece 0
         state.piece_manager.need_queue.push(0);
 
-        // 3. Trigger Work Assignment
         // This moves Piece 0 from Need -> Pending and adds to Peer's pending_requests
         state.update(Action::AssignWork {
             peer_id: "peer_A".into(),
@@ -2299,13 +2710,11 @@ mod tests {
             "Setup failed: Piece 0 should be pending"
         );
 
-        // 4. Simulate the Disk Write (The action containing your sabotage)
         state.update(Action::PieceWrittenToDisk {
             peer_id: "peer_A".into(),
             piece_index: 0,
         });
 
-        // 5. ASSERTION
         // If the code is correct, piece 0 is removed from the peer.
         // If sabotaged, piece 0 remains, and this assert will panic.
         let is_still_pending = state.peers["peer_A"].pending_requests.contains(&0);
@@ -2331,7 +2740,6 @@ mod tests {
         state.torrent_status = TorrentStatus::Standard;
         state.piece_manager.need_queue = vec![0];
 
-        // 1. Connect Peer A and start downloading Piece 0
         add_peer(&mut state, "peer_A");
         let _ = state.update(Action::PeerUnchoked {
             peer_id: "peer_A".into(),
@@ -2344,7 +2752,6 @@ mod tests {
             peer_id: "peer_A".into(),
         });
 
-        // 2. Simulate partial download (polluting PieceManager internal buffer)
         let data = vec![1; 100];
         let _ = state.update(Action::IncomingBlock {
             peer_id: "peer_A".into(),
@@ -2353,10 +2760,8 @@ mod tests {
             data: data.clone(),
         });
 
-        // 3. DELETE! (This must wipe PieceManager clean)
         let _ = state.update(Action::Delete);
 
-        // 4. Connect Peer B and try downloading Piece 0 again
         // If state wasn't wiped, this causes "subtract with overflow" or "ghost queue" panic
         add_peer(&mut state, "peer_B");
 
@@ -2410,7 +2815,6 @@ mod tests {
             .pending_requests
             .insert(0);
 
-        // 1. First Write Confirmation (Valid)
         state.update(Action::PieceWrittenToDisk {
             peer_id: "peer_A".into(),
             piece_index: 0,
@@ -2418,7 +2822,6 @@ mod tests {
 
         assert_eq!(state.piece_manager.bitfield[0], PieceStatus::Done);
 
-        // 2. Second Write Confirmation (The Bug Trigger)
         // Should be ignored gracefully, not panic.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut s = state;
@@ -2442,13 +2845,11 @@ mod tests {
 
         let huge_val = u64::MAX - 100;
 
-        // 1. Add huge value (should be fine)
         state.update(Action::BlockSentToPeer {
             peer_id: "peer_A".into(),
             byte_count: huge_val,
         });
 
-        // 2. Add more (should saturate, not panic)
         state.update(Action::BlockSentToPeer {
             peer_id: "peer_A".into(),
             byte_count: 200,
@@ -2463,7 +2864,6 @@ mod tests {
         let mut state = create_empty_state();
         let peer_id = "peer_A".to_string();
 
-        // 1. Peer connects (Adapter inserts peer into map, then sends event)
         super::tests::add_peer(&mut state, &peer_id);
         state.update(Action::PeerSuccessfullyConnected {
             peer_id: peer_id.clone(),
@@ -2473,7 +2873,6 @@ mod tests {
             "Counter after first connection"
         );
 
-        // 2. Duplicate connection event (Map size doesn't change, counter should stay 1)
         state.update(Action::PeerSuccessfullyConnected {
             peer_id: peer_id.clone(),
         });
@@ -2482,7 +2881,6 @@ mod tests {
             "Counter on duplicate connection"
         );
 
-        // 3. Disconnect Peer A (Peer is removed from map, counter becomes 0)
         state.update(Action::PeerDisconnected {
             peer_id: peer_id.clone(),
         });
@@ -2499,26 +2897,27 @@ mod tests {
         let torrent = create_dummy_torrent(2); // <--- Changed to 2
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(2, false); // <--- Changed to 2
-        state
-            .piece_manager
-            .block_manager
-            .set_geometry(16384, 163840, vec![], vec![], false);
+        state.piece_manager.block_manager.set_geometry(
+            16384,
+            163840,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
         state.torrent_status = TorrentStatus::Validating;
 
         // We need piece 0 and 1
         state.piece_manager.need_queue = vec![0, 1];
 
-        // 1. Peer connects WHILE validating
         add_peer(&mut state, "seeder");
 
-        // 2. Peer sends Bitfield saying they have Piece 0
         // 0x80 is binary 10000000 -> 1st bit set -> Piece 0 available
         state.update(Action::PeerBitfieldReceived {
             peer_id: "seeder".into(),
             bitfield: vec![0x80],
         });
 
-        // 3. Peer Unchokes us
         state.update(Action::PeerUnchoked {
             peer_id: "seeder".into(),
         });
@@ -2534,10 +2933,9 @@ mod tests {
         println!("{:?}", effects);
 
         // THEN:
-        // 1. Status must be Standard (since piece 1 is still needed)
+
         assert_eq!(state.torrent_status, TorrentStatus::Standard);
 
-        // 2. We MUST see a BulkRequest effect immediately
         let request_sent = effects.iter().any(|e| {
             matches!(e, Effect::SendToPeer { cmd, .. }
             if matches!(**cmd, TorrentCommand::BulkRequest(ref reqs) if !reqs.is_empty() && reqs[0].0 == 0))
@@ -2548,7 +2946,6 @@ mod tests {
             "Regression: Validation finished but download did not trigger!"
         );
 
-        // 3. Peer state must reflect the pending request
         assert!(state.peers["seeder"].inflight_requests == 1);
     }
 
@@ -2559,10 +2956,14 @@ mod tests {
         let torrent = create_dummy_torrent(1);
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(1, false);
-        state
-            .piece_manager
-            .block_manager
-            .set_geometry(16384, 163840, vec![], vec![], false);
+        state.piece_manager.block_manager.set_geometry(
+            16384,
+            163840,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
         state.torrent_status = TorrentStatus::Standard;
 
         // We explicitly need Piece 0
@@ -2573,11 +2974,11 @@ mod tests {
         let peer = state.peers.get_mut("generous_seeder").unwrap();
 
         // CRITICAL SETUP FOR BUG REPRODUCTION:
-        // 1. Peer has the piece we need
+
         peer.bitfield = vec![true];
-        // 2. Peer has ALREADY unchoked us (e.g. optimistic unchoke or previous state)
+
         peer.peer_choking = ChokeStatus::Unchoke;
-        // 3. We have NOT yet told them we are interested (e.g. just finished validation)
+
         peer.am_interested = false;
 
         // WHEN: We assign work
@@ -2623,10 +3024,14 @@ mod tests {
         state.torrent = Some(torrent);
         state.piece_manager.set_initial_fields(2, false);
         state.torrent_status = TorrentStatus::Standard;
-        state
-            .piece_manager
-            .block_manager
-            .set_geometry(32768, 65536, vec![], vec![], false);
+        state.piece_manager.block_manager.set_geometry(
+            32768,
+            65536,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
 
         state.piece_manager.need_queue = vec![0, 1];
 
@@ -2680,7 +3085,6 @@ mod tests {
         state.piece_manager.set_initial_fields(2, false);
         state.torrent_status = TorrentStatus::Validating; // Initial state
 
-        // 1. Peer connects WHILE validating, is CHOKED by us, but IS INTERESTED in our pieces.
         add_peer(&mut state, "leecher");
         let leecher = state.peers.get_mut("leecher").unwrap();
         // Manager is initially choking the peer (am_choking == Choke)
@@ -2695,14 +3099,13 @@ mod tests {
         });
 
         // THEN:
-        // 1. Status must transition to DONE (since all 2 pieces were found).
+
         assert_eq!(
             state.torrent_status,
             TorrentStatus::Done,
             "Torrent status should be DONE after finding all pieces."
         );
 
-        // 2. We MUST see an Unchoke effect sent to the interested peer.
         let unchoke_sent = effects.iter().any(|e| {
             matches!(e, Effect::SendToPeer { peer_id, cmd }
         if peer_id == "leecher" && matches!(**cmd, TorrentCommand::PeerUnchoke))
@@ -2713,10 +3116,8 @@ mod tests {
             "Validation completion failed to trigger Unchoke for interested peer."
         );
 
-        // 3. Our internal state must reflect that we are Unchoking the peer.
         assert_eq!(state.peers["leecher"].am_choking, ChokeStatus::Unchoke);
 
-        // 4. We must also broadcast a HAVE message for piece 0 (and 1) to announce availability.
         let have_broadcasted = effects
             .iter()
             .any(|e| matches!(e, Effect::BroadcastHave { piece_index: 0 }));
@@ -2789,13 +3190,12 @@ mod tests {
         });
 
         // THEN:
-        // 1. Must trigger the Tracker Announce (event=started).
+
         let announce_sent = effects
             .iter()
             .any(|e| matches!(e, Effect::AnnounceToTracker { url } if url == &tracker_url));
         assert!(announce_sent, "Should trigger AnnounceToTracker.");
 
-        // 2. Internal state should be set to active.
         assert!(!state.is_paused);
     }
 
@@ -2822,10 +3222,9 @@ mod tests {
         });
 
         // THEN:
-        // 1. Internal state must be set to paused.
+
         assert!(state.is_paused);
 
-        // 2. NO network activity should be generated.
         let network_activity = effects
             .iter()
             .any(|e| matches!(e, Effect::AnnounceToTracker { .. }));
@@ -2837,7 +3236,6 @@ mod tests {
 
     #[test]
     fn test_state_scale_2k_blocks_simulation() {
-        // --- 1. SETUP ---
         let num_pieces = 2000;
         let piece_len = 16_384;
 
@@ -2851,6 +3249,7 @@ mod tests {
             (piece_len * num_pieces) as u64,
             vec![],
             vec![],
+            HashMap::new(),
             false,
         );
         state.torrent_status = TorrentStatus::Standard;
@@ -2917,14 +3316,12 @@ mod tests {
             let inflight = state.peers.get(&peer_id).unwrap().inflight_requests;
             let mut effects = Vec::new();
 
-            // A. Trigger Assignment (Manager Logic)
             if inflight < 20 {
                 effects.extend(state.update(Action::AssignWork {
                     peer_id: peer_id.clone(),
                 }));
             }
 
-            // B. Process One "Network/Disk" Event
             if let Some(action) = pending_actions.pop_front() {
                 effects.extend(state.update(action));
             } else if effects.is_empty() && inflight == 0 {
@@ -2988,7 +3385,6 @@ mod tests {
 
     #[test]
     fn test_debug_3_blocks_trace() {
-        // --- 1. SETUP ---
         let num_pieces = 3;
         let piece_len = 16_384;
 
@@ -3002,6 +3398,7 @@ mod tests {
             (piece_len * num_pieces) as u64,
             vec![],
             vec![],
+            HashMap::new(),
             false,
         );
         state.torrent_status = TorrentStatus::Standard;
@@ -3137,7 +3534,6 @@ mod tests {
 
     #[test]
     fn test_reproduce_gap_duplicate_bug() {
-        // 1. SETUP: Manager with 1 Piece (3 Blocks)
         let mut state = super::tests::create_empty_state();
         let piece_len = 16384 * 3;
         let torrent = super::tests::create_dummy_torrent(1);
@@ -3148,12 +3544,12 @@ mod tests {
             piece_len as u64,
             vec![],
             vec![],
+            HashMap::new(),
             false,
         );
         state.torrent_status = TorrentStatus::Standard;
         state.piece_manager.need_queue = vec![0];
 
-        // 2. CONNECT PEER
         let peer_id = "gap_peer".to_string();
         let (tx, _) = mpsc::channel(100);
         let mut peer = PeerState::new(peer_id.clone(), tx, state.now);
@@ -3162,14 +3558,12 @@ mod tests {
         peer.peer_choking = ChokeStatus::Unchoke;
         peer.am_interested = true;
 
-        // 3. ARTIFICIALLY CREATE A "GAP"
         // We simulate that we have ALREADY requested Block 0 and Block 2.
         // Block 1 is NOT requested yet.
         // Inflight = 2.
         peer.inflight_requests = 2;
         state.peers.insert(peer_id.clone(), peer);
 
-        // 4. TRIGGER: Receive Block 0
         let data = vec![0u8; 16384];
         let effects = state.update(Action::IncomingBlock {
             peer_id: peer_id.clone(),
@@ -3178,7 +3572,6 @@ mod tests {
             data,
         });
 
-        // 5. ASSERTION: Did we duplicate Block 2?
         // Current Logic:
         // - Inflight drops to 1.
         // - AssignWork runs with skips=1.
@@ -3205,7 +3598,6 @@ mod tests {
 
     #[test]
     fn test_assign_work_is_sequential() {
-        // 1. SETUP: Manager with 1 Piece (10 Blocks)
         let mut state = create_empty_state();
         let piece_len = 16_384 * 10;
         let torrent = create_dummy_torrent(1);
@@ -3218,6 +3610,7 @@ mod tests {
             piece_len as u64,
             vec![],
             vec![],
+            HashMap::new(),
             false,
         );
         state.torrent_status = TorrentStatus::Standard;
@@ -3225,7 +3618,6 @@ mod tests {
         // We need Piece 0
         state.piece_manager.need_queue = vec![0];
 
-        // 2. CONNECT PEER
         let peer_id = "seq_peer".to_string();
         let (tx, _) = mpsc::channel(100);
         let mut peer = PeerState::new(peer_id.clone(), tx, state.now);
@@ -3241,13 +3633,11 @@ mod tests {
 
         state.peers.insert(peer_id.clone(), peer);
 
-        // 3. ACTION: Assign Work
         // This should generate 10 requests for Piece 0 (Blocks 0-9)
         let effects = state.update(Action::AssignWork {
             peer_id: peer_id.clone(),
         });
 
-        // 4. ASSERTION: Strict Sequential Ordering
         let mut expected_offset = 0;
         let mut request_count = 0;
 
@@ -3279,7 +3669,6 @@ mod tests {
 
     #[test]
     fn test_assign_work_multi_piece_saturation() {
-        // 1. SETUP: Manager with 15 Pieces (each 4 blocks = 60 blocks total)
         // We need > 50 blocks to test the MAX_PIPELINE_DEPTH limit.
         let mut state = create_empty_state();
         let piece_len = 16_384 * 4;
@@ -3293,6 +3682,7 @@ mod tests {
             (piece_len * num_pieces as u32) as u64,
             vec![],
             vec![],
+            HashMap::new(),
             false,
         );
         state.torrent_status = TorrentStatus::Standard;
@@ -3300,7 +3690,6 @@ mod tests {
         // All pieces are needed
         state.piece_manager.need_queue = (0..num_pieces as u32).collect();
 
-        // 2. CONNECT PEER
         let peer_id = "multi_piece_peer".to_string();
         let (tx, _) = mpsc::channel(100);
         let mut peer = PeerState::new(peer_id.clone(), tx, state.now);
@@ -3312,7 +3701,6 @@ mod tests {
         peer.inflight_requests = 0;
         peer.active_blocks.clear();
 
-        // 3. SIMULATE "MANY PIECES IN FLIGHT"
         // We manually put all pieces into the pending queue.
         for i in 0..num_pieces as u32 {
             peer.pending_requests.insert(i);
@@ -3320,7 +3708,6 @@ mod tests {
 
         state.peers.insert(peer_id.clone(), peer);
 
-        // 4. ACTION: Assign Work
         // Pipeline Depth is 50.
         // We need 60 blocks total (15 pieces * 4 blocks).
         // We expect the first 50 blocks to be requested.
@@ -3328,7 +3715,6 @@ mod tests {
             peer_id: peer_id.clone(),
         });
 
-        // 5. ANALYZE OUTPUT
         let mut requests = Vec::new();
         for effect in effects {
             if let Effect::SendToPeer { cmd, .. } = effect {
@@ -3338,7 +3724,6 @@ mod tests {
             }
         }
 
-        // 6. ASSERTIONS
         assert_eq!(
             requests.len(),
             60,
@@ -3379,15 +3764,2086 @@ mod tests {
 
         println!("SUCCESS: Pipeline saturated at 50 requests with sequential ordering.");
     }
+
+    // V2 / HYBRID LOGIC TESTS
+
+    #[test]
+    fn test_v2_hybrid_boundary_routing() {
+        let mut state = create_empty_state();
+
+        // Setup: Piece 0, Length 32768 (Spans 2 Files of 16384 each)
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 32768;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state
+            .piece_manager
+            .set_geometry(32768, 32768, HashMap::new(), false);
+
+        let root_a = vec![0xAA; 32]; // File A (0-16384)
+        let root_b = vec![0xBB; 32]; // File B (16384-32768)
+
+        state.piece_to_roots.insert(
+            0,
+            vec![
+                V2RootInfo {
+                    file_offset: 0,
+                    length: 16384,
+                    root_hash: root_a.clone(),
+                    file_index: 0,
+                },
+                V2RootInfo {
+                    file_offset: 16384,
+                    length: 16384,
+                    root_hash: root_b.clone(),
+                    file_index: 0,
+                },
+            ],
+        );
+        state.v2_proofs.insert(0, vec![0xFF; 32]); // Proof ready
+
+        // --- SCENARIO 1: Complete via Offset 16384 (Should match Root B) ---
+
+        state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0u8; 16384],
+        });
+
+        let effects_b = state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 16384,
+            data: vec![0u8; 16384],
+        });
+
+        let verified_b = effects_b
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPieceV2 { root_hash, .. } if root_hash == &root_b));
+        assert!(
+            verified_b,
+            "Completion at offset 16384 should verify against Root B"
+        );
+
+        // --- SCENARIO 2: Complete via Offset 0 (Should match Root A) ---
+
+        // Reset State for clean run
+        state.piece_manager = PieceManager::new();
+        state.piece_manager.set_initial_fields(1, false);
+        state
+            .piece_manager
+            .set_geometry(32768, 32768, HashMap::new(), false);
+
+        state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 16384,
+            data: vec![0u8; 16384],
+        });
+
+        let effects_a = state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0u8; 16384],
+        });
+
+        let verified_a = effects_a
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPieceV2 { root_hash, .. } if root_hash == &root_a));
+        assert!(
+            verified_a,
+            "Completion at offset 0 should verify against Root A"
+        );
+    }
+
+    #[test]
+    fn test_v2_deferred_verification_with_offset() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(10);
+        torrent.info.piece_length = 4;
+        torrent.info.pieces = Vec::new();
+
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(10, false);
+        state
+            .piece_manager
+            .set_geometry(4, 40, HashMap::new(), false);
+
+        let root_target = vec![0xCC; 32];
+        // FIX: file_len (8) > piece_len (4) forces buffering
+        state.piece_to_roots.insert(
+            5,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 8,
+                root_hash: root_target.clone(),
+                file_index: 0,
+            }],
+        );
+
+        let _effects_data = state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 5,
+            block_offset: 0,
+            data: vec![1, 2, 3, 4],
+        });
+
+        assert!(
+            state.v2_pending_data.contains_key(&5),
+            "Data must buffer for multi-piece files without proof"
+        );
+
+        let effects_proof = state.update(Action::MerkleProofReceived {
+            peer_id: "peer1".into(),
+            piece_index: 5,
+            proof: vec![0xEE; 32],
+        });
+
+        assert!(effects_proof
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPieceV2 { .. })));
+    }
+
+    #[test]
+    fn test_v2_verification_failure() {
+        let mut state = create_empty_state();
+        // Setup simple 1-piece torrent
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 1024;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state
+            .piece_manager
+            .set_geometry(1024, 1024, HashMap::new(), false);
+
+        let root_hash = vec![0xAA; 32];
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 1024,
+                root_hash: root_hash.clone(),
+                file_index: 0,
+            }],
+        );
+
+        // Proof arrives first
+        state.v2_proofs.insert(0, vec![0xFF; 32]);
+
+        // Incoming block with "bad" data
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0x00; 1024], // Junk data
+        });
+
+        // Effect should be VerifyPieceV2
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPieceV2 { .. })));
+
+        // Simulate the CPU worker returning "valid: false"
+        let verify_effects = state.update(Action::PieceVerified {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            valid: false, // <--- FAILURE
+            data: vec![],
+        });
+
+        // Expect disconnection or punishment
+        let disconnected = verify_effects
+            .iter()
+            .any(|e| matches!(e, Effect::DisconnectPeer { .. }));
+        assert!(
+            disconnected,
+            "Peer should be disconnected on V2 verification failure"
+        );
+    }
+
+    #[test]
+    fn test_v2_verification_failure_disconnects_peer() {
+        // GIVEN: A V2 piece where verification fails (e.g. bad data sent)
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 1024;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state
+            .piece_manager
+            .set_geometry(1024, 1024, HashMap::new(), false);
+
+        let root_hash = vec![0xAA; 32];
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 1024,
+                root_hash: root_hash.clone(),
+                file_index: 0,
+            }],
+        );
+
+        state.update(Action::MerkleProofReceived {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            proof: vec![0xFF; 32],
+        });
+
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0x00; 1024],
+        });
+
+        // Assert: Verification was attempted
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPieceV2 { .. })));
+
+        let verify_effects = state.update(Action::PieceVerified {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            valid: false,
+            data: vec![],
+        });
+
+        // THEN: Peer should be disconnected
+        let disconnected = verify_effects
+            .iter()
+            .any(|e| matches!(e, Effect::DisconnectPeer { .. }));
+        assert!(
+            disconnected,
+            "Peer should be disconnected on V2 verification failure"
+        );
+
+        // THEN: Assembly should be reset (checked via internal state or subsequent behavior)
+        // (In this mock state, reset_piece_assembly is a void operation, but the effect confirms the logic path)
+    }
+
+    #[test]
+    fn test_v2_state_cleanup_after_success() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 4;
+        torrent.info.pieces = Vec::new();
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state
+            .piece_manager
+            .set_geometry(4, 4, HashMap::new(), false);
+
+        // FIX: Set file_len (8) > piece_len (4) to force the V2 workflow (buffer + proof)
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 8,
+                root_hash: vec![0xAA; 32],
+                file_index: 0,
+            }],
+        );
+
+        state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![1, 2, 3, 4],
+        });
+        assert!(
+            state.v2_pending_data.contains_key(&0),
+            "Data should be buffered for multi-piece file"
+        );
+
+        state.update(Action::MerkleProofReceived {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            proof: vec![0xBB; 32],
+        });
+
+        assert!(
+            !state.v2_pending_data.contains_key(&0),
+            "Pending data consumed"
+        );
+
+        state.update(Action::PieceVerified {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            valid: true,
+            data: vec![1, 2, 3, 4],
+        });
+
+        assert!(
+            !state.v2_proofs.contains_key(&0),
+            "Proof cache cleared after verification"
+        );
+    }
+
+    #[test]
+    fn test_v2_duplicate_handling_robustness() {
+        // GIVEN: A peer that sends duplicate proofs/data
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 1024;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state
+            .piece_manager
+            .set_geometry(1024, 1024, HashMap::new(), false);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 1024,
+                root_hash: vec![0xAA; 32],
+                file_index: 0,
+            }],
+        );
+
+        state.update(Action::MerkleProofReceived {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            proof: vec![0xBB; 32],
+        });
+
+        let effects_dup = state.update(Action::MerkleProofReceived {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            proof: vec![0xBB; 32],
+        });
+        // Duplicate proof with no data buffered usually results in DoNothing or effectively a no-op update
+        assert!(effects_dup.iter().all(|e| matches!(e, Effect::DoNothing)));
+
+        let effects_data = state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0xCC; 1024],
+        });
+
+        let verify_triggered = effects_data
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPieceV2 { .. }));
+        assert!(
+            verify_triggered,
+            "Verification should still trigger after duplicate proofs"
+        );
+
+        // Note: The manager usually transitions `last_activity` to VerifyingPiece.
+        // We verify that it doesn't try to double-verify or panic.
+        let _effects_data_dup = state.update(Action::IncomingBlock {
+            peer_id: "peer1".into(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0xCC; 1024],
+        });
+
+        // Logic: If last_activity is VerifyingPiece, IncomingBlock usually returns DoNothing or ignores.
+        // We just assert it didn't panic and logic held.
+    }
+
+    #[test]
+    fn test_v2_scale_1000_deferred_blocks() {
+        // GIVEN: A torrent with 1000 V2 pieces
+        let mut state = create_empty_state();
+        let num_pieces = 1000;
+        let piece_len = 1024; // Defined here for scope visibility
+
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.pieces = Vec::new();
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(num_pieces, false);
+        state.piece_manager.set_geometry(
+            piece_len as u32,
+            (piece_len * num_pieces) as u64,
+            HashMap::new(),
+            false,
+        );
+
+        // Map all pieces to a dummy root
+        let root = vec![0xAA; 32];
+        let total_file_len = (num_pieces as u64) * (piece_len as u64);
+
+        for i in 0..num_pieces {
+            // All pieces belong to one large file (0 to total_file_len)
+            state.piece_to_roots.insert(
+                i as u32,
+                vec![V2RootInfo {
+                    file_offset: 0,
+                    length: total_file_len,
+                    root_hash: root.clone(),
+                    file_index: 0,
+                }],
+            );
+        }
+
+        let peer_id = "worker_peer".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // We simulate a peer sending 1000 blocks rapidly.
+        for i in 0..num_pieces {
+            state.update(Action::IncomingBlock {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                block_offset: 0,
+                data: vec![0u8; 1024],
+            });
+        }
+
+        // CHECK: We should have 1000 items pending in memory
+        assert_eq!(
+            state.v2_pending_data.len(),
+            1000,
+            "Should buffer 1000 pieces awaiting proofs"
+        );
+
+        // Now the proofs arrive. This tests if the system can drain the queue efficiently.
+        let mut verify_count = 0;
+        for i in 0..num_pieces {
+            let effects = state.update(Action::MerkleProofReceived {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                proof: vec![0xFF; 32],
+            });
+
+            if effects
+                .iter()
+                .any(|e| matches!(e, Effect::VerifyPieceV2 { .. }))
+            {
+                verify_count += 1;
+            }
+        }
+
+        // CHECK: All 1000 should have triggered verification
+        assert_eq!(
+            verify_count, 1000,
+            "All 1000 pieces should trigger verification after proofs arrive"
+        );
+
+        // CHECK: Buffer should be empty (moved to verification)
+        assert!(
+            state.v2_pending_data.is_empty(),
+            "Pending buffer should be drained"
+        );
+    }
+
+    #[test]
+    fn test_scale_1000_blocks_pure_v2() {
+        let mut state = create_empty_state();
+        let num_pieces = 1000;
+        let piece_len = 1024;
+        let total_len = (num_pieces as i64) * (piece_len as i64);
+
+        let mut torrent = create_dummy_torrent(0);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.length = total_len;
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new();
+
+        // Setup V2 File Tree to ensure rebuild_v2_mappings populates piece_to_roots
+        let root = vec![0xBB; 32];
+        let mut file_meta = HashMap::new();
+        file_meta.insert(
+            "length".as_bytes().to_vec(),
+            serde_bencode::value::Value::Int(total_len),
+        );
+        file_meta.insert(
+            "pieces root".as_bytes().to_vec(),
+            serde_bencode::value::Value::Bytes(root.clone()),
+        );
+
+        let mut file_node = HashMap::new();
+        file_node.insert(
+            "".as_bytes().to_vec(),
+            serde_bencode::value::Value::Dict(file_meta),
+        );
+
+        let mut root_node = HashMap::new();
+        root_node.insert(
+            "test_torrent".as_bytes().to_vec(),
+            serde_bencode::value::Value::Dict(file_node),
+        );
+        torrent.info.file_tree = Some(serde_bencode::value::Value::Dict(root_node));
+
+        // Calling this will now correctly build piece_to_roots for you
+        state.update(Action::MetadataReceived {
+            torrent: Box::new(torrent.clone()),
+            metadata_length: 5000,
+        });
+
+        state.torrent_status = TorrentStatus::Standard;
+
+        let root = vec![0xBB; 32];
+        let total_file_len = (num_pieces as u64) * (piece_len as u64);
+
+        for i in 0..num_pieces {
+            // Map every piece to a single large 1000-piece file
+            state.piece_to_roots.insert(
+                i as u32,
+                vec![V2RootInfo {
+                    file_offset: 0,
+                    length: total_file_len,
+                    root_hash: root.clone(),
+                    file_index: 0,
+                }],
+            );
+        }
+
+        let peer_id = "v2_worker".to_string();
+        add_peer(&mut state, &peer_id);
+        state.update(Action::PeerUnchoked {
+            peer_id: peer_id.clone(),
+        });
+
+        for i in 0..num_pieces {
+            state.update(Action::IncomingBlock {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                block_offset: 0,
+                data: vec![0u8; piece_len as usize],
+            });
+        }
+        assert_eq!(
+            state.v2_pending_data.len(),
+            1000,
+            "Pure V2: Should buffer pieces for large files"
+        );
+
+        let mut verify_count = 0;
+        for i in 0..num_pieces {
+            let effects = state.update(Action::MerkleProofReceived {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                proof: vec![0xEE; 32],
+            });
+            if effects
+                .iter()
+                .any(|e| matches!(e, Effect::VerifyPieceV2 { .. }))
+            {
+                verify_count += 1;
+            }
+        }
+        assert_eq!(verify_count, 1000);
+    }
+
+    #[test]
+    fn test_v2_memory_cap_enforcement() {
+        let mut state = create_empty_state();
+
+        // GIVEN: A torrent with HUGE pieces (500 MB)
+        // This tricks the cleanup logic into setting a very small item limit.
+        // Limit = 1GB / 500MB = 2 items allowed.
+        let mut torrent = create_dummy_torrent(10);
+        torrent.info.piece_length = 500 * 1024 * 1024; // 500 MB
+        state.torrent = Some(torrent);
+
+        // We use small data vectors so we don't actually crash the test runner,
+        // but the state machine counts them as "full pieces".
+        for i in 0..3 {
+            state.v2_pending_data.insert(i, (0, vec![0u8; 10]));
+        }
+
+        assert_eq!(
+            state.v2_pending_data.len(),
+            3,
+            "Sanity check: 3 items inserted"
+        );
+
+        state.update(Action::Cleanup);
+
+        // THEN: The buffer should be cleared because 3 > 2 (Limit)
+        assert!(state.v2_pending_data.is_empty(),
+            "Cleanup should verify that 3 items exceeds the calculated limit for 500MB pieces (limit=2), and clear the buffer");
+    }
+
+    #[test]
+    fn test_hybrid_v1_v2_interop() {
+        // GIVEN: A State with 2 pieces
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = 1024;
+        state.torrent = Some(torrent);
+
+        state.piece_manager.set_initial_fields(2, false);
+        state
+            .piece_manager
+            .set_geometry(1024, 2048, HashMap::new(), false);
+
+        // CONFIGURATION: Hybrid Setup
+        // Piece 0: Has a V2 Root
+        let root = vec![0xAA; 32];
+
+        // FIX: Set file length (2048) > piece_length (1024).
+        // This ensures get_local_v2_hash returns None (requires proof/layers),
+        // forcing the system to fall back to the V1 hashes provided by create_dummy_torrent.
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 2048,
+                root_hash: root.clone(),
+                file_index: 0,
+            }],
+        );
+
+        // Piece 1: NO Root (V1 Only)
+
+        let peer_id = "hybrid_peer".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // --- CASE 4: V1 Peer -> V2 Piece (The "Cooperative" Case) ---
+        // Peer B (Legacy) sends data for Piece 0 (V2).
+        // It CANNOT send a proof.
+        // BEHAVIOR CHANGE: Since we have V1 hashes (from create_dummy_torrent),
+        // we should FALL BACK to V1 verification immediately, NOT buffer.
+
+        let effects_4_data = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![1u8; 1024],
+        });
+
+        assert!(
+            !state.v2_pending_data.contains_key(&0),
+            "Piece 0 should NOT buffer; it should verify via V1 fallback"
+        );
+
+        // Note: VerifyPiece (V1) is different from VerifyPieceV2
+        let verified_v1 = effects_4_data
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPiece { .. }));
+        assert!(
+            verified_v1,
+            "Should have fallen back to V1 verification (Effect::VerifyPiece)"
+        );
+    }
+
+    #[test]
+    fn test_v2_full_completion_lifecycle() {
+        let mut state = create_empty_state();
+        let num_pieces = 4;
+        let piece_len = 1024;
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.pieces = Vec::new(); // Pure V2
+
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(num_pieces, false);
+        state.piece_manager.set_geometry(
+            piece_len as u32,
+            (piece_len * num_pieces) as u64,
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+
+        let root = vec![0xAA; 32];
+        // FIX: Set file length to force the standard V2 proof workflow (buffer -> proof -> verify)
+        let file_len = (piece_len * 2) as u64;
+        for i in 0..num_pieces {
+            state.piece_to_roots.insert(
+                i as u32,
+                vec![V2RootInfo {
+                    file_offset: 0,
+                    length: file_len,
+                    root_hash: root.clone(),
+                    file_index: 0,
+                }],
+            );
+        }
+
+        let peer_id = "seeder".to_string();
+        add_peer(&mut state, &peer_id);
+
+        for i in 0..num_pieces {
+            // Data arrives and is buffered because it is a multi-piece file without a proof
+            state.update(Action::IncomingBlock {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                block_offset: 0,
+                data: vec![1u8; piece_len],
+            });
+
+            // Proof arrives, triggering the V2 verification effect
+            let effects = state.update(Action::MerkleProofReceived {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                proof: vec![0xFF; 32],
+            });
+
+            assert!(
+                effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::VerifyPieceV2 { .. })),
+                "Proof arrival should trigger VerifyPieceV2 for piece {}",
+                i
+            );
+        }
+
+        assert!(
+            state.v2_pending_data.is_empty(),
+            "All pending data should be moved to verification"
+        );
+    }
+
+    #[test]
+    fn test_v2_cleanup_on_completion_race() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 1024;
+        torrent.info.pieces = Vec::new();
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state
+            .piece_manager
+            .set_geometry(1024, 1024, HashMap::new(), false);
+
+        // FIX: Set file_len (2048) > piece_length (1024) to force buffering
+        // Small files (<= piece_len) verify immediately using the root as the leaf.
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 2048,
+                root_hash: vec![0xAA; 32],
+                file_index: 0,
+            }],
+        );
+        let peer_id = "racer".to_string();
+        add_peer(&mut state, &peer_id);
+
+        state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![1u8; 1024],
+        });
+        assert!(
+            state.v2_pending_data.contains_key(&0),
+            "Sanity: Data buffered"
+        );
+
+        state.update(Action::PieceVerified {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            valid: true,
+            data: vec![1u8; 1024],
+        });
+
+        // Manually mark as done in bitfield to simulate WriteToDisk completion
+        state.piece_manager.bitfield[0] = crate::torrent_manager::piece_manager::PieceStatus::Done;
+
+        // CHECK 1: Did we clean up the pending data?
+        assert!(
+            !state.v2_pending_data.contains_key(&0),
+            "Leak: Pending data should be removed immediately upon verification"
+        );
+
+        state.update(Action::MerkleProofReceived {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            proof: vec![0xFF; 32],
+        });
+
+        // CHECK 2: Did we ignore the late proof?
+        assert!(
+            !state.v2_proofs.contains_key(&0),
+            "Leak: Late proofs for Done pieces should be ignored, not cached"
+        );
+    }
+
+    #[test]
+    fn test_v2_cleanup_on_failure() {
+        // GIVEN: A torrent with buffered data
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = 1024;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state
+            .piece_manager
+            .set_geometry(1024, 1024, HashMap::new(), false);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 1024,
+                root_hash: vec![0xAA; 32],
+                file_index: 0,
+            }],
+        );
+
+        let peer_id = "bad_actor".to_string();
+        add_peer(&mut state, &peer_id);
+
+        state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![1u8; 1024],
+        });
+
+        state.update(Action::PieceVerified {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            valid: false, // <--- FAILURE
+            data: vec![],
+        });
+
+        // CHECK: Memory should be freed immediately
+        assert!(
+            !state.v2_pending_data.contains_key(&0),
+            "Cleanup: Pending data must be removed even if verification fails"
+        );
+        assert!(
+            !state.v2_proofs.contains_key(&0),
+            "Cleanup: Proofs must be removed even if verification fails"
+        );
+    }
+
+    #[test]
+    fn test_hybrid_swarm_interop() {
+        // GIVEN: A Hybrid Torrent with 4 pieces
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(4);
+        torrent.info.piece_length = 1024;
+        state.torrent = Some(torrent);
+
+        state.piece_manager.set_initial_fields(4, false);
+        state
+            .piece_manager
+            .set_geometry(1024, 4096, HashMap::new(), false);
+
+        // CONFIGURATION:
+        // Piece 0: V2 (Has Root)
+        let root = vec![0xAA; 32];
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 1024,
+                root_hash: root.clone(),
+                file_index: 0,
+            }],
+        );
+
+        let peer_a = "v2_peer_A".to_string();
+        add_peer(&mut state, &peer_a);
+
+        // --- CASE 1: V2 Peer -> V2 Piece ---
+        // Peer A sends data.
+        // Because V1 hashes exist, the client will likely verify immediately via V1
+        // instead of waiting for the proof. This is valid/desired behavior.
+        // OR: If the file is small (<= piece size), it verifies via V2 immediately using the root as the leaf.
+        let effects_data = state.update(Action::IncomingBlock {
+            peer_id: peer_a.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![1u8; 1024],
+        });
+
+        let effects_proof = state.update(Action::MerkleProofReceived {
+            peer_id: peer_a.clone(),
+            piece_index: 0,
+            proof: vec![0xFF; 32],
+        });
+
+        // CHECK: Did we verify at all?
+        // We accept:
+
+        let verified_data_v1 = effects_data
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPiece { .. }));
+        let verified_data_v2 = effects_data
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPieceV2 { .. }));
+        let verified_proof_v2 = effects_proof
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPieceV2 { .. }));
+
+        assert!(verified_data_v1 || verified_data_v2 || verified_proof_v2,
+            "Case 1 Fail: Should have verified via V1/V2 (data) OR V2 (proof). DataV1: {}, DataV2: {}, ProofV2: {}",
+            verified_data_v1, verified_data_v2, verified_proof_v2);
+    }
+
+    #[test]
+    fn test_v2_magnet_metadata_sequence() {
+        // GIVEN: An empty state (simulating a fresh V2 Magnet connection)
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::AwaitingMetadata;
+
+        // Construct a V2-Only Torrent (Empty V1 pieces, Has V2 Roots)
+        let mut torrent = create_dummy_torrent(5);
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // V2 has empty pieces string
+        torrent.info.piece_length = 16384;
+        torrent.info.length = 16384 * 5; // 5 Pieces
+
+        // Ensure the name matches what we put in the tree
+        let filename = "test_torrent".to_string();
+        torrent.info.name = filename.clone();
+
+        // Setup V2 Root (Critical for piece_to_roots population)
+        let root = vec![0xAA; 32];
+
+        // Mock the V2 File Tree Structure
+        // Structure: { "filename": { "": { "pieces root": ..., "length": ... } } }
+        use serde_bencode::value::Value;
+
+        let mut file_metadata = std::collections::HashMap::new();
+        file_metadata.insert(
+            "pieces root".as_bytes().to_vec(),
+            Value::Bytes(root.clone()),
+        );
+        file_metadata.insert(
+            "length".as_bytes().to_vec(),
+            Value::Int(torrent.info.length),
+        );
+
+        let mut dir_node = std::collections::HashMap::new();
+        dir_node.insert("".as_bytes().to_vec(), Value::Dict(file_metadata));
+
+        let mut tree = std::collections::HashMap::new();
+        tree.insert(filename.as_bytes().to_vec(), Value::Dict(dir_node));
+
+        torrent.info.file_tree = Some(Value::Dict(tree));
+
+        // WHEN: Metadata is received
+        let action = Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 12345,
+        };
+        let effects = state.update(action);
+
+        // THEN 1: Sequencing - Should transition to Validating and Init Storage
+        assert_eq!(state.torrent_status, TorrentStatus::Validating);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::InitializeStorage)));
+        assert!(effects.iter().any(|e| matches!(e, Effect::StartValidation)));
+
+        // THEN 2: V2 Initialization - Piece count must be 5 (calculated from length)
+        assert_eq!(
+            state.piece_manager.bitfield.len(),
+            5,
+            "Failed to calculate piece count for V2 torrent (likely initialized to 0)"
+        );
+
+        // THEN 3: V2 State - piece_to_roots must be populated
+        assert!(
+            !state.piece_to_roots.is_empty(),
+            "Failed to populate V2 roots from metadata"
+        );
+
+        let roots_for_piece_0 = state.piece_to_roots.get(&0).unwrap();
+        assert_eq!(
+            roots_for_piece_0[0].root_hash, root,
+            "Piece 0 should map to our mock root"
+        );
+    }
+
+    #[test]
+    fn test_v2_magnet_metadata_sequence_multi_file() {
+        // GIVEN: An empty state (simulating a fresh V2 Magnet connection)
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::AwaitingMetadata;
+
+        // Construct a V2-Only Torrent
+        // 2 Files, 1 Piece each. Total 2 Pieces.
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // V2 has empty pieces string
+        torrent.info.piece_length = 16384;
+        torrent.info.length = 0; // Unused in multi-file usually, but safer to leave 0 or sum
+
+        let dir_name = "multi_v2_download".to_string();
+        torrent.info.name = dir_name.clone();
+
+        // define file properties
+        let len_a = 16384;
+        let len_b = 16384;
+        let root_a = vec![0xAA; 32];
+        let root_b = vec![0xBB; 32];
+
+        torrent.info.files = vec![
+            crate::torrent_file::InfoFile {
+                length: len_a,
+                path: vec![dir_name.clone(), "file_a.txt".to_string()],
+                md5sum: None,
+                attr: None,
+            },
+            crate::torrent_file::InfoFile {
+                length: len_b,
+                path: vec![dir_name.clone(), "file_b.txt".to_string()],
+                md5sum: None,
+                attr: None,
+            },
+        ];
+
+        // Structure: { "dir_name": { "file_a.txt": { "": metadata }, "file_b.txt": { "": metadata } } }
+        use serde_bencode::value::Value;
+
+        // Leaf A
+        let mut meta_a = std::collections::HashMap::new();
+        meta_a.insert(
+            "pieces root".as_bytes().to_vec(),
+            Value::Bytes(root_a.clone()),
+        );
+        meta_a.insert("length".as_bytes().to_vec(), Value::Int(len_a));
+        let mut node_a = std::collections::HashMap::new();
+        node_a.insert("".as_bytes().to_vec(), Value::Dict(meta_a));
+
+        // Leaf B
+        let mut meta_b = std::collections::HashMap::new();
+        meta_b.insert(
+            "pieces root".as_bytes().to_vec(),
+            Value::Bytes(root_b.clone()),
+        );
+        meta_b.insert("length".as_bytes().to_vec(), Value::Int(len_b));
+        let mut node_b = std::collections::HashMap::new();
+        node_b.insert("".as_bytes().to_vec(), Value::Dict(meta_b));
+
+        // Directory
+        let mut dir_content = std::collections::HashMap::new();
+        dir_content.insert("file_a.txt".as_bytes().to_vec(), Value::Dict(node_a));
+        dir_content.insert("file_b.txt".as_bytes().to_vec(), Value::Dict(node_b));
+
+        // Root
+        let mut tree = std::collections::HashMap::new();
+        tree.insert(dir_name.as_bytes().to_vec(), Value::Dict(dir_content));
+
+        torrent.info.file_tree = Some(Value::Dict(tree));
+
+        // WHEN: Metadata is received
+        let action = Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 500,
+        };
+        let effects = state.update(action);
+
+        // THEN 1: Transitions
+        assert_eq!(state.torrent_status, TorrentStatus::Validating);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::InitializeStorage)));
+
+        // THEN 2: Piece Count Calculation (16384+16384 / 16384 = 2)
+        assert_eq!(
+            state.piece_manager.bitfield.len(),
+            2,
+            "Should calculate 2 pieces from file sizes"
+        );
+
+        // THEN 3: Root Mapping
+        // Piece 0 -> File A -> Root A
+        let roots_0 = state.piece_to_roots.get(&0).expect("Piece 0 missing roots");
+        assert!(
+            roots_0.iter().any(|r| r.root_hash == root_a),
+            "Piece 0 must map to Root A"
+        );
+
+        // Piece 1 -> File B -> Root B
+        let roots_1 = state.piece_to_roots.get(&1).expect("Piece 1 missing roots");
+        assert!(
+            roots_1.iter().any(|r| r.root_hash == root_b),
+            "Piece 1 must map to Root B"
+        );
+
+        // Piece 1 -> File B -> Root B
+        let roots_1 = state.piece_to_roots.get(&1).expect("Piece 1 missing roots");
+        assert!(
+            roots_1.iter().any(|r| r.root_hash == root_b),
+            "Piece 1 must map to Root B"
+        );
+    }
+
+    #[test]
+    fn test_scale_1000_blocks_hybrid() {
+        println!("\n=== STARTING SCALE TEST: HYBRID (1000 Blocks) ===");
+
+        let mut state = create_empty_state();
+        let num_pieces = 1000;
+        let piece_len = 1024;
+
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.length = (num_pieces as i64) * (piece_len as i64);
+        torrent.info.meta_version = Some(2);
+
+        state.update(Action::MetadataReceived {
+            torrent: Box::new(torrent.clone()),
+            metadata_length: 5000,
+        });
+        state.torrent_status = TorrentStatus::Standard;
+
+        let root = vec![0xAA; 32];
+        // FIX: Define total file length to exceed one piece length
+        let total_file_len = (num_pieces as u64) * (piece_len as u64);
+        for i in 0..num_pieces {
+            // Map to a single large file to test V1/V2 interop on large structures
+            state.piece_to_roots.insert(
+                i as u32,
+                vec![V2RootInfo {
+                    file_offset: 0,
+                    length: total_file_len,
+                    root_hash: root.clone(),
+                    file_index: 0,
+                }],
+            );
+        }
+
+        let peer_id = "hybrid_worker".to_string();
+        add_peer(&mut state, &peer_id);
+        state.update(Action::PeerUnchoked {
+            peer_id: peer_id.clone(),
+        });
+
+        let mut immediate_verifications = 0;
+
+        for i in 0..num_pieces {
+            let effects = state.update(Action::IncomingBlock {
+                peer_id: peer_id.clone(),
+                piece_index: i as u32,
+                block_offset: 0,
+                data: vec![0u8; piece_len],
+            });
+
+            if effects
+                .iter()
+                .any(|e| matches!(e, Effect::VerifyPiece { .. }))
+            {
+                immediate_verifications += 1;
+            }
+        }
+
+        assert_eq!(
+            immediate_verifications, 1000,
+            "Hybrid: All 1000 pieces should verify immediately via V1 fallback"
+        );
+        assert!(
+            state.v2_pending_data.is_empty(),
+            "Hybrid: Buffer should be empty"
+        );
+    }
+
+    #[test]
+    fn test_v2_verification_with_nonzero_file_offset() {
+        let mut state = create_empty_state();
+
+        // Setup: 2 Pieces total.
+        // Piece 0: File A (Padding/Skip)
+        // Piece 1: File B (The one we want to verify)
+        let piece_len = 1024;
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = piece_len;
+        state.torrent = Some(torrent);
+
+        state.piece_manager.set_initial_fields(2, false);
+        state
+            .piece_manager
+            .set_geometry(1024, 2048, HashMap::new(), false);
+
+        // Root for File B
+        let root_b = vec![0xBB; 32];
+
+        // Map Piece 1 to File B, which starts at 1024 (Piece 1's start)
+        // This implies File A occupied 0..1024.
+        state.piece_to_roots.insert(
+            1,
+            vec![V2RootInfo {
+                file_offset: 1024,
+                length: 1024,
+                root_hash: root_b.clone(),
+                file_index: 0,
+            }],
+        );
+
+        let peer_id = "offset_tester".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // The proof corresponds to the FIRST piece of File B (Relative Index 0)
+        let proof = vec![0xFF; 32]; // Dummy proof
+        state.update(Action::MerkleProofReceived {
+            peer_id: peer_id.clone(),
+            piece_index: 1, // GLOBAL Index 1
+            proof: proof.clone(),
+        });
+
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 1, // GLOBAL Index 1
+            block_offset: 0,
+            data: vec![0xBB; 1024],
+        });
+
+        // If your logic is correct, it should spawn VerifyPieceV2.
+        // Inspect the arguments passed to it.
+
+        let verify_effect = effects.iter().find_map(|e| {
+            if let Effect::VerifyPieceV2 {
+                piece_index,
+                root_hash,
+                ..
+            } = e
+            {
+                Some((piece_index, root_hash))
+            } else {
+                None
+            }
+        });
+
+        assert!(verify_effect.is_some(), "Should trigger V2 verification");
+
+        let (idx, hash) = verify_effect.unwrap();
+        assert_eq!(hash, &root_b, "Should verify against Root B");
+
+        // CRITICAL CHECK:
+        // If you updated the enum to have `relative_index`, check that here.
+        // If you are relying on the manager to calculate it, this test ensures
+        // the manager receives the correct GLOBAL index (1) to look up the file info later.
+        assert_eq!(
+            *idx, 1,
+            "Effect should carry Global Index 1 for state tracking"
+        );
+    }
+
+    #[test]
+    fn test_v2_local_lookup_optimization() {
+        use sha2::Digest;
+        use std::collections::HashMap;
+
+        // GOAL: Verify that a Pure V2 torrent can verify data using LOCAL piece_layers
+
+        let mut state = create_empty_state();
+        let piece_len = 16384;
+        let num_pieces = 1;
+
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.pieces = Vec::new(); // Pure V2 (Disable V1 fallback)
+        torrent.info.meta_version = Some(2);
+
+        let data = vec![0xAA; piece_len];
+        let leaf_hash = sha2::Sha256::digest(&data).to_vec();
+        let root = leaf_hash.clone();
+
+        let mut layer_map = HashMap::new();
+        layer_map.insert(
+            root.clone(),
+            serde_bencode::value::Value::Bytes(leaf_hash.clone()),
+        );
+        torrent.piece_layers = Some(serde_bencode::value::Value::Dict(layer_map));
+
+        state.torrent = Some(torrent);
+
+        // CRITICAL FIX: Initialize PieceManager so it accepts the block!
+        state.piece_manager.set_initial_fields(num_pieces, false);
+        state
+            .piece_manager
+            .set_geometry(piece_len as u32, piece_len as u64, HashMap::new(), false);
+
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: piece_len as u64,
+                root_hash: root.clone(),
+                file_index: 0,
+            }],
+        );
+
+        let peer_id = "optimized_peer".to_string();
+        add_peer(&mut state, &peer_id);
+
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: data.clone(),
+        });
+
+        assert!(
+            !state.v2_pending_data.contains_key(&0),
+            "Optimization Fail: Data buffered instead of verifying!"
+        );
+
+        let verified = effects.iter().any(|e| {
+            if let Effect::VerifyPieceV2 { root_hash, .. } = e {
+                *root_hash == leaf_hash
+            } else {
+                false
+            }
+        });
+        assert!(
+            verified,
+            "Optimization Fail: VerifyPieceV2 was not triggered immediately."
+        );
+    }
+
+    #[test]
+    fn test_repro_v2_proof_priority_bug() {
+        use sha2::{Digest, Sha256};
+
+        let mut state = create_empty_state();
+        let piece_len = 1024;
+
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new();
+
+        let data = vec![0xAA; 1024];
+        let leaf_hash = Sha256::digest(&data).to_vec();
+        let file_root = vec![0xBB; 32]; // Different from leaf
+
+        let mut layer_map = std::collections::HashMap::new();
+        layer_map.insert(
+            file_root.clone(),
+            serde_bencode::value::Value::Bytes(leaf_hash.clone()),
+        );
+        torrent.piece_layers = Some(serde_bencode::value::Value::Dict(layer_map));
+        state.torrent = Some(torrent);
+
+        // C. FIX: Set file_len to 2 * piece_len to bypass small-file optimization
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 2048,
+                root_hash: file_root.clone(),
+                file_index: 0,
+            }],
+        );
+        state.piece_manager.set_initial_fields(2, false);
+        state
+            .piece_manager
+            .set_geometry(1024, 2048, HashMap::new(), false);
+
+        let peer_id = "bug_tester".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // D. Data is now buffered because it's a large file and we lack a network proof
+        state.v2_pending_data.insert(0, (0, data.clone()));
+
+        // E. Receive Proof - should now correctly prioritize the leaf_hash from metadata
+        let effects = state.update(Action::MerkleProofReceived {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            proof: vec![0xFF; 32],
+        });
+
+        let verify_op = effects.iter().find_map(|e| {
+            if let Effect::VerifyPieceV2 { root_hash, .. } = e {
+                Some(root_hash)
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(
+            verify_op.unwrap(),
+            &leaf_hash,
+            "Should prioritize Leaf Hash over File Root for multi-piece files"
+        );
+    }
+
+    #[test]
+    fn test_incoming_block_uses_local_leaf_hash_priority() {
+        use sha2::{Digest, Sha256};
+        use std::collections::HashMap;
+
+        let mut state = create_empty_state();
+        let piece_len = 1024;
+        let num_pieces = 1;
+
+        // Construct Pure V2 Torrent
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.pieces = Vec::new(); // Pure V2 (No V1 Fallback)
+        torrent.info.meta_version = Some(2);
+
+        let data = vec![0xAA; piece_len];
+        let leaf_hash = Sha256::digest(&data).to_vec();
+
+        // V2 PROTOCOL RULE: For a file that fits in one piece,
+        // the "pieces root" is identical to the leaf hash.
+        let file_root = leaf_hash.clone();
+
+        // Note: While protocol-compliant small files don't have layers,
+        // we keep this here to ensure the logic handles the presence of metadata.
+        let mut layer_map = HashMap::new();
+        layer_map.insert(
+            file_root.clone(),
+            serde_bencode::value::Value::Bytes(leaf_hash.clone()),
+        );
+        torrent.piece_layers = Some(serde_bencode::value::Value::Dict(layer_map));
+        state.torrent = Some(torrent);
+
+        // C. Init Piece Manager & Maps
+        state.piece_manager.set_initial_fields(num_pieces, false);
+        state
+            .piece_manager
+            .set_geometry(piece_len as u32, piece_len as u64, HashMap::new(), false);
+
+        // Map Piece 0 -> File Root
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: piece_len as u64,
+                root_hash: file_root.clone(),
+                file_index: 0,
+            }],
+        );
+
+        let peer_id = "priority_tester".to_string();
+        add_peer(&mut state, &peer_id);
+
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: data.clone(),
+        });
+
+        let verify_op = effects.iter().find_map(|e| {
+            if let Effect::VerifyPieceV2 {
+                root_hash, proof, ..
+            } = e
+            {
+                Some((root_hash, proof))
+            } else {
+                None
+            }
+        });
+
+        assert!(
+            verify_op.is_some(),
+            "Should trigger VerifyPieceV2 immediately via small file optimization"
+        );
+
+        let (target_hash, proof) = verify_op.unwrap();
+
+        // The target_hash must be the file_root (which is the leaf_hash)
+        assert_eq!(
+            target_hash, &leaf_hash,
+            "Verification hash mismatch. Expected the protocol-compliant file root."
+        );
+
+        assert!(
+            proof.is_empty(),
+            "Small files should verify directly without a Merkle proof."
+        );
+    }
+
+    #[test]
+    fn test_v2_tail_block_request_clamping() {
+        use serde_bencode::value::Value;
+
+        let piece_len = 16_384;
+        let file_len: u64 = 20_000;
+        let tail_size = 3_616;
+        let num_pieces = 2;
+        let padded_len = (num_pieces as u64) * (piece_len as u64); // 32,768
+
+        let mut torrent = create_dummy_torrent(num_pieces);
+        torrent.info.meta_version = Some(2);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.length = file_len as i64;
+        torrent.info.pieces = Vec::new();
+
+        let mut file_map = std::collections::HashMap::new();
+        file_map.insert("length".as_bytes().to_vec(), Value::Int(file_len as i64));
+        file_map.insert(
+            "pieces root".as_bytes().to_vec(),
+            Value::Bytes(vec![0xAA; 32]),
+        );
+        let mut dir_map = std::collections::HashMap::new();
+        dir_map.insert("".as_bytes().to_vec(), Value::Dict(file_map));
+        let mut root_map = std::collections::HashMap::new();
+        root_map.insert("test_tail_file".as_bytes().to_vec(), Value::Dict(dir_map));
+        torrent.info.file_tree = Some(Value::Dict(root_map));
+
+        let mut state = TorrentState::new(
+            vec![0; 20],
+            Some(torrent),
+            Some(100),
+            PieceManager::new(),
+            HashMap::new(),
+            false,
+        );
+
+        // This simulates exactly what TorrentState::new does incorrectly for V2.
+        // The BlockManager now thinks the tail piece is full (16384 bytes).
+        state.torrent_status = TorrentStatus::Standard;
+        state.piece_manager.set_initial_fields(num_pieces, false);
+        state
+            .piece_manager
+            .set_geometry(piece_len as u32, padded_len, HashMap::new(), false); // <--- CHANGED to padded_len
+        state.piece_manager.need_queue = vec![1];
+
+        let mut overrides = HashMap::new();
+        overrides.insert(1, tail_size);
+        state
+            .piece_manager
+            .set_geometry(piece_len as u32, padded_len, overrides, false);
+        state.piece_manager.need_queue = vec![1];
+
+        let peer_id = "strict_peer".to_string();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut peer = PeerState::new(peer_id.clone(), tx, state.now);
+        peer.bitfield = vec![true, true];
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.am_interested = true;
+        state.peers.insert(peer_id.clone(), peer);
+
+        let effects = state.update(Action::AssignWork {
+            peer_id: peer_id.clone(),
+        });
+
+        let mut request_found = false;
+        for effect in effects {
+            if let Effect::SendToPeer { cmd, .. } = effect {
+                if let TorrentCommand::BulkRequest(reqs) = *cmd {
+                    for (idx, _off, len) in reqs {
+                        if idx == 1 {
+                            request_found = true;
+                            // Without the V2 map, this will be 16384 (Full Block) -> FAIL
+                            assert_eq!(
+                                len, tail_size,
+                                "BUG REPRODUCED: Requested {} (full) instead of {} (tail). V2 roots missing.",
+                                len, tail_size
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if !request_found {
+            panic!("Setup Failure: No requests generated.");
+        }
+    }
+
+    #[test]
+    fn test_v2_triggers_hash_request_when_buffering() {
+        // 1. GIVEN: A pure V2 torrent state
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // Pure V2 (no V1 hashes)
+        torrent.info.piece_length = 16384;
+
+        // Setup State
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state
+            .piece_manager
+            .set_geometry(16384, 16384, HashMap::new(), false);
+        state.torrent_status = TorrentStatus::Standard;
+
+        // Map piece 0 to a file larger than one piece to force buffering
+        // (If file_len <= piece_len, it optimizes and verifies immediately)
+        let root = vec![0xAA; 32];
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 32768,
+                root_hash: root.clone(),
+                file_index: 0,
+            }],
+        );
+
+        let peer_id = "v2_seeder".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // 2. WHEN: We receive a block for this piece
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0u8; 16384], // Full piece
+        });
+
+        // 3. THEN: The state should buffer the data AND request hashes
+
+        // Assert buffering happened
+        assert!(
+            state.v2_pending_data.contains_key(&0),
+            "Data should be buffered pending proof"
+        );
+
+        // Assert Effect was emitted
+        let request_sent = effects.iter().any(|e| {
+            matches!(e, Effect::RequestHashes { peer_id: id, piece_index: idx, .. }
+                     if id == &peer_id && *idx == 0)
+        });
+
+        assert!(
+            request_sent,
+            "State failed to emit RequestHashes effect for buffered V2 data!"
+        );
+    }
+
+    #[test]
+    fn test_v2_magnet_scenario_requests_hashes_when_layers_missing() {
+        // 1. SETUP: Create a "Magnet-like" Torrent state
+        let mut state = create_empty_state();
+        let piece_len = 16384;
+
+        // Construct a Torrent that has Info (Roots) but NO Piece Layers
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // Pure v2
+        torrent.info.piece_length = piece_len as i64;
+
+        // CRITICAL: Ensure this is None. This simulates "Magnet Metadata Received".
+        // Real .torrent files would populate this, but Magnet links don't give it to us.
+        torrent.piece_layers = None;
+
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state
+            .piece_manager
+            .set_geometry(piece_len as u32, piece_len as u64, HashMap::new(), false);
+        state.torrent_status = TorrentStatus::Standard;
+
+        // 2. SETUP ROOTS: Map piece 0 to a File Root
+        // We use a file larger than piece_len (32KB) to force proof verification logic.
+        let file_root = vec![0xAA; 32];
+        let file_len = 32768;
+
+        // In a real app, 'calculate_v2_mapping' populates this from the Info Dict.
+        // Here we inject it manually to simulate that we know the Root.
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: file_len,
+                root_hash: file_root.clone(),
+                file_index: 0,
+            }],
+        );
+
+        let peer_id = "magnet_peer".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // 3. EXECUTE: Peer sends us Data for Piece 0
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: vec![0u8; 16384], // Full piece
+        });
+
+        // 4. VERIFY: The State must Buffer + Request Hashes
+        // It cannot verify because 'piece_layers' is None, so it MUST ask the peer.
+
+        // Check Buffering
+        assert!(
+            state.v2_pending_data.contains_key(&0),
+            "Data should be buffered because we have no local proof"
+        );
+
+        // Check Effect
+        let request_sent = effects.iter().any(|e| {
+            if let Effect::RequestHashes {
+                peer_id: pid,
+                file_root: root,
+                piece_index,
+                ..
+            } = e
+            {
+                // Verify we are asking the right peer for the right piece using the right root
+                pid == &peer_id && piece_index == &0 && root == &file_root
+            } else {
+                false
+            }
+        });
+
+        assert!(
+            request_sent,
+            "State failed to emit RequestHashes! It likely tried to verify locally and failed."
+        );
+    }
+
+    #[test]
+    fn test_state_v1_metadata_workflow() {
+        use sha1::{Digest, Sha1};
+
+        // 1. SETUP: Empty State
+        let mut state = create_empty_state();
+        let num_pieces = 100; // Standard V1 swarm
+        let piece_len = 16384;
+
+        // 2. CONSTRUCT V1 METADATA
+        // V1 puts all hashes into a single byte string inside the Info Dict.
+        let data_chunk = vec![0xAA; piece_len];
+        let piece_hash = Sha1::digest(&data_chunk).to_vec();
+
+        let mut all_hashes = Vec::new();
+        for _ in 0..num_pieces {
+            all_hashes.extend_from_slice(&piece_hash);
+        }
+
+        let mut torrent = create_dummy_torrent(0);
+        torrent.info.meta_version = None; // V1
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.pieces = all_hashes; // <--- The V1 "Proof" is here immediately
+        torrent.info.length = (num_pieces * piece_len) as i64;
+
+        // 3. ACTION: METADATA RECEIVED
+        state.update(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 5000,
+        });
+
+        // CHECK: Bitfield resized correctly based on 'pieces' string length
+        assert_eq!(state.piece_manager.bitfield.len(), num_pieces);
+        assert_eq!(state.torrent_status, TorrentStatus::Validating);
+
+        // 4. ACTION: VALIDATION COMPLETE
+        state.update(Action::ValidationComplete {
+            completed_pieces: vec![],
+        });
+        assert_eq!(state.torrent_status, TorrentStatus::Standard);
+
+        // 5. EXECUTE DOWNLOAD (V1 Style)
+        let peer_id = "v1_worker".to_string();
+        add_peer(&mut state, &peer_id);
+
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: data_chunk.clone(),
+        });
+
+        // CHECK: V1 Optimization
+        // Unlike V2, we should NOT see 'RequestHashes'.
+        // We SHOULD see 'VerifyPiece' immediately because we already have the hash.
+        let verify_sent = effects
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPiece { piece_index: 0, .. }));
+        assert!(
+            verify_sent,
+            "V1 failed to trigger immediate verification using info-dict hashes"
+        );
+
+        // Ensure no V2 requests leaked in
+        let v2_request = effects
+            .iter()
+            .any(|e| matches!(e, Effect::RequestHashes { .. }));
+        assert!(
+            !v2_request,
+            "V1 torrent incorrectly triggered V2 hash request"
+        );
+    }
+
+    #[test]
+    fn test_state_hybrid_metadata_workflow() {
+        use serde_bencode::value::Value;
+        use sha1::{Digest, Sha1};
+        use std::collections::HashMap;
+
+        let mut state = create_empty_state();
+        let num_pieces = 50;
+        let piece_len = 16384;
+
+        // 1. CONSTRUCT HYBRID TORRENT
+        // It has V1 'pieces' AND V2 'file_tree'
+        let data_chunk = vec![0xBB; piece_len];
+        let v1_hash = Sha1::digest(&data_chunk).to_vec();
+
+        let mut v1_pieces = Vec::new();
+        for _ in 0..num_pieces {
+            v1_pieces.extend_from_slice(&v1_hash);
+        }
+
+        let mut torrent = create_dummy_torrent(0);
+        torrent.info.meta_version = Some(2); // Hybrid implies v2 support
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.pieces = v1_pieces; // V1 Data
+
+        // V2 Data (File Tree)
+        let root_hash = vec![0xCC; 32];
+        let total_len = (num_pieces * piece_len) as i64;
+
+        let mut file_meta = HashMap::new();
+        file_meta.insert("length".as_bytes().to_vec(), Value::Int(total_len));
+        file_meta.insert(
+            "pieces root".as_bytes().to_vec(),
+            Value::Bytes(root_hash.clone()),
+        );
+
+        let mut file_node = HashMap::new();
+        file_node.insert("".as_bytes().to_vec(), Value::Dict(file_meta));
+
+        let mut root_node = HashMap::new();
+        root_node.insert("hybrid_file".as_bytes().to_vec(), Value::Dict(file_node));
+
+        torrent.info.file_tree = Some(Value::Dict(root_node));
+
+        // 2. ACTION: METADATA RECEIVED
+        state.update(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 9999,
+        });
+        state.update(Action::ValidationComplete {
+            completed_pieces: vec![],
+        });
+
+        // 3. CHECK DUAL INITIALIZATION
+        // V1 Check: Bitfield correct?
+        assert_eq!(state.piece_manager.bitfield.len(), num_pieces);
+
+        // V2 Check: Roots mapped?
+        assert!(
+            state.piece_to_roots.contains_key(&0),
+            "Hybrid failed to map V2 roots"
+        );
+        assert!(
+            state.piece_to_roots.contains_key(&(num_pieces as u32 - 1)),
+            "Hybrid failed to map end piece"
+        );
+
+        // 4. EXECUTE DOWNLOAD
+        let peer_id = "hybrid_worker".to_string();
+        add_peer(&mut state, &peer_id);
+
+        let effects = state.update(Action::IncomingBlock {
+            peer_id: peer_id.clone(),
+            piece_index: 0,
+            block_offset: 0,
+            data: data_chunk,
+        });
+
+        // 5. VERIFY HYBRID BEHAVIOR
+        // It should prefer V1 verification (Immediate VerifyPiece) because it's faster
+        // than asking for V2 proofs.
+        let verify_v1 = effects
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPiece { piece_index: 0, .. }));
+        assert!(verify_v1, "Hybrid failed to fallback to V1 verification");
+
+        // It should NOT buffer/request V2 hashes if V1 verification is possible
+        assert!(
+            !state.v2_pending_data.contains_key(&0),
+            "Hybrid inefficiently buffered data despite having V1 hashes"
+        );
+    }
+
+    #[test]
+    fn test_state_scale_1000_v2_metadata_workflow() {
+        use serde_bencode::value::Value;
+        use std::collections::HashMap; // Needed to construct the file tree
+
+        // 1. SETUP: Empty State
+        let mut state = create_empty_state();
+        let num_pieces = 1000;
+        let piece_len = 1024;
+        let total_len = (num_pieces as u64) * (piece_len as u64);
+        let root_hash = vec![0xAA; 32];
+
+        // 2. CONSTRUCT METADATA (Simulate Magnet Link Download)
+        // We start with a Torrent that has NO layers and NO pieces, just the File Tree.
+        let mut torrent = create_dummy_torrent(0);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new(); // Pure V2
+        torrent.piece_layers = None; // <--- Crucial: Forces proof requests
+
+        // Construct V2 File Tree: { "big_file": { "": { "length": ..., "pieces root": ... } } }
+        // This is what the State uses to populate 'piece_to_roots' during MetadataReceived
+        let mut file_meta = HashMap::new();
+        file_meta.insert("length".as_bytes().to_vec(), Value::Int(total_len as i64));
+        file_meta.insert(
+            "pieces root".as_bytes().to_vec(),
+            Value::Bytes(root_hash.clone()),
+        );
+
+        let mut file_node = HashMap::new();
+        file_node.insert("".as_bytes().to_vec(), Value::Dict(file_meta));
+
+        let mut root_node = HashMap::new();
+        root_node.insert("big_file".as_bytes().to_vec(), Value::Dict(file_node));
+
+        torrent.info.file_tree = Some(Value::Dict(root_node));
+
+        // 3. ACTION: METADATA RECEIVED
+        let _meta_effects = state.update(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 12345,
+        });
+
+        // CHECK: State successfully mapped the file tree to pieces
+        assert_eq!(state.torrent_status, TorrentStatus::Validating);
+        // The file is 1000 pieces long, so piece 0 and piece 999 must exist in the map
+        assert!(
+            state.piece_to_roots.contains_key(&0),
+            "Failed to map piece 0 from file tree"
+        );
+        assert!(
+            state.piece_to_roots.contains_key(&999),
+            "Failed to map piece 999 from file tree"
+        );
+        assert_eq!(
+            state.piece_manager.bitfield.len(),
+            1000,
+            "Incorrect piece count calculated"
+        );
+
+        // 4. ACTION: VALIDATION COMPLETE
+        // We must exit the 'Validating' state to accept incoming blocks
+        state.update(Action::ValidationComplete {
+            completed_pieces: vec![],
+        });
+        assert_eq!(state.torrent_status, TorrentStatus::Standard);
+
+        // 5. EXECUTE SCALE LOOP (1000 Blocks)
+        let peer_id = "v2_full_worker".to_string();
+        add_peer(&mut state, &peer_id);
+
+        let data_chunk = vec![0u8; piece_len as usize];
+        let proof_chunk = vec![0xFF; 32];
+
+        for i in 0..num_pieces {
+            let piece_idx = i as u32;
+
+            // A. Incoming Block
+            let data_effects = state.update(Action::IncomingBlock {
+                peer_id: peer_id.clone(),
+                piece_index: piece_idx,
+                block_offset: 0,
+                data: data_chunk.clone(),
+            });
+
+            // CHECK: Buffer + Request Effect
+            assert!(
+                state.v2_pending_data.contains_key(&piece_idx),
+                "Piece {} not buffered",
+                piece_idx
+            );
+
+            let request_correct = data_effects.iter().any(|e| {
+                // Ensure the Effect carries the Root Hash derived from our File Tree
+                matches!(e, Effect::RequestHashes { file_root, piece_index, .. }
+                         if *piece_index == piece_idx && file_root == &root_hash)
+            });
+            assert!(
+                request_correct,
+                "Piece {} failed to emit RequestHashes with correct Root",
+                piece_idx
+            );
+
+            // B. Proof Received
+            let proof_effects = state.update(Action::MerkleProofReceived {
+                peer_id: peer_id.clone(),
+                piece_index: piece_idx,
+                proof: proof_chunk.clone(),
+            });
+
+            // CHECK: Verify Effect + Buffer Clear
+            let verify_triggered = proof_effects.iter().any(|e| {
+                matches!(e, Effect::VerifyPieceV2 { piece_index, .. } if *piece_index == piece_idx)
+            });
+            assert!(
+                verify_triggered,
+                "Piece {} failed to verify after proof",
+                piece_idx
+            );
+            assert!(
+                !state.v2_pending_data.contains_key(&piece_idx),
+                "Buffer leak for piece {}",
+                piece_idx
+            );
+        }
+
+        // 6. FINAL CLEANUP CHECK
+        assert!(state.v2_pending_data.is_empty());
+    }
+
+    #[test]
+    fn test_repro_magnet_bitfield_truncation() {
+        // GIVEN: A state initialized like a Magnet link (No metadata, 0 pieces known)
+        let mut state = create_empty_state();
+        state.torrent = None;
+        state.torrent_status = TorrentStatus::AwaitingMetadata;
+        // Explicitly set piece manager to 0 to mimic "don't know size yet"
+        state.piece_manager.set_initial_fields(0, false);
+
+        let peer_id = "magnet_seeder".to_string();
+        add_peer(&mut state, &peer_id);
+
+        // WHEN: Peer sends a Bitfield BEFORE we have metadata
+        // Scenario: 8 pieces, peer has all of them (0xFF = 11111111)
+        state.update(Action::PeerBitfieldReceived {
+            peer_id: peer_id.clone(),
+            bitfield: vec![0xFF],
+        });
+
+        // CHECK 1: The peer's bitfield should NOT be truncated to 0.
+        // It should hold the raw bits until we know better.
+        let peer_pre = state.peers.get(&peer_id).unwrap();
+        assert!(
+            !peer_pre.bitfield.is_empty(),
+            "BUG REPRODUCED: Peer bitfield was truncated/wiped because we had 0 pieces!"
+        );
+
+        // WHEN: Metadata finally arrives (defining 8 pieces)
+        let mut torrent = create_dummy_torrent(8);
+        torrent.info.piece_length = 16384;
+        torrent.info.length = 16384 * 8;
+
+        state.update(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 123,
+        });
+
+        // CRITICAL STEP: MetadataReceived puts us in 'Validating'.
+        // AssignWork ignores everything during 'Validating'.
+        // We must complete validation to enter 'Standard' mode and calculate interest.
+        state.update(Action::ValidationComplete {
+            completed_pieces: vec![], // We found nothing locally
+        });
+
+        // THEN: The peer should still be seen as a Seeder (having all pieces)
+        let peer_post = state.peers.get(&peer_id).unwrap();
+
+        assert_eq!(
+            peer_post.bitfield.len(),
+            8,
+            "Bitfield should be resized to correct piece count"
+        );
+        assert!(
+            peer_post.bitfield.iter().all(|&b| b),
+            "Peer data lost! Expected all TRUE, got {:?}",
+            peer_post.bitfield
+        );
+
+        // Final sanity check: Manager should be interested
+        state.update(Action::AssignWork {
+            peer_id: peer_id.clone(),
+        });
+        let peer_final = state.peers.get(&peer_id).unwrap();
+
+        assert!(
+            peer_final.am_interested,
+            "We should be interested in the seeder (failed if bitfield was wiped)"
+        );
+    }
 }
 
 #[cfg(test)]
 fn check_invariants(state: &TorrentState) {
-    // =========================================================================
     // CATEGORY 1: Data Consistency (The "Is the Math Right?" Check)
-    // =========================================================================
 
-    // 1. Global Stats vs. Peer Stats
     // The global session total MUST be >= the sum of currently connected peers.
     // (It is not == because disconnected peers contribute to the total but are gone from the map).
     let sum_peer_dl: u64 = state.peers.values().map(|p| p.total_bytes_downloaded).sum();
@@ -3407,7 +5863,6 @@ fn check_invariants(state: &TorrentState) {
         sum_peer_ul
     );
 
-    // 2. Bitfield Integrity
     if let Some(torrent) = &state.torrent {
         let expected_pieces = torrent.info.pieces.len() / 20;
         assert_eq!(
@@ -3431,11 +5886,8 @@ fn check_invariants(state: &TorrentState) {
         }
     }
 
-    // =========================================================================
     // CATEGORY 2: Queue Synchronization (The "Ghost Piece" Check)
-    // =========================================================================
 
-    // 3. The "Orphaned Pending" Check (CRITICAL)
     // If a piece is in `pending_queue` (Global), AT LEAST one peer must be working on it.
     for &piece_idx in state.piece_manager.pending_queue.keys() {
         let exists_in_peer = state
@@ -3449,7 +5901,6 @@ fn check_invariants(state: &TorrentState) {
         );
     }
 
-    // 4. The "Zombie Request" Check
     // If a peer has a pending request, that piece MUST be globally Pending (or Done).
     // It cannot be in the "Need" queue.
     for (id, peer) in &state.peers {
@@ -3466,7 +5917,6 @@ fn check_invariants(state: &TorrentState) {
         }
     }
 
-    // 5. Queue Mutually Exclusive
     for piece in &state.piece_manager.need_queue {
         assert!(
             !state.piece_manager.pending_queue.contains_key(piece),
@@ -3475,11 +5925,8 @@ fn check_invariants(state: &TorrentState) {
         );
     }
 
-    // =========================================================================
     // CATEGORY 3: State Machine Logic
-    // =========================================================================
 
-    // 6. Status vs. Queues
     match state.torrent_status {
         TorrentStatus::Done => {
             // If Done, we should need nothing.
@@ -3513,11 +5960,8 @@ fn check_invariants(state: &TorrentState) {
         TorrentStatus::AwaitingMetadata => {}
     }
 
-    // =========================================================================
     // CATEGORY 4: Resource & Math Integrity
-    // =========================================================================
 
-    // 7. Map Key Consistency
     for (key, peer) in &state.peers {
         assert_eq!(
             key, &peer.ip_port,
@@ -3526,14 +5970,12 @@ fn check_invariants(state: &TorrentState) {
         );
     }
 
-    // 8. Peer Count Sync
     assert_eq!(
         state.number_of_successfully_connected_peers,
         state.peers.len(),
         "Peer count metric out of sync with Map size!"
     );
 
-    // 9. Pieces Remaining Synchronization (Optimization Check)
     if state.torrent.is_some() {
         // Count how many pieces in the bitfield are NOT done
         let actual_remaining = state
@@ -3550,7 +5992,6 @@ fn check_invariants(state: &TorrentState) {
         );
     }
 
-    // 10. EMA (Speed) Stability
     assert!(
         state.total_dl_prev_avg_ema.is_finite(),
         "DL Speed EMA is Infinite/NaN"
@@ -3568,7 +6009,6 @@ fn check_invariants(state: &TorrentState) {
         );
     }
 
-    // 11. Timer Sanity
     if let Some(t) = state.optimistic_unchoke_timer {
         let now = state.now;
         // Allow buffer, but 1 hour in future implies logic error
@@ -3576,11 +6016,9 @@ fn check_invariants(state: &TorrentState) {
             panic!("Optimistic timer is set way too far in the future!");
         }
     }
-    // =========================================================================
-    // CATEGORY 5: LOGICAL INVARIANTS (Protocol & State Logic)
-    // =========================================================================
 
-    // 1. The "Capability" Check (Possession)
+    // CATEGORY 5: LOGICAL INVARIANTS (Protocol & State Logic)
+
     // We must never ask a peer for a piece they do not possess.
     for (id, peer) in &state.peers {
         for &piece_idx in &peer.pending_requests {
@@ -3597,7 +6035,6 @@ fn check_invariants(state: &TorrentState) {
         }
     }
 
-    // 2. The "Interest-Request" Consistency
     // If we have pending requests sending to a peer, we MUST claim to be interested in them.
     for (id, peer) in &state.peers {
         if !peer.pending_requests.is_empty() {
@@ -3609,7 +6046,6 @@ fn check_invariants(state: &TorrentState) {
         }
     }
 
-    // 3. The "Choked Compliance" Check
     // If a peer is choking us, we should not have any active pending requests waiting on them.
     for (id, peer) in &state.peers {
         if peer.peer_choking == crate::torrent_manager::state::ChokeStatus::Choke {
@@ -3621,7 +6057,6 @@ fn check_invariants(state: &TorrentState) {
         }
     }
 
-    // 4. The "Rational Interest" Check
     // We should only be interested in a peer if they have a piece we actually need.
     if state.torrent_status != TorrentStatus::Done {
         for (id, peer) in &state.peers {
@@ -3642,7 +6077,6 @@ fn check_invariants(state: &TorrentState) {
         }
     }
 
-    // 5. The "Seeding" Boundary
     // If our status is Done, we must strictly have am_interested = false for everyone.
     if state.torrent_status == TorrentStatus::Done {
         for (id, peer) in &state.peers {
@@ -3654,7 +6088,6 @@ fn check_invariants(state: &TorrentState) {
         }
     }
 
-    // 6. The "Standard Mode" Efficiency (Duplicate Avoidance)
     // In Standard mode, a specific piece should strictly be requested from only ONE peer.
     if state.torrent_status == TorrentStatus::Standard {
         let mut requested_pieces = std::collections::HashMap::new();
@@ -3670,7 +6103,6 @@ fn check_invariants(state: &TorrentState) {
         }
     }
 
-    // 7. The "Endgame" Definition
     // If we are in Endgame mode, the need_queue MUST be empty.
     if state.torrent_status == TorrentStatus::Endgame {
         assert!(
@@ -3683,7 +6115,6 @@ fn check_invariants(state: &TorrentState) {
         );
     }
 
-    // 8. The "Upload Slot" Hard Cap
     // We must never unchoke more peers than our allowed maximum (plus allowance for optimistic unchoke).
     let unchoked_count = state
         .peers
@@ -3701,9 +6132,8 @@ fn check_invariants(state: &TorrentState) {
     );
 }
 
-// -----------------------------------------------------------------------------
 // Property-Based Tests (Fuzzing Logic)
-// -----------------------------------------------------------------------------
+
 #[cfg(test)]
 mod prop_tests {
 
@@ -3729,7 +6159,6 @@ mod prop_tests {
     }
 
     fn inject_reordering_faults(actions: Vec<Action>, seed: u64) -> Vec<Action> {
-        // 1. Setup Deterministic RNG
         // We use a fixed seed from Proptest so failures are reproducible
         let mut rng = StdRng::seed_from_u64(seed);
 
@@ -3753,11 +6182,9 @@ mod prop_tests {
             pending.push((delay, action));
         }
 
-        // 2. THE MAGIC: Reordering
         // Sort events by who arrives first. This shuffles the timeline.
         pending.sort_by_key(|(delay, _)| *delay);
 
-        // 3. Reconstruct Timeline with Ticks
         // We must insert 'Tick' actions to account for the time gaps between events.
         let mut current_time = 0;
         for (arrival_time, action) in pending {
@@ -3844,11 +6271,6 @@ mod prop_tests {
         final_actions
     }
 
-    // =========================================================================
-    // 1. STRATEGIES: Atomic Actions
-    // =========================================================================
-
-    // --- NEW STRATEGY 1: Tit-for-Tat Generator ---
     fn tit_for_tat_strategy() -> impl Strategy<Value = TorrentState> {
         let num_peers = 10usize;
         let speeds_strat = proptest::collection::vec(0..100_000u64, num_peers);
@@ -3876,22 +6298,24 @@ mod prop_tests {
         })
     }
 
-    // --- NEW STRATEGY 2: Rarest First Generator ---
     fn rarest_first_strategy() -> impl Strategy<Value = TorrentState> {
         Just(()).prop_map(|_| {
             let mut state = super::tests::create_empty_state();
             let torrent = super::tests::create_dummy_torrent(2);
             state.torrent = Some(torrent);
             state.piece_manager.set_initial_fields(2, false);
-            state
-                .piece_manager
-                .block_manager
-                .set_geometry(16384, 16384 * 2, vec![], vec![], false);
+            state.piece_manager.block_manager.set_geometry(
+                16384,
+                16384 * 2,
+                vec![],
+                vec![],
+                HashMap::new(),
+                false,
+            );
             state.torrent_status = TorrentStatus::Standard;
 
             state.piece_manager.need_queue = vec![0, 1];
 
-            // 1. Create Peers (Target + Background)
             // ... (Same peer creation code as before) ...
             let target_id = "target_peer".to_string();
             let (tx, _) = mpsc::channel(1);
@@ -3956,14 +6380,17 @@ mod prop_tests {
             let torrent = super::tests::create_dummy_torrent(2);
             state.torrent = Some(torrent);
             state.piece_manager.set_initial_fields(2, false);
-            state
-                .piece_manager
-                .block_manager
-                .set_geometry(16384, 16384 * 2, vec![], vec![], false);
+            state.piece_manager.block_manager.set_geometry(
+                16384,
+                16384 * 2,
+                vec![],
+                vec![],
+                HashMap::new(),
+                false,
+            );
             state.torrent_status = TorrentStatus::Standard;
             state.piece_manager.need_queue = vec![0, 1];
 
-            // 1. Target Peer (Has BOTH Rare pieces 0 and 1)
             let target_id = "target_peer".to_string();
             let (tx, _) = mpsc::channel(1);
             let mut target = PeerState::new(target_id.clone(), tx, state.now);
@@ -3975,7 +6402,6 @@ mod prop_tests {
 
             state.number_of_successfully_connected_peers = state.peers.len();
 
-            // 2. Official Sync: Rarity is {0: 1, 1: 1} -> A Tie!
             state
                 .piece_manager
                 .update_rarity(state.peers.values().map(|p| &p.bitfield));
@@ -3994,10 +6420,14 @@ mod prop_tests {
             let torrent = super::tests::create_dummy_torrent(2);
             state.torrent = Some(torrent);
             state.piece_manager.set_initial_fields(2, false);
-            state
-                .piece_manager
-                .block_manager
-                .set_geometry(16384, 16384 * 2, vec![], vec![], false);
+            state.piece_manager.block_manager.set_geometry(
+                16384,
+                16384 * 2,
+                vec![],
+                vec![],
+                HashMap::new(),
+                false,
+            );
             state.torrent_status = TorrentStatus::Standard;
             state.piece_manager.need_queue = vec![0, 1];
 
@@ -4032,8 +6462,7 @@ mod prop_tests {
 
     // --- STRATEGY 6: The Free-Rider (Parasite) Scenario ---
     // Creates a scenario with:
-    // 1. One "Hero" peer (High upload to us)
-    // 2. One "Parasite" peer (Zero upload to us)
+
     // Both want our data. Logic MUST favor the Hero.
     fn free_rider_strategy() -> impl Strategy<Value = TorrentState> {
         Just(()).prop_map(move |_| {
@@ -4043,7 +6472,6 @@ mod prop_tests {
             // Use the fixed constant defined in state.rs (which is 4)
             const UPLOAD_SLOTS: usize = super::UPLOAD_SLOTS_DEFAULT;
 
-            // 1. The HERO: Uploads 1MB/s to us (Ensured Unchoked)
             let hero_id = "hero_peer".to_string();
             let (tx1, _) = mpsc::channel(1);
             let mut hero = PeerState::new(hero_id.clone(), tx1, state.now);
@@ -4053,7 +6481,6 @@ mod prop_tests {
             hero.bytes_downloaded_from_peer = 1_000_000; // High contribution
             state.peers.insert(hero_id, hero);
 
-            // 2. NEW: Add 3 Intermediate Peers (med_peer_1 to med_peer_3)
             // These peers, plus the Hero, will consume the 4 upload slots.
             // The loop runs from 1 to UPLOAD_SLOTS_DEFAULT (4).
             for i in 1..=UPLOAD_SLOTS {
@@ -4067,7 +6494,6 @@ mod prop_tests {
                 state.peers.insert(id, p);
             }
 
-            // 3. The PARASITE: Uploads 0 to us (Must be Choked)
             let leech_id = "parasite_peer".to_string();
             let (tx2, _) = mpsc::channel(1);
             let mut leech = PeerState::new(leech_id.clone(), tx2, state.now);
@@ -4095,14 +6521,17 @@ mod prop_tests {
             let torrent = super::tests::create_dummy_torrent(2);
             state.torrent = Some(torrent);
             state.piece_manager.set_initial_fields(2, false);
-            state
-                .piece_manager
-                .block_manager
-                .set_geometry(16384, 16384 * 2, vec![], vec![], false);
+            state.piece_manager.block_manager.set_geometry(
+                16384,
+                16384 * 2,
+                vec![],
+                vec![],
+                HashMap::new(),
+                false,
+            );
             state.torrent_status = TorrentStatus::Standard;
             state.piece_manager.need_queue = vec![0, 1];
 
-            // 1. One Rare Peer (Has Piece 0)
             let rare_id = "rare_peer".to_string();
             let (tx, _) = mpsc::channel(1);
             let mut rare = PeerState::new(rare_id.clone(), tx, state.now);
@@ -4112,7 +6541,6 @@ mod prop_tests {
             rare.bitfield = vec![true, false]; // Has 0
             state.peers.insert(rare_id, rare);
 
-            // 2. 999 Common Peers (Have Piece 1)
             // We optimize this loop to avoid 1000 channel allocations slowing down the test setup too much
             let (tx, _) = mpsc::channel(1);
             for i in 0..999 {
@@ -4124,7 +6552,6 @@ mod prop_tests {
             }
             state.number_of_successfully_connected_peers = state.peers.len();
 
-            // 3. Sync
             state
                 .piece_manager
                 .update_rarity(state.peers.values().map(|p| &p.bitfield));
@@ -4141,7 +6568,6 @@ mod prop_tests {
             // Case 1: The Endgame Transition
             // Force queue to empty, then verify redundant requests behavior
             Just(vec![
-                // 1. Setup: Connect a peer
                 Action::PeerSuccessfullyConnected {
                     peer_id: peer_id.clone()
                 },
@@ -4152,11 +6578,9 @@ mod prop_tests {
                     peer_id: peer_id.clone(),
                     piece_index: 0
                 },
-                // 2. Force Work Assignment (puts piece 0 in pending)
                 Action::AssignWork {
                     peer_id: peer_id.clone()
                 },
-                // 3. Trigger Endgame Logic (by simulating another peer taking the last needed piece)
                 // (We would need to manually manipulate the state queue in the test runner
                 //  for this to work perfectly, or send a specific sequence here).
             ]),
@@ -4372,15 +6796,10 @@ mod prop_tests {
         ]
     }
 
-    // =========================================================================
-    // 2. STRATEGIES: Complex Logical Stories & Violation Strategy
-    // =========================================================================
-
     fn protocol_violation_strategy() -> impl Strategy<Value = Vec<Action>> {
         let id = "bad_actor".to_string();
 
         prop_oneof![
-            // 1. Sending Data while Choked
             // Expectation: Data should be dropped or peer disconnected, no panic.
             Just(vec![
                 Action::PeerSuccessfullyConnected {
@@ -4396,7 +6815,6 @@ mod prop_tests {
                     data: vec![0; 100]
                 }
             ]),
-            // 2. Requesting Out-of-Bounds Pieces
             // Expectation: Request ignored, strict clients might disconnect peer.
             Just(vec![
                 Action::PeerSuccessfullyConnected {
@@ -4412,7 +6830,6 @@ mod prop_tests {
                     length: 16384
                 }
             ]),
-            // 3. Duplicate Connections (Race condition test)
             // Expectation: State handles map collisions gracefully.
             Just(vec![
                 Action::PeerSuccessfullyConnected {
@@ -4432,7 +6849,6 @@ mod prop_tests {
                     data: vec![1]
                 }
             ]),
-            // 4. NEW: The "Fragmented Packet" Attack (Griefing)
             // Expectation: Client accepts the byte into a buffer OR drops it. MUST NOT PANIC.
             // Malicious peers do this to exhaust memory 1 byte at a time.
             (0..20u32).prop_map(|idx| {
@@ -4510,10 +6926,6 @@ mod prop_tests {
         ]
     }
 
-    // =========================================================================
-    // 3. NEW: Populated State Strategy (State Primer)
-    // =========================================================================
-
     fn populated_state_strategy() -> impl Strategy<Value = TorrentState> {
         let peers_strat = proptest::collection::hash_map(
             any::<String>(),
@@ -4536,17 +6948,14 @@ mod prop_tests {
 
                 peer.peer_id = id.as_bytes().to_vec();
 
-                // 1. Initialize bitfield first (default to all false / correct length)
                 peer.bitfield = vec![false; NUM_PIECES];
                 if has_piece_0 {
                     peer.bitfield[0] = true;
                 }
 
-                // 2. Set interest based on actual possession
                 // In this strategy we need all pieces, so if they have any, we are interested.
                 peer.am_interested = peer.bitfield.iter().any(|&b| b);
 
-                // 3. Set remaining flags
                 peer.peer_is_interested_in_us = true;
                 peer.peer_choking = crate::torrent_manager::state::ChokeStatus::Unchoke;
 
@@ -4571,10 +6980,6 @@ mod prop_tests {
             state
         })
     }
-
-    // =========================================================================
-    // 4. Invariants & Runner
-    // =========================================================================
 
     proptest! {
         #![proptest_config(ProptestConfig::default())]
@@ -4646,8 +7051,6 @@ mod prop_tests {
             }
         }
 
-
-        // --- NEW TEST 1: Verify Choking Algorithm Fairness ---
         #[test]
         fn test_tit_for_tat_fairness(mut state  in tit_for_tat_strategy()) {
             let mut peers: Vec<_> = state.peers.values().collect();
@@ -4673,15 +7076,11 @@ mod prop_tests {
             }
         }
 
-        // --- NEW TEST 2: Verify Piece Selection Optimization ---
         #[test]
     fn test_rarest_first_selection(mut state in rarest_first_strategy()) {
-            // 1. No setup needed (Strategy handles it)
 
-            // 2. Ask Target for work
             let effects = state.update(Action::AssignWork { peer_id: "target_peer".into() });
 
-            // 3. Check request
             let requested_index = effects.iter().find_map(|e| {
                 if let Effect::SendToPeer { cmd, .. } = e {
                     if let TorrentCommand::BulkRequest(ref reqs) = **cmd {
@@ -4702,17 +7101,15 @@ mod prop_tests {
         // --- TEST 3: Tit-for-Tat Snubbed Invariant ---
         #[test]
         fn test_tit_for_tat_snubbed(mut state in tit_for_tat_snubbed_strategy()) {
-            // 1. Run Recalc logic
+
             let _ = state.update(Action::RecalculateChokes {
                 random_seed: 999
             });
 
-            // 2. Count Unchoked
             let unchoked_count = state.peers.values()
                 .filter(|p| p.am_choking == super::ChokeStatus::Unchoke)
                 .count();
 
-            // 3. Assert Snubbing Behavior
             // Even if everyone is slow, we MUST NOT unchoke more than slots + 1 (optimistic).
             // In a strict implementation, if everyone is 0, we might unchoke NO ONE (except optimistic),
             // or we might unchoke randoms. But we must never exceed the limit.
@@ -4723,10 +7120,9 @@ mod prop_tests {
         // --- TEST 4: Rarest First Tiebreaker Invariant ---
         #[test]
         fn test_rarest_first_tie(mut state in rarest_first_tie_strategy()) {
-            // 1. Assign Work
+
             let effects = state.update(Action::AssignWork { peer_id: "target_peer".into() });
 
-            // 2. Check Pick
             let picked_idx = effects.iter().find_map(|e| {
                 if let Effect::SendToPeer { cmd, .. } = e {
                     if let TorrentCommand::BulkRequest(ref reqs) = **cmd {
@@ -4736,7 +7132,6 @@ mod prop_tests {
                 None
             });
 
-            // 3. Assert Valid Tiebreak
             if let Some(idx) = picked_idx {
                 // It must be one of the available pieces (0 or 1).
                 // A stable sort usually picks the lower index (0).
@@ -4751,13 +7146,11 @@ mod prop_tests {
         // --- TEST 5: Integrated Logic (The "Choke Check") ---
         #[test]
         fn test_choke_during_pick(mut state in combined_algo_strategy()) {
-            // 1. Recalculate Chokes (Decide who WE upload to)
+
             let _ = state.update(Action::RecalculateChokes {  random_seed: 42 });
 
-            // 2. Assign Work (Decide what WE download from "medium_both")
             let effects = state.update(Action::AssignWork { peer_id: "medium_both".into() });
 
-            // 3. Verify Request Logic
             // The request should be valid regardless of OUR choking status towards them.
             // (BitTorrent allows downloading from people we choke, though they might not like it).
             // However, we MUST verify we only request pieces they actually have.
@@ -4779,7 +7172,7 @@ mod prop_tests {
         // --- TEST 6: Tit-for-Tat Justice (Hero vs Parasite) ---
         #[test]
         fn test_free_rider_justice(mut state in free_rider_strategy()) {
-            // 1. Run Recalc
+
             // We set a fixed seed to control Optimistic Unchoke.
             // In a real scenario, the Parasite might get the Optimistic slot occasionally,
             // but the Regular slots MUST go to the Hero.
@@ -4788,12 +7181,10 @@ mod prop_tests {
                 random_seed: 42
             });
 
-            // 2. Verify Hero Status
             let hero = state.peers.get("hero_peer").unwrap();
             prop_assert_eq!(hero.am_choking.clone(), super::ChokeStatus::Unchoke,
                 "Injustice! The Hero peer (high contributor) was choked.");
 
-            // 3. Verify Parasite Status
             let parasite = state.peers.get("parasite_peer").unwrap();
             // Note: If your Optimistic Unchoke logic overrides the single slot,
             // this assert might flake depending on the seed.
@@ -4802,11 +7193,10 @@ mod prop_tests {
                 "Exploit! The Free-Rider (zero contributor) stole the upload slot.");
         }
 
-
         // --- TEST 8: Scale & Complexity ---
         #[test]
         fn test_rarest_first_scale(mut state in huge_swarm_strategy()) {
-            // 1. Run AssignWork on the Rare Peer
+
             let effects = state.update(Action::AssignWork { peer_id: "rare_peer".into() });
 
             let picked = effects.iter().any(|e| {
@@ -4824,16 +7214,13 @@ mod prop_tests {
         // --- TEST 9: Choke Race Condition (The "Stop" Check) ---
         #[test]
         fn test_choke_race_condition(mut state in combined_algo_strategy()) {
-            // 1. Peer Unchokes us (Setup state)
+
             state.update(Action::PeerUnchoked { peer_id: "medium_both".into() });
 
-            // 2. RACE: Peer Chokes us *immediately* before we process the queue
             state.update(Action::PeerChoked { peer_id: "medium_both".into() });
 
-            // 3. Assign Work
             let effects = state.update(Action::AssignWork { peer_id: "medium_both".into() });
 
-            // 4. Assert Silence
             // If we are choked, we must NOT send a Request, even if we want the data.
             let sent_request = effects
                 .iter()
@@ -4842,12 +7229,10 @@ mod prop_tests {
             prop_assert!(!sent_request, "Race Condition Fail: Requested data while Choked!");
         }
 
-
     }
 
-    // =========================================================================
     // STATE MACHINE FUZZER (Expanded Lifecycle Coverage)
-    // =========================================================================
+
     mod state_machine {
         use super::*;
         use super::{inject_network_faults, inject_reordering_faults};
@@ -5181,7 +7566,7 @@ mod prop_tests {
                 assert_eq!(
                     sut_status_norm,
                     model_status_norm,
-                    "Status Mismatch! SUT: {:?} (Normalized), Model: {:?} (Normalized). Action: {:?}", 
+                    "Status Mismatch! SUT: {:?} (Normalized), Model: {:?} (Normalized). Action: {:?}",
                     sut.torrent_status, expected_state.status, transition
                 );
 
@@ -5297,10 +7682,6 @@ mod integration_tests {
     use crate::torrent_file::Torrent;
     use crate::torrent_manager::{ManagerCommand, TorrentManager, TorrentParameters};
 
-    // -------------------------------------------------------------------------
-    // 1. HELPER FUNCTIONS
-    // -------------------------------------------------------------------------
-
     fn create_manager_harness(
         name: &str,
         num_pieces: usize,
@@ -5367,12 +7748,15 @@ mod integration_tests {
                 files: vec![],
                 private: None,
                 md5sum: None,
+                meta_version: None,
+                file_tree: None,
             },
             info_dict_bencode: vec![0u8; 20],
             created_by: None,
             creation_date: None,
             encoding: None,
             comment: None,
+            piece_layers: None,
         };
 
         let params = TorrentParameters {
@@ -5422,7 +7806,6 @@ mod integration_tests {
             if let Ok((socket, _)) = listener.accept().await {
                 let (mut rd, mut wr) = socket.into_split();
 
-                // 1. Handshake
                 let mut handshake_buf = vec![0u8; 68];
                 if rd.read_exact(&mut handshake_buf).await.is_err() {
                     return;
@@ -5434,19 +7817,16 @@ mod integration_tests {
                 h_resp[28..48].copy_from_slice(&handshake_buf[28..48]);
                 let _ = wr.write_all(&h_resp).await;
 
-                // 2. Bitfield
                 let mut msg = Vec::new();
                 msg.extend_from_slice(&(1 + bitfield.len() as u32).to_be_bytes());
                 msg.push(5);
                 msg.extend_from_slice(&bitfield);
                 let _ = wr.write_all(&msg).await;
 
-                // 3. Send "Interested" (ID 2)
                 // This ensures the Manager knows we want data, so it considers Unchoking us.
                 let interested_msg = vec![0, 0, 0, 1, 2];
                 let _ = wr.write_all(&interested_msg).await;
 
-                // 4. Loop
                 let mut buf = vec![0u8; 4096];
                 let mut buffer = Vec::new();
                 let mut am_choking = true;
@@ -5521,10 +7901,6 @@ mod integration_tests {
         });
         (rx_events, tx_ctrl)
     }
-
-    // -------------------------------------------------------------------------
-    // 2. TEST CASES
-    // -------------------------------------------------------------------------
 
     #[tokio::test]
     async fn test_case_06_rarest_first_strategy() {

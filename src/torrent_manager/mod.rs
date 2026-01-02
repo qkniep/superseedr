@@ -3,6 +3,7 @@
 
 pub mod block_manager;
 pub mod manager;
+pub mod merkle;
 pub mod piece_manager;
 pub mod state;
 

@@ -48,6 +48,7 @@ use mainline::{async_dht::AsyncDht, Dht};
 type AsyncDht = ();
 
 use sha1::Digest;
+use sha2::Sha256;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -289,6 +290,7 @@ pub enum AppMode {
     Normal,
     PowerSaving,
     DownloadPathPicker(FileExplorer),
+    AddTorrentPicker(FileExplorer),
     DeleteConfirm {
         info_hash: Vec<u8>,
         with_files: bool,
@@ -866,11 +868,17 @@ impl App {
             let mut buffer = vec![0u8; 68];
             if (stream.read_exact(&mut buffer).await).is_ok() {
                 let peer_info_hash = &buffer[28..48];
+
                 if let Some(torrent_manager_tx) =
                     torrent_manager_incoming_peer_txs_clone.get(peer_info_hash)
                 {
                     let torrent_manager_tx_clone = torrent_manager_tx.clone();
                     let _ = torrent_manager_tx_clone.send((stream, buffer)).await;
+                } else {
+                    tracing::trace!(
+                        "ROUTING FAIL: No manager registered for hash: {}",
+                        hex::encode(peer_info_hash)
+                    );
                 }
             }
         });
@@ -888,40 +896,53 @@ impl App {
                     )
                     .await;
 
-                    let move_successful =
-                        if let Some(watch_folder) = &self.client_configs.watch_folder {
-                            (|| {
-                                let parent_dir = watch_folder.parent()?;
-                                let processed_folder = parent_dir.join("processed_torrents");
-                                fs::create_dir_all(&processed_folder).ok()?;
-
-                                let file_name = path.file_name()?;
-                                let new_path = processed_folder.join(file_name);
-                                fs::rename(&path, &new_path).ok()?;
-
-                                Some(())
-                            })()
-                            .is_some()
-                        } else {
-                            false
-                        };
-
                     self.save_state_to_disk();
 
-                    if !move_successful {
-                        tracing_event!(
-                            Level::WARN,
-                            "Could not move torrent file. Defaulting to renaming in place."
-                        );
-                        let mut new_path = path.clone();
-                        new_path.set_extension("torrent.added");
-                        if let Err(e) = fs::rename(&path, &new_path) {
+                    let parent_dir = path.parent();
+
+                    let is_user_watch = self
+                        .client_configs
+                        .watch_folder
+                        .as_ref()
+                        .is_some_and(|p| parent_dir == Some(p));
+
+                    let is_system_watch =
+                        get_watch_path().is_some_and(|(p, _)| parent_dir == Some(&p));
+
+                    if is_user_watch || is_system_watch {
+                        let move_successful =
+                            if let Some(watch_folder) = &self.client_configs.watch_folder {
+                                (|| {
+                                    let parent = watch_folder.parent()?;
+                                    let processed_folder = parent.join("processed_torrents");
+                                    fs::create_dir_all(&processed_folder).ok()?;
+
+                                    let file_name = path.file_name()?;
+                                    let new_path = processed_folder.join(file_name);
+                                    fs::rename(&path, &new_path).ok()?;
+
+                                    Some(())
+                                })()
+                                .is_some()
+                            } else {
+                                false
+                            };
+
+                        if !move_successful {
                             tracing_event!(
-                                Level::ERROR,
-                                "Fallback rename failed for {:?}: {}",
-                                path,
-                                e
+                                Level::WARN,
+                                "Could not move torrent file. Defaulting to renaming in place."
                             );
+                            let mut new_path = path.clone();
+                            new_path.set_extension("torrent.added");
+                            if let Err(e) = fs::rename(&path, &new_path) {
+                                tracing_event!(
+                                    Level::ERROR,
+                                    "Fallback rename failed for {:?}: {}",
+                                    path,
+                                    e
+                                );
+                            }
                         }
                     }
                 } else {
@@ -955,8 +976,9 @@ impl App {
                             } else {
                                 self.app_state.pending_torrent_path = Some(torrent_file_path);
                                 if let Ok(mut explorer) = FileExplorer::new() {
-                                    let initial_path =
-                                        self.find_most_common_download_path().or_else(|| {
+                                    let initial_path = UserDirs::new()
+                                        .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
+                                        .or_else(|| {
                                             UserDirs::new().map(|ud| ud.home_dir().to_path_buf())
                                         });
                                     if let Some(common_path) = initial_path {
@@ -1964,7 +1986,6 @@ impl App {
                 return std::cmp::Ordering::Equal;
             };
 
-            // 1. Primary Sort (Existing)
             let ordering = match sort_by {
                 TorrentSortColumn::Name => a_torrent
                     .latest_state
@@ -2005,7 +2026,6 @@ impl App {
                 ordering
             };
 
-            // 2. Secondary Sort: Weighted Peer Activity
             // If primary sort is equal (e.g. both 0 DL), use activity score.
             primary_ordering.then_with(|| {
                 let calculate_weighted_activity = |t: &TorrentDisplayState| -> u64 {
@@ -2114,9 +2134,23 @@ impl App {
             }
         }
 
-        let mut hasher = sha1::Sha1::new();
-        hasher.update(&torrent.info_dict_bencode);
-        let info_hash = hasher.finalize().to_vec();
+        let info_hash = if torrent.info.meta_version == Some(2) {
+            if !torrent.info.pieces.is_empty() {
+                let mut hasher = sha1::Sha1::new();
+                hasher.update(&torrent.info_dict_bencode);
+                hasher.finalize().to_vec()
+            } else {
+                // Pure V2 -> Primary is V2 (SHA-256 Truncated)
+                let mut hasher = Sha256::new();
+                hasher.update(&torrent.info_dict_bencode);
+                hasher.finalize()[0..20].to_vec()
+            }
+        } else {
+            // V1 -> SHA-1
+            let mut hasher = sha1::Sha1::new();
+            hasher.update(&torrent.info_dict_bencode);
+            hasher.finalize().to_vec()
+        };
 
         if self.app_state.torrents.contains_key(&info_hash) {
             tracing_event!(
@@ -2156,6 +2190,19 @@ impl App {
             return;
         }
 
+        let number_of_pieces_total = if !torrent.info.pieces.is_empty() {
+            (torrent.info.pieces.len() / 20) as u32
+        } else {
+            // Handle v2 torrents (empty pieces list)
+            let total_len = torrent.info.total_length();
+            if torrent.info.piece_length > 0 {
+                // ceil(total_len / piece_length)
+                ((total_len as f64) / (torrent.info.piece_length as f64)).ceil() as u32
+            } else {
+                0
+            }
+        };
+
         let placeholder_state = TorrentDisplayState {
             latest_state: TorrentMetrics {
                 torrent_control_state: torrent_control_state.clone(),
@@ -2163,7 +2210,7 @@ impl App {
                 torrent_or_magnet: permanent_torrent_path.to_string_lossy().to_string(),
                 torrent_name: torrent.info.name.clone(),
                 download_path: download_path.clone(),
-                number_of_pieces_total: (torrent.info.pieces.len() / 20) as u32,
+                number_of_pieces_total,
                 ..Default::default()
             },
             ..Default::default()
@@ -2243,21 +2290,11 @@ impl App {
             }
         };
 
-        let hash_string = match magnet.hash() {
-            Some(hash) => hash,
-            None => {
-                tracing_event!(Level::ERROR, "Magnet link is missing info_hash");
-                return;
-            }
-        };
-
-        let info_hash = match decode_info_hash(hash_string) {
-            Ok(hash) => hash,
-            Err(e) => {
-                tracing_event!(Level::ERROR, "Failed to decode info_hash: {}", e);
-                return;
-            }
-        };
+        let (v1_hash, v2_hash) = parse_hybrid_hashes(&magnet_link);
+        let info_hash = v1_hash
+            .clone()
+            .or_else(|| v2_hash.clone())
+            .expect("Magnet link missing both btih and btmh hashes");
 
         if self.app_state.torrents.contains_key(&info_hash) {
             tracing_event!(Level::INFO, "Ignoring already present torrent from magnet");
@@ -2307,7 +2344,7 @@ impl App {
             global_ul_bucket: global_ul_bucket_clone,
         };
 
-        match TorrentManager::from_magnet(torrent_params, magnet) {
+        match TorrentManager::from_magnet(torrent_params, magnet, &magnet_link) {
             Ok(torrent_manager) => {
                 tokio::spawn(async move {
                     let _ = torrent_manager
@@ -2367,7 +2404,6 @@ impl App {
             }
         }
 
-        // 2. Check System Watch Path (Existing Logic)
         if let Some((watch_path, _)) = get_watch_path() {
             let Ok(entries) = fs::read_dir(watch_path) else {
                 return;
@@ -2541,12 +2577,10 @@ fn make_random_adjustment(mut limits: CalculatedLimits) -> (CalculatedLimits, St
     ];
 
     for attempt in 0..MAX_TRADE_ATTEMPTS {
-        // 1. Randomly shuffle to pick a Source and Destination
         parameters.shuffle(&mut rng);
         let source_param = parameters[0];
         let dest_param = parameters[1];
 
-        // 2. Get current values and bounds
         let source_val = get_limit(&limits, source_param);
         let dest_val = get_limit(&limits, dest_param);
 
@@ -2557,16 +2591,14 @@ fn make_random_adjustment(mut limits: CalculatedLimits) -> (CalculatedLimits, St
             ResourceType::Reserve => MIN_RESERVE,
         };
 
-        // 3. Calculate random step rate and amount to trade
         let step_rate = rng.random_range(MIN_STEP_RATE..=MAX_STEP_RATE);
         let amount_to_trade = ((source_val as f64 * step_rate).ceil() as usize).max(1);
 
-        // 4. Check if this specific trade is possible
         let can_give = source_val >= source_min.saturating_add(amount_to_trade);
 
         if can_give {
             // --- VALID TRADE FOUND ---
-            // 5. Perform the 1-for-1 trade
+
             set_limit(
                 &mut limits,
                 source_param,
@@ -2601,17 +2633,31 @@ fn make_random_adjustment(mut limits: CalculatedLimits) -> (CalculatedLimits, St
 }
 
 pub fn decode_info_hash(hash_string: &str) -> Result<Vec<u8>, String> {
-    if hash_string.len() == 40 {
-        // It's Hex encoded
-        hex::decode(hash_string).map_err(|e| e.to_string())
-    } else if hash_string.len() == 32 {
-        // It's Base32 encoded
-        BASE32
-            .decode(hash_string.to_uppercase().as_bytes())
-            .map_err(|e| e.to_string())
-    } else {
-        Err(format!("Invalid info_hash length: {}", hash_string.len()))
+    // Try Hex Decoding (Handles standard V1 and Hex-encoded V2 Multihash)
+    if let Ok(bytes) = hex::decode(hash_string) {
+        // V1: 20 bytes (SHA-1)
+        if bytes.len() == 20 {
+            return Ok(bytes);
+        }
+        // V2: 34 bytes (Multihash: 2 byte prefix + 32 byte SHA-256)
+        // Prefix 0x12 (SHA2-256) + 0x20 (32 bytes)
+        if bytes.len() == 34 && bytes[0] == 0x12 && bytes[1] == 0x20 {
+            // Return truncated 20 bytes for internal ID
+            return Ok(bytes[2..22].to_vec());
+        }
     }
+
+    // Try Base32 Decoding (Handles Base32-encoded V1 and V2)
+    if let Ok(bytes) = BASE32.decode(hash_string.to_uppercase().as_bytes()) {
+        if bytes.len() == 20 {
+            return Ok(bytes);
+        }
+        if bytes.len() == 34 && bytes[0] == 0x12 && bytes[1] == 0x20 {
+            return Ok(bytes[2..22].to_vec());
+        }
+    }
+
+    Err(format!("Invalid info_hash format/length: {}", hash_string))
 }
 
 fn aggregate_peers_to_availability(peers: &[PeerInfo], total_pieces: usize) -> Vec<u32> {
@@ -2627,4 +2673,20 @@ fn aggregate_peers_to_availability(peers: &[PeerInfo], total_pieces: usize) -> V
         }
     }
     availability
+}
+
+pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    let v1 = magnet_link
+        .split('&')
+        .find(|part| part.contains("xt=urn:btih:"))
+        .and_then(|part| part.split(':').next_back())
+        .and_then(|h| decode_info_hash(h).ok());
+
+    let v2 = magnet_link
+        .split('&')
+        .find(|part| part.contains("xt=urn:btmh:"))
+        .and_then(|part| part.split(':').next_back())
+        .and_then(|h| decode_info_hash(h).ok());
+
+    (v1, v2)
 }

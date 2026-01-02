@@ -45,10 +45,52 @@ pub enum TorrentCommand {
     #[cfg(feature = "pex")]
     SendPexPeers(Vec<String>),
 
-    DhtTorrent(Torrent, i64),
+    DhtTorrent(Box<Torrent>, i64),
 
     AnnounceResponse(String, TrackerResponse),
     AnnounceFailed(String, String),
+
+    MerkleHashData {
+        peer_id: String,
+        root: Vec<u8>,
+        piece_index: u32,
+        base_layer: u32,
+        length: u32,
+        proof: Vec<u8>,
+    },
+
+    #[allow(dead_code)]
+    RequestHash {
+        piece_index: u32,
+        base_layer: u32,
+        length: u32,
+        proof_layers: u32,
+    },
+
+    GetHashes {
+        peer_id: String,
+        file_root: Vec<u8>,
+        base_layer: u32,
+        index: u32,
+        length: u32,
+        proof_layers: u32,
+    },
+
+    SendHashPiece {
+        peer_id: String,
+        root: Vec<u8>,
+        base_layer: u32,
+        index: u32,
+        proof: Vec<u8>,
+    },
+
+    SendHashReject {
+        peer_id: String,
+        root: Vec<u8>,
+        base_layer: u32,
+        index: u32,
+        length: u32,
+    },
 
     PieceVerified {
         piece_index: u32,

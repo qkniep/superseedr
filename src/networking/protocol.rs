@@ -94,6 +94,9 @@ pub struct ExtendedHandshakePayload {
 
     #[serde(default)]
     pub metadata_size: Option<i64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lt_v2: Option<u8>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -113,6 +116,10 @@ pub enum Message {
 
     ExtendedHandshake(Option<i64>),
     Extended(u8, Vec<u8>),
+
+    HashRequest(Vec<u8>, u32, u32, u32, u32), // root, base, offset, length, proof_layers
+    HashReject(Vec<u8>, u32, u32, u32, u32),
+    HashPiece(Vec<u8>, u32, u32, Vec<u8>), // root, base, offset, proof_data
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -150,7 +157,7 @@ pub async fn writer_task<W>(
             res = write_rx.recv() => {
                 match res {
                     Some(first_msg) => {
-                        // 1. Serialize the first message
+
                         match generate_message(first_msg) {
                             Ok(bytes) => batch_buffer.extend_from_slice(&bytes),
                             Err(e) => {
@@ -159,7 +166,6 @@ pub async fn writer_task<W>(
                             }
                         }
 
-                        // 2. Greedy Batching:
                         // Check if more messages are immediately available in the channel.
                         // This reduces syscalls by writing multiple messages in one go.
                         // We cap the batch size (e.g., ~256KB) to ensure we don't hog memory
@@ -179,7 +185,6 @@ pub async fn writer_task<W>(
                             }
                         }
 
-                        // 3. Flush the batch to the socket
                         if !batch_buffer.is_empty() {
 
                             let len = batch_buffer.len();
@@ -227,11 +232,10 @@ pub async fn reader_task<R>(
                 match read_result {
                     Ok(0) => break, // EOF
                     Ok(n) => {
-                        // A. THROTTLE DOWNLOAD
+
                         // We "pay" for the bytes before processing them.
                         consume_tokens(&global_dl_bucket, n as f64).await;
 
-                        // B. BUFFER
                         processing_buf.extend_from_slice(&socket_buf[..n]);
 
                         // C. PARSE LOOP
@@ -351,7 +355,11 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
                 .filter(|&variant| variant != ClientExtendedId::Handshake) // Exclude the special handshake ID
                 .map(|variant| (variant.as_str().to_string(), variant.id()))
                 .collect();
-            let payload = ExtendedHandshakePayload { m, metadata_size };
+            let payload = ExtendedHandshakePayload {
+                m,
+                metadata_size,
+                lt_v2: Some(1),
+            };
             let bencoded_payload =
                 serde_bencode::to_bytes(&payload).map_err(MessageGenerationError::BencodeError)?;
 
@@ -372,13 +380,55 @@ pub fn generate_message(message: Message) -> Result<Vec<u8>, MessageGenerationEr
             message_bytes.extend(payload);
             Ok(message_bytes)
         }
+
+        Message::HashRequest(root, base, offset, length, proof_layers) => {
+            let mut buffer = Vec::with_capacity(53); // 4 (len) + 1 (id) + 32 (root) + 16 (4*u32)
+
+            // 49 bytes: ID + root (32) + base + offset + length + proof_layers
+            let payload_len: u32 = 49;
+            buffer.extend_from_slice(&payload_len.to_be_bytes());
+
+            buffer.push(21); // HashRequest ID
+            buffer.extend_from_slice(&root); // 32 bytes
+            buffer.extend_from_slice(&base.to_be_bytes());
+            buffer.extend_from_slice(&offset.to_be_bytes());
+            buffer.extend_from_slice(&length.to_be_bytes());
+            buffer.extend_from_slice(&proof_layers.to_be_bytes());
+
+            Ok(buffer)
+        }
+
+        Message::HashPiece(root, base, offset, data) => {
+            let mut buffer = Vec::new();
+            // Length: 1 (ID) + 32 (Root) + 8 (2 * u32) + Data
+            let len = 1 + 32 + 4 + 4 + data.len();
+            buffer.extend_from_slice(&(len as u32).to_be_bytes());
+            buffer.push(22);
+            buffer.extend_from_slice(&root); // Write 32-byte Root
+            buffer.extend_from_slice(&base.to_be_bytes());
+            buffer.extend_from_slice(&offset.to_be_bytes());
+            buffer.extend_from_slice(&data);
+            Ok(buffer)
+        }
+        Message::HashReject(root, base, offset, length, proof_layers) => {
+            let mut buffer = Vec::new();
+            // Length: 1 (ID) + 32 (Root) + 16 (4 * u32) = 49 bytes
+            let len = 1 + 32 + 4 + 4 + 4 + 4;
+            buffer.extend_from_slice(&(len as u32).to_be_bytes());
+            buffer.push(23);
+            buffer.extend_from_slice(&root); // Write 32-byte Root
+            buffer.extend_from_slice(&base.to_be_bytes());
+            buffer.extend_from_slice(&offset.to_be_bytes());
+            buffer.extend_from_slice(&length.to_be_bytes());
+            buffer.extend_from_slice(&proof_layers.to_be_bytes());
+            Ok(buffer)
+        }
     }
 }
 
 pub fn parse_message_from_bytes(
     cursor: &mut std::io::Cursor<&Vec<u8>>,
 ) -> Result<Message, std::io::Error> {
-    // 1. Read Length Prefix (4 bytes)
     let mut len_buf = [0u8; 4];
 
     if std::io::Read::read_exact(cursor, &mut len_buf).is_err() {
@@ -392,7 +442,6 @@ pub fn parse_message_from_bytes(
         return Ok(Message::KeepAlive);
     }
 
-    // 2. Check if we have the full message payload
     let current_pos = cursor.position();
     let available_bytes = cursor.get_ref().len() as u64 - current_pos;
 
@@ -403,22 +452,17 @@ pub fn parse_message_from_bytes(
         return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
     }
 
-    // 3. Read Message ID (1 byte)
     let mut id_buf = [0u8; 1];
 
-    // FIX: Disambiguate explicitly
     std::io::Read::read_exact(cursor, &mut id_buf)?;
 
     let message_id = id_buf[0];
 
-    // 4. Read Payload (Len - 1 bytes)
     let payload_len = message_len as usize - 1;
     let mut payload = vec![0u8; payload_len];
 
-    // FIX: Disambiguate explicitly
     std::io::Read::read_exact(cursor, &mut payload)?;
 
-    // 5. Decode Message
     match message_id {
         // ... (rest of the function remains the same)
         0 => Ok(Message::Choke),
@@ -511,12 +555,94 @@ pub fn parse_message_from_bytes(
             let extended_payload = payload[1..].to_vec();
             Ok(Message::Extended(extended_id, extended_payload))
         }
+        21 => {
+            if payload.len() != 48 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Invalid HashRequest length: {}", payload.len()),
+                ));
+            }
+            let root = payload[0..32].to_vec(); // Read Root
+            let base = read_be_u32(&payload, 32)?;
+            let offset = read_be_u32(&payload, 36)?;
+            let length = read_be_u32(&payload, 40)?;
+            let proof_layers = read_be_u32(&payload, 44)?;
+            Ok(Message::HashRequest(
+                root,
+                base,
+                offset,
+                length,
+                proof_layers,
+            ))
+        }
+        22 => {
+            if payload.len() < 40 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid HashPiece length",
+                ));
+            }
+            let root = payload[0..32].to_vec();
+            let base = read_be_u32(&payload, 32)?;
+            let offset = read_be_u32(&payload, 36)?;
+
+            let mut data = payload[40..].to_vec();
+
+            if !data.is_empty() && !data.len().is_multiple_of(32) {
+                let remainder = data.len() % 32;
+                if remainder == 4 {
+                    // Likely [Count: 4] [Hashes...]
+                    data = data[4..].to_vec();
+                    tracing::debug!("Trimmed 4-byte prefix from HashPiece proof");
+                } else if remainder == 8 {
+                    // Likely [Length: 4] [Count: 4] [Hashes...]
+                    data = data[8..].to_vec();
+                    tracing::debug!("Trimmed 8-byte prefix from HashPiece proof");
+                }
+            }
+
+            Ok(Message::HashPiece(root, base, offset, data))
+        }
+        23 => {
+            if payload.len() != 48 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Invalid HashReject length: {}", payload.len()),
+                ));
+            }
+            let root = payload[0..32].to_vec();
+            let base = read_be_u32(&payload, 32)?;
+            let offset = read_be_u32(&payload, 36)?;
+            let length = read_be_u32(&payload, 40)?;
+            let proof_layers = read_be_u32(&payload, 44)?; // Read extra field
+
+            Ok(Message::HashReject(
+                root,
+                base,
+                offset,
+                length,
+                proof_layers,
+            ))
+        }
         _ => {
             // Unknown ID
             let msg = format!("Unknown message ID: {}", message_id);
             Err(Error::new(ErrorKind::InvalidData, msg))
         }
     }
+}
+
+// Helper to read a u32 from a byte slice at a specific offset
+fn read_be_u32(slice: &[u8], offset: usize) -> Result<u32, std::io::Error> {
+    if offset + 4 > slice.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Payload too short",
+        ));
+    }
+    // We strictly use try_into() to grab exactly 4 bytes
+    let bytes: [u8; 4] = slice[offset..offset + 4].try_into().unwrap();
+    Ok(u32::from_be_bytes(bytes))
 }
 
 #[cfg(test)]
@@ -716,16 +842,12 @@ mod tests {
     /// This one helper function replaces all your TCP tests.
     /// It checks that a message can be serialized and then parsed back.
     async fn assert_message_roundtrip(msg: Message) {
-        // 1. Generate the message into bytes
         let bytes = generate_message(msg.clone()).unwrap();
 
-        // 2. Create an in-memory "reader" from those bytes
         let mut reader = &bytes[..];
 
-        // 3. Parse the message back (this works because of Step 1)
         let parsed_msg = parse_message(&mut reader).await.unwrap();
 
-        // 4. Assert they are identical
         assert_eq!(msg, parsed_msg);
     }
 
@@ -749,20 +871,16 @@ mod tests {
     /// Special test for the ExtendedHandshake
     #[tokio::test]
     async fn test_extended_handshake_parsing() {
-        // 1. Generate the ExtendedHandshake message
         let metadata_size = 12345;
         let msg = Message::ExtendedHandshake(Some(metadata_size));
         let generated_bytes = generate_message(msg).unwrap();
 
-        // 2. Parse it back using our generic parser
         let mut reader = &generated_bytes[..];
         let parsed = parse_message(&mut reader).await.unwrap();
 
-        // 3. It should parse as a Message::Extended with ID 0 (Handshake ID)
         if let Message::Extended(id, payload_bytes) = parsed {
             assert_eq!(id, ClientExtendedId::Handshake.id()); // ID is 0
 
-            // 4. Check the bencoded payload
             let payload: ExtendedHandshakePayload =
                 serde_bencode::from_bytes(&payload_bytes).unwrap();
 

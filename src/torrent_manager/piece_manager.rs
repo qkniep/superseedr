@@ -47,6 +47,7 @@ impl PieceManager {
         &mut self,
         piece_length: u32,
         total_length: u64,
+        piece_overrides: HashMap<u32, u32>,
         validation_complete: bool,
     ) {
         self.block_manager.set_geometry(
@@ -54,6 +55,7 @@ impl PieceManager {
             total_length,
             Vec::new(),
             Vec::new(),
+            piece_overrides,
             validation_complete,
         );
     }
@@ -82,38 +84,37 @@ impl PieceManager {
         block_data: &[u8],
         piece_size: usize,
     ) -> Option<Vec<u8>> {
-        // 1. Safety fallback: If geometry wasn't set externally, infer it now.
         if self.block_manager.piece_length == 0 {
             let estimated_total = (piece_index as u64 + 1) * piece_size as u64;
-            self.set_geometry(piece_size as u32, estimated_total, false);
+            self.set_geometry(piece_size as u32, estimated_total, HashMap::new(), false);
         }
 
-        // 2. Map the incoming byte offset to a BlockAddress
         let addr = self.block_manager.inflate_address_from_overlay(
             piece_index,
             block_offset,
             block_data.len() as u32,
         )?;
 
-        // 3. Delegate buffering to BlockManager
         self.block_manager
             .handle_v1_block_buffering(addr, block_data)
     }
 
     pub fn mark_as_complete(&mut self, piece_index: u32) -> Vec<String> {
-        if self.bitfield.get(piece_index as usize) == Some(&PieceStatus::Done) {
+        let current_status = self.bitfield.get(piece_index as usize).cloned();
+
+        if current_status == Some(PieceStatus::Done) {
             return Vec::new();
         }
 
-        // 1. Update High-Level State (for state.rs logic)
         self.bitfield[piece_index as usize] = PieceStatus::Done;
         self.pieces_remaining = self.pieces_remaining.saturating_sub(1);
+
+        let _old_need_len = self.need_queue.len();
         self.need_queue.retain(|&p| p != piece_index);
+        let _new_need_len = self.need_queue.len();
 
         let peers_to_cancel = self.pending_queue.remove(&piece_index).unwrap_or_default();
 
-        // 2. Update Low-Level State (BlockManager)
-        // This ensures the block manager knows this piece is done and won't accept duplicates.
         self.block_manager.commit_v1_piece(piece_index);
 
         peers_to_cancel
@@ -156,10 +157,8 @@ impl PieceManager {
     where
         I: Iterator<Item = &'a Vec<bool>> + Clone,
     {
-        // 1. Delegate calculation to BlockManager (counts everything)
         self.block_manager.update_rarity(all_peer_bitfields);
 
-        // 2. Sync AND Filter
         // We only want to expose rarity for pieces we actually Need or are Pending.
         // This matches the original API contract and passes the existing tests.
         self.piece_rarity = self
@@ -175,6 +174,7 @@ impl PieceManager {
     // This logic remains here because it orchestrates the high-level queues
     // (need_queue, pending_queue) which define the download strategy.
 
+    #[allow(dead_code)]
     pub fn choose_piece_for_peer(
         &self,
         peer_bitfield: &[bool],
@@ -215,6 +215,10 @@ impl PieceManager {
     pub fn clear_assembly_buffers(&mut self) {
         self.block_manager.legacy_buffers.clear();
     }
+
+    pub fn get_piece_availability(&self, piece_index: u32) -> u32 {
+        self.piece_rarity.get(&piece_index).copied().unwrap_or(0) as u32
+    }
 }
 
 #[cfg(test)]
@@ -230,7 +234,7 @@ mod tests {
         // 16KB * 10 blocks per piece = 163840 bytes per piece
         let piece_len = 163_840;
         let total_len = piece_len as u64 * num_pieces as u64;
-        pm.set_geometry(piece_len, total_len, false);
+        pm.set_geometry(piece_len, total_len, HashMap::new(), false);
 
         pm.set_initial_fields(num_pieces, false);
         pm
@@ -268,7 +272,6 @@ mod tests {
         assert_eq!(pm.pieces_remaining, 5);
         assert_eq!(pm.need_queue, vec![0, 1, 2, 3, 4]);
 
-        // 1. Mark piece 2 as PENDING
         pm.mark_as_pending(2, "peer_A".to_string());
         assert_eq!(pm.need_queue, vec![0, 1, 3, 4]);
         assert_eq!(
@@ -277,14 +280,12 @@ mod tests {
         );
         assert_eq!(pm.pieces_remaining, 5); // Still need it
 
-        // 2. Mark piece 2 as PENDING from another peer
         pm.mark_as_pending(2, "peer_B".to_string());
         assert_eq!(
             pm.pending_queue.get(&2).unwrap(),
             &vec!["peer_A".to_string(), "peer_B".to_string()]
         );
 
-        // 3. Requeue piece 2 back to NEED
         pm.requeue_pending_to_need(2);
         // Order doesn't matter, check presence and absence
         assert!(!pm.pending_queue.contains_key(&2));
@@ -295,14 +296,12 @@ mod tests {
         assert!(pm.need_queue.contains(&4));
         assert_eq!(pm.need_queue.len(), 5);
 
-        // 4. Mark piece 3 (from NEED) as COMPLETE
         let peers_to_cancel = pm.mark_as_complete(3);
         assert!(peers_to_cancel.is_empty());
         assert_eq!(pm.bitfield[3], PieceStatus::Done);
         assert_eq!(pm.pieces_remaining, 4);
         assert!(!pm.need_queue.contains(&3));
 
-        // 5. Mark piece 2 (from PENDING) as COMPLETE
         pm.mark_as_pending(2, "peer_C".to_string()); // Pend it again
         let peers_to_cancel = pm.mark_as_complete(2);
         assert_eq!(peers_to_cancel, vec!["peer_C".to_string()]);
@@ -311,7 +310,6 @@ mod tests {
         assert!(!pm.pending_queue.contains_key(&2));
         assert!(!pm.need_queue.contains(&2));
 
-        // 6. Mark piece 2 (already DONE) as COMPLETE (idempotent)
         let peers_to_cancel = pm.mark_as_complete(2);
         assert!(peers_to_cancel.is_empty());
         assert_eq!(pm.pieces_remaining, 3); // No change
@@ -325,12 +323,16 @@ mod tests {
         let block_size = 16384;
 
         // Set geometry explicitly (required for block manager calculations)
-        pm.set_geometry(piece_size as u32, piece_size as u64 * 10, false);
+        pm.set_geometry(
+            piece_size as u32,
+            piece_size as u64 * 10,
+            HashMap::new(),
+            false,
+        );
 
         let block_data_0 = vec![1; block_size];
         let block_data_1 = vec![2; block_size];
 
-        // 1. Add first block
         let result = pm.handle_block(piece_index, 0, &block_data_0, piece_size);
         assert!(result.is_none());
 
@@ -340,25 +342,20 @@ mod tests {
         assert_eq!(assembler.total_blocks, 2);
         assert_eq!(assembler.received_blocks, 1);
 
-        // 2. Reset the assembler (e.g., hash fail)
         pm.reset_piece_assembly(piece_index);
         assert!(!pm.block_manager.legacy_buffers.contains_key(&piece_index));
 
-        // 3. Add first block again (new assembler created)
         let result = pm.handle_block(piece_index, 0, &block_data_0, piece_size);
         assert!(result.is_none());
 
-        // 4. Add second block
         let result = pm.handle_block(piece_index, block_size as u32, &block_data_1, piece_size);
 
-        // 5. Check completion
         assert!(result.is_some());
         let full_piece = result.unwrap();
         assert_eq!(full_piece.len(), piece_size);
         assert_eq!(&full_piece[0..block_size], &block_data_0[..]);
         assert_eq!(&full_piece[block_size..], &block_data_1[..]);
 
-        // 6. Assembler should be gone
         assert!(!pm.block_manager.legacy_buffers.contains_key(&piece_index));
     }
 
@@ -401,12 +398,10 @@ mod tests {
         let mut peer_pending = HashSet::new();
         let status = TorrentStatus::Standard;
 
-        // 1. Choose rarest piece
         let choice = pm.choose_piece_for_peer(&peer_bitfield, &peer_pending, &status);
         assert!(choice == Some(0) || choice == Some(2));
         let chosen_piece = choice.unwrap();
 
-        // 2. Choose rarest, but chosen piece (0 or 2) is now pending for this peer
         peer_pending.insert(chosen_piece);
         let choice2 = pm.choose_piece_for_peer(&peer_bitfield, &peer_pending, &status);
         if chosen_piece == 0 {
@@ -415,7 +410,6 @@ mod tests {
             assert_eq!(choice2, Some(0));
         }
 
-        // 3. Make all available pieces pending for this peer
         peer_pending.insert(0);
         peer_pending.insert(1);
         peer_pending.insert(2);
@@ -423,7 +417,6 @@ mod tests {
         let choice = pm.choose_piece_for_peer(&peer_bitfield, &peer_pending, &status);
         assert_eq!(choice, None);
 
-        // 4. Peer has nothing we need
         let empty_peer_bitfield = vec![false; 5];
         let choice = pm.choose_piece_for_peer(&empty_peer_bitfield, &peer_pending, &status);
         assert_eq!(choice, None);
@@ -480,7 +473,12 @@ mod tests {
         let piece_size = 32768;
         let block_size = 16384;
 
-        pm.set_geometry(piece_size as u32, piece_size as u64 * 5, false);
+        pm.set_geometry(
+            piece_size as u32,
+            piece_size as u64 * 5,
+            HashMap::new(),
+            false,
+        );
 
         let block_data_0 = vec![1; block_size];
         let block_data_1 = vec![2; block_size];
@@ -512,7 +510,7 @@ mod tests {
         let block_size = 16384;
         let block_data = vec![1; block_size];
 
-        pm.set_geometry(piece_size as u32, piece_size as u64, false);
+        pm.set_geometry(piece_size as u32, piece_size as u64, HashMap::new(), false);
 
         // Receive block 0
         let result1 = pm.handle_block(piece_index, 0, &block_data, piece_size);
@@ -522,7 +520,12 @@ mod tests {
         // Test duplicate detection during assembly
         let piece_size_2 = 32768;
 
-        pm.set_geometry(piece_size_2 as u32, piece_size_2 as u64 * 2, false);
+        pm.set_geometry(
+            piece_size_2 as u32,
+            piece_size_2 as u64 * 2,
+            HashMap::new(),
+            false,
+        );
 
         let block_data_0 = vec![1; block_size];
         let block_data_1 = vec![2; block_size];
@@ -551,7 +554,7 @@ mod tests {
         let piece_size = 16384;
         let block_data = vec![1; piece_size];
 
-        pm.set_geometry(piece_size as u32, piece_size as u64, false);
+        pm.set_geometry(piece_size as u32, piece_size as u64, HashMap::new(), false);
 
         // Mark piece as complete first
         pm.mark_as_complete(piece_index);
@@ -583,7 +586,6 @@ mod tests {
         let mut pm = setup_manager(1);
         let piece_index = 0;
 
-        // 1. Mark as complete (simulates verification success)
         pm.mark_as_complete(piece_index);
 
         // Assertion: BlockManager must think it's done
@@ -595,7 +597,6 @@ mod tests {
             );
         }
 
-        // 2. Simulate Disk Write Failure -> Requeue
         pm.requeue_pending_to_need(piece_index);
 
         // Assertion: High level state is updated
@@ -633,14 +634,12 @@ mod tests {
         let piece_size = 32768; // Standard 32KB piece size
         let total_len = 16385;
 
-        pm.set_geometry(piece_size, total_len, false);
+        pm.set_geometry(piece_size, total_len, HashMap::new(), false);
 
-        // 1. Handle the full block (0-16384)
         let block_0 = vec![1u8; 16384];
         let res_0 = pm.handle_block(0, 0, &block_0, piece_size as usize);
         assert!(res_0.is_none());
 
-        // 2. Handle the tiny block (16384-16385) - Length 1
         let block_1 = vec![2u8; 1];
         let res_1 = pm.handle_block(0, 16384, &block_1, piece_size as usize);
 

@@ -25,10 +25,10 @@ jobs:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -65,9 +65,9 @@ jobs:
           - suffix: "private"
             flags: --no-default-features
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -133,7 +133,7 @@ jobs:
       #     cd ../../../.. # Return to root
 
       - name: Upload Linux Artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: superseedr-linux-amd64-${{ matrix.suffix }}-${{ github.ref_name }}
           path: staging/* # Uploads both .deb and .tar.gz
@@ -155,7 +155,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -276,7 +276,7 @@ jobs:
           security delete-keychain "$KEYCHAIN_NAME"
 
       - name: Upload macOS PKG Artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: superseedr-macos-${{ matrix.suffix }}-universal-${{ github.ref_name }} 
           path: ${{ steps.stage_pkg.outputs.final_pkg_path }}
@@ -296,7 +296,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -393,7 +393,7 @@ jobs:
           echo "final_msi_name=$MSI_NAME" >> $env:GITHUB_OUTPUT
 
       - name: Upload Windows MSI Artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: superseedr-windows-${{ matrix.suffix }}-${{ github.ref_name }}
           path: staging/*.msi
@@ -406,7 +406,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -486,7 +486,7 @@ jobs:
     needs: [package_linux, bundle_macos, build_windows, publish_crates_io, build_and_push_docker]
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           path: artifacts/
           pattern: superseedr-*

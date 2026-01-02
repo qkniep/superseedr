@@ -72,6 +72,10 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
             draw_file_picker(f, file_explorer, "Select Download Folder".to_string());
             return;
         }
+        AppMode::AddTorrentPicker(file_explorer) => {
+            draw_file_picker(f, file_explorer, "Select Torrent File".to_string());
+            return;
+        }
         _ => {}
     }
 
@@ -1218,7 +1222,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
             .constraints([
                 Constraint::Length(30), // Fixed space for Branding
                 Constraint::Min(0),     // Center takes all remaining space
-                Constraint::Length(18), // Fixed space for Port Status
+                Constraint::Length(21), // Fixed space for Port Status
             ])
             .split(footer_chunk)
     } else {
@@ -1308,6 +1312,8 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     // Priority 3: Management
     if width > 90 {
         spans.extend(vec![
+            Span::styled("[a]", Style::default().fg(theme::GREEN)),
+            Span::raw("dd | "),
             Span::styled("[d]", Style::default().fg(theme::YELLOW)),
             Span::raw("elete | "),
             Span::styled("[s]", Style::default().fg(theme::MAUVE)),
@@ -1432,13 +1438,22 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
 
     let legend_line = Line::from(vec![
         Span::styled("Connected:", Style::default().fg(color_connected)),
-        Span::raw(connected_count.to_string()),
+        Span::styled(
+            connected_count.to_string(),
+            Style::default().fg(color_connected),
+        ),
         Span::raw(" "),
         Span::styled("Discovered:", Style::default().fg(color_discovered)),
-        Span::raw(discovered_count.to_string()),
+        Span::styled(
+            discovered_count.to_string(),
+            Style::default().fg(color_discovered),
+        ),
         Span::raw(" "),
         Span::styled("Disconnected:", Style::default().fg(color_disconnected)),
-        Span::raw(disconnected_count.to_string()),
+        Span::styled(
+            disconnected_count.to_string(),
+            Style::default().fg(color_disconnected),
+        ),
         Span::raw(" "),
     ]);
 
@@ -2269,7 +2284,7 @@ fn draw_welcome_screen(f: &mut Frame) {
     let text = vec![
         Line::from(Span::styled(
             "A BitTorrent Client in your Terminal",
-            Style::default(),
+            Style::default().add_modifier(Modifier::ITALIC),
         )),
         Line::from(""),
         Line::from(Span::styled(
@@ -2278,43 +2293,91 @@ fn draw_welcome_screen(f: &mut Frame) {
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" 1. ", Style::default().fg(theme::GREEN)),
-            Span::raw("Paste (Ctrl+V) a "),
+            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
+            Span::raw("Paste ("),
+            Span::styled("Ctrl+V", Style::default().fg(theme::SKY).bold()),
+            Span::raw(") a "),
             Span::styled("magnet link", Style::default().fg(theme::PEACH)),
-            Span::raw(" or "),
-            Span::styled("`.torrent` file path", Style::default().fg(theme::PEACH)),
-            Span::raw("."),
+            Span::raw(" from your clipboard."),
         ]),
-        Line::from("    A file picker will appear to choose a download location for magnet links."),
+        Line::from(vec![
+            Span::raw("      - "),
+            Span::styled(
+                "e.g. \"magnet:?xt=urn:btih:...\"",
+                Style::default()
+                    .fg(theme::SURFACE2)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
+            Span::raw("Press "),
+            Span::styled("[a]", Style::default().fg(theme::MAUVE).bold()),
+            Span::raw(" to open the file picker and select a "),
+            Span::styled("`.torrent`", Style::default().fg(theme::PEACH)),
+            Span::raw(" file."),
+        ]),
+        Line::from(vec![
+            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
+            Span::raw("Use the "),
+            Span::styled("CLI", Style::default().fg(theme::SKY).bold()),
+            Span::raw(" from another terminal:"),
+        ]),
+        // Sub-bullet 1: CLI Magnet
+        Line::from(vec![
+            Span::raw("      - magnet: "),
+            Span::styled(
+                "superseedr add \"magnet:?xt=urn:btih:...\"",
+                Style::default().fg(theme::SURFACE2),
+            ),
+        ]),
+        // Sub-bullet 2: CLI Torrent File
+        Line::from(vec![
+            Span::raw("      - file:   "),
+            Span::styled(
+                "superseedr add \"/path/to/my.torrent\"",
+                Style::default().fg(theme::SURFACE2),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
+            Span::raw("Drop files into your "),
+            Span::styled("Watch Folder", Style::default().fg(theme::SKY).bold()),
+            Span::raw(" to add them automatically."),
+        ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" 2. ", Style::default().fg(theme::GREEN)),
-            Span::raw("Use the CLI in another terminal while this TUI is running:"),
+            Span::styled(
+                "Browser Support: ",
+                Style::default().fg(theme::YELLOW).bold(),
+            ),
+            Span::raw("To open magnet links directly from your browser,"),
         ]),
-        Line::from(Span::styled(
-            "   $ superseedr \"magnet:?xt=urn:btih:...\"",
-            Style::default().fg(theme::SURFACE2),
-        )),
-        Line::from(Span::styled(
-            "   $ superseedr \"/path/to/my.torrent\"",
-            Style::default().fg(theme::SURFACE2),
-        )),
         Line::from(vec![
-            Span::raw("    Note: CLI requires a default download path. Press "),
-            Span::styled("[c]", Style::default().fg(theme::MAUVE)),
-            Span::raw(" to configure."),
+            Span::raw("   natively install superseedr: "),
+            Span::styled(
+                "https://github.com/Jagalite/superseedr/releases",
+                Style::default().fg(theme::BLUE).underlined(),
+            ),
         ]),
         Line::from(""),
         Line::from(""),
         Line::from(vec![
             Span::styled(" [m] ", Style::default().fg(theme::TEAL)),
-            Span::styled("for manual/help", Style::default().fg(theme::SUBTEXT1)),
+            Span::styled("Manual/Help", Style::default().fg(theme::SUBTEXT1)),
             Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-            Span::styled("[Esc] ", Style::default().fg(theme::RED)),
-            Span::styled("to dismiss", Style::default().fg(theme::SUBTEXT1)),
+            Span::styled(" [c] ", Style::default().fg(theme::MAUVE)),
+            Span::styled("Config", Style::default().fg(theme::SUBTEXT1)),
+            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+            Span::styled(" [q] ", Style::default().fg(theme::RED)), // Added Quit command
+            Span::styled("Quit", Style::default().fg(theme::SUBTEXT1)),
+            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+            Span::styled(" [Esc] ", Style::default().fg(theme::RED)),
+            Span::styled("Dismiss", Style::default().fg(theme::SUBTEXT1)),
         ]),
     ];
 
+    // ... (rest of the centering and rendering logic remains the same)
     let text_height = text.len() as u16;
     let text_width = text.iter().map(|line| line.width()).max().unwrap_or(0) as u16;
     let horizontal_padding: u16 = 4;
@@ -2339,7 +2402,7 @@ fn draw_welcome_screen(f: &mut Frame) {
     let block = Block::default()
         .title(Span::styled(
             " Welcome to superseedr! ",
-            Style::default().fg(theme::MAUVE),
+            Style::default().fg(theme::MAUVE).bold(),
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::SURFACE2));
@@ -2549,11 +2612,14 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
                     Cell::from("Delete torrent (D includes downloaded files)"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
-                // --- Adding Torrents ---
                 Row::new(vec![Cell::from(Span::styled(
                     "Adding Torrents",
                     Style::default().fg(theme::YELLOW),
                 ))]),
+                Row::new(vec![
+                    Cell::from(Span::styled("a", Style::default().fg(theme::GREEN))),
+                    Cell::from("Open file picker to add a .torrent file"),
+                ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Paste | v",

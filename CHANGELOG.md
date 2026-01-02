@@ -1,5 +1,23 @@
 # Changelog
 
+## Release v0.9.30
+### Performance
+- Optimized BitTorrent v2 verification with small-file root lookup bypassing.
+- Implemented memory-aware cleanup logic for v2 pending data buffers.
+- Improved piece request pipelining with deterministic rarity-first selection.
+
+### Refactoring
+- Introduced BitTorrent v2 and Hybrid torrent support (BEP 52).
+- Implemented Merkle tree verification engine for v2 data integrity.
+- Refactored torrent parser to handle v2 file trees and synthetic padding files (BEP 47).
+- Decoupled piece geometry from contiguous streams to support file-aligned pieces.
+- Enhanced TUI with an "Add Torrent" file picker and improved watch folder management.
+
+### Testing
+- Added comprehensive v2/hybrid integration tests covering boundary alignment and proof verification.
+- Introduced scale tests for 1000-piece torrents to verify pipeline stability.
+- Added proptest-based network fault injection for the state machine.
+
 ## Release v0.9.29
 ### Performance
 - Introduced "Smart Table" logic to dynamically hide columns based on priority and width.

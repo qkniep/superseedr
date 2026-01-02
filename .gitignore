@@ -4,6 +4,7 @@
 
 
 # --- local temp---
+tmp
 *.tmp
 
 # --- macOS ---
