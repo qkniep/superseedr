@@ -424,8 +424,8 @@ mod tests {
 
         let roots_0 = mapping.piece_to_roots.get(&0).unwrap();
         let roots_1 = mapping.piece_to_roots.get(&1).unwrap();
-        assert_eq!(roots_0[0].2, vec![0xAA; 32]);
-        assert_eq!(roots_1[0].2, vec![0xBB; 32]);
+        assert_eq!(roots_0[0].root_hash, vec![0xAA; 32]);
+        assert_eq!(roots_1[0].root_hash, vec![0xBB; 32]);
     }
 
     #[test]
@@ -462,10 +462,10 @@ mod tests {
         let mapping = torrent.calculate_v2_mapping();
 
         let roots_0 = mapping.piece_to_roots.get(&0).expect("Piece 0 missing");
-        assert_eq!(roots_0[0].2, vec![0xAA; 32]);
+        assert_eq!(roots_0[0].root_hash, vec![0xAA; 32]);
 
         let roots_1 = mapping.piece_to_roots.get(&1).expect("Piece 1 missing");
-        assert_eq!(roots_1[0].2, vec![0x5A; 32]);
+        assert_eq!(roots_1[0].root_hash, vec![0x5A; 32]);
     }
 
     #[test]
@@ -489,7 +489,10 @@ mod tests {
         let mapping = torrent.calculate_v2_mapping();
 
         assert_eq!(mapping.piece_count, 1);
-        assert_eq!(mapping.piece_to_roots.get(&0).unwrap()[0].2, vec![0xAA; 32]);
+        assert_eq!(
+            mapping.piece_to_roots.get(&0).unwrap()[0].root_hash,
+            vec![0xAA; 32]
+        );
     }
 
     #[test]

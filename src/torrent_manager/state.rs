@@ -683,8 +683,10 @@ impl TorrentState {
                         if let Some(roots) = roots_ref.get(&piece_index) {
                             if let Some(root_info) = roots.first() {
                                 let global_piece_start = piece_index as u64 * piece_len;
-                                let offset_in_file = global_piece_start.saturating_sub(root_info.file_offset);
-                                let remaining_in_file = root_info.length.saturating_sub(offset_in_file);
+                                let offset_in_file =
+                                    global_piece_start.saturating_sub(root_info.file_offset);
+                                let remaining_in_file =
+                                    root_info.length.saturating_sub(offset_in_file);
                                 return Some(std::cmp::min(piece_len, remaining_in_file) as u32);
                             }
                         }
@@ -1195,7 +1197,13 @@ impl TorrentState {
 
                         if let Some(root_info) = matching_root_info {
                             if let Some(target_hash) = self.torrent.as_ref().and_then(|t| {
-                                t.get_v2_hash_layer(piece_index, root_info.file_offset, root_info.length, 1, &root_info.root_hash)
+                                t.get_v2_hash_layer(
+                                    piece_index,
+                                    root_info.file_offset,
+                                    root_info.length,
+                                    1,
+                                    &root_info.root_hash,
+                                )
                             }) {
                                 // SCENARIO: We have the piece-layer hash locally
                                 effects.push(Effect::VerifyPieceV2 {
@@ -1222,7 +1230,11 @@ impl TorrentState {
                                     relative_index,
                                     hashing_context_len,
                                 });
-                            } else if self.torrent.as_ref().is_some_and(|t| !t.info.pieces.is_empty()) {
+                            } else if self
+                                .torrent
+                                .as_ref()
+                                .is_some_and(|t| !t.info.pieces.is_empty())
+                            {
                                 // Fallback for Hybrid torrents
                                 self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                                 effects.push(Effect::VerifyPiece {
@@ -1232,17 +1244,30 @@ impl TorrentState {
                                 });
                             } else {
                                 // Buffer v2 data and ask for proof.
-                                self.v2_pending_data.insert(piece_index, (block_offset, complete_data));
+                                self.v2_pending_data
+                                    .insert(piece_index, (block_offset, complete_data));
 
-                                let root_info_opt = self.piece_to_roots.get(&piece_index).and_then(|roots| roots.first());
+                                let root_info_opt = self
+                                    .piece_to_roots
+                                    .get(&piece_index)
+                                    .and_then(|roots| roots.first());
 
                                 if let Some(r_info) = root_info_opt {
-                                    let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(32768);
-                                    let request_base = if piece_len >= 16384 { (piece_len / 16384).trailing_zeros() } else { 0 };
+                                    let piece_len = self
+                                        .torrent
+                                        .as_ref()
+                                        .map(|t| t.info.piece_length as u64)
+                                        .unwrap_or(32768);
+                                    let request_base = if piece_len >= 16384 {
+                                        (piece_len / 16384).trailing_zeros()
+                                    } else {
+                                        0
+                                    };
 
                                     let request_index = if piece_len >= 16384 {
                                         let global_piece_offset = piece_index as u64 * piece_len;
-                                        let offset_in_file = global_piece_offset.saturating_sub(r_info.file_offset);
+                                        let offset_in_file =
+                                            global_piece_offset.saturating_sub(r_info.file_offset);
                                         let relative_block_index = offset_in_file / 16384;
                                         relative_block_index >> request_base
                                     } else {
@@ -1259,8 +1284,7 @@ impl TorrentState {
                                     });
                                 }
                             }
-                        }
-                        else {
+                        } else {
                             // Fallback attempt to V1 if possible
                             self.last_activity = TorrentActivity::VerifyingPiece(piece_index);
                             effects.push(Effect::VerifyPiece {
@@ -1320,7 +1344,8 @@ impl TorrentState {
                             let (valid_length, _, hashing_context_len) =
                                 self.calculate_v2_verify_params(piece_index, data.len());
 
-                            let offset_in_file = global_offset.saturating_sub(root_info.file_offset);
+                            let offset_in_file =
+                                global_offset.saturating_sub(root_info.file_offset);
                             let actual_relative_index = (offset_in_file / piece_len) as u32;
 
                             let local_piece_hash = self.torrent.as_ref().and_then(|t| {
@@ -1334,12 +1359,15 @@ impl TorrentState {
                             });
 
                             let (verification_target, verification_proof) = if proof.len() == 32 {
-                                (local_piece_hash.unwrap_or_else(|| proof.clone()), Vec::new())
+                                (
+                                    local_piece_hash.unwrap_or_else(|| proof.clone()),
+                                    Vec::new(),
+                                )
                             } else {
                                 (root_info.root_hash.clone(), proof)
                             };
-                            
-                             return vec![Effect::VerifyPieceV2 {
+
+                            return vec![Effect::VerifyPieceV2 {
                                 peer_id,
                                 piece_index,
                                 proof: verification_proof,
@@ -2034,7 +2062,11 @@ impl TorrentState {
     fn calculate_v2_verify_params(&self, piece_index: u32, data_len: usize) -> (usize, u32, usize) {
         if let Some(roots) = self.piece_to_roots.get(&piece_index) {
             if let Some(root_info) = roots.first() {
-                let piece_len = self.torrent.as_ref().map(|t| t.info.piece_length as u64).unwrap_or(0);
+                let piece_len = self
+                    .torrent
+                    .as_ref()
+                    .map(|t| t.info.piece_length as u64)
+                    .unwrap_or(0);
 
                 let piece_start_global = piece_index as u64 * piece_len;
                 let offset_in_file = piece_start_global.saturating_sub(root_info.file_offset);
@@ -2121,6 +2153,7 @@ impl PeerState {
 mod tests {
     use super::*;
     use crate::command::TorrentCommand;
+    use crate::torrent_file::V2RootInfo;
     use crate::torrent_manager::piece_manager::PieceManager;
     use tokio::sync::mpsc;
 
@@ -3753,8 +3786,18 @@ mod tests {
         state.piece_to_roots.insert(
             0,
             vec![
-                (0, 16384, root_a.clone(), 0),
-                (16384, 16384, root_b.clone(), 0),
+                V2RootInfo {
+                    file_offset: 0,
+                    length: 16384,
+                    root_hash: root_a.clone(),
+                    file_index: 0,
+                },
+                V2RootInfo {
+                    file_offset: 16384,
+                    length: 16384,
+                    root_hash: root_b.clone(),
+                    file_index: 0,
+                },
             ],
         );
         state.v2_proofs.insert(0, vec![0xFF; 32]); // Proof ready
@@ -3830,9 +3873,15 @@ mod tests {
 
         let root_target = vec![0xCC; 32];
         // FIX: file_len (8) > piece_len (4) forces buffering
-        state
-            .piece_to_roots
-            .insert(5, vec![(0, 8, root_target.clone(), 0)]);
+        state.piece_to_roots.insert(
+            5,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 8,
+                root_hash: root_target.clone(),
+                file_index: 0,
+            }],
+        );
 
         let _effects_data = state.update(Action::IncomingBlock {
             peer_id: "peer1".into(),
@@ -3870,9 +3919,15 @@ mod tests {
             .set_geometry(1024, 1024, HashMap::new(), false);
 
         let root_hash = vec![0xAA; 32];
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, 1024, root_hash.clone(), 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 1024,
+                root_hash: root_hash.clone(),
+                file_index: 0,
+            }],
+        );
 
         // Proof arrives first
         state.v2_proofs.insert(0, vec![0xFF; 32]);
@@ -3921,9 +3976,15 @@ mod tests {
             .set_geometry(1024, 1024, HashMap::new(), false);
 
         let root_hash = vec![0xAA; 32];
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, 1024, root_hash.clone(), 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 1024,
+                root_hash: root_hash.clone(),
+                file_index: 0,
+            }],
+        );
 
         state.update(Action::MerkleProofReceived {
             peer_id: "peer1".into(),
@@ -3976,9 +4037,15 @@ mod tests {
             .set_geometry(4, 4, HashMap::new(), false);
 
         // FIX: Set file_len (8) > piece_len (4) to force the V2 workflow (buffer + proof)
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, 8, vec![0xAA; 32], 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 8,
+                root_hash: vec![0xAA; 32],
+                file_index: 0,
+            }],
+        );
 
         state.update(Action::IncomingBlock {
             peer_id: "peer1".into(),
@@ -4026,9 +4093,15 @@ mod tests {
         state
             .piece_manager
             .set_geometry(1024, 1024, HashMap::new(), false);
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, 1024, vec![0xAA; 32], 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 1024,
+                root_hash: vec![0xAA; 32],
+                file_index: 0,
+            }],
+        );
 
         state.update(Action::MerkleProofReceived {
             peer_id: "peer1".into(),
@@ -4097,9 +4170,15 @@ mod tests {
 
         for i in 0..num_pieces {
             // All pieces belong to one large file (0 to total_file_len)
-            state
-                .piece_to_roots
-                .insert(i as u32, vec![(0, total_file_len, root.clone(), 0)]);
+            state.piece_to_roots.insert(
+                i as u32,
+                vec![V2RootInfo {
+                    file_offset: 0,
+                    length: total_file_len,
+                    root_hash: root.clone(),
+                    file_index: 0,
+                }],
+            );
         }
 
         let peer_id = "worker_peer".to_string();
@@ -4203,9 +4282,15 @@ mod tests {
 
         for i in 0..num_pieces {
             // Map every piece to a single large 1000-piece file
-            state
-                .piece_to_roots
-                .insert(i as u32, vec![(0, total_file_len, root.clone(), 0)]);
+            state.piece_to_roots.insert(
+                i as u32,
+                vec![V2RootInfo {
+                    file_offset: 0,
+                    length: total_file_len,
+                    root_hash: root.clone(),
+                    file_index: 0,
+                }],
+            );
         }
 
         let peer_id = "v2_worker".to_string();
@@ -4295,9 +4380,15 @@ mod tests {
         // FIX: Set file length (2048) > piece_length (1024).
         // This ensures get_local_v2_hash returns None (requires proof/layers),
         // forcing the system to fall back to the V1 hashes provided by create_dummy_torrent.
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, 2048, root.clone(), 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 2048,
+                root_hash: root.clone(),
+                file_index: 0,
+            }],
+        );
 
         // Piece 1: NO Root (V1 Only)
 
@@ -4355,9 +4446,15 @@ mod tests {
         // FIX: Set file length to force the standard V2 proof workflow (buffer -> proof -> verify)
         let file_len = (piece_len * 2) as u64;
         for i in 0..num_pieces {
-            state
-                .piece_to_roots
-                .insert(i as u32, vec![(0, file_len, root.clone(), 0)]);
+            state.piece_to_roots.insert(
+                i as u32,
+                vec![V2RootInfo {
+                    file_offset: 0,
+                    length: file_len,
+                    root_hash: root.clone(),
+                    file_index: 0,
+                }],
+            );
         }
 
         let peer_id = "seeder".to_string();
@@ -4408,9 +4505,15 @@ mod tests {
 
         // FIX: Set file_len (2048) > piece_length (1024) to force buffering
         // Small files (<= piece_len) verify immediately using the root as the leaf.
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, 2048, vec![0xAA; 32], 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 2048,
+                root_hash: vec![0xAA; 32],
+                file_index: 0,
+            }],
+        );
         let peer_id = "racer".to_string();
         add_peer(&mut state, &peer_id);
 
@@ -4465,9 +4568,15 @@ mod tests {
         state
             .piece_manager
             .set_geometry(1024, 1024, HashMap::new(), false);
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, 1024, vec![0xAA; 32], 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 1024,
+                root_hash: vec![0xAA; 32],
+                file_index: 0,
+            }],
+        );
 
         let peer_id = "bad_actor".to_string();
         add_peer(&mut state, &peer_id);
@@ -4513,9 +4622,15 @@ mod tests {
         // CONFIGURATION:
         // Piece 0: V2 (Has Root)
         let root = vec![0xAA; 32];
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, 1024, root.clone(), 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 1024,
+                root_hash: root.clone(),
+                file_index: 0,
+            }],
+        );
 
         let peer_a = "v2_peer_A".to_string();
         add_peer(&mut state, &peer_a);
@@ -4627,7 +4742,7 @@ mod tests {
 
         let roots_for_piece_0 = state.piece_to_roots.get(&0).unwrap();
         assert_eq!(
-            roots_for_piece_0[0].2, root,
+            roots_for_piece_0[0].root_hash, root,
             "Piece 0 should map to our mock root"
         );
     }
@@ -4727,17 +4842,22 @@ mod tests {
         // THEN 3: Root Mapping
         // Piece 0 -> File A -> Root A
         let roots_0 = state.piece_to_roots.get(&0).expect("Piece 0 missing roots");
-        // Check if we have the correct root. Note: The vector might contain multiple entries if files share pieces,
-        // but here they are aligned perfectly.
         assert!(
-            roots_0.iter().any(|(_, _, r, _)| *r == root_a),
+            roots_0.iter().any(|r| r.root_hash == root_a),
             "Piece 0 must map to Root A"
         );
 
         // Piece 1 -> File B -> Root B
         let roots_1 = state.piece_to_roots.get(&1).expect("Piece 1 missing roots");
         assert!(
-            roots_1.iter().any(|(_, _, r, _)| *r == root_b),
+            roots_1.iter().any(|r| r.root_hash == root_b),
+            "Piece 1 must map to Root B"
+        );
+
+        // Piece 1 -> File B -> Root B
+        let roots_1 = state.piece_to_roots.get(&1).expect("Piece 1 missing roots");
+        assert!(
+            roots_1.iter().any(|r| r.root_hash == root_b),
             "Piece 1 must map to Root B"
         );
     }
@@ -4766,9 +4886,15 @@ mod tests {
         let total_file_len = (num_pieces as u64) * (piece_len as u64);
         for i in 0..num_pieces {
             // Map to a single large file to test V1/V2 interop on large structures
-            state
-                .piece_to_roots
-                .insert(i as u32, vec![(0, total_file_len, root.clone(), 0)]);
+            state.piece_to_roots.insert(
+                i as u32,
+                vec![V2RootInfo {
+                    file_offset: 0,
+                    length: total_file_len,
+                    root_hash: root.clone(),
+                    file_index: 0,
+                }],
+            );
         }
 
         let peer_id = "hybrid_worker".to_string();
@@ -4827,9 +4953,15 @@ mod tests {
 
         // Map Piece 1 to File B, which starts at 1024 (Piece 1's start)
         // This implies File A occupied 0..1024.
-        state
-            .piece_to_roots
-            .insert(1, vec![(1024, 1024, root_b.clone(), 0)]);
+        state.piece_to_roots.insert(
+            1,
+            vec![V2RootInfo {
+                file_offset: 1024,
+                length: 1024,
+                root_hash: root_b.clone(),
+                file_index: 0,
+            }],
+        );
 
         let peer_id = "offset_tester".to_string();
         add_peer(&mut state, &peer_id);
@@ -4915,9 +5047,15 @@ mod tests {
             .piece_manager
             .set_geometry(piece_len as u32, piece_len as u64, HashMap::new(), false);
 
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, piece_len as u64, root.clone(), 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: piece_len as u64,
+                root_hash: root.clone(),
+                file_index: 0,
+            }],
+        );
 
         let peer_id = "optimized_peer".to_string();
         add_peer(&mut state, &peer_id);
@@ -4972,9 +5110,15 @@ mod tests {
         state.torrent = Some(torrent);
 
         // C. FIX: Set file_len to 2 * piece_len to bypass small-file optimization
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, 2048, file_root.clone(), 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 2048,
+                root_hash: file_root.clone(),
+                file_index: 0,
+            }],
+        );
         state.piece_manager.set_initial_fields(2, false);
         state
             .piece_manager
@@ -5047,9 +5191,15 @@ mod tests {
             .set_geometry(piece_len as u32, piece_len as u64, HashMap::new(), false);
 
         // Map Piece 0 -> File Root
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, piece_len as u64, file_root.clone(), 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: piece_len as u64,
+                root_hash: file_root.clone(),
+                file_index: 0,
+            }],
+        );
 
         let peer_id = "priority_tester".to_string();
         add_peer(&mut state, &peer_id);
@@ -5200,9 +5350,15 @@ mod tests {
         // Map piece 0 to a file larger than one piece to force buffering
         // (If file_len <= piece_len, it optimizes and verifies immediately)
         let root = vec![0xAA; 32];
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, 32768, root.clone(), 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: 32768,
+                root_hash: root.clone(),
+                file_index: 0,
+            }],
+        );
 
         let peer_id = "v2_seeder".to_string();
         add_peer(&mut state, &peer_id);
@@ -5265,9 +5421,15 @@ mod tests {
 
         // In a real app, 'calculate_v2_mapping' populates this from the Info Dict.
         // Here we inject it manually to simulate that we know the Root.
-        state
-            .piece_to_roots
-            .insert(0, vec![(0, file_len, file_root.clone(), 0)]);
+        state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: file_len,
+                root_hash: file_root.clone(),
+                file_index: 0,
+            }],
+        );
 
         let peer_id = "magnet_peer".to_string();
         add_peer(&mut state, &peer_id);

@@ -51,7 +51,7 @@ use crate::tracker::client::{
 
 use rand::Rng;
 
-use crate::torrent_file::Torrent;
+use crate::torrent_file::{Torrent, V2RootInfo};
 
 use std::error::Error;
 
@@ -2449,10 +2449,10 @@ impl TorrentManager {
                                     }
 
                                     if let Some(proof_data) = torrent.get_v2_hash_layer(
-                                        index, 
-                                        root_info.file_offset, 
-                                        root_info.length, 
-                                        length, 
+                                        index,
+                                        root_info.file_offset,
+                                        root_info.length,
+                                        length,
                                         &root_info.root_hash
                                     ) {
                                         if let Some(peer) = self.state.peers.get(&peer_id) {
@@ -3547,15 +3547,25 @@ mod resource_tests {
         let layer_b = vec![0x22; 32]; // Data for File B (Index 0)
 
         // Map Global Piece 0 -> Root A
-        manager
-            .state
-            .piece_to_roots
-            .insert(0, vec![(0, piece_len as u64, root_a.clone(), 0)]);
+        manager.state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: piece_len as u64,
+                root_hash: root_a.clone(),
+                file_index: 0,
+            }],
+        );
         // Map Global Piece 1 -> Root B (File starts at byte 16384)
-        manager
-            .state
-            .piece_to_roots
-            .insert(1, vec![(16384, piece_len as u64, root_b.clone(), 0)]);
+        manager.state.piece_to_roots.insert(
+            1,
+            vec![V2RootInfo {
+                file_offset: 16384,
+                length: piece_len as u64,
+                root_hash: root_b.clone(),
+                file_index: 0,
+            }],
+        );
 
         // Inject the piece_layers into the Torrent struct
         let mut torrent = create_dummy_torrent(2);
@@ -3650,10 +3660,15 @@ mod resource_tests {
         let layer_data = vec![0xFF; 32 * 10];
 
         // Map it
-        manager
-            .state
-            .piece_to_roots
-            .insert(0, vec![(0, piece_len as u64, root.clone(), 0)]);
+        manager.state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: piece_len as u64,
+                root_hash: root.clone(),
+                file_index: 0,
+            }],
+        );
 
         let mut torrent = create_dummy_torrent(10);
         torrent.info.piece_length = piece_len as i64;
@@ -3723,10 +3738,15 @@ mod resource_tests {
 
         // The manager looks up the specific piece index requested.
         for i in 0..5 {
-            manager
-                .state
-                .piece_to_roots
-                .insert(i, vec![(0, piece_len as u64, root.clone(), 0)]);
+            manager.state.piece_to_roots.insert(
+                i,
+                vec![V2RootInfo {
+                    file_offset: 0,
+                    length: piece_len as u64,
+                    root_hash: root.clone(),
+                    file_index: 0,
+                }],
+            );
         }
 
         let mut torrent = create_dummy_torrent(5);
@@ -3927,10 +3947,15 @@ mod resource_tests {
 
         // Manually inject V2 Roots
         for i in 0..num_pieces {
-            manager
-                .state
-                .piece_to_roots
-                .insert(i as u32, vec![(0, piece_len as u64, root_hash.clone(), 0)]);
+            manager.state.piece_to_roots.insert(
+                i as u32,
+                vec![V2RootInfo {
+                    file_offset: 0,
+                    length: piece_len as u64,
+                    root_hash: root_hash.clone(),
+                    file_index: 0,
+                }],
+            );
         }
 
         let peer_id = "scale_worker".to_string();
@@ -4035,10 +4060,15 @@ mod resource_tests {
         manager.state.torrent_status = TorrentStatus::Standard;
 
         for i in 0..num_pieces {
-            manager
-                .state
-                .piece_to_roots
-                .insert(i as u32, vec![(0, piece_len as u64, root_hash.clone(), 0)]);
+            manager.state.piece_to_roots.insert(
+                i as u32,
+                vec![V2RootInfo {
+                    file_offset: 0,
+                    length: piece_len as u64,
+                    root_hash: root_hash.clone(),
+                    file_index: 0,
+                }],
+            );
         }
 
         if manager.state.piece_manager.bitfield.is_empty() {
@@ -4180,10 +4210,10 @@ mod resource_tests {
         // depending on previous state, but checking the root hash is the gold standard.
 
         let root_0 = &roots_0.unwrap()[0];
-        assert_eq!(root_0.2, root_a, "Piece 0 must map to Root A");
+        assert_eq!(root_0.root_hash, root_a, "Piece 0 must map to Root A");
 
         let root_1 = &roots_1.unwrap()[0];
-        assert_eq!(root_1.2, root_b, "Piece 1 must map to Root B");
+        assert_eq!(root_1.root_hash, root_b, "Piece 1 must map to Root B");
     }
 
     #[tokio::test]
@@ -4256,12 +4286,12 @@ mod resource_tests {
 
         // Verify alignment: Piece 0 -> Root A, Piece 1 -> Root B
         assert_eq!(
-            roots_0.unwrap()[0].2,
+            roots_0.unwrap()[0].root_hash,
             root_a,
             "Piece 0 should map to File A"
         );
         assert_eq!(
-            roots_1.unwrap()[0].2,
+            roots_1.unwrap()[0].root_hash,
             root_b,
             "Piece 1 should map to File B"
         );
@@ -4333,14 +4363,24 @@ mod resource_tests {
                 .unwrap(),
         );
 
-        manager
-            .state
-            .piece_to_roots
-            .insert(0, vec![(0, file_len, root_v2.clone(), 0)]);
-        manager
-            .state
-            .piece_to_roots
-            .insert(1, vec![(0, file_len, root_v2.clone(), 0)]);
+        manager.state.piece_to_roots.insert(
+            0,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: file_len,
+                root_hash: root_v2.clone(),
+                file_index: 0,
+            }],
+        );
+        manager.state.piece_to_roots.insert(
+            1,
+            vec![V2RootInfo {
+                file_offset: 0,
+                length: file_len,
+                root_hash: root_v2.clone(),
+                file_index: 0,
+            }],
+        );
 
         let result = TorrentManager::perform_validation(
             manager.multi_file_info.unwrap(),
