@@ -192,10 +192,6 @@ pub async fn write_data_to_disk(
                         &data_to_write[bytes_written..bytes_written + bytes_to_write_in_this_file];
 
                     file.write_all(data_slice).await?;
-
-                    // Without this, the OS might hold the data in memory, and if the app exits immediately
-                    // (like in the test case), the data is lost.
-                    file.flush().await?;
                 }
 
                 bytes_written += bytes_to_write_in_this_file;
