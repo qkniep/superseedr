@@ -2526,13 +2526,13 @@ impl TorrentManager {
                                 };
 
                                 if calculated_hash == self.state.info_hash {
-                                    tracing::info!("METADATA VALIDATED - {}: Proceeding with metadata hydration.", hex::encode(calculated_hash));
+                                    tracing::debug!("METADATA VALIDATED - {}: Proceeding with metadata hydration.", hex::encode(calculated_hash));
                                     self.apply_action(Action::MetadataReceived {
                                         torrent: Box::new(torrent),
                                         metadata_length,
                                     });
                                 } else {
-                                    tracing::warn!(
+                                    tracing::debug!(
                                         "Metadata Hash Mismatch! Expected: {:?}, Got: {:?}",
                                         hex::encode(&self.state.info_hash),
                                         hex::encode(&calculated_hash)
