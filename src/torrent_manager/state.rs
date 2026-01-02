@@ -1687,12 +1687,10 @@ impl TorrentState {
 
                 let total_len: u64 = if torrent.info.meta_version == Some(2) {
                     (num_pieces as u64) * (torrent.info.piece_length as u64)
+                } else if torrent.info.files.is_empty() {
+                    torrent.info.length as u64
                 } else {
-                    if torrent.info.files.is_empty() {
-                        torrent.info.length as u64
-                    } else {
-                        torrent.info.files.iter().map(|f| f.length as u64).sum()
-                    }
+                    torrent.info.files.iter().map(|f| f.length as u64).sum()
                 };
 
                 self.piece_manager.set_geometry(
@@ -2095,7 +2093,7 @@ impl TorrentState {
                             let tail_idx = (current_idx + file_pieces - 1) as u32;
                             overrides.insert(tail_idx, tail_len);
                         }
-                        current_idx += file_pieces as u64;
+                        current_idx += file_pieces;
                     }
                 }
             }
