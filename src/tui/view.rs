@@ -2298,8 +2298,19 @@ pub fn draw_file_browser(
 ) {
     let area = centered_rect(75, 80, f.area());
     f.render_widget(Clear, area);
-
     let inner_height = area.height.saturating_sub(2) as usize;
+
+    let item_count = data.len();
+    let count_label = if item_count == 0 {
+        "(empty)".to_string()
+    } else {
+        format!("({} items)", item_count)
+    };
+
+    let title = match browser_mode {
+        FileBrowserMode::Directory => format!(" Select Directory — {} ", count_label),
+        FileBrowserMode::File(exts) => format!(" Select File [{}] — {} ", exts.join(", "), count_label),
+    };
     
     // Stateless mode uses the standard filter based on the search query
     let filter = match browser_mode {
@@ -2316,44 +2327,53 @@ pub fn draw_file_browser(
     let visible_items = TreeMathHelper::get_visible_slice(data, state, filter, inner_height);
     let mut list_items = Vec::new();
 
-    for item in visible_items {
-        let is_cursor = item.is_cursor;
-        let mut style = if is_cursor {
-            Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::TEXT)
-        };
 
-        // Updated icons: using  (Caret) for directories
-        let (prefix, icon) = if item.node.is_dir {
-            (" ", "󰉋 ") // Caret + double space + folder icon
-        } else {
-            ("  ", "󰈔 ")   // Double space for files
-        };
+    if data.is_empty() {
+        list_items.push(ListItem::new(Line::from(vec![
+            Span::styled("   (Directory is empty)", Style::default().fg(theme::OVERLAY0).italic())
+        ])));
+    } else if visible_items.is_empty() {
+        list_items.push(ListItem::new(Line::from(vec![
+            Span::styled(format!("   (No matching files found among {} items)", data.len()), 
+            Style::default().fg(theme::OVERLAY0).italic())
+        ])));
+    } else {
 
-        let name_span = Span::styled(format!("{}{}{}", prefix, icon, item.node.name), style);
-        
-        let meta_span = if !item.node.is_dir {
-            Span::styled(
-                format!("  ({})", format_bytes(item.node.payload.size)), 
-                Style::default().fg(theme::OVERLAY0).italic()
-            )
-        } else {
-            Span::raw("")
-        };
+        for item in visible_items {
+            let is_cursor = item.is_cursor;
+            let mut style = if is_cursor {
+                Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::TEXT)
+            };
+            
+            let (prefix, icon) = if item.node.is_dir {
+                (" ", "󰉋 ") // Caret + double space + folder icon
+            } else {
+                ("  ", "󰈔 ")   // Double space for files
+            };
 
-        list_items.push(ListItem::new(Line::from(vec![name_span, meta_span])));
+            let name_span = Span::styled(format!("{}{}{}", prefix, icon, item.node.name), style);
+            
+            let meta_span = if !item.node.is_dir {
+                Span::styled(
+                    format!("  ({})", format_bytes(item.node.payload.size)), 
+                    Style::default().fg(theme::OVERLAY0).italic()
+                )
+            } else {
+                Span::raw("")
+            };
+
+            list_items.push(ListItem::new(Line::from(vec![name_span, meta_span])));
+        }
     }
 
-    let title = match browser_mode {
-        FileBrowserMode::Directory => " Select Directory ".to_string(),
-        FileBrowserMode::File(exts) => format!(" Select File [{}] ", exts.join(", ")),
-    };
-    
+
     f.render_widget(
         List::new(list_items)
             .block(Block::default()
                 .title(title)
+
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::MAUVE)))
             .highlight_symbol("▶ "),
