@@ -2299,7 +2299,31 @@ pub fn draw_file_browser(
     let area = centered_rect(75, 80, f.area());
     f.render_widget(Clear, area);
 
-    let inner_height = area.height.saturating_sub(2) as usize;
+    // Create a vertical layout: [Search Bar (optional), File List]
+    let browser_chunks = if app_state.is_searching {
+        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area)
+    } else {
+        Layout::vertical([Constraint::Length(0), Constraint::Min(0)]).split(area)
+    };
+
+    // Render Search Bar
+    if app_state.is_searching {
+        let search_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::YELLOW))
+            .title(" Search Filter ");
+        
+        let search_text = Line::from(vec![
+            Span::styled("/", Style::default().fg(theme::SUBTEXT0)),
+            Span::raw(&app_state.search_query),
+            Span::styled("_", Style::default().fg(theme::YELLOW).add_modifier(Modifier::SLOW_BLINK)),
+        ]);
+        
+        f.render_widget(Paragraph::new(search_text).block(search_block), browser_chunks[0]);
+    }
+
+    let list_area = browser_chunks[1];
+    let inner_height = list_area.height.saturating_sub(2) as usize;
     
     // 1. Filter setup (ensure directories stay visible for navigation)
     let filter = match browser_mode {
@@ -2369,7 +2393,6 @@ pub fn draw_file_browser(
         }
     }
 
-    // 4. Final Widget Render
     f.render_widget(
         List::new(list_items)
             .block(Block::default()
@@ -2378,7 +2401,7 @@ pub fn draw_file_browser(
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::MAUVE)))
             .highlight_symbol("▶ "),
-        area,
+        list_area, // Changed from area to list_area
     );
 }
 

@@ -30,8 +30,13 @@ use tracing::{event as tracing_event, Level};
 
 use directories::UserDirs;
 
+
 #[cfg(windows)]
 use clipboard::{ClipboardContext, ClipboardProvider};
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+static GLOBAL_ESC_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     if let CrosstermEvent::Resize(w, h) = &event {
@@ -41,7 +46,27 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     }
 
     if let CrosstermEvent::Key(key) = event {
-        if app.app_state.is_searching && key.kind == KeyEventKind::Press {
+        if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
+            let last = GLOBAL_ESC_TIMESTAMP.load(Ordering::Relaxed);
+
+            // If the last Esc was less than 200ms ago, ignore this one
+            if now.saturating_sub(last) < 200 {
+                tracing::info!("GLOBAL DEBOUNCE: Ignoring rapid Esc key press");
+                return; 
+            }
+
+            // Otherwise, update the timestamp and let the event proceed
+            GLOBAL_ESC_TIMESTAMP.store(now, Ordering::Relaxed);
+        }
+    }
+
+    if let CrosstermEvent::Key(key) = event {
+        if matches!(app.app_state.mode, AppMode::Normal) && app.app_state.is_searching && key.kind == KeyEventKind::Press {
             match key.code {
                 KeyCode::Esc => {
                     app.app_state.is_searching = false;
@@ -655,6 +680,32 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         AppMode::FileBrowser { state, data, browser_mode } => {
             if let CrosstermEvent::Key(key) = event {
                 if key.kind == KeyEventKind::Press {
+
+                    if app.app_state.is_searching {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.app_state.is_searching = false;
+                                app.app_state.search_query.clear();
+                                state.top_most_offset = 0; 
+                            }
+                            KeyCode::Enter => {
+                                app.app_state.is_searching = false;
+                                // Keep the query so the list stays filtered, or clear it if preferred
+                            }
+                            KeyCode::Backspace => {
+                                app.app_state.search_query.pop();
+                                state.top_most_offset = 0; // Reset scroll on filter change
+                            }
+                            KeyCode::Char(c) => {
+                                app.app_state.search_query.push(c);
+                                state.top_most_offset = 0; // Reset scroll on filter change
+                            }
+                            _ => {}
+                        }
+                        app.app_state.ui_needs_redraw = true;
+                        return;
+                    }
+
                     let area = crate::tui::formatters::centered_rect(75, 80, app.app_state.screen_area);
                     let max_height = area.height.saturating_sub(2) as usize;
 
@@ -669,6 +720,11 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                     };
 
                     match key.code {
+                        KeyCode::Char('/') => {
+                            app.app_state.is_searching = true;
+                            app.app_state.search_query.clear();
+                        }
+
                         // Vertical Navigation
                         KeyCode::Up | KeyCode::Char('k') => {
                             TreeMathHelper::apply_action(state, data, TreeAction::Up, filter, max_height);
