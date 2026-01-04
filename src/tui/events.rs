@@ -684,8 +684,24 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         KeyCode::Left | KeyCode::Char('h') => { 
                             TreeMathHelper::apply_action(state, data, TreeAction::Left, filter, max_height); 
                         }
-                        KeyCode::Right | KeyCode::Char('l') => { 
-                            TreeMathHelper::apply_action(state, data, TreeAction::Right, filter, max_height); 
+                        KeyCode::Right | KeyCode::Char('l') => {
+                            // 1. Capture the current path before the action
+                            if let Some(path) = state.cursor_path.clone() {
+                                let was_expanded = state.expanded_paths.contains(&path);
+                                
+                                // 2. Apply the tree logic (expands the folder in the view state)
+                                TreeMathHelper::apply_action(state, data, TreeAction::Right, filter, max_height); 
+                                
+                                // 3. Check if the directory was just expanded
+                                let is_expanded = state.expanded_paths.contains(&path);
+                                if !was_expanded && is_expanded && path.is_dir() {
+                                    tracing::info!("FileBrowser: Right-key crawl for: {:?}", path);
+                                    let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                        path,
+                                        browser_mode: browser_mode.clone(),
+                                    });
+                                }
+                            }
                         }
                         KeyCode::Enter | KeyCode::Tab => {
                             // 1. Clone the path immediately to release the immutable borrow on 'state'
