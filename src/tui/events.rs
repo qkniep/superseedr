@@ -208,6 +208,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
                                 path: initial_path,
                                 browser_mode: FileBrowserMode::File(vec![".torrent".to_string()]),
+                                highlight_path: None,
                             });
                         }
                         KeyCode::Char('d') => {
@@ -414,6 +415,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
                                         path: initial_path,
                                         browser_mode: FileBrowserMode::default(),
+                                        highlight_path: None,
                                     });
                                 }
                             }
@@ -682,6 +684,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
                                         path,
                                         browser_mode: browser_mode.clone(),
+                                        highlight_path: None,
                                     });
                                 } else if let FileBrowserMode::File(extensions) = browser_mode {
                                     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -696,10 +699,12 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         }
 
                         KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+                            let child_to_highlight = state.current_path.clone();
                             if let Some(parent) = state.current_path.parent() {
                                 let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
                                     path: parent.to_path_buf(),
                                     browser_mode: browser_mode.clone(),
+                                    highlight_path: Some(child_to_highlight),
                                 });
                             }
                         }
@@ -900,6 +905,7 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
                 let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
                     path: initial_path,
                     browser_mode: FileBrowserMode::default(),
+                    highlight_path: None,
                 });
             }
     } else {
@@ -918,6 +924,7 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
                 let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
                     path: initial_path,
                     browser_mode: FileBrowserMode::default(),
+                    highlight_path: None,
                 });
             }
         } else {

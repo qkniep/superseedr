@@ -291,8 +291,8 @@ pub enum AppCommand {
     AddMagnetFromFile(PathBuf),
     ClientShutdown(PathBuf),
     PortFileChanged(PathBuf),
-    FetchFileTree { path: PathBuf, browser_mode: FileBrowserMode },
-    UpdateFileBrowserData { data: Vec<tree::RawNode<FileMetadata>> },
+    FetchFileTree { path: PathBuf, browser_mode: FileBrowserMode, highlight_path: Option<PathBuf> },
+    UpdateFileBrowserData { data: Vec<tree::RawNode<FileMetadata>>, highlight_path: Option<PathBuf> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, EnumIter)]
@@ -1117,38 +1117,37 @@ impl App {
                 self.handle_port_change(path).await;
             }
 
-            AppCommand::FetchFileTree { path,  browser_mode} => {
-
-
+            AppCommand::FetchFileTree { path, browser_mode, highlight_path } => {
                 let tx = self.app_command_tx.clone();
                 let mut shutdown_rx = self.shutdown_tx.subscribe();
                 let path_clone = path.clone();
+                let highlight_clone = highlight_path.clone();
 
-
-                // 1. Initialize UI state immediately so the browser opens
-                let mut tree_state = crate::tui::tree::TreeViewState::new();
-                tree_state.current_path = path.clone();
-                tree_state.cursor_path = Some(path.clone()); // Set cursor to common path
-                
-                // We open the browser immediately with an empty list to show it's loading
-                self.app_state.mode = AppMode::FileBrowser {
-                    state: tree_state,
-                    data: Vec::new(),
-                    browser_mode,
-                };
+                // 1. Update or Initialize the UI state immediately
+                if let AppMode::FileBrowser { state, .. } = &mut self.app_state.mode {
+                    // If already in browser, just update the path we are viewing
+                    state.current_path = path.clone();
+                } else {
+                    // Otherwise, initialize the mode
+                    let mut tree_state = crate::tui::tree::TreeViewState::new();
+                    tree_state.current_path = path.clone();
+                    self.app_state.mode = AppMode::FileBrowser {
+                        state: tree_state,
+                        data: Vec::new(),
+                        browser_mode,
+                    };
+                }
 
                 // 2. Spawn the background crawl
                 tokio::spawn(async move {
                     tokio::select! {
                         result = build_fs_tree(&path_clone, 2) => {
-                            match result {
-                                Ok(nodes) => {
-                                    tracing::info!("CRAWLER SUCCESS: Found {} top-level nodes in {:?}", nodes.len(), path_clone);
-                                    let _ = tx.send(AppCommand::UpdateFileBrowserData { data: nodes }).await;
-                                }
-                                Err(e) => {
-                                    tracing::error!("CRAWLER FAILED: Path: {:?}, Error: {}", path_clone, e);
-                                }
+                            if let Ok(nodes) = result {
+                                // Pass the highlight_path back so the Update arm can find it
+                                let _ = tx.send(AppCommand::UpdateFileBrowserData { 
+                                    data: nodes, 
+                                    highlight_path: highlight_clone 
+                                }).await;
                             }
                         }
                         _ = shutdown_rx.recv() => {
@@ -1158,44 +1157,59 @@ impl App {
                 });
             }
 
-
-            AppCommand::UpdateFileBrowserData { mut data } => {
+            AppCommand::UpdateFileBrowserData { mut data, highlight_path } => {
                 if let AppMode::FileBrowser { state, data: existing_data, browser_mode } = &mut self.app_state.mode {
-                    
-                    // Apply sorting ONLY if in File mode
+
+                    // --- 1. Apply Dynamic Sorting ---
                     if let FileBrowserMode::File(extensions) = browser_mode {
-                        // Pre-process extensions to lowercase for efficient matching
                         let target_exts: Vec<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
-
                         data.sort_by(|a, b| {
-                            let a_name = a.name.to_lowercase();
-                            let b_name = b.name.to_lowercase();
+                            let a_matches = target_exts.iter().any(|ext| a.name.to_lowercase().ends_with(ext));
+                            let b_matches = target_exts.iter().any(|ext| b.name.to_lowercase().ends_with(ext));
 
-                            let a_matches = target_exts.iter().any(|ext| a_name.ends_with(ext));
-                            let b_matches = target_exts.iter().any(|ext| b_name.ends_with(ext));
-
-                            // Rule 1: Prioritized files (matching extensions) go to the very top
-                            if a_matches != b_matches {
-                                return b_matches.cmp(&a_matches);
+                            // 1. Priority: Torrents first
+                            if a_matches != b_matches { 
+                                return b_matches.cmp(&a_matches); 
                             }
-
-                            // Rule 2: Files generally above folders (if neither matched prioritized extensions)
-                            if a.is_dir != b.is_dir {
-                                return a.is_dir.cmp(&b.is_dir);
+                            
+                            // 2. Priority: Folders second (ensures folders follow torrents directly)
+                            if a.is_dir != b.is_dir { 
+                                return b.is_dir.cmp(&a.is_dir); // Changed order to put folders higher
                             }
-
-                            // Rule 3: Sort by latest modified time first within each group
+                            
+                            // 3. Final: Sort by newest date
                             b.payload.modified.cmp(&a.payload.modified)
                         });
                     }
 
+                    // --- 2. Update Data ---
                     *existing_data = data;
                     state.top_most_offset = 0;
-                    // Snap cursor to the first item (the newest prioritized file)
-                    state.cursor_path = existing_data.first().map(|node| node.full_path.clone());
+
+                    // --- 3. Smart Cursor Positioning ---
+                    if let Some(target) = highlight_path {
+                        // Find the index of the folder/file we want to highlight
+                        if let Some(index) = existing_data.iter().position(|node| node.full_path == target) {
+                            state.cursor_path = Some(target);
+                            
+                            // Adjust scroll if the item is below the current visible area
+                            let area = crate::tui::formatters::centered_rect(75, 80, self.app_state.screen_area);
+                            let max_height = area.height.saturating_sub(2) as usize;
+                            if index >= max_height {
+                                state.top_most_offset = index.saturating_sub(max_height / 2);
+                            }
+                        } else {
+                            state.cursor_path = existing_data.first().map(|node| node.full_path.clone());
+                        }
+                    } else {
+                        // Default: reset to top if entering a new folder
+                        state.cursor_path = existing_data.first().map(|node| node.full_path.clone());
+                    }
+
                     self.app_state.ui_needs_redraw = true;
                 }
             }
+
         }
     }
 
