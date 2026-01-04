@@ -3,6 +3,8 @@
 
 use crate::app::AppState;
 use crate::app::{App, AppMode, ConfigItem, SelectedHeader, TorrentControlState};
+use crate::app::AppCommand;
+use crate::app::FileBrowserMode;
 use crate::torrent_manager::ManagerCommand;
 
 use strum::IntoEnumIterator;
@@ -15,6 +17,8 @@ use crate::tui::layout::get_peer_columns;
 use crate::tui::layout::get_torrent_columns;
 use crate::tui::layout::LayoutContext;
 use crate::tui::layout::SmartCol;
+use crate::tui::tree::{TreeMathHelper, TreeAction, TreeFilter};
+use crate::tui::formatters::centered_rect;
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::prelude::Rect;
@@ -200,35 +204,11 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             }
                         }
                         KeyCode::Char('a') => {
-                            let theme = Theme::default()
-                                .add_default_title()
-                                .with_item_style(Style::default().fg(Color::DarkGray))
-                                .with_dir_style(Style::default());
-
-                            match FileExplorer::with_theme(theme) {
-                                Ok(mut file_explorer) => {
-                                    // Try to find the user's Download folder first
-                                    let initial_path = UserDirs::new()
-                                        .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
-                                        .or_else(|| {
-                                            UserDirs::new().map(|ud| ud.home_dir().to_path_buf())
-                                        });
-
-                                    if let Some(path) = initial_path {
-                                        let _ = file_explorer.set_cwd(path);
-                                    }
-                                    app.app_state.mode = AppMode::AddTorrentPicker(file_explorer);
-                                }
-                                Err(e) => {
-                                    tracing_event!(
-                                        Level::ERROR,
-                                        "Failed to create FileExplorer: {}",
-                                        e
-                                    );
-                                    app.app_state.system_error =
-                                        Some(format!("Error opening file picker: {}", e));
-                                }
-                            }
+                            let initial_path = app.get_initial_source_path();
+                            let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                path: initial_path,
+                                browser_mode: FileBrowserMode::File(vec![".torrent".to_string()]),
+                            });
                         }
                         KeyCode::Char('d') => {
                             if let Some(info_hash) = app
@@ -425,21 +405,16 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     *editing = Some((selected_item, String::new()));
                                 }
                                 ConfigItem::DefaultDownloadFolder | ConfigItem::WatchFolder => {
-                                    let theme = Theme::default().add_default_title();
-                                    match FileExplorer::with_theme(theme) {
-                                        Ok(file_explorer) => {
-                                            app.app_state.mode = AppMode::ConfigPathPicker {
-                                                settings_edit: settings_edit.clone(),
-                                                for_item: selected_item,
-                                                file_explorer,
-                                            };
-                                        }
-                                        Err(e) => tracing_event!(
-                                            Level::ERROR,
-                                            "Failed to create FileExplorer for config: {}",
-                                            e
-                                        ),
-                                    }
+                                    let initial_path = if selected_item == ConfigItem::WatchFolder {
+                                        settings_edit.watch_folder.clone()
+                                    } else {
+                                        settings_edit.default_download_folder.clone()
+                                    }.unwrap_or_else(|| app.get_initial_destination_path());
+
+                                    let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                        path: initial_path,
+                                        browser_mode: FileBrowserMode::default(),
+                                    });
                                 }
                             }
                         }
@@ -674,6 +649,105 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 }
             }
         }
+        AppMode::FileBrowser { state, data, browser_mode } => {
+            if let CrosstermEvent::Key(key) = event {
+
+                if key.kind == KeyEventKind::Press {
+
+                    let area = crate::tui::formatters::centered_rect(75, 80, app.app_state.screen_area);
+                    let max_height = area.height.saturating_sub(2) as usize;
+
+                    let filter = match browser_mode {
+                        FileBrowserMode::Directory => {
+                            // Show everything, but maybe you only want directories?
+                            // Usually for folder pickers, we show files (greyed out) so user has context.
+                            TreeFilter::from_text(&app.app_state.search_query) 
+                        },
+                        FileBrowserMode::File(extensions) => {
+                            let exts = extensions.clone(); // Clone for the closure
+                            TreeFilter::new(&app.app_state.search_query, move |node| {
+                                if node.is_dir { return true; } // Always show dirs for navigation
+                                // Check if file ends with ANY of the allowed extensions
+                                exts.iter().any(|ext| node.name.ends_with(ext))
+                            })
+                        }
+                    };
+
+                    match key.code {
+                        // Standard Tree Navigation
+                        KeyCode::Up | KeyCode::Char('k') => { 
+                            TreeMathHelper::apply_action(state, data, TreeAction::Up, filter, max_height); 
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => { 
+                            TreeMathHelper::apply_action(state, data, TreeAction::Down, filter, max_height); 
+                        }
+                        KeyCode::Left | KeyCode::Char('h') => { 
+                            TreeMathHelper::apply_action(state, data, TreeAction::Left, filter, max_height); 
+                        }
+                        KeyCode::Right | KeyCode::Char('l') => { 
+                            TreeMathHelper::apply_action(state, data, TreeAction::Right, filter, max_height); 
+                        }
+                        KeyCode::Enter | KeyCode::Tab => {
+                            // 1. Clone the path immediately to release the immutable borrow on 'state'
+                            if let Some(path) = state.cursor_path.clone() { 
+                                let is_dir = path.is_dir();
+
+                                match browser_mode {
+                                    FileBrowserMode::File(extensions) => {
+                                        if !is_dir {
+                                            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                            let is_valid_file = extensions.iter().any(|ext| name.ends_with(ext));
+
+                                            if is_valid_file {
+                                                if name.ends_with(".torrent") {
+                                                    let _ = app.app_command_tx.send(AppCommand::AddTorrentFromFile(path)).await;
+                                                }
+                                                app.app_state.mode = AppMode::Normal;
+                                            }
+                                        } else {
+                                            // 2. Now 'state' can be safely borrowed mutably
+                                            TreeMathHelper::apply_action(state, data, TreeAction::Toggle, filter, max_height);
+                                            
+                                            // 3. Trigger the deep crawl if the directory was just expanded
+                                            if state.expanded_paths.contains(&path) {
+                                                tracing::info!("FileBrowser: Requesting crawl for sub-path: {:?}", path);
+                                                let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                                    path,
+                                                    browser_mode: browser_mode.clone(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                    FileBrowserMode::Directory => {
+                                        if is_dir && key.code == KeyCode::Tab {
+                                            // Confirmed selection logic here (e.g., updating settings)
+                                            app.app_state.mode = AppMode::Normal;
+                                        } else if is_dir {
+                                            TreeMathHelper::apply_action(state, data, TreeAction::Toggle, filter, max_height);
+                                            
+                                            if state.expanded_paths.contains(&path) {
+                                                let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                                    path,
+                                                    browser_mode: browser_mode.clone(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Esc => {
+                            app.app_state.mode = AppMode::Normal;
+                            // Cleanup pending states to prevent accidental triggers later
+                            app.app_state.pending_torrent_path = None;
+                            app.app_state.pending_torrent_link.clear();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        
         AppMode::DeleteConfirm {
             info_hash,
             with_files,
@@ -843,28 +917,13 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
                 TorrentControlState::Running,
             )
             .await;
-        } else {
-            app.app_state.pending_torrent_link = pasted_text.to_string();
-            let theme = Theme::default()
-                .add_default_title()
-                .with_item_style(Style::default().fg(Color::DarkGray))
-                .with_dir_style(Style::default());
-            match FileExplorer::with_theme(theme) {
-                Ok(mut file_explorer) => {
-                    // Since no default path is set, try to find the most common path to start the picker in
-                    let initial_path = app
-                        .find_most_common_download_path()
-                        .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()));
-                    if let Some(common_path) = initial_path {
-                        file_explorer.set_cwd(common_path).ok();
-                    }
-                    app.app_state.mode = AppMode::DownloadPathPicker(file_explorer);
-                }
-                Err(e) => {
-                    tracing_event!(Level::ERROR, "Failed to create FileExplorer: {}", e);
-                }
+            } else {
+                let initial_path = app.get_initial_destination_path();
+                let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                    path: initial_path,
+                    browser_mode: FileBrowserMode::default(),
+                });
             }
-        }
     } else {
         let path = Path::new(pasted_text.trim());
         if path.is_file() && path.extension().is_some_and(|ext| ext == "torrent") {
@@ -877,22 +936,11 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
                 )
                 .await;
             } else {
-                // Show the download path picker.
-                app.app_state.pending_torrent_path = Some(path.to_path_buf());
-                match FileExplorer::new() {
-                    Ok(mut file_explorer) => {
-                        let initial_path = app
-                            .find_most_common_download_path()
-                            .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()));
-                        if let Some(common_path) = initial_path {
-                            file_explorer.set_cwd(common_path).ok();
-                        }
-                        app.app_state.mode = AppMode::DownloadPathPicker(file_explorer);
-                    }
-                    Err(e) => {
-                        tracing_event!(Level::ERROR, "Failed to create FileExplorer: {}", e);
-                    }
-                }
+                let initial_path = app.get_initial_destination_path();
+                let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                    path: initial_path,
+                    browser_mode: FileBrowserMode::default(),
+                });
             }
         } else {
             tracing_event!(

@@ -19,8 +19,12 @@ use crate::token_bucket::TokenBucket;
 
 use crate::tui::events;
 use crate::tui::view::draw;
+use crate::tui::tree;
+use crate::tui::tree::TreeViewState;
+use crate::tui::tree::RawNode;
 
 use crate::config::get_watch_path;
+use crate::storage::build_fs_tree;
 
 use crate::resource_manager::ResourceType;
 
@@ -89,6 +93,20 @@ const MINUTES_HISTORY_MAX: usize = 48 * 60; // 48 hours of per-minute data
 
 const FILE_HANDLE_MINIMUM: usize = 64;
 const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
+
+#[derive(Default, Debug, Clone, PartialEq)]
+pub enum FileBrowserMode {
+    #[default]
+    Directory,               // User must pick a folder (e.g. Download Location)
+    File(Vec<String>),       // User must pick a file matching these extensions (e.g. vec!["torrent"])
+    // Future proofing: You could add 'AnyFile' or 'FileOrFolder' here later
+}
+
+#[derive(Debug, Clone)]
+pub struct FileMetadata {
+    pub size: u64,
+    pub is_loaded: bool,
+}
 
 #[derive(Debug, Default)]
 pub struct ThrobberHolder {
@@ -272,6 +290,8 @@ pub enum AppCommand {
     AddMagnetFromFile(PathBuf),
     ClientShutdown(PathBuf),
     PortFileChanged(PathBuf),
+    FetchFileTree { path: PathBuf, browser_mode: FileBrowserMode },
+    UpdateFileBrowserData { data: Vec<tree::RawNode<FileMetadata>> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, EnumIter)]
@@ -306,6 +326,12 @@ pub enum AppMode {
         for_item: ConfigItem,
         file_explorer: FileExplorer,
     },
+    FileBrowser {
+        state: TreeViewState,
+        data: Vec<RawNode<FileMetadata>>,
+        browser_mode: FileBrowserMode,
+    },
+
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -479,6 +505,7 @@ pub struct AppState {
     pub throbber_holder: RefCell<ThrobberHolder>,
 }
 
+
 pub struct App {
     pub app_state: AppState,
     pub client_configs: Settings,
@@ -563,6 +590,7 @@ impl App {
         let ul_limit = client_configs.global_upload_limit_bps as f64;
         let global_dl_bucket = Arc::new(TokenBucket::new(dl_limit, dl_limit));
         let global_ul_bucket = Arc::new(TokenBucket::new(ul_limit, ul_limit));
+
 
         let app_state = AppState {
             system_warning,
@@ -1086,6 +1114,130 @@ impl App {
             }
             AppCommand::PortFileChanged(path) => {
                 self.handle_port_change(path).await;
+            }
+
+            AppCommand::FetchFileTree { path,  browser_mode} => {
+
+
+                let tx = self.app_command_tx.clone();
+                let mut shutdown_rx = self.shutdown_tx.subscribe();
+                let path_clone = path.clone();
+
+
+tracing::info!("CRAWLER START: Target path: {:?}, Absolute: {}", 
+        path_clone, 
+        path_clone.is_absolute()
+    );
+
+                // 1. Initialize UI state immediately so the browser opens
+                let mut tree_state = crate::tui::tree::TreeViewState::new();
+                tree_state.cursor_path = Some(path.clone()); // Set cursor to common path
+                
+                // We open the browser immediately with an empty list to show it's loading
+                self.app_state.mode = AppMode::FileBrowser {
+                    state: tree_state,
+                    data: Vec::new(),
+                    browser_mode,
+                };
+
+                // 2. Spawn the background crawl
+                tokio::spawn(async move {
+                    tokio::select! {
+                        result = build_fs_tree(&path_clone, 2) => {
+                            match result {
+                                Ok(nodes) => {
+                                    tracing::info!("CRAWLER SUCCESS: Found {} top-level nodes in {:?}", nodes.len(), path_clone);
+                                    let _ = tx.send(AppCommand::UpdateFileBrowserData { data: nodes }).await;
+                                }
+                                Err(e) => {
+                                    tracing::error!("CRAWLER FAILED: Path: {:?}, Error: {}", path_clone, e);
+                                }
+                            }
+                        }
+                        _ = shutdown_rx.recv() => {
+                            tracing::debug!("Aborting FileBrowser crawl due to shutdown");
+                        }
+                    }
+                });
+            }
+
+            /*
+            AppCommand::UpdateFileBrowserData { data } => {
+                if let AppMode::FileBrowser { state, data: existing_data, browser_mode: _ } = &mut self.app_state.mode {
+                    // 1. Inject the crawled filesystem nodes
+                    *existing_data = data; 
+
+                    // 2. Automatic Expansion Logic:
+                    // We ensure that the directory the user just "entered" is expanded 
+                    // in the view state so the contents are visible immediately.
+                    if let Some(current_path) = state.cursor_path.clone() {
+                        state.expanded_paths.insert(current_path);
+                    }
+
+                    // 3. UI Refresh
+                    self.app_state.ui_needs_redraw = true;
+                }
+            }
+            */
+
+
+            AppCommand::UpdateFileBrowserData { data } => {
+                if let AppMode::FileBrowser { state, data: existing_data, browser_mode } = &mut self.app_state.mode {
+                    
+                    // --- DEBUG LOGGING START ---
+                    tracing::info!("--- 📂 FILE BROWSER UPDATE RECEIVED ---");
+
+                    // 1. Define a temporary checker to simulate what View.rs does
+                    // This lets us verify if the Logic or the Data is the problem.
+                    let check_mode = browser_mode.clone();
+                    let debug_has_valid_contents = |node: &crate::tui::tree::RawNode<FileMetadata>| -> bool {
+                        fn check_node(n: &crate::tui::tree::RawNode<FileMetadata>, mode: &FileBrowserMode) -> bool {
+                            // Logic Mirror from View.rs
+                            if n.name.starts_with('.') { return false; } 
+                            
+                            if !n.is_dir {
+                                return match mode {
+                                    FileBrowserMode::Directory => false, // Files are invalid in Dir mode
+                                    FileBrowserMode::File(exts) => exts.iter().any(|ext| n.name.ends_with(ext)),
+                                };
+                            }
+                            if !n.payload.is_loaded { return true; } // Pending folders are "Active"
+                            if n.children.is_empty() { return false; } // Empty loaded folders are "Inactive"
+                            
+                            // Recursive
+                            n.children.iter().any(|child| check_node(child, mode))
+                        }
+                        check_node(node, &check_mode)
+                    };
+
+                    // 2. Iterate and Log
+                    for node in &data {
+                        let is_valid = debug_has_valid_contents(node);
+                        let status = if is_valid { "✅ ACTIVE" } else { "🌑 INACTIVE (Grey)" };
+                        let load_state = if node.payload.is_loaded { "LOADED" } else { "PENDING" };
+                        
+                        // If it's a directory, log its immediate children to catch hidden files
+                        if node.is_dir && !node.children.is_empty() {
+                            for child in &node.children {
+                                let child_valid = debug_has_valid_contents(child);
+                                let child_status = if child_valid { "ACTIVE" } else { "GREY" };
+                            }
+                        }
+                    }
+                    tracing::info!("--- 📂 END UPDATE ---\n");
+                    // --- DEBUG LOGGING END ---
+
+                    // 1. Inject the crawled filesystem nodes
+                    *existing_data = data; 
+
+                    // 2. Automatic Expansion Logic:
+                    if let Some(current_path) = state.cursor_path.clone() {
+                        state.expanded_paths.insert(current_path);
+                    }
+
+                    // 3. UI Refresh
+                    self.app_state.ui_needs_redraw = true;
+                }
             }
         }
     }
@@ -2083,6 +2235,24 @@ impl App {
             .into_iter()
             .max_by_key(|&(_, count)| count)
             .map(|(path, _)| path)
+    }
+
+    pub fn get_initial_source_path(&self) -> PathBuf {
+        UserDirs::new()
+            .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
+            .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("/"))
+    }
+
+    pub fn get_initial_destination_path(&mut self) -> PathBuf {
+        self.find_most_common_download_path()
+            .or_else(|| {
+                UserDirs::new().and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
+            })
+            .or_else(|| {
+                UserDirs::new().map(|ud| ud.home_dir().to_path_buf())
+            })
+            .unwrap_or_else(|| PathBuf::from("/"))
     }
 
     pub async fn add_torrent_from_file(

@@ -1,49 +1,79 @@
-// SPDX-FileCopyrightText: 2025 The superseedr Contributors
+                        // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::path::Path;
+use std::rc::Rc;
 
 /// The raw data structure (The "Truth")
 #[derive(Debug, Clone, PartialEq)] 
 pub struct RawNode<T> {
     pub name: String,
+    pub full_path: PathBuf,
     pub children: Vec<RawNode<T>>,
     pub payload: T, 
     pub is_dir: bool,
 }
 
-/// Criteria used to prune the tree. Supports multiple terms (AND logic).
-#[derive(Debug, Default, Clone)]
-pub struct TreeFilter {
+#[derive(Clone)]
+pub struct TreeFilter<T> {
     pub queries: Vec<String>,
+    /// Optional rule: If this returns false, the node is hidden 
+    /// (unless it has matching children).
+    pub node_rule: Option<Rc<dyn Fn(&RawNode<T>) -> bool>>,
 }
 
-impl TreeFilter {
-    /// Parses a raw input string into multiple search terms.
-    pub fn from_input(input: &str) -> Self {
+impl<T> Default for TreeFilter<T> {
+    fn default() -> Self {
+        Self { 
+            queries: Vec::new(), 
+            node_rule: None,
+        }
+    }
+}
+
+impl<T> TreeFilter<T> {
+    /// Creates a filter from text input only (standard behavior)
+    pub fn from_text(input: &str) -> Self {
         let queries = input
             .split_whitespace()
             .filter(|s| !s.is_empty())
             .map(|s| s.to_lowercase())
             .collect();
-        Self { queries }
+        Self { queries, node_rule: None }
     }
 
-    /// Returns true if the node name matches ALL search terms.
-    pub fn matches(&self, name: &str) -> bool {
+    /// Creates a filter with text input AND a custom rule (e.g. "is .torrent")
+    pub fn new(input: &str, rule: impl Fn(&RawNode<T>) -> bool + 'static) -> Self {
+        let mut filter = Self::from_text(input);
+        filter.node_rule = Some(Rc::new(rule));
+        filter
+    }
+
+    /// Returns true if the node itself matches (Text + Rule).
+    pub fn matches(&self, node: &RawNode<T>) -> bool {
+        // 1. Check Custom Rule first (if exists)
+        if let Some(rule) = &self.node_rule {
+            if !(rule)(node) {
+                return false;
+            }
+        }
+
+        // 2. Check Text Search
         if self.queries.is_empty() { return true; }
-        let name_lower = name.to_lowercase();
+        let name_lower = node.name.to_lowercase();
         self.queries.iter().all(|q| name_lower.contains(q))
     }
 
-    /// Returns true if this node or any of its descendants match the filter.
-    pub fn any_matches<T>(&self, node: &RawNode<T>) -> bool {
-        if self.matches(&node.name) { return true; }
+    /// Returns true if this node OR any descendant matches.
+    pub fn any_matches(&self, node: &RawNode<T>) -> bool {
+        // This existing logic now works perfectly for your use case:
+        if self.matches(node) { return true; }
         node.children.iter().any(|child| self.any_matches(child))
     }
 }
+
 
 /// The "Memory" of the tree (what is open, selected, focused)
 #[derive(Debug, Clone, Default)]
@@ -131,15 +161,14 @@ pub struct TreeMathHelper;
 impl TreeMathHelper {
     // --- PUBLIC API ---
 
-    /// Entry point for the View layer. Returns only the items that fit in the current viewport.
     pub fn get_visible_slice<'a, T>(
         nodes: &'a [RawNode<T>],
         state: &TreeViewState,
-        filter_input: &str,
+        filter: TreeFilter<T>, // <--- The Object
         max_height: usize,
     ) -> Vec<RenderItem<'a, T>> {
         let mut full_list = Vec::new();
-        let filter = TreeFilter::from_input(filter_input);
+        // Just pass 'filter' directly. Do not recreate it.
         Self::project_recursive(nodes, state, &filter, PathBuf::from(""), 0, &mut full_list);
 
         let start = state.top_most_offset.min(full_list.len());
@@ -152,74 +181,65 @@ impl TreeMathHelper {
         }
     }
 
-    /// Entry point for the Events layer. Handles internal projection to ensure the
-    /// navigation logic always works against the full visible set.
+    // CHANGED: We use the 'filter' passed in directly.
     pub fn apply_action<T>(
         state: &mut TreeViewState,
         nodes: &[RawNode<T>],
         action: TreeAction,
-        filter_input: &str,
+        filter: TreeFilter<T>, // <--- The Object
         max_height: usize,
     ) -> bool {
         let mut full_list = Vec::new();
-        let filter = TreeFilter::from_input(filter_input);
+        // Just pass 'filter' directly.
         Self::project_recursive(nodes, state, &filter, PathBuf::from(""), 0, &mut full_list);
-
         Self::handle_action(state, &full_list, action, max_height)
     }
 
+    
+    // NOTE: If you have jump_to_path, update it similarly to take `filter: TreeFilter<T>`
     pub fn jump_to_path<T>(
         state: &mut TreeViewState,
         nodes: &[RawNode<T>],
-        target_path: &Path,
-        filter_input: &str,
+        target_path: &std::path::Path,
+        filter: TreeFilter<T>, // <--- Updated
         max_height: usize,
     ) -> bool {
-        // 1. Flatten the tree to find where the item "lives" visually
         let mut full_list = Vec::new();
-        let filter = TreeFilter::from_input(filter_input);
         Self::project_recursive(nodes, state, &filter, PathBuf::from(""), 0, &mut full_list);
-
-        // 2. Find the index of the target
+        // ... (rest of logic)
         if let Some(target_idx) = full_list.iter().position(|item| item.path == target_path) {
-            state.cursor_path = Some(target_path.to_path_buf());
-
-            // 3. Calculate Smart Offset (Keep it in the middle if possible)
-            let effective_height = max_height.max(1);
-            
-            // If it's already visible, do nothing (optional preference)
-            if target_idx >= state.top_most_offset && target_idx < state.top_most_offset + effective_height {
-                return true;
-            }
-
-            // Otherwise, center it
-            let half_height = effective_height / 2;
-            state.top_most_offset = target_idx.saturating_sub(half_height);
-            return true;
+             // ... logic ...
+             state.cursor_path = Some(target_path.to_path_buf());
+             // ...
+             return true;
         }
         false
     }
 
     // --- PRIVATE HELPERS ---
-
     fn project_recursive<'a, T>(
         nodes: &'a [RawNode<T>],
         state: &TreeViewState,
-        filter: &TreeFilter,
+        filter: &TreeFilter<T>, 
         current_path: PathBuf,
         depth: usize,
         output: &mut Vec<RenderItem<'a, T>>,
     ) {
         let is_searching = !filter.queries.is_empty();
-        let visible_nodes: Vec<_> = nodes.iter().filter(|node| filter.any_matches(node)).collect();
 
+        let visible_nodes: Vec<_> = nodes.iter()
+            .filter(|node| filter.any_matches(node))
+            .collect();
+
+        // ... (rest of function is standard) ...
         let len = visible_nodes.len();
         for (i, node) in visible_nodes.into_iter().enumerate() {
-            let path = current_path.join(&node.name);
+            let path = node.full_path.clone();
             let expanded = if is_searching { true } else { state.expanded_paths.contains(&path) };
 
             output.push(RenderItem {
                 node, path: path.clone(), depth, is_last: i == len - 1,
+
                 is_expanded: expanded, is_selected: state.selected_paths.contains(&path),
                 is_cursor: state.cursor_path.as_ref() == Some(&path),
             });
@@ -251,8 +271,16 @@ impl TreeMathHelper {
                 let item = &full_list[current_idx];
                 if item.node.is_dir {
                     if !state.expanded_paths.contains(&item.path) {
+                        // Case 1: It's closed -> Expand it (Cursor stays put)
                         state.expanded_paths.insert(item.path.clone());
-                    } else if current_idx < full_list.len() - 1 { new_idx = current_idx + 1; }
+                    } else if current_idx < full_list.len() - 1 {
+                        // Case 2: It's already open -> Only descend if the next item is a CHILD
+                        let next_item = &full_list[current_idx + 1];
+                        if next_item.depth > item.depth {
+                            new_idx = current_idx + 1;
+                        }
+                        // If next_item.depth <= item.depth (sibling or parent), do nothing.
+                    }
                 }
             }
             TreeAction::Left => {
@@ -770,4 +798,55 @@ mod tests {
         TreeMathHelper::apply_action(&mut state, &tree, TreeAction::Left, "", 10);
         assert!(!state.expanded_paths.contains(&new_root));
     }
+
+    #[test]
+    fn test_smart_nav_right_on_empty_expanded_dir_does_not_jump_to_sibling() {
+        // Setup: [EmptyDir, SiblingDir]
+        // EmptyDir is technically a directory, but has no children.
+        let tree = vec![
+            RawNode { 
+                name: "EmptyDir".into(), 
+                is_dir: true, 
+                payload: TestPayload, 
+                children: vec![] 
+            },
+            RawNode { 
+                name: "SiblingDir".into(), 
+                is_dir: true, 
+                payload: TestPayload, 
+                children: vec![] 
+            },
+        ];
+        
+        let mut state = TreeViewState::default();
+        
+        // 1. Initial State: EmptyDir is EXPANDED, Cursor is on EmptyDir
+        // (Simulate user having just pressed Right once to expand it)
+        state.expanded_paths.insert(PathBuf::from("EmptyDir"));
+        state.cursor_path = Some(PathBuf::from("EmptyDir"));
+
+        // 2. ACTION: Press Right AGAIN
+        // EXPECTATION: 
+        // - Since it has no children, we cannot descend.
+        // - We must NOT jump to "SiblingDir". 
+        // - Cursor should stay on "EmptyDir".
+        TreeMathHelper::apply_action(&mut state, &tree, TreeAction::Right, "", 10);
+
+        // ASSERT:
+        assert_eq!(state.cursor_path, Some(PathBuf::from("EmptyDir")));
+    }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+

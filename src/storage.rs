@@ -7,6 +7,9 @@ use tokio::fs::{self, try_exists, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
 use crate::torrent_file::InfoFile;
+use crate::tui::tree::RawNode;
+
+use crate::app::FileMetadata;
 
 #[derive(Debug, Clone)]
 pub struct FileInfo {
@@ -214,6 +217,45 @@ pub async fn write_data_to_disk(
         std::io::ErrorKind::InvalidInput,
         "Failed to write all data, offset likely out of bounds",
     )))
+}
+
+pub async fn build_fs_tree(path: &Path, depth: usize) -> Result<Vec<RawNode<FileMetadata>>, std::io::Error> {
+    let mut nodes = Vec::new();
+    let mut entries = match fs::read_dir(path).await {
+        Ok(e) => e,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    while let Some(entry) = entries.next_entry().await? {
+        let meta = entry.metadata().await?;
+        let is_dir = meta.is_dir();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let full_path = entry.path();
+        let size = meta.len();
+
+        let mut is_loaded = true;
+        let children = if is_dir {
+            if depth > 0 {
+                Box::pin(build_fs_tree(&entry.path(), depth - 1)).await.unwrap_or_default()
+            } else {
+                is_loaded = false; // Mark as pending
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        nodes.push(RawNode {
+            name,
+            full_path,
+            is_dir,
+            payload: FileMetadata { size, is_loaded }, // <--- USE THE FLAG
+            children,
+        });
+    }
+
+    nodes.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+    Ok(nodes)
 }
 
 #[cfg(test)]
