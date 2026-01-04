@@ -2541,7 +2541,7 @@ fn draw_torrent_preview_panel(f: &mut Frame, area: Rect, path: &std::path::Path)
             Span::raw(indent),
             Span::styled(icon, Style::default().fg(if item.node.is_dir { theme::BLUE } else { theme::TEXT })),
             Span::raw(&item.node.name),
-            Span::styled(format!("({}) ", size_str), Style::default().fg(theme::SURFACE2)),
+            Span::styled(format!(" ({}) ", size_str), Style::default().fg(theme::SURFACE2)),
         ]);
         ListItem::new(line)
     }).collect();
