@@ -14,7 +14,7 @@ pub struct RawNode<T> {
     pub payload: T, 
     pub is_dir: bool,
 }
-impl<T: Clone> RawNode<T> {
+impl<T: Clone + Default + std::ops::AddAssign> RawNode<T> {
     /// Recursively finds a node by path and updates its children with new results.
     /// Returns true if the node was found and updated.
     pub fn merge_subtree(&mut self, incoming: RawNode<T>) -> bool {
@@ -35,6 +35,78 @@ impl<T: Clone> RawNode<T> {
             }
         }
         false
+    }
+
+    pub fn from_path_list(root_name: String, files: Vec<(Vec<String>, T)>) -> Self {
+        let root_path = PathBuf::from(&root_name);
+        let mut root = RawNode {
+            name: root_name,
+            full_path: root_path.clone(),
+            children: Vec::new(),
+            payload: T::default(),
+            is_dir: true,
+        };
+
+        for (path_parts, payload) in files {
+            root.insert_recursive(&path_parts, payload, &root_path);
+        }
+        
+        root.sort_recursive();
+        root
+    }
+
+    /// Step 2: Traverse the tree and tell the state to expand everything
+    pub fn expand_all(&self, state: &mut TreeViewState) {
+        if self.is_dir {
+            state.expanded_paths.insert(self.full_path.clone());
+            for child in &self.children {
+                child.expand_all(state);
+            }
+        }
+    }
+
+    fn insert_recursive(&mut self, path_parts: &[String], payload: T, parent_path: &Path) {
+        // Update current folder size (if T is size)
+        self.payload += payload.clone(); 
+
+        if path_parts.is_empty() { return; }
+
+        let name = &path_parts[0];
+        let is_last = path_parts.len() == 1;
+        let current_path = parent_path.join(name);
+
+        let child_idx = if let Some(idx) = self.children.iter().position(|c| &c.name == name) {
+            idx
+        } else {
+            let new_node = RawNode {
+                name: name.clone(),
+                full_path: current_path.clone(),
+                children: Vec::new(),
+                payload: T::default(),
+                is_dir: !is_last,
+            };
+            self.children.push(new_node);
+            self.children.len() - 1
+        };
+
+        if is_last {
+            self.children[child_idx].payload = payload;
+        } else {
+            self.children[child_idx].insert_recursive(&path_parts[1..], payload, &current_path);
+        }
+    }
+
+    fn sort_recursive(&mut self) {
+        self.children.sort_by(|a, b| {
+            match (a.is_dir, b.is_dir) {
+                (true, false) => std::cmp::Ordering::Less, // Dirs on top
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.name.cmp(&b.name), // Alphabetical
+            }
+        });
+        for child in &mut self.children {
+            child.sort_recursive();
+        }
     }
 }
 

@@ -2296,22 +2296,48 @@ pub fn draw_file_browser(
     data: &[tree::RawNode<FileMetadata>],
     browser_mode: &FileBrowserMode
 ) {
-    let area = centered_rect(75, 80, f.area());
+    let mut area = centered_rect(75, 80, f.area());
+    
+    // Check if we need to show the preview panel
+    let mut preview_path = None;
+    if let Some(cursor) = &state.cursor_path {
+        if cursor.extension().map_or(false, |ext| ext == "torrent") {
+            preview_path = Some(cursor);
+            // Widen the area slightly to accommodate the preview panel
+            area = centered_rect(90, 80, f.area());
+        }
+    }
+
     f.render_widget(Clear, area);
 
-    // [LAYOUT] Vertical split: [Search Bar (optional)] -> [File List] -> [Footer]
+    // Layout: [Preview (30%) | Browser (70%)] if preview active, else just Browser
+    let main_chunks = if preview_path.is_some() {
+        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area)
+    } else {
+        Layout::horizontal([Constraint::Percentage(0), Constraint::Percentage(100)]).split(area)
+    };
+
+    let preview_area = main_chunks[0];
+    let browser_area = main_chunks[1];
+
+    // --- Draw Torrent Preview (if applicable) ---
+    if let Some(path) = preview_path {
+        draw_torrent_preview_panel(f, preview_area, path);
+    }
+
+    // --- Draw Existing File Browser (Right Side) ---
     let constraints = if app_state.is_searching {
         vec![Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)]
     } else {
         vec![Constraint::Length(0), Constraint::Min(0), Constraint::Length(1)]
     };
 
-    let browser_chunks = Layout::vertical(constraints).split(area);
+    let browser_chunks = Layout::vertical(constraints).split(browser_area);
     let search_area = browser_chunks[0];
     let list_area = browser_chunks[1];
     let footer_area = browser_chunks[2];
 
-    // --- 1. Search Bar ---
+    // ... (Keep existing search bar logic) ...
     if app_state.is_searching {
         let search_block = Block::default()
             .borders(Borders::ALL)
@@ -2327,7 +2353,7 @@ pub fn draw_file_browser(
         f.render_widget(Paragraph::new(search_text).block(search_block), search_area);
     }
 
-    // --- 2. Footer Bar ---
+    // ... (Keep existing footer logic) ...
     let mut footer_spans = vec![
         Span::styled("[Arrows/Vim]", Style::default().fg(theme::BLUE)),
         Span::raw(" Nav | "),
@@ -2338,26 +2364,20 @@ pub fn draw_file_browser(
         Span::styled("[/]", Style::default().fg(theme::MAUVE)),
         Span::raw(" Filter | "),
     ];
-
-    // Conditionally show "Tab" if selecting a directory
     if let FileBrowserMode::Directory = browser_mode {
         footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
         footer_spans.push(Span::raw(" Select Dir | "));
     }
-
     footer_spans.push(Span::styled("[Esc]", Style::default().fg(theme::RED)));
     footer_spans.push(Span::raw(" Cancel"));
 
     let footer = Paragraph::new(Line::from(footer_spans))
         .alignment(Alignment::Center)
         .style(Style::default().fg(theme::SUBTEXT1));
-    
     f.render_widget(footer, footer_area);
 
-    // --- 3. File List Logic ---
+    // ... (Keep existing list rendering logic, ensure it uses list_area) ...
     let inner_height = list_area.height.saturating_sub(2) as usize;
-    
-    // Filter setup
     let filter = match browser_mode {
         FileBrowserMode::Directory => TreeFilter::from_text(&app_state.search_query),
         FileBrowserMode::File(extensions) => {
@@ -2368,21 +2388,19 @@ pub fn draw_file_browser(
         }
     };
 
-    // Prepare Titles
     let abs_path = state.current_path.to_string_lossy();
     let item_count = data.len();
     let count_label = if item_count == 0 { " (empty)".to_string() } else { format!(" ({} items)", item_count) };
-
     let left_title = format!(" {}/{} ", abs_path, count_label);
     let right_title = match browser_mode {
         FileBrowserMode::Directory => " Select Directory ".to_string(),
         FileBrowserMode::File(exts) => format!(" Select File [{}] ", exts.join(", ")),
     };
 
-    // Render Items
     let visible_items = TreeMathHelper::get_visible_slice(data, state, filter, inner_height);
     let mut list_items = Vec::new();
 
+    // ... (Existing item mapping logic) ...
     if data.is_empty() {
         list_items.push(ListItem::new(Line::from(vec![
             Span::styled("   (Directory is empty)", Style::default().fg(theme::OVERLAY0).italic())
@@ -2395,33 +2413,62 @@ pub fn draw_file_browser(
     } else {
         for item in visible_items {
             let is_cursor = item.is_cursor;
-            let style = if is_cursor {
-                Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme::TEXT)
-            };
-
-            let (prefix, icon) = if item.node.is_dir {
-                (" ", "󰉋 ") 
-            } else {
-                ("  ", "󰈔 ")
-            };
-
-            let name_span = Span::styled(format!("{}{}{}", prefix, icon, item.node.name), style);
             
-            let meta_span = if !item.node.is_dir {
-                let datetime: chrono::DateTime<chrono::Local> = item.node.payload.modified.into();
-                let date_str = datetime.format("%b %d %Y %I:%M %p").to_string();
+            // 1. Indentation
+            let indent = "  ".repeat(item.depth);
 
-                Span::styled(
-                    format!(" ({})", date_str),
-                    Style::default().fg(theme::SURFACE2).italic()
+            // 2. Icon String (Combined, just like Torrent Preview)
+            // Note: You can swap "" for "" if item.is_expanded is true, 
+            // but we stick to "" here to match the Preview panel exactly.
+            let icon_str = if item.node.is_dir { 
+                "  " 
+            } else { 
+                "   " 
+            };
+
+            // 3. Styling Logic
+            // The file browser needs to handle the "Cursor" (Selection) state specifically.
+            let (icon_style, text_style) = if is_cursor {
+                // If selected: Everything is Yellow Bold
+                (
+                    Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD)
                 )
             } else {
-                Span::raw("")
+                // If not selected:
+                // - Dirs are Blue
+                // - Files are Text color
+                let i_style = if item.node.is_dir {
+                    Style::default().fg(theme::BLUE)
+                } else {
+                    Style::default().fg(theme::TEXT)
+                };
+                (i_style, Style::default().fg(theme::TEXT))
             };
 
-            list_items.push(ListItem::new(Line::from(vec![name_span, meta_span])));
+            // 4. Construct the Line
+            let line = Line::from(vec![
+                Span::raw(indent),
+                Span::styled(icon_str, icon_style), // Single span for icon group
+                Span::styled(format!("{}", item.node.name), text_style),
+            ]);
+
+            // 5. Meta (Date/Time)
+            let meta_span = if !item.node.is_dir {
+                let datetime: chrono::DateTime<chrono::Local> = item.node.payload.modified.into();
+                Span::styled(
+                    format!(" ({})", datetime.format("%b %d %H:%M")), 
+                    Style::default().fg(theme::SURFACE2).italic()
+                )
+            } else { 
+                Span::raw("") 
+            };
+
+            // Add meta to line
+            let mut full_line_spans = line.spans;
+            full_line_spans.push(meta_span);
+            
+            list_items.push(ListItem::new(Line::from(full_line_spans)));
         }
     }
 
@@ -2434,6 +2481,106 @@ pub fn draw_file_browser(
                 .border_style(Style::default().fg(theme::MAUVE)))
             .highlight_symbol("▶ "),
         list_area,
+    );
+}
+
+fn draw_torrent_preview_panel(f: &mut Frame, area: Rect, path: &std::path::Path) {
+    let chunks = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1) 
+    ]).split(area);
+    
+    let content_area = chunks[0];
+    // chunks[1] is the spacer alignment for the footer
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::SAPPHIRE))
+        .title(" Torrent Preview ");
+    
+    // Use content_area instead of area
+    let inner_area = block.inner(content_area);
+    f.render_widget(block, content_area);
+
+    // 1. Read & Parse (Immediate Mode)
+    let file_bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            f.render_widget(Paragraph::new(format!("Error reading file:\n{}", e)).style(Style::default().fg(theme::RED)), inner_area);
+            return;
+        }
+    };
+
+    let torrent = match crate::torrent_file::parser::from_bytes(&file_bytes) {
+        Ok(t) => t,
+        Err(e) => {
+            f.render_widget(Paragraph::new(format!("Invalid Torrent:\n{}", e)).style(Style::default().fg(theme::RED)), inner_area);
+            return;
+        }
+    };
+
+    // 2. Format Info
+    let total_size = torrent.info.total_length();
+    let piece_len = torrent.info.piece_length;
+    let piece_count = if piece_len > 0 { total_size / piece_len } else { 0 };
+    
+    let size_str = format_bytes(total_size as u64);
+    let created_by = torrent.created_by.as_deref().unwrap_or("Unknown");
+    let comment = torrent.comment.as_deref().unwrap_or("-");
+    let is_v2 = torrent.info.meta_version == Some(2);
+    let ver_str = if is_v2 { "v2 (Hybrid)" } else { "v1" };
+
+    let info_text = vec![
+        Line::from(vec![Span::styled("Name: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(&torrent.info.name)]),
+        Line::from(vec![Span::styled("Size: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(size_str)]),
+        Line::from(vec![Span::styled("Pieces: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(format!("{} x {}", piece_count, format_bytes(piece_len as u64)))]),
+        Line::from(vec![Span::styled("Creator: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(created_by)]),
+        Line::from(vec![Span::styled("Version: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(ver_str)]),
+        Line::from(vec![Span::styled("Comment: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(comment)]),
+    ];
+
+    let layout = Layout::vertical([
+        Constraint::Length(info_text.len() as u16 + 2), // Info block
+        Constraint::Min(0) // File Tree
+    ]).split(inner_area);
+
+    f.render_widget(Paragraph::new(info_text).block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(theme::SURFACE2))), layout[0]);
+
+    // 3. Build & Render Tree
+    let file_list = torrent.file_list();
+    let root_node = tree::RawNode::from_path_list(torrent.info.name.clone(), file_list);
+    
+    let mut preview_state = tree::TreeViewState::default();
+    root_node.expand_all(&mut preview_state);
+
+    // Lifetime Fix: Bind array to variable
+    let nodes = [root_node]; 
+
+    let filter = tree::TreeFilter::default(); 
+    let visible_rows = TreeMathHelper::get_visible_slice(
+        &nodes,
+        &preview_state, 
+        filter, 
+        layout[1].height as usize
+    );
+
+    let list_items: Vec<ListItem> = visible_rows.iter().map(|item| {
+        let indent = "  ".repeat(item.depth);
+        let icon = if item.node.is_dir { "  " } else { "   " };
+        let size_str = format_bytes(item.node.payload);
+        
+        let line = Line::from(vec![
+            Span::raw(indent),
+            Span::styled(icon, Style::default().fg(if item.node.is_dir { theme::BLUE } else { theme::TEXT })),
+            Span::raw(&item.node.name),
+            Span::styled(format!(" ({})", size_str), Style::default().fg(theme::SURFACE2)),
+        ]);
+        ListItem::new(line)
+    }).collect();
+
+    f.render_widget(
+        List::new(list_items).block(Block::default().title(" File Content ")),
+        layout[1]
     );
 }
 

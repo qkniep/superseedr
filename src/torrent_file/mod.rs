@@ -183,6 +183,18 @@ impl Torrent {
 
         None
     }
+
+    pub fn file_list(&self) -> Vec<(Vec<String>, u64)> {
+        if !self.info.files.is_empty() {
+            // Multi-file case
+            self.info.files.iter()
+                .map(|f| (f.path.clone(), f.length as u64))
+                .collect()
+        } else {
+            // Single-file V1 case: The torrent name is the file name
+            vec![(vec![self.info.name.clone()], self.info.length as u64)]
+        }
+    }
 }
 
 fn traverse_file_tree(
