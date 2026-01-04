@@ -8,6 +8,78 @@ use ratatui::prelude::*;
 pub const MIN_SIDEBAR_WIDTH: u16 = 25;
 pub const MIN_DETAILS_HEIGHT: u16 = 10;
 
+#[derive(Default, Debug)]
+pub struct FileBrowserLayout {
+    pub area: Rect,           // The full popup area
+    pub content: Rect,        // Area for Preview + List
+    pub footer: Rect,         // Shared footer at bottom
+    
+    pub preview: Option<Rect>, // Left panel (if active)
+    pub browser: Rect,         // Right panel (always active)
+    
+    // Sub-areas for the Browser panel
+    pub search: Option<Rect>,
+    pub list: Rect,
+}
+
+pub fn calculate_file_browser_layout(
+    area: Rect, 
+    show_preview: bool, 
+    show_search: bool
+) -> FileBrowserLayout {
+    let mut plan = FileBrowserLayout::default();
+    
+    // 1. Global Split: Content vs Footer
+    // Footer gets 1 line at the bottom
+    let main_chunks = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ]).split(area);
+    
+    plan.area = area;
+    plan.content = main_chunks[0];
+    plan.footer = main_chunks[1];
+
+    // 2. Horizontal Split: Preview vs Browser
+    // If preview is active, give it 35%, otherwise Browser gets 100%
+    let content_chunks = if show_preview {
+        Layout::horizontal([
+            Constraint::Percentage(35), 
+            Constraint::Percentage(65)
+        ]).split(plan.content)
+    } else {
+        Layout::horizontal([
+            Constraint::Percentage(0), 
+            Constraint::Percentage(100)
+        ]).split(plan.content)
+    };
+
+    if show_preview {
+        plan.preview = Some(content_chunks[0]);
+    }
+    plan.browser = content_chunks[1];
+
+    // 3. Browser Vertical Split: Search vs List
+    let browser_chunks = if show_search {
+        Layout::vertical([
+            Constraint::Length(3), // Search bar height
+            Constraint::Min(0)     // List height
+        ]).split(plan.browser)
+    } else {
+        Layout::vertical([
+            Constraint::Length(0),
+            Constraint::Min(0)
+        ]).split(plan.browser)
+    };
+
+    if show_search {
+        plan.search = Some(browser_chunks[0]);
+    }
+    plan.list = browser_chunks[1];
+
+    plan
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ColumnId {
     Status,
