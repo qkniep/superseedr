@@ -2299,14 +2299,19 @@ pub fn draw_file_browser(
     let area = centered_rect(75, 80, f.area());
     f.render_widget(Clear, area);
 
-    // Create a vertical layout: [Search Bar (optional), File List]
-    let browser_chunks = if app_state.is_searching {
-        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area)
+    // [LAYOUT] Vertical split: [Search Bar (optional)] -> [File List] -> [Footer]
+    let constraints = if app_state.is_searching {
+        vec![Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)]
     } else {
-        Layout::vertical([Constraint::Length(0), Constraint::Min(0)]).split(area)
+        vec![Constraint::Length(0), Constraint::Min(0), Constraint::Length(1)]
     };
 
-    // Render Search Bar
+    let browser_chunks = Layout::vertical(constraints).split(area);
+    let search_area = browser_chunks[0];
+    let list_area = browser_chunks[1];
+    let footer_area = browser_chunks[2];
+
+    // --- 1. Search Bar ---
     if app_state.is_searching {
         let search_block = Block::default()
             .borders(Borders::ALL)
@@ -2319,13 +2324,40 @@ pub fn draw_file_browser(
             Span::styled("_", Style::default().fg(theme::YELLOW).add_modifier(Modifier::SLOW_BLINK)),
         ]);
         
-        f.render_widget(Paragraph::new(search_text).block(search_block), browser_chunks[0]);
+        f.render_widget(Paragraph::new(search_text).block(search_block), search_area);
     }
 
-    let list_area = browser_chunks[1];
+    // --- 2. Footer Bar ---
+    let mut footer_spans = vec![
+        Span::styled("[Arrows/Vim]", Style::default().fg(theme::BLUE)),
+        Span::raw(" Nav | "),
+        Span::styled("[Enter]", Style::default().fg(theme::GREEN)),
+        Span::raw(" Confirm | "),
+        Span::styled("[Backspace]", Style::default().fg(theme::YELLOW)),
+        Span::raw(" Back | "),
+        Span::styled("[/]", Style::default().fg(theme::MAUVE)),
+        Span::raw(" Filter | "),
+    ];
+
+    // Conditionally show "Tab" if selecting a directory
+    if let FileBrowserMode::Directory = browser_mode {
+        footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
+        footer_spans.push(Span::raw(" Select Dir | "));
+    }
+
+    footer_spans.push(Span::styled("[Esc]", Style::default().fg(theme::RED)));
+    footer_spans.push(Span::raw(" Cancel"));
+
+    let footer = Paragraph::new(Line::from(footer_spans))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(theme::SUBTEXT1));
+    
+    f.render_widget(footer, footer_area);
+
+    // --- 3. File List Logic ---
     let inner_height = list_area.height.saturating_sub(2) as usize;
     
-    // 1. Filter setup (ensure directories stay visible for navigation)
+    // Filter setup
     let filter = match browser_mode {
         FileBrowserMode::Directory => TreeFilter::from_text(&app_state.search_query),
         FileBrowserMode::File(extensions) => {
@@ -2336,7 +2368,7 @@ pub fn draw_file_browser(
         }
     };
 
-    // 2. Prepare Titles (Absolute Path on Left, Selection Mode on Right)
+    // Prepare Titles
     let abs_path = state.current_path.to_string_lossy();
     let item_count = data.len();
     let count_label = if item_count == 0 { " (empty)".to_string() } else { format!(" ({} items)", item_count) };
@@ -2347,7 +2379,7 @@ pub fn draw_file_browser(
         FileBrowserMode::File(exts) => format!(" Select File [{}] ", exts.join(", ")),
     };
 
-    // 3. Render Items
+    // Render Items
     let visible_items = TreeMathHelper::get_visible_slice(data, state, filter, inner_height);
     let mut list_items = Vec::new();
 
@@ -2401,7 +2433,7 @@ pub fn draw_file_browser(
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::MAUVE)))
             .highlight_symbol("▶ "),
-        list_area, // Changed from area to list_area
+        list_area,
     );
 }
 

@@ -733,8 +733,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             TreeMathHelper::apply_action(state, data, TreeAction::Down, filter, max_height);
                         }
 
-                        // Drill Down (Enter / Right / l)
-                        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                        KeyCode::Right | KeyCode::Char('l') => {
                             if let Some(path) = state.cursor_path.clone() {
                                 if path.is_dir() {
                                     let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
@@ -742,7 +741,23 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                         browser_mode: browser_mode.clone(),
                                         highlight_path: None,
                                     });
+                                }
+                                // If it's a file, do nothing (as requested)
+                            }
+                        }
+
+                        // [CHANGED] Open Directory OR Confirm File (Enter)
+                        KeyCode::Enter => {
+                            if let Some(path) = state.cursor_path.clone() {
+                                if path.is_dir() {
+                                    // If directory, enter it
+                                    let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                        path,
+                                        browser_mode: browser_mode.clone(),
+                                        highlight_path: None,
+                                    });
                                 } else if let FileBrowserMode::File(extensions) = browser_mode {
+                                    // If file, check extension and confirm
                                     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                                     if extensions.iter().any(|ext| name.ends_with(ext)) {
                                         if name.ends_with(".torrent") {
@@ -753,6 +768,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 }
                             }
                         }
+
 
                         KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
                             let child_to_highlight = state.current_path.clone();

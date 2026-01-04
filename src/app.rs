@@ -1141,7 +1141,7 @@ impl App {
                 // 2. Spawn the background crawl
                 tokio::spawn(async move {
                     tokio::select! {
-                        result = build_fs_tree(&path_clone, 2) => {
+                        result = build_fs_tree(&path_clone, 0) => {
                             if let Ok(nodes) = result {
                                 // Pass the highlight_path back so the Update arm can find it
                                 let _ = tx.send(AppCommand::UpdateFileBrowserData { 
