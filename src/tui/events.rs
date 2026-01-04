@@ -649,112 +649,80 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 }
             }
         }
+
         AppMode::FileBrowser { state, data, browser_mode } => {
             if let CrosstermEvent::Key(key) = event {
-
                 if key.kind == KeyEventKind::Press {
-
                     let area = crate::tui::formatters::centered_rect(75, 80, app.app_state.screen_area);
                     let max_height = area.height.saturating_sub(2) as usize;
 
                     let filter = match browser_mode {
-                        FileBrowserMode::Directory => {
-                            // Show everything, but maybe you only want directories?
-                            // Usually for folder pickers, we show files (greyed out) so user has context.
-                            TreeFilter::from_text(&app.app_state.search_query) 
-                        },
+                        FileBrowserMode::Directory => TreeFilter::from_text(&app.app_state.search_query),
                         FileBrowserMode::File(extensions) => {
-                            let exts = extensions.clone(); // Clone for the closure
+                            let exts = extensions.clone();
                             TreeFilter::new(&app.app_state.search_query, move |node| {
-                                if node.is_dir { return true; } // Always show dirs for navigation
-                                // Check if file ends with ANY of the allowed extensions
-                                exts.iter().any(|ext| node.name.ends_with(ext))
+                                node.is_dir || exts.iter().any(|ext| node.name.ends_with(ext))
                             })
                         }
                     };
 
                     match key.code {
-                        // Standard Tree Navigation
-                        KeyCode::Up | KeyCode::Char('k') => { 
-                            TreeMathHelper::apply_action(state, data, TreeAction::Up, filter, max_height); 
+                        // Vertical Navigation
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            TreeMathHelper::apply_action(state, data, TreeAction::Up, filter, max_height);
                         }
-                        KeyCode::Down | KeyCode::Char('j') => { 
-                            TreeMathHelper::apply_action(state, data, TreeAction::Down, filter, max_height); 
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            TreeMathHelper::apply_action(state, data, TreeAction::Down, filter, max_height);
                         }
-                        KeyCode::Left | KeyCode::Char('h') => { 
-                            TreeMathHelper::apply_action(state, data, TreeAction::Left, filter, max_height); 
-                        }
-                        KeyCode::Right | KeyCode::Char('l') => {
-                            // 1. Capture the current path before the action
+
+                        // Drill Down (Enter / Right / l)
+                        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                             if let Some(path) = state.cursor_path.clone() {
-                                let was_expanded = state.expanded_paths.contains(&path);
-                                
-                                // 2. Apply the tree logic (expands the folder in the view state)
-                                TreeMathHelper::apply_action(state, data, TreeAction::Right, filter, max_height); 
-                                
-                                // 3. Check if the directory was just expanded
-                                let is_expanded = state.expanded_paths.contains(&path);
-                                if !was_expanded && is_expanded && path.is_dir() {
-                                    tracing::info!("FileBrowser: Right-key crawl for: {:?}", path);
+                                if path.is_dir() {
                                     let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
                                         path,
                                         browser_mode: browser_mode.clone(),
                                     });
-                                }
-                            }
-                        }
-                        KeyCode::Enter | KeyCode::Tab => {
-                            // 1. Clone the path immediately to release the immutable borrow on 'state'
-                            if let Some(path) = state.cursor_path.clone() { 
-                                let is_dir = path.is_dir();
-
-                                match browser_mode {
-                                    FileBrowserMode::File(extensions) => {
-                                        if !is_dir {
-                                            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                                            let is_valid_file = extensions.iter().any(|ext| name.ends_with(ext));
-
-                                            if is_valid_file {
-                                                if name.ends_with(".torrent") {
-                                                    let _ = app.app_command_tx.send(AppCommand::AddTorrentFromFile(path)).await;
-                                                }
-                                                app.app_state.mode = AppMode::Normal;
-                                            }
-                                        } else {
-                                            // 2. Now 'state' can be safely borrowed mutably
-                                            TreeMathHelper::apply_action(state, data, TreeAction::Toggle, filter, max_height);
-                                            
-                                            // 3. Trigger the deep crawl if the directory was just expanded
-                                            if state.expanded_paths.contains(&path) {
-                                                tracing::info!("FileBrowser: Requesting crawl for sub-path: {:?}", path);
-                                                let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
-                                                    path,
-                                                    browser_mode: browser_mode.clone(),
-                                                });
-                                            }
+                                } else if let FileBrowserMode::File(extensions) = browser_mode {
+                                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                    if extensions.iter().any(|ext| name.ends_with(ext)) {
+                                        if name.ends_with(".torrent") {
+                                            let _ = app.app_command_tx.send(AppCommand::AddTorrentFromFile(path)).await;
                                         }
-                                    }
-                                    FileBrowserMode::Directory => {
-                                        if is_dir && key.code == KeyCode::Tab {
-                                            // Confirmed selection logic here (e.g., updating settings)
-                                            app.app_state.mode = AppMode::Normal;
-                                        } else if is_dir {
-                                            TreeMathHelper::apply_action(state, data, TreeAction::Toggle, filter, max_height);
-                                            
-                                            if state.expanded_paths.contains(&path) {
-                                                let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
-                                                    path,
-                                                    browser_mode: browser_mode.clone(),
-                                                });
-                                            }
-                                        }
+                                        app.app_state.mode = AppMode::Normal;
                                     }
                                 }
                             }
                         }
+
+                        KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+                            if let Some(first_node) = data.first() {
+                                // 1. Get the path of the folder we are CURRENTLY looking at
+                                if let Some(current_dir) = first_node.full_path.parent() {
+                                    // 2. Get the PARENT of that current directory to go "back"
+                                    if let Some(parent_to_fetch) = current_dir.parent() {
+                                        let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                            path: parent_to_fetch.to_path_buf(),
+                                            browser_mode: browser_mode.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
+                        KeyCode::Tab => {
+                            if let FileBrowserMode::Directory = browser_mode {
+                                if let Some(path) = state.cursor_path.clone() {
+                                    if path.is_dir() {
+                                        // Finalize selection (e.g., for download location)
+                                        app.app_state.mode = AppMode::Normal;
+                                    }
+                                }
+                            }
+                        }
+
                         KeyCode::Esc => {
                             app.app_state.mode = AppMode::Normal;
-                            // Cleanup pending states to prevent accidental triggers later
                             app.app_state.pending_torrent_path = None;
                             app.app_state.pending_torrent_link.clear();
                         }

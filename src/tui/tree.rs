@@ -299,6 +299,10 @@ impl TreeMathHelper {
         }
         true
     }
+
+    pub fn get_parent_path(state: &TreeViewState) -> Option<PathBuf> {
+        state.cursor_path.as_ref().and_then(|path| path.parent().map(|p| p.to_path_buf()))
+    }
 }
 
 #[cfg(test)]

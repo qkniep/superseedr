@@ -1161,81 +1161,19 @@ tracing::info!("CRAWLER START: Target path: {:?}, Absolute: {}",
                 });
             }
 
-            /*
+
             AppCommand::UpdateFileBrowserData { data } => {
-                if let AppMode::FileBrowser { state, data: existing_data, browser_mode: _ } = &mut self.app_state.mode {
-                    // 1. Inject the crawled filesystem nodes
+                if let AppMode::FileBrowser { state, data: existing_data, .. } = &mut self.app_state.mode {
+                    // 1. Completely replace the data (stateless)
                     *existing_data = data; 
 
-                    // 2. Automatic Expansion Logic:
-                    // We ensure that the directory the user just "entered" is expanded 
-                    // in the view state so the contents are visible immediately.
-                    if let Some(current_path) = state.cursor_path.clone() {
-                        state.expanded_paths.insert(current_path);
-                    }
-
-                    // 3. UI Refresh
-                    self.app_state.ui_needs_redraw = true;
-                }
-            }
-            */
-
-
-            AppCommand::UpdateFileBrowserData { data } => {
-                if let AppMode::FileBrowser { state, data: existing_data, browser_mode } = &mut self.app_state.mode {
+                    // 2. Reset the view state for the new directory
+                    state.top_most_offset = 0; // Scroll back to the top
+                    state.expanded_paths.clear(); // No expansions in stateless mode
                     
-                    // --- DEBUG LOGGING START ---
-                    tracing::info!("--- 📂 FILE BROWSER UPDATE RECEIVED ---");
+                    // 3. Set cursor to the first item of the new directory
+                    state.cursor_path = existing_data.first().map(|node| node.full_path.clone());
 
-                    // 1. Define a temporary checker to simulate what View.rs does
-                    // This lets us verify if the Logic or the Data is the problem.
-                    let check_mode = browser_mode.clone();
-                    let debug_has_valid_contents = |node: &crate::tui::tree::RawNode<FileMetadata>| -> bool {
-                        fn check_node(n: &crate::tui::tree::RawNode<FileMetadata>, mode: &FileBrowserMode) -> bool {
-                            // Logic Mirror from View.rs
-                            if n.name.starts_with('.') { return false; } 
-                            
-                            if !n.is_dir {
-                                return match mode {
-                                    FileBrowserMode::Directory => false, // Files are invalid in Dir mode
-                                    FileBrowserMode::File(exts) => exts.iter().any(|ext| n.name.ends_with(ext)),
-                                };
-                            }
-                            if !n.payload.is_loaded { return true; } // Pending folders are "Active"
-                            if n.children.is_empty() { return false; } // Empty loaded folders are "Inactive"
-                            
-                            // Recursive
-                            n.children.iter().any(|child| check_node(child, mode))
-                        }
-                        check_node(node, &check_mode)
-                    };
-
-                    // 2. Iterate and Log
-                    for node in &data {
-                        let is_valid = debug_has_valid_contents(node);
-                        let status = if is_valid { "✅ ACTIVE" } else { "🌑 INACTIVE (Grey)" };
-                        let load_state = if node.payload.is_loaded { "LOADED" } else { "PENDING" };
-                        
-                        // If it's a directory, log its immediate children to catch hidden files
-                        if node.is_dir && !node.children.is_empty() {
-                            for child in &node.children {
-                                let child_valid = debug_has_valid_contents(child);
-                                let child_status = if child_valid { "ACTIVE" } else { "GREY" };
-                            }
-                        }
-                    }
-                    tracing::info!("--- 📂 END UPDATE ---\n");
-                    // --- DEBUG LOGGING END ---
-
-                    // 1. Inject the crawled filesystem nodes
-                    *existing_data = data; 
-
-                    // 2. Automatic Expansion Logic:
-                    if let Some(current_path) = state.cursor_path.clone() {
-                        state.expanded_paths.insert(current_path);
-                    }
-
-                    // 3. UI Refresh
                     self.app_state.ui_needs_redraw = true;
                 }
             }

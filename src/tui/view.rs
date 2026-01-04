@@ -2300,46 +2300,8 @@ pub fn draw_file_browser(
     f.render_widget(Clear, area);
 
     let inner_height = area.height.saturating_sub(2) as usize;
-    let filter_extensions = match browser_mode {
-        FileBrowserMode::Directory => None,
-        FileBrowserMode::File(exts) => Some(exts),
-    };
-
-    // Improved Recursive Check: 
-    // Proves a directory is "Active" if it has valid files OR uncrawled depth.
-    let has_valid_contents = |node: &tree::RawNode<FileMetadata>| -> bool {
-        fn check_node(n: &tree::RawNode<FileMetadata>, exts: Option<&Vec<String>>) -> bool {
-            // Filter out hidden files from "Active" consideration (e.g. .DS_Store)
-            if n.name.starts_with('.') {
-                return false;
-            }
-
-            // 1. If it's a file, it's active only if it matches the criteria
-            if !n.is_dir {
-                return match exts {
-                    Some(e) => e.iter().any(|ext| n.name.ends_with(ext)),
-                    // In Directory Picker mode, files are NOT valid content for navigation
-                    // This ensures folders containing only files turn Grey.
-                    None => false, 
-                };
-            }
-
-            // 2. If it's a directory that hasn't been loaded yet, keep it active (White)
-            if !n.payload.is_loaded {
-                return true;
-            }
-
-            // 3. If it is a loaded directory with NO children, it is INACTIVE (Grey)
-            if n.children.is_empty() {
-                return false;
-            }
-
-            // 4. Recursive check: Active if ANY child is active
-            n.children.iter().any(|child| check_node(child, exts))
-        }
-        check_node(node, filter_extensions.as_ref().map(|v| *v))
-    };
-
+    
+    // Stateless mode uses the standard filter based on the search query
     let filter = match browser_mode {
         FileBrowserMode::Directory => TreeFilter::from_text(&app_state.search_query),
         FileBrowserMode::File(extensions) => {
@@ -2350,52 +2312,38 @@ pub fn draw_file_browser(
         }
     };
 
+    // Get the visible slice of the current directory
     let visible_items = TreeMathHelper::get_visible_slice(data, state, filter, inner_height);
+    let mut list_items = Vec::new();
 
-    let items: Vec<ListItem> = visible_items.iter()
-        .map(|item| {
-            let indent = "  ".repeat(item.depth);
-            let is_active = has_valid_contents(&item.node);
-            
-            let (prefix, icon) = if item.node.is_dir { 
-                ("> ", if item.is_expanded { "󰉖 " } else { "󰉋 " })
-            } else { 
-                ("  ", "󰈔 ") 
-            };
+    for item in visible_items {
+        let is_cursor = item.is_cursor;
+        let mut style = if is_cursor {
+            Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::TEXT)
+        };
 
-            let mut style = if is_active {
-                Style::default().fg(theme::TEXT)
-            } else {
-                Style::default().fg(theme::SURFACE1) // Greying out empty/invalid items
-            };
+        // Updated icons: using  (Caret) for directories
+        let (prefix, icon) = if item.node.is_dir {
+            (" ", "󰉋 ") // Caret + double space + folder icon
+        } else {
+            ("  ", "󰈔 ")   // Double space for files
+        };
 
-            if item.is_cursor {
-                if is_active {
-                    style = style.fg(theme::YELLOW).add_modifier(Modifier::BOLD);
-                } else {
-                    // Cursor is on an empty/inactive item -> Use a muted highlight
-                    // allowing the user to see it is "empty" (Greyish) but selected.
-                    style = style.fg(theme::OVERLAY0).add_modifier(Modifier::BOLD);
-                }
-            }
+        let name_span = Span::styled(format!("{}{}{}", prefix, icon, item.node.name), style);
+        
+        let meta_span = if !item.node.is_dir {
+            Span::styled(
+                format!("  ({})", format_bytes(item.node.payload.size)), 
+                Style::default().fg(theme::OVERLAY0).italic()
+            )
+        } else {
+            Span::raw("")
+        };
 
-            let name_span = Span::styled(format!("{}{}{}{}", indent, prefix, icon, item.node.name), style);
-            
-            let meta_span = if item.node.is_dir {
-                if !item.node.payload.is_loaded {
-                    Span::styled("  (more...)", Style::default().fg(theme::SURFACE0).italic())
-                } else if !is_active {
-                    Span::styled("  (empty)", Style::default().fg(theme::SURFACE0).italic())
-                } else {
-                    Span::raw("")
-                }
-            } else {
-                Span::styled(format!("  ({})", format_bytes(item.node.payload.size)), Style::default().fg(theme::OVERLAY0).italic())
-            };
-
-            ListItem::new(Line::from(vec![name_span, meta_span]))
-        })
-        .collect();
+        list_items.push(ListItem::new(Line::from(vec![name_span, meta_span])));
+    }
 
     let title = match browser_mode {
         FileBrowserMode::Directory => " Select Directory ".to_string(),
@@ -2403,7 +2351,7 @@ pub fn draw_file_browser(
     };
     
     f.render_widget(
-        List::new(items)
+        List::new(list_items)
             .block(Block::default()
                 .title(title)
                 .borders(Borders::ALL)
@@ -2412,7 +2360,6 @@ pub fn draw_file_browser(
         area,
     );
 }
-// ...
 
 fn draw_welcome_screen(f: &mut Frame) {
     let text = vec![
