@@ -87,6 +87,7 @@ impl<T> TreeFilter<T> {
 #[derive(Debug, Clone, Default)]
 pub struct TreeViewState {
     pub cursor_path: Option<PathBuf>,
+    pub current_path: PathBuf,
     pub expanded_paths: HashSet<PathBuf>,
     pub selected_paths: HashSet<PathBuf>,
     pub top_most_offset: usize,

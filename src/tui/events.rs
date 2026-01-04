@@ -696,17 +696,11 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         }
 
                         KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
-                            if let Some(first_node) = data.first() {
-                                // 1. Get the path of the folder we are CURRENTLY looking at
-                                if let Some(current_dir) = first_node.full_path.parent() {
-                                    // 2. Get the PARENT of that current directory to go "back"
-                                    if let Some(parent_to_fetch) = current_dir.parent() {
-                                        let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
-                                            path: parent_to_fetch.to_path_buf(),
-                                            browser_mode: browser_mode.clone(),
-                                        });
-                                    }
-                                }
+                            if let Some(parent) = state.current_path.parent() {
+                                let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                    path: parent.to_path_buf(),
+                                    browser_mode: browser_mode.clone(),
+                                });
                             }
                         }
 

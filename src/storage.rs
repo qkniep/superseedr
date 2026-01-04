@@ -232,6 +232,9 @@ pub async fn build_fs_tree(path: &Path, depth: usize) -> Result<Vec<RawNode<File
         let name = entry.file_name().to_string_lossy().into_owned();
         let full_path = entry.path();
         let size = meta.len();
+        
+        // Extract modification time, defaulting to UNIX_EPOCH if unavailable
+        let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
         let mut is_loaded = true;
         let children = if is_dir {
@@ -249,11 +252,16 @@ pub async fn build_fs_tree(path: &Path, depth: usize) -> Result<Vec<RawNode<File
             name,
             full_path,
             is_dir,
-            payload: FileMetadata { size, is_loaded }, // <--- USE THE FLAG
+            payload: FileMetadata { 
+                size, 
+                is_loaded, 
+                modified // <--- Pass the extracted timestamp here
+            },
             children,
         });
     }
 
+    // Default alphabetical sort for the raw fetch
     nodes.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
     Ok(nodes)
 }

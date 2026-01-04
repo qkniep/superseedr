@@ -106,6 +106,7 @@ pub enum FileBrowserMode {
 pub struct FileMetadata {
     pub size: u64,
     pub is_loaded: bool,
+    pub modified: std::time::SystemTime,
 }
 
 #[derive(Debug, Default)]
@@ -1124,13 +1125,9 @@ impl App {
                 let path_clone = path.clone();
 
 
-tracing::info!("CRAWLER START: Target path: {:?}, Absolute: {}", 
-        path_clone, 
-        path_clone.is_absolute()
-    );
-
                 // 1. Initialize UI state immediately so the browser opens
                 let mut tree_state = crate::tui::tree::TreeViewState::new();
+                tree_state.current_path = path.clone();
                 tree_state.cursor_path = Some(path.clone()); // Set cursor to common path
                 
                 // We open the browser immediately with an empty list to show it's loading
@@ -1162,18 +1159,40 @@ tracing::info!("CRAWLER START: Target path: {:?}, Absolute: {}",
             }
 
 
-            AppCommand::UpdateFileBrowserData { data } => {
-                if let AppMode::FileBrowser { state, data: existing_data, .. } = &mut self.app_state.mode {
-                    // 1. Completely replace the data (stateless)
-                    *existing_data = data; 
-
-                    // 2. Reset the view state for the new directory
-                    state.top_most_offset = 0; // Scroll back to the top
-                    state.expanded_paths.clear(); // No expansions in stateless mode
+            AppCommand::UpdateFileBrowserData { mut data } => {
+                if let AppMode::FileBrowser { state, data: existing_data, browser_mode } = &mut self.app_state.mode {
                     
-                    // 3. Set cursor to the first item of the new directory
-                    state.cursor_path = existing_data.first().map(|node| node.full_path.clone());
+                    // Apply sorting ONLY if in File mode
+                    if let FileBrowserMode::File(extensions) = browser_mode {
+                        // Pre-process extensions to lowercase for efficient matching
+                        let target_exts: Vec<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
 
+                        data.sort_by(|a, b| {
+                            let a_name = a.name.to_lowercase();
+                            let b_name = b.name.to_lowercase();
+
+                            let a_matches = target_exts.iter().any(|ext| a_name.ends_with(ext));
+                            let b_matches = target_exts.iter().any(|ext| b_name.ends_with(ext));
+
+                            // Rule 1: Prioritized files (matching extensions) go to the very top
+                            if a_matches != b_matches {
+                                return b_matches.cmp(&a_matches);
+                            }
+
+                            // Rule 2: Files generally above folders (if neither matched prioritized extensions)
+                            if a.is_dir != b.is_dir {
+                                return a.is_dir.cmp(&b.is_dir);
+                            }
+
+                            // Rule 3: Sort by latest modified time first within each group
+                            b.payload.modified.cmp(&a.payload.modified)
+                        });
+                    }
+
+                    *existing_data = data;
+                    state.top_most_offset = 0;
+                    // Snap cursor to the first item (the newest prioritized file)
+                    state.cursor_path = existing_data.first().map(|node| node.full_path.clone());
                     self.app_state.ui_needs_redraw = true;
                 }
             }

@@ -2298,35 +2298,34 @@ pub fn draw_file_browser(
 ) {
     let area = centered_rect(75, 80, f.area());
     f.render_widget(Clear, area);
+
     let inner_height = area.height.saturating_sub(2) as usize;
-
-    let item_count = data.len();
-    let count_label = if item_count == 0 {
-        "(empty)".to_string()
-    } else {
-        format!("({} items)", item_count)
-    };
-
-    let title = match browser_mode {
-        FileBrowserMode::Directory => format!(" Select Directory — {} ", count_label),
-        FileBrowserMode::File(exts) => format!(" Select File [{}] — {} ", exts.join(", "), count_label),
-    };
     
-    // Stateless mode uses the standard filter based on the search query
+    // 1. Filter setup (ensure directories stay visible for navigation)
     let filter = match browser_mode {
         FileBrowserMode::Directory => TreeFilter::from_text(&app_state.search_query),
         FileBrowserMode::File(extensions) => {
             let exts = extensions.clone();
             tree::TreeFilter::new(&app_state.search_query, move |node| {
-                node.is_dir || exts.iter().any(|ext| node.name.ends_with(ext))
+                node.is_dir || exts.iter().any(|ext| node.name.to_lowercase().ends_with(ext))
             })
         }
     };
 
-    // Get the visible slice of the current directory
+    // 2. Prepare Titles (Absolute Path on Left, Selection Mode on Right)
+    let abs_path = state.current_path.to_string_lossy();
+    let item_count = data.len();
+    let count_label = if item_count == 0 { " (empty)".to_string() } else { format!(" ({} items)", item_count) };
+
+    let left_title = format!(" {}/{} ", abs_path, count_label);
+    let right_title = match browser_mode {
+        FileBrowserMode::Directory => " Select Directory ".to_string(),
+        FileBrowserMode::File(exts) => format!(" Select File [{}] ", exts.join(", ")),
+    };
+
+    // 3. Render Items
     let visible_items = TreeMathHelper::get_visible_slice(data, state, filter, inner_height);
     let mut list_items = Vec::new();
-
 
     if data.is_empty() {
         list_items.push(ListItem::new(Line::from(vec![
@@ -2334,31 +2333,33 @@ pub fn draw_file_browser(
         ])));
     } else if visible_items.is_empty() {
         list_items.push(ListItem::new(Line::from(vec![
-            Span::styled(format!("   (No matching files found among {} items)", data.len()), 
+            Span::styled(format!("   (No matching files among {} items)", item_count), 
             Style::default().fg(theme::OVERLAY0).italic())
         ])));
     } else {
-
         for item in visible_items {
             let is_cursor = item.is_cursor;
-            let mut style = if is_cursor {
+            let style = if is_cursor {
                 Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme::TEXT)
             };
-            
+
             let (prefix, icon) = if item.node.is_dir {
-                (" ", "󰉋 ") // Caret + double space + folder icon
+                (" ", "󰉋 ") 
             } else {
-                ("  ", "󰈔 ")   // Double space for files
+                ("  ", "󰈔 ")
             };
 
             let name_span = Span::styled(format!("{}{}{}", prefix, icon, item.node.name), style);
             
             let meta_span = if !item.node.is_dir {
+                let datetime: chrono::DateTime<chrono::Local> = item.node.payload.modified.into();
+                let date_str = datetime.format("%b %d %Y %I:%M %p").to_string();
+
                 Span::styled(
-                    format!("  ({})", format_bytes(item.node.payload.size)), 
-                    Style::default().fg(theme::OVERLAY0).italic()
+                    format!(" ({})", date_str),
+                    Style::default().fg(theme::SURFACE2).italic()
                 )
             } else {
                 Span::raw("")
@@ -2368,12 +2369,12 @@ pub fn draw_file_browser(
         }
     }
 
-
+    // 4. Final Widget Render
     f.render_widget(
         List::new(list_items)
             .block(Block::default()
-                .title(title)
-
+                .title(block::Title::from(Span::styled(left_title, Style::default().fg(theme::MAUVE).bold())).alignment(Alignment::Left))
+                .title(block::Title::from(Span::styled(right_title, Style::default().fg(theme::MAUVE).italic())).alignment(Alignment::Right))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::MAUVE)))
             .highlight_symbol("▶ "),
