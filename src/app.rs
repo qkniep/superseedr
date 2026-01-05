@@ -62,7 +62,6 @@ use notify::{Config, Error as NotifyError, Event, RecommendedWatcher, RecursiveM
 
 use ratatui::prelude::Rect;
 use ratatui::{backend::CrosstermBackend, Terminal};
-use ratatui_explorer::FileExplorer;
 use std::cell::RefCell;
 use throbber_widgets_tui::ThrobberState;
 
@@ -100,6 +99,12 @@ pub enum FileBrowserMode {
     Directory,               // User must pick a folder (e.g. Download Location)
     File(Vec<String>),       // User must pick a file matching these extensions (e.g. vec!["torrent"])
     // Future proofing: You could add 'AnyFile' or 'FileOrFolder' here later
+    DownloadLocSelection {
+        torrent_files: Vec<String>, // List of relative file paths in the torrent
+        container_name: String,     // Name of the container folder (e.g. hash_name)
+        use_container: bool,        // Toggle state
+        is_editing_name: bool,      // Whether the user is currently typing the name
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +112,7 @@ pub struct FileMetadata {
     pub size: u64,
     pub is_loaded: bool,
     pub modified: std::time::SystemTime,
+    pub is_virtual: bool,
 }
 
 #[derive(Debug, Default)]
@@ -293,6 +299,7 @@ pub enum AppCommand {
     PortFileChanged(PathBuf),
     FetchFileTree { path: PathBuf, browser_mode: FileBrowserMode, highlight_path: Option<PathBuf> },
     UpdateFileBrowserData { data: Vec<tree::RawNode<FileMetadata>>, highlight_path: Option<PathBuf> },
+    UpdateConfig(Settings),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, EnumIter)]
@@ -310,8 +317,6 @@ pub enum AppMode {
     #[default]
     Normal,
     PowerSaving,
-    DownloadPathPicker(FileExplorer),
-    AddTorrentPicker(FileExplorer),
     DeleteConfirm {
         info_hash: Vec<u8>,
         with_files: bool,
@@ -321,11 +326,6 @@ pub enum AppMode {
         selected_index: usize,
         items: Vec<ConfigItem>,
         editing: Option<(ConfigItem, String)>,
-    },
-    ConfigPathPicker {
-        settings_edit: Box<Settings>,
-        for_item: ConfigItem,
-        file_explorer: FileExplorer,
     },
     FileBrowser {
         state: TreeViewState,
@@ -721,6 +721,9 @@ impl App {
 
                 Some(event) = self.tui_event_rx.recv() => {
                     self.clamp_selected_indices();
+
+                    
+
                     events::handle_event(event, self).await;
                 }
 
@@ -976,14 +979,22 @@ impl App {
                     }
                 } else {
                     self.app_state.pending_torrent_path = Some(path.clone());
-                    if let Ok(mut explorer) = FileExplorer::new() {
-                        let initial_path = self
-                            .find_most_common_download_path()
-                            .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()));
-                        if let Some(common_path) = initial_path {
-                            explorer.set_cwd(common_path).ok();
-                        }
-                    }
+                    
+                    let initial_path = self.find_most_common_download_path()
+                        .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()))
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+                    // Launch the new FileBrowser
+                    let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
+                        path: initial_path,
+                        browser_mode: FileBrowserMode::DownloadLocSelection {
+                            torrent_files: vec![], // Populate with file list if parsed later
+                            container_name: "New Download".to_string(),
+                            use_container: true,
+                            is_editing_name: false,
+                        },
+                        highlight_path: None,
+                    });
                 }
             }
             AppCommand::AddTorrentFromPathFile(path) => {
@@ -1004,17 +1015,22 @@ impl App {
                                 self.save_state_to_disk();
                             } else {
                                 self.app_state.pending_torrent_path = Some(torrent_file_path);
-                                if let Ok(mut explorer) = FileExplorer::new() {
-                                    let initial_path = UserDirs::new()
-                                        .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
-                                        .or_else(|| {
-                                            UserDirs::new().map(|ud| ud.home_dir().to_path_buf())
-                                        });
-                                    if let Some(common_path) = initial_path {
-                                        explorer.set_cwd(common_path).ok();
-                                    }
-                                    self.app_state.mode = AppMode::DownloadPathPicker(explorer);
-                                }
+                                
+                                let initial_path = UserDirs::new()
+                                    .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
+                                    .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()))
+                                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+                                let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                    path: initial_path,
+                                    browser_mode: FileBrowserMode::DownloadLocSelection {
+                                        torrent_files: vec![], // Populate if needed
+                                        container_name: "New Download".to_string(),
+                                        use_container: true,
+                                        is_editing_name: false,
+                                    },
+                                    highlight_path: None,
+                                });
                             }
                         }
                         Err(e) => {
@@ -1056,15 +1072,22 @@ impl App {
                                 )
                                 .await;
                                 self.save_state_to_disk();
-                            } else if let Ok(mut explorer) = FileExplorer::new() {
-                                let initial_path =
-                                    self.find_most_common_download_path().or_else(|| {
-                                        UserDirs::new().map(|ud| ud.home_dir().to_path_buf())
-                                    });
-                                if let Some(common_path) = initial_path {
-                                    explorer.set_cwd(common_path).ok();
-                                }
-                                self.app_state.mode = AppMode::DownloadPathPicker(explorer);
+                            } 
+                            else {
+                                let initial_path = self.find_most_common_download_path()
+                                    .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()))
+                                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+                                let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                    path: initial_path,
+                                    browser_mode: FileBrowserMode::DownloadLocSelection {
+                                        torrent_files: vec![],
+                                        container_name: "Magnet Download".to_string(),
+                                        use_container: true,
+                                        is_editing_name: false,
+                                    },
+                                    highlight_path: None,
+                                });
                             }
                         }
                         Err(e) => {
@@ -1209,7 +1232,31 @@ impl App {
                     self.app_state.ui_needs_redraw = true;
                 }
             }
+            AppCommand::UpdateConfig(new_settings) => {
+                let old_settings = self.client_configs.clone();
+                self.client_configs = new_settings.clone();
 
+                // 1. Handle Port Change (Re-bind Listener)
+                if new_settings.client_port != old_settings.client_port {
+                    tracing::info!("Config update: Port changed to {}", new_settings.client_port);
+                    // Reuse your existing port logic or extract it to a helper
+                    self.rebind_listener(new_settings.client_port).await; 
+                }
+
+                // 2. Handle Bandwidth Limit Changes (Update Buckets)
+                if new_settings.global_download_limit_bps != old_settings.global_download_limit_bps {
+                    self.global_dl_bucket.set_rate(new_settings.global_download_limit_bps as f64);
+                }
+                if new_settings.global_upload_limit_bps != old_settings.global_upload_limit_bps {
+                    self.global_ul_bucket.set_rate(new_settings.global_upload_limit_bps as f64);
+                }
+
+                // 3. Persist to Disk
+                self.save_state_to_disk();
+                
+                // 4. Force Redraw
+                self.app_state.ui_needs_redraw = true;
+            }
         }
     }
 
@@ -2571,6 +2618,68 @@ impl App {
                         let _ = self.app_command_tx.send(cmd).await;
                     }
                 }
+            }
+        }
+    }
+
+    async fn rebind_listener(&mut self, new_port: u16) {
+        match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", new_port)).await {
+            Ok(new_listener) => {
+                self.listener = new_listener;
+                // Note: client_configs.client_port is likely already updated by the caller (UpdateConfig)
+                // but we ensure consistency here just in case.
+                self.client_configs.client_port = new_port; 
+                
+                tracing_event!(
+                    Level::INFO,
+                    "Successfully rebound listener to port {}",
+                    new_port
+                );
+
+                // Notify all running managers of the new port
+                for manager_tx in self.torrent_manager_command_txs.values() {
+                    let _ = manager_tx.try_send(ManagerCommand::UpdateListenPort(new_port));
+                }
+
+                // Re-initialize DHT if enabled (Logic copied from handle_port_change)
+                #[cfg(feature = "dht")]
+                {
+                    let bootstrap_nodes: Vec<&str> = self
+                        .client_configs
+                        .bootstrap_nodes
+                        .iter()
+                        .map(AsRef::as_ref)
+                        .collect();
+
+                    match Dht::builder()
+                        .bootstrap(&bootstrap_nodes)
+                        .port(new_port)
+                        .server_mode()
+                        .build()
+                    {
+                        Ok(new_dht_server) => {
+                            let new_dht_handle = new_dht_server.as_async();
+                            self.distributed_hash_table = new_dht_handle.clone();
+
+                            for manager_tx in self.torrent_manager_command_txs.values() {
+                                let _ = manager_tx.try_send(ManagerCommand::UpdateDhtHandle(
+                                    new_dht_handle.clone(),
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            tracing_event!(Level::ERROR, "Failed to rebuild DHT on new port: {}", e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing_event!(
+                    Level::ERROR,
+                    "Failed to bind to new port {}: {}. Listener not updated.",
+                    new_port,
+                    e
+                );
             }
         }
     }

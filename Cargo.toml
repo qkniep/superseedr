@@ -74,7 +74,6 @@ directories = "6.0"
 toml = "0.9.8"
 hex = "0.4"
 sysinfo = "0.37.2"
-ratatui-explorer = "0.2.0" 
 strum = "0.27.2"
 strum_macros = "0.27.2"
 figment = { version = "0.10", features = ["toml", "env"] }

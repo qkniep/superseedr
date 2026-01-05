@@ -254,8 +254,9 @@ pub async fn build_fs_tree(path: &Path, depth: usize) -> Result<Vec<RawNode<File
             is_dir,
             payload: FileMetadata { 
                 size, 
-                is_loaded, 
-                modified // <--- Pass the extracted timestamp here
+                is_loaded,
+                modified,
+                is_virtual: false,
             },
             children,
         });

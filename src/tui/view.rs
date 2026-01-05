@@ -51,15 +51,6 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
             draw_power_saving_screen(f, app_state, settings);
             return;
         }
-        AppMode::ConfigPathPicker {
-            file_explorer,
-            for_item,
-            ..
-        } => {
-            let title = format!("Select a Folder - {:?}", for_item);
-            draw_file_picker(f, file_explorer, title);
-            return;
-        }
         AppMode::Config {
             settings_edit,
             selected_index,
@@ -71,14 +62,6 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
         }
         AppMode::DeleteConfirm { .. } => {
             draw_delete_confirm_dialog(f, app_state);
-            return;
-        }
-        AppMode::DownloadPathPicker(file_explorer) => {
-            draw_file_picker(f, file_explorer, "Select Download Folder".to_string());
-            return;
-        }
-        AppMode::AddTorrentPicker(file_explorer) => {
-            draw_file_picker(f, file_explorer, "Select Torrent File".to_string());
             return;
         }
         AppMode::FileBrowser { state, data, browser_mode } => {
@@ -125,32 +108,6 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     if app_state.should_quit {
         draw_shutdown_screen(f, app_state);
     }
-}
-
-fn draw_file_picker(f: &mut Frame, file_explorer: &ratatui_explorer::FileExplorer, title: String) {
-    let area = centered_rect(80, 70, f.area());
-    f.render_widget(Clear, area);
-    let block = Block::default()
-        .title(Span::styled(title, Style::default().fg(theme::MAUVE)))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::SURFACE2));
-    let inner_area = block.inner(area);
-    let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner_area);
-    let footer_text = Line::from(vec![
-        Span::styled("[Tab]", Style::default().fg(theme::GREEN)),
-        Span::raw(" Confirm | "),
-        Span::styled("[Esc]", Style::default().fg(theme::RED)),
-        Span::raw(" Cancel | "),
-        Span::styled("←→↑↓", Style::default().fg(theme::BLUE)),
-        Span::raw(" Navigate"),
-    ])
-    .alignment(Alignment::Center);
-    f.render_widget(block, area);
-    f.render_widget(&file_explorer.widget(), chunks[0]);
-    f.render_widget(
-        Paragraph::new(footer_text).style(Style::default().fg(theme::SUBTEXT1)),
-        chunks[1],
-    );
 }
 
 fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
@@ -2290,7 +2247,6 @@ fn draw_power_saving_screen(f: &mut Frame, app_state: &AppState, settings: &Sett
     f.render_widget(footer_paragraph, footer_area);
 }
 
-
 pub fn draw_file_browser(
     f: &mut Frame, 
     app_state: &AppState, 
@@ -2310,13 +2266,16 @@ pub fn draw_file_browser(
         }
     }
 
+    let show_options = matches!(browser_mode, FileBrowserMode::DownloadLocSelection { .. });
+
     f.render_widget(Clear, area);
 
     // --- USE LAYOUT MODULE ---
     let layout = calculate_file_browser_layout(
         area, 
         preview_path.is_some(), 
-        app_state.is_searching
+        app_state.is_searching,
+        show_options
     );
 
     // --- Draw Torrent Preview ---
@@ -2339,36 +2298,161 @@ pub fn draw_file_browser(
         f.render_widget(Paragraph::new(search_text).block(search_block), search_area);
     }
 
-    // --- Draw Footer ---
-    let mut footer_spans = vec![
-        Span::styled("[Arrows/Vim]", Style::default().fg(theme::BLUE)),
-        Span::raw(" Nav | "),
-        Span::styled("[Enter]", Style::default().fg(theme::GREEN)),
-        Span::raw(" Confirm | "),
-        Span::styled("[Backspace]", Style::default().fg(theme::YELLOW)),
-        Span::raw(" Back | "),
-        Span::styled("[/]", Style::default().fg(theme::MAUVE)),
-        Span::raw(" Filter | "),
-    ];
+    // --- Draw Download Options Panel (Bottom) ---
+    if let (Some(options_area), FileBrowserMode::DownloadLocSelection { container_name, use_container, is_editing_name, .. }) = (layout.options, browser_mode) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::MAUVE))
+            .title(" Download Options ");
+
+        let inner = block.inner(options_area);
+        f.render_widget(block, options_area);
+
+        let chunks = Layout::horizontal([
+            Constraint::Length(22), // Checkbox
+            Constraint::Min(0),     // Input
+        ]).split(inner);
+
+        // 1. Toggle Checkbox
+        let check_char = if *use_container { "[x]" } else { "[ ]" };
+        let toggle_style = if *use_container { Style::default().fg(theme::GREEN) } else { Style::default().fg(theme::SUBTEXT0) };
+        let toggle_text = Line::from(vec![
+            Span::styled(check_char, toggle_style.bold()),
+            Span::raw(" Create Subfolder"),
+        ]);
+        f.render_widget(Paragraph::new(toggle_text), chunks[0]);
+
+        // 2. Folder Name Input
+        let input_style = if *is_editing_name { Style::default().fg(theme::YELLOW) } else { Style::default().fg(theme::TEXT) };
+        let name_text = Line::from(vec![
+            Span::styled(" Name: ", Style::default().fg(theme::SUBTEXT0)),
+            Span::styled(container_name, input_style.bg(if *is_editing_name { theme::SURFACE0 } else { Color::Reset })),
+            if *is_editing_name { Span::styled("_", Style::default().fg(theme::YELLOW).add_modifier(Modifier::SLOW_BLINK)) } else { Span::raw("") }
+        ]);
+        f.render_widget(Paragraph::new(name_text), chunks[1]);
+    }
+
+    // --- PREPARE DATA (MERGE VIRTUAL NODES) ---
+    // We clone the data to a new vector so we can prepend virtual nodes without sorting/destroying the original list
+    let mut display_data = Vec::new();
+
+    // 1. Prepend Virtual Nodes (if any)
+    if let FileBrowserMode::DownloadLocSelection { torrent_files, container_name, use_container, .. } = browser_mode {
+        let current_path = &state.current_path;
+
+        if *use_container {
+            // Virtual Node: Container Folder
+            let virtual_folder_path = current_path.join(container_name);
+            let virtual_node = tree::RawNode {
+                name: container_name.clone(),
+                full_path: virtual_folder_path,
+                children: Vec::new(),
+                is_dir: true,
+                payload: FileMetadata { 
+                    size: 0, 
+                    is_loaded: true, 
+                    modified: std::time::SystemTime::now(),
+                    is_virtual: true 
+                }
+            };
+            display_data.push(virtual_node);
+        } else {
+            // Virtual Nodes: Top-level files from torrent
+            let mut top_level_items = std::collections::HashSet::new();
+            // We want these sorted relative to each other, but always at the top
+            let mut virtual_files = Vec::new();
+
+            for file_path in torrent_files {
+                let path = std::path::Path::new(file_path);
+                if let Some(first_component) = path.components().next() {
+                    let name = first_component.as_os_str().to_string_lossy().to_string();
+                    if top_level_items.contains(&name) { continue; }
+                    top_level_items.insert(name.clone());
+
+                    let is_dir = path.components().count() > 1;
+                    let virtual_node = tree::RawNode {
+                        name: name.clone(),
+                        full_path: current_path.join(&name),
+                        children: Vec::new(),
+                        is_dir,
+                        payload: FileMetadata { 
+                            size: 0, 
+                            is_loaded: true, 
+                            modified: std::time::SystemTime::now(),
+                            is_virtual: true 
+                        }
+                    };
+                    virtual_files.push(virtual_node);
+                }
+            }
+            // Sort only the virtual files so they look tidy
+            virtual_files.sort_by(|a, b| {
+                match (a.is_dir, b.is_dir) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.name.cmp(&b.name),
+                }
+            });
+            display_data.extend(virtual_files);
+        }
+    }
+
+    // 2. Append Actual Data (Preserving original order/sort)
+    display_data.extend_from_slice(data);
+
+
+    // --- DRAW FOOTER ---
+    let mut footer_spans = Vec::new();
+    match browser_mode {
+        FileBrowserMode::Directory => {
+             footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
+             footer_spans.push(Span::raw(" Select Dir | "));
+        }
+        FileBrowserMode::DownloadLocSelection { .. } => {
+             if show_options {
+                footer_spans.push(Span::styled("[Space]", Style::default().fg(theme::YELLOW)));
+                footer_spans.push(Span::raw(" Toggle | "));
+                footer_spans.push(Span::styled("[e]", Style::default().fg(theme::YELLOW)));
+                footer_spans.push(Span::raw(" Edit Name | "));
+                footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
+                footer_spans.push(Span::raw(" Select"));
+            }
+        }
+        _ => {
+            footer_spans.push(Span::styled("[Enter]", Style::default().fg(theme::GREEN)));
+            footer_spans.push(Span::raw(" Confirm | "));
+        }
+    }
+    
+    footer_spans.push(Span::styled("[Esc]", Style::default().fg(theme::RED)));
+    footer_spans.push(Span::raw(" Cancel"));
     if let FileBrowserMode::Directory = browser_mode {
         footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
         footer_spans.push(Span::raw(" Select Dir | "));
     }
-    footer_spans.push(Span::styled("[Esc]", Style::default().fg(theme::RED)));
-    footer_spans.push(Span::raw(" Cancel"));
+    if show_options {
+        footer_spans.push(Span::styled("[Space]", Style::default().fg(theme::YELLOW)));
+        footer_spans.push(Span::raw(" Toggle | "));
+        footer_spans.push(Span::styled("[e]", Style::default().fg(theme::YELLOW)));
+        footer_spans.push(Span::raw(" Edit Name | "));
+        footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
+        footer_spans.push(Span::raw(" Select"));
+    } else {
+        footer_spans.push(Span::styled("[Esc]", Style::default().fg(theme::RED)));
+        footer_spans.push(Span::raw(" Cancel"));
+    }
 
     let footer = Paragraph::new(Line::from(footer_spans))
         .alignment(Alignment::Center)
         .style(Style::default().fg(theme::SUBTEXT1));
-    
-    // Use layout.footer
     f.render_widget(footer, layout.footer);
 
-    // --- Draw File List ---
-    // Use layout.list for sizing calculations
+    // --- DRAW LIST ---
     let inner_height = layout.list.height.saturating_sub(2) as usize;
     let filter = match browser_mode {
-        FileBrowserMode::Directory => TreeFilter::from_text(&app_state.search_query),
+        FileBrowserMode::Directory | FileBrowserMode::DownloadLocSelection { .. } => {
+            TreeFilter::from_text(&app_state.search_query)
+        },
         FileBrowserMode::File(extensions) => {
             let exts = extensions.clone();
             tree::TreeFilter::new(&app_state.search_query, move |node| {
@@ -2378,19 +2462,21 @@ pub fn draw_file_browser(
     };
 
     let abs_path = state.current_path.to_string_lossy();
-    let item_count = data.len();
+    let item_count = display_data.len();
     let count_label = if item_count == 0 { " (empty)".to_string() } else { format!(" ({} items)", item_count) };
     let left_title = format!(" {}/{} ", abs_path, count_label);
+    
     let right_title = match browser_mode {
         FileBrowserMode::Directory => " Select Directory ".to_string(),
+        FileBrowserMode::DownloadLocSelection { .. } => " Select Download Location ".to_string(),
         FileBrowserMode::File(exts) => format!(" Select File [{}] ", exts.join(", ")),
     };
 
-    let visible_items = TreeMathHelper::get_visible_slice(data, state, filter, inner_height);
+    // Use display_data here to ensure virtual nodes are included in calculations
+    let visible_items = TreeMathHelper::get_visible_slice(&display_data, state, filter, inner_height);
     let mut list_items = Vec::new();
 
-    // ... (Keep existing item mapping loop mostly the same) ...
-    if data.is_empty() {
+    if display_data.is_empty() {
         list_items.push(ListItem::new(Line::from(vec![
             Span::styled("   (Directory is empty)", Style::default().fg(theme::OVERLAY0).italic())
         ])));
@@ -2402,6 +2488,7 @@ pub fn draw_file_browser(
     } else {
         for item in visible_items {
             let is_cursor = item.is_cursor;
+            let is_virtual = item.node.payload.is_virtual; 
             let indent = "  ".repeat(item.depth);
             let icon_str = if item.node.is_dir { "  " } else { "   " };
 
@@ -2409,6 +2496,12 @@ pub fn draw_file_browser(
                 (
                     Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD),
                     Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD)
+                )
+            } else if is_virtual {
+                // Virtual Node Style
+                 (
+                    Style::default().fg(theme::GREEN),
+                    Style::default().fg(theme::GREEN).add_modifier(Modifier::ITALIC)
                 )
             } else {
                 let i_style = if item.node.is_dir {
@@ -2419,25 +2512,26 @@ pub fn draw_file_browser(
                 (i_style, Style::default().fg(theme::TEXT))
             };
 
-            let line = Line::from(vec![
-                Span::raw(indent),
-                Span::styled(icon_str, icon_style), 
-                Span::styled(format!("{}", item.node.name), text_style),
-            ]);
+            let mut line_spans = vec![Span::raw(indent)];
+            if is_virtual {
+                line_spans.push(Span::styled("+ ", Style::default().fg(theme::GREEN).bold()));
+            }
+            line_spans.push(Span::styled(icon_str, icon_style));
+            line_spans.push(Span::styled(format!("{}", item.node.name), text_style));
 
-            let meta_span = if !item.node.is_dir {
-                let datetime: chrono::DateTime<chrono::Local> = item.node.payload.modified.into();
-                Span::styled(
+            // RESTORE DATE RENDER LOGIC
+            // We only show date/time for real nodes (not virtual) that are not directories
+            if !is_virtual && !item.node.is_dir {
+                 let datetime: chrono::DateTime<chrono::Local> = item.node.payload.modified.into();
+                 line_spans.push(Span::styled(
                     format!(" ({})", datetime.format("%b %d %H:%M")), 
                     Style::default().fg(theme::SURFACE2).italic()
-                )
-            } else { 
-                Span::raw("") 
-            };
+                ));
+            } else if is_virtual {
+                 line_spans.push(Span::styled(" (New)", Style::default().fg(theme::GREEN).italic()));
+            }
 
-            let mut full_line_spans = line.spans;
-            full_line_spans.push(meta_span);
-            list_items.push(ListItem::new(Line::from(full_line_spans)));
+            list_items.push(ListItem::new(Line::from(line_spans)));
         }
     }
 
@@ -2449,7 +2543,7 @@ pub fn draw_file_browser(
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::MAUVE)))
             .highlight_symbol("▶ "),
-        layout.list, // Use layout.list here
+        layout.list,
     );
 }
 
@@ -3079,30 +3173,14 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
                 ]),
             ],
         ),
-        AppMode::ConfigPathPicker { .. } | AppMode::DownloadPathPicker { .. } => (
+        AppMode::FileBrowser { .. } => (
             " Help / File Browser ",
             vec![
                 Row::new(vec![
                     Cell::from(Span::styled("Esc", Style::default().fg(theme::RED))),
                     Cell::from("Cancel selection"),
                 ]),
-                Row::new(vec![
-                    Cell::from(Span::styled("Tab", Style::default().fg(theme::GREEN))),
-                    Cell::from("Confirm selection"),
-                ]),
-                Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
-                Row::new(vec![
-                    Cell::from(Span::styled("↑ / ↓", Style::default().fg(theme::BLUE))),
-                    Cell::from("Navigate files"),
-                ]),
-                Row::new(vec![
-                    Cell::from(Span::styled("←", Style::default().fg(theme::BLUE))),
-                    Cell::from("Go to parent directory"),
-                ]),
-                Row::new(vec![
-                    Cell::from(Span::styled("→ / Enter", Style::default().fg(theme::BLUE))),
-                    Cell::from("Enter directory"),
-                ]),
+                // ... rest of help items ...
             ],
         ),
         _ => (

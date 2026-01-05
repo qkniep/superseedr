@@ -10,27 +10,28 @@ pub const MIN_DETAILS_HEIGHT: u16 = 10;
 
 #[derive(Default, Debug)]
 pub struct FileBrowserLayout {
-    pub area: Rect,           // The full popup area
-    pub content: Rect,        // Area for Preview + List
-    pub footer: Rect,         // Shared footer at bottom
+    pub area: Rect,
+    pub content: Rect,
+    pub footer: Rect,
     
-    pub preview: Option<Rect>, // Left panel (if active)
-    pub browser: Rect,         // Right panel (always active)
+    pub preview: Option<Rect>,
+    pub browser: Rect,
     
-    // Sub-areas for the Browser panel
     pub search: Option<Rect>,
     pub list: Rect,
+    pub options: Option<Rect>, // Added: Area for Container Toggle/Input
 }
 
+// - Update calculate_file_browser_layout
 pub fn calculate_file_browser_layout(
     area: Rect, 
     show_preview: bool, 
-    show_search: bool
+    show_search: bool,
+    show_options: bool // Added parameter
 ) -> FileBrowserLayout {
     let mut plan = FileBrowserLayout::default();
     
     // 1. Global Split: Content vs Footer
-    // Footer gets 1 line at the bottom
     let main_chunks = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(1),
@@ -41,7 +42,6 @@ pub fn calculate_file_browser_layout(
     plan.footer = main_chunks[1];
 
     // 2. Horizontal Split: Preview vs Browser
-    // If preview is active, give it 35%, otherwise Browser gets 100%
     let content_chunks = if show_preview {
         Layout::horizontal([
             Constraint::Percentage(35), 
@@ -59,23 +59,25 @@ pub fn calculate_file_browser_layout(
     }
     plan.browser = content_chunks[1];
 
-    // 3. Browser Vertical Split: Search vs List
-    let browser_chunks = if show_search {
-        Layout::vertical([
-            Constraint::Length(3), // Search bar height
-            Constraint::Min(0)     // List height
-        ]).split(plan.browser)
-    } else {
-        Layout::vertical([
-            Constraint::Length(0),
-            Constraint::Min(0)
-        ]).split(plan.browser)
-    };
+    // 3. Browser Vertical Split: Search vs List vs Options
+    let mut constraints = Vec::new();
+    if show_search { constraints.push(Constraint::Length(3)); } // 0: Search
+    constraints.push(Constraint::Min(0));                       // 1: List
+    if show_options { constraints.push(Constraint::Length(3)); } // 2: Options
 
+    let browser_chunks = Layout::vertical(constraints).split(plan.browser);
+
+    let mut chunk_index = 0;
     if show_search {
-        plan.search = Some(browser_chunks[0]);
+        plan.search = Some(browser_chunks[chunk_index]);
+        chunk_index += 1;
     }
-    plan.list = browser_chunks[1];
+    plan.list = browser_chunks[chunk_index];
+    chunk_index += 1;
+    
+    if show_options {
+        plan.options = Some(browser_chunks[chunk_index]);
+    }
 
     plan
 }
