@@ -105,6 +105,12 @@ pub enum FileBrowserMode {
         use_container: bool,        // Toggle state
         is_editing_name: bool,      // Whether the user is currently typing the name
     },
+    ConfigPathSelection {
+        target_item: ConfigItem,
+        current_settings: Box<Settings>,
+        selected_index: usize,
+        items: Vec<ConfigItem>,
+    },
 }
 
 #[derive(Debug, Clone)]

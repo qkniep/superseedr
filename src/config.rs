@@ -47,7 +47,7 @@ pub enum SortDirection {
     Descending,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default)]
 pub struct Settings {
     pub client_id: String,
@@ -124,7 +124,7 @@ impl Default for Settings {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct TorrentSettings {
     pub torrent_or_magnet: String,

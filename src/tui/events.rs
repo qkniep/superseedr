@@ -434,11 +434,22 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                         settings_edit.watch_folder.clone()
                                     } else {
                                         settings_edit.default_download_folder.clone()
-                                    }.unwrap_or_else(|| app.get_initial_destination_path());
+                                    }.unwrap_or_else(|| {
+                                        UserDirs::new()
+                                            .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
+                                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                                    });
 
+                                    // Send command to switch mode, PASSING the current state
                                     let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
                                         path: initial_path,
-                                        browser_mode: FileBrowserMode::default(),
+                                        // Carry the state into the browser
+                                        browser_mode: FileBrowserMode::ConfigPathSelection {
+                                            target_item: selected_item,
+                                            current_settings: settings_edit.clone(), // Clone the edits so far
+                                            selected_index: *selected_index,
+                                            items: items.clone(),
+                                        },
                                         highlight_path: None,
                                     });
                                 }
@@ -592,11 +603,13 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 
                     // ... [Existing Filter Logic] ...
                     let filter = match browser_mode {
-                        FileBrowserMode::Directory | FileBrowserMode::DownloadLocSelection { .. } => {
+                        // Add ConfigPathSelection to this arm ▼
+                        FileBrowserMode::Directory 
+                        | FileBrowserMode::DownloadLocSelection { .. } 
+                        | FileBrowserMode::ConfigPathSelection { .. } => {
                              TreeFilter::from_text(&app.app_state.search_query)
                         },
                         FileBrowserMode::File(extensions) => {
-                            // ... (keep existing filter logic)
                             let exts = extensions.clone();
                             TreeFilter::new(&app.app_state.search_query, move |node| {
                                 node.is_dir || exts.iter().any(|ext| node.name.ends_with(ext))
@@ -672,6 +685,28 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         // --- MODIFIED: Confirm Selection (Tab) ---
                         KeyCode::Tab => {
                             match browser_mode {
+                            FileBrowserMode::ConfigPathSelection { target_item, current_settings, selected_index, items } => {
+                                    let mut new_settings = current_settings.clone();
+                                    let selected_path = state.cursor_path.clone().unwrap_or_else(|| state.current_path.clone());
+
+                                    // 1. Update the specific setting
+                                    match target_item {
+                                        ConfigItem::DefaultDownloadFolder => new_settings.default_download_folder = Some(selected_path),
+                                        ConfigItem::WatchFolder => new_settings.watch_folder = Some(selected_path),
+                                        _ => {}
+                                    }
+
+                                    // 2. RESTORE the Config Mode with the updated settings
+                                    app.app_state.mode = AppMode::Config {
+                                        settings_edit: new_settings, // Edits preserved + new path
+                                        selected_index: *selected_index,
+                                        items: items.clone(),
+                                        editing: None,
+                                    };
+                                    
+                                    app.app_state.ui_needs_redraw = true;
+                                }
+
                                 FileBrowserMode::Directory => {
                                     if let Some(path) = state.cursor_path.clone() {
                                         if path.is_dir() {

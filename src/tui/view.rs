@@ -2254,34 +2254,48 @@ pub fn draw_file_browser(
     data: &[tree::RawNode<FileMetadata>],
     browser_mode: &FileBrowserMode
 ) {
-    let mut area = centered_rect(75, 80, f.area());
-    
-    // Check if we need to show the preview panel
+    // 1. Logic: Determine if we have a preview to show
     let mut preview_path = None;
-    if let Some(cursor) = &state.cursor_path {
-        if cursor.extension().map_or(false, |ext| ext == "torrent") {
-            preview_path = Some(cursor);
-            // Widen the area slightly to accommodate the preview panel
-            area = centered_rect(90, 80, f.area());
+    let is_config_mode = matches!(browser_mode, FileBrowserMode::ConfigPathSelection { .. });
+
+    // Guard: No previews in Config Mode
+    if !is_config_mode {
+        if let Some(cursor) = &state.cursor_path {
+            // Only preview .torrent files
+            if cursor.extension().map_or(false, |ext| ext == "torrent") {
+                preview_path = Some(cursor);
+            }
         }
     }
 
-    let show_options = matches!(browser_mode, FileBrowserMode::DownloadLocSelection { .. });
-
+    // 2. Geometry: Calculate the Popup Area
+    // If we have a preview, we make the window wider (90%) to fit the split
+    let area = if preview_path.is_some() {
+        centered_rect(90, 80, f.area()) 
+    } else {
+        centered_rect(75, 80, f.area())
+    };
+    
     f.render_widget(Clear, area);
 
-    // --- USE LAYOUT MODULE ---
+    // 3. Layout: Delegate the splitting to layout.rs
+    // We pass simple booleans: app_state.is_searching, show_options, etc.
+    let show_options = matches!(browser_mode, FileBrowserMode::DownloadLocSelection { .. });
+    
     let layout = calculate_file_browser_layout(
         area, 
-        preview_path.is_some(), 
+        preview_path.is_some(), // Pass the result of our logic
         app_state.is_searching,
         show_options
     );
 
-    // --- Draw Torrent Preview ---
+    // ... (Rest of rendering code) ...
+
+    // 4. Render Preview (if it exists)
     if let (Some(path), Some(preview_area)) = (preview_path, layout.preview) {
         draw_torrent_preview_panel(f, preview_area, path);
     }
+    
 
     // --- Draw Search Bar ---
     if let Some(search_area) = layout.search {
@@ -2404,6 +2418,10 @@ pub fn draw_file_browser(
     // --- DRAW FOOTER ---
     let mut footer_spans = Vec::new();
     match browser_mode {
+        FileBrowserMode::ConfigPathSelection { .. } => {
+             footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
+             footer_spans.push(Span::raw(" Select This Dir | "));
+        }
         FileBrowserMode::Directory => {
              footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
              footer_spans.push(Span::raw(" Select Dir | "));
@@ -2450,7 +2468,10 @@ pub fn draw_file_browser(
     // --- DRAW LIST ---
     let inner_height = layout.list.height.saturating_sub(2) as usize;
     let filter = match browser_mode {
-        FileBrowserMode::Directory | FileBrowserMode::DownloadLocSelection { .. } => {
+        // Add ConfigPathSelection here ▼
+        FileBrowserMode::Directory 
+        | FileBrowserMode::DownloadLocSelection { .. } 
+        | FileBrowserMode::ConfigPathSelection { .. } => {
             TreeFilter::from_text(&app_state.search_query)
         },
         FileBrowserMode::File(extensions) => {
@@ -2469,6 +2490,7 @@ pub fn draw_file_browser(
     let right_title = match browser_mode {
         FileBrowserMode::Directory => " Select Directory ".to_string(),
         FileBrowserMode::DownloadLocSelection { .. } => " Select Download Location ".to_string(),
+        FileBrowserMode::ConfigPathSelection { .. } => " Select Config Path ".to_string(),
         FileBrowserMode::File(exts) => format!(" Select File [{}] ", exts.join(", ")),
     };
 
