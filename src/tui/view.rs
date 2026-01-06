@@ -2269,7 +2269,6 @@ pub fn draw_file_browser(
     }
 
     // 2. Geometry: Calculate the Popup Area
-    // If we have a preview, we make the window wider (90%) to fit the split
     let area = if preview_path.is_some() {
         centered_rect(90, 80, f.area()) 
     } else {
@@ -2278,25 +2277,21 @@ pub fn draw_file_browser(
     
     f.render_widget(Clear, area);
 
-    // 3. Layout: Delegate the splitting to layout.rs
-    // We pass simple booleans: app_state.is_searching, show_options, etc.
+    // 3. Layout
     let show_options = matches!(browser_mode, FileBrowserMode::DownloadLocSelection { .. });
     
     let layout = calculate_file_browser_layout(
         area, 
-        preview_path.is_some(), // Pass the result of our logic
+        preview_path.is_some(),
         app_state.is_searching,
         show_options
     );
 
-    // ... (Rest of rendering code) ...
-
-    // 4. Render Preview (if it exists)
+    // 4. Render Preview
     if let (Some(path), Some(preview_area)) = (preview_path, layout.preview) {
         draw_torrent_preview_panel(f, preview_area, path);
     }
     
-
     // --- Draw Search Bar ---
     if let Some(search_area) = layout.search {
         let search_block = Block::default()
@@ -2312,7 +2307,7 @@ pub fn draw_file_browser(
         f.render_widget(Paragraph::new(search_text).block(search_block), search_area);
     }
 
-    // --- Draw Download Options Panel (Bottom) ---
+    // --- Draw Download Options Panel ---
     if let (Some(options_area), FileBrowserMode::DownloadLocSelection { container_name, use_container, is_editing_name, .. }) = (layout.options, browser_mode) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -2323,11 +2318,10 @@ pub fn draw_file_browser(
         f.render_widget(block, options_area);
 
         let chunks = Layout::horizontal([
-            Constraint::Length(22), // Checkbox
-            Constraint::Min(0),     // Input
+            Constraint::Length(22),
+            Constraint::Min(0),
         ]).split(inner);
 
-        // 1. Toggle Checkbox
         let check_char = if *use_container { "[x]" } else { "[ ]" };
         let toggle_style = if *use_container { Style::default().fg(theme::GREEN) } else { Style::default().fg(theme::SUBTEXT0) };
         let toggle_text = Line::from(vec![
@@ -2336,7 +2330,6 @@ pub fn draw_file_browser(
         ]);
         f.render_widget(Paragraph::new(toggle_text), chunks[0]);
 
-        // 2. Folder Name Input
         let input_style = if *is_editing_name { Style::default().fg(theme::YELLOW) } else { Style::default().fg(theme::TEXT) };
         let name_text = Line::from(vec![
             Span::styled(" Name: ", Style::default().fg(theme::SUBTEXT0)),
@@ -2346,95 +2339,20 @@ pub fn draw_file_browser(
         f.render_widget(Paragraph::new(name_text), chunks[1]);
     }
 
-    // --- PREPARE DATA (MERGE VIRTUAL NODES) ---
-    // We clone the data to a new vector so we can prepend virtual nodes without sorting/destroying the original list
-    let mut display_data = Vec::new();
-
-    // 1. Prepend Virtual Nodes (if any)
-    if let FileBrowserMode::DownloadLocSelection { torrent_files, container_name, use_container, .. } = browser_mode {
-        let current_path = &state.current_path;
-
-        if *use_container {
-            // Virtual Node: Container Folder
-            let virtual_folder_path = current_path.join(container_name);
-            let virtual_node = tree::RawNode {
-                name: container_name.clone(),
-                full_path: virtual_folder_path,
-                children: Vec::new(),
-                is_dir: true,
-                payload: FileMetadata { 
-                    size: 0, 
-                    is_loaded: true, 
-                    modified: std::time::SystemTime::now(),
-                    is_virtual: true 
-                }
-            };
-            display_data.push(virtual_node);
-        } else {
-            // Virtual Nodes: Top-level files from torrent
-            let mut top_level_items = std::collections::HashSet::new();
-            // We want these sorted relative to each other, but always at the top
-            let mut virtual_files = Vec::new();
-
-            for file_path in torrent_files {
-                let path = std::path::Path::new(file_path);
-                if let Some(first_component) = path.components().next() {
-                    let name = first_component.as_os_str().to_string_lossy().to_string();
-                    if top_level_items.contains(&name) { continue; }
-                    top_level_items.insert(name.clone());
-
-                    let is_dir = path.components().count() > 1;
-                    let virtual_node = tree::RawNode {
-                        name: name.clone(),
-                        full_path: current_path.join(&name),
-                        children: Vec::new(),
-                        is_dir,
-                        payload: FileMetadata { 
-                            size: 0, 
-                            is_loaded: true, 
-                            modified: std::time::SystemTime::now(),
-                            is_virtual: true 
-                        }
-                    };
-                    virtual_files.push(virtual_node);
-                }
-            }
-            // Sort only the virtual files so they look tidy
-            virtual_files.sort_by(|a, b| {
-                match (a.is_dir, b.is_dir) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => a.name.cmp(&b.name),
-                }
-            });
-            display_data.extend(virtual_files);
-        }
-    }
-
-    // 2. Append Actual Data (Preserving original order/sort)
-    display_data.extend_from_slice(data);
-
-
     // --- DRAW FOOTER ---
     let mut footer_spans = Vec::new();
     match browser_mode {
-        FileBrowserMode::ConfigPathSelection { .. } => {
+        FileBrowserMode::ConfigPathSelection { .. } | FileBrowserMode::Directory => {
              footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
              footer_spans.push(Span::raw(" Select This Dir | "));
         }
-        FileBrowserMode::Directory => {
-             footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
-             footer_spans.push(Span::raw(" Select Dir | "));
-        }
         FileBrowserMode::DownloadLocSelection { .. } => {
-             if show_options {
-                footer_spans.push(Span::styled("[Space]", Style::default().fg(theme::YELLOW)));
-                footer_spans.push(Span::raw(" Toggle | "));
-                footer_spans.push(Span::styled("[e]", Style::default().fg(theme::YELLOW)));
-                footer_spans.push(Span::raw(" Edit Name | "));
-                footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
-                footer_spans.push(Span::raw(" Select"));
-            }
+             footer_spans.push(Span::styled("[Space]", Style::default().fg(theme::YELLOW)));
+             footer_spans.push(Span::raw(" Toggle | "));
+             footer_spans.push(Span::styled("[e]", Style::default().fg(theme::YELLOW)));
+             footer_spans.push(Span::raw(" Edit Name | "));
+             footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
+             footer_spans.push(Span::raw(" Select | "));
         }
         _ => {
             footer_spans.push(Span::styled("[Enter]", Style::default().fg(theme::GREEN)));
@@ -2444,21 +2362,6 @@ pub fn draw_file_browser(
     
     footer_spans.push(Span::styled("[Esc]", Style::default().fg(theme::RED)));
     footer_spans.push(Span::raw(" Cancel"));
-    if let FileBrowserMode::Directory = browser_mode {
-        footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
-        footer_spans.push(Span::raw(" Select Dir | "));
-    }
-    if show_options {
-        footer_spans.push(Span::styled("[Space]", Style::default().fg(theme::YELLOW)));
-        footer_spans.push(Span::raw(" Toggle | "));
-        footer_spans.push(Span::styled("[e]", Style::default().fg(theme::YELLOW)));
-        footer_spans.push(Span::raw(" Edit Name | "));
-        footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
-        footer_spans.push(Span::raw(" Select"));
-    } else {
-        footer_spans.push(Span::styled("[Esc]", Style::default().fg(theme::RED)));
-        footer_spans.push(Span::raw(" Cancel"));
-    }
 
     let footer = Paragraph::new(Line::from(footer_spans))
         .alignment(Alignment::Center)
@@ -2468,7 +2371,6 @@ pub fn draw_file_browser(
     // --- DRAW LIST ---
     let inner_height = layout.list.height.saturating_sub(2) as usize;
     let filter = match browser_mode {
-        // Add ConfigPathSelection here ▼
         FileBrowserMode::Directory 
         | FileBrowserMode::DownloadLocSelection { .. } 
         | FileBrowserMode::ConfigPathSelection { .. } => {
@@ -2483,7 +2385,7 @@ pub fn draw_file_browser(
     };
 
     let abs_path = state.current_path.to_string_lossy();
-    let item_count = display_data.len();
+    let item_count = data.len();
     let count_label = if item_count == 0 { " (empty)".to_string() } else { format!(" ({} items)", item_count) };
     let left_title = format!(" {}/{} ", abs_path, count_label);
     
@@ -2494,11 +2396,10 @@ pub fn draw_file_browser(
         FileBrowserMode::File(exts) => format!(" Select File [{}] ", exts.join(", ")),
     };
 
-    // Use display_data here to ensure virtual nodes are included in calculations
-    let visible_items = TreeMathHelper::get_visible_slice(&display_data, state, filter, inner_height);
+    let visible_items = TreeMathHelper::get_visible_slice(data, state, filter, inner_height);
     let mut list_items = Vec::new();
 
-    if display_data.is_empty() {
+    if data.is_empty() {
         list_items.push(ListItem::new(Line::from(vec![
             Span::styled("   (Directory is empty)", Style::default().fg(theme::OVERLAY0).italic())
         ])));
@@ -2510,7 +2411,6 @@ pub fn draw_file_browser(
     } else {
         for item in visible_items {
             let is_cursor = item.is_cursor;
-            let is_virtual = item.node.payload.is_virtual; 
             let indent = "  ".repeat(item.depth);
             let icon_str = if item.node.is_dir { "  " } else { "   " };
 
@@ -2518,12 +2418,6 @@ pub fn draw_file_browser(
                 (
                     Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD),
                     Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD)
-                )
-            } else if is_virtual {
-                // Virtual Node Style
-                 (
-                    Style::default().fg(theme::GREEN),
-                    Style::default().fg(theme::GREEN).add_modifier(Modifier::ITALIC)
                 )
             } else {
                 let i_style = if item.node.is_dir {
@@ -2534,23 +2428,18 @@ pub fn draw_file_browser(
                 (i_style, Style::default().fg(theme::TEXT))
             };
 
-            let mut line_spans = vec![Span::raw(indent)];
-            if is_virtual {
-                line_spans.push(Span::styled("+ ", Style::default().fg(theme::GREEN).bold()));
-            }
-            line_spans.push(Span::styled(icon_str, icon_style));
-            line_spans.push(Span::styled(format!("{}", item.node.name), text_style));
+            let mut line_spans = vec![
+                Span::raw(indent),
+                Span::styled(icon_str, icon_style),
+                Span::styled(format!("{}", item.node.name), text_style)
+            ];
 
-            // RESTORE DATE RENDER LOGIC
-            // We only show date/time for real nodes (not virtual) that are not directories
-            if !is_virtual && !item.node.is_dir {
+            if !item.node.is_dir {
                  let datetime: chrono::DateTime<chrono::Local> = item.node.payload.modified.into();
                  line_spans.push(Span::styled(
                     format!(" ({})", datetime.format("%b %d %H:%M")), 
                     Style::default().fg(theme::SURFACE2).italic()
                 ));
-            } else if is_virtual {
-                 line_spans.push(Span::styled(" (New)", Style::default().fg(theme::GREEN).italic()));
             }
 
             list_items.push(ListItem::new(Line::from(line_spans)));
