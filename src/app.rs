@@ -1000,7 +1000,7 @@ impl App {
                             };
 
                             let info_hash_hex = hex::encode(&info_hash);
-                            let default_container_name = format!("{}_{}", torrent.info.name, info_hash_hex);
+                            let default_container_name = format!("{} [{}]", torrent.info.name, info_hash_hex);
 
                             let file_list = torrent.file_list();
                             let file_count = file_list.len(); //

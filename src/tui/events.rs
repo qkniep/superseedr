@@ -551,6 +551,27 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
             if let CrosstermEvent::Key(key) = event {
                 if key.kind == KeyEventKind::Press {
 
+                    if app.app_state.is_searching {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.app_state.is_searching = false;
+                                app.app_state.search_query.clear();
+                            }
+                            KeyCode::Enter => {
+                                app.app_state.is_searching = false;
+                            }
+                            KeyCode::Backspace => {
+                                app.app_state.search_query.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                app.app_state.search_query.push(c);
+                            }
+                            _ => {} 
+                        }
+                        app.app_state.ui_needs_redraw = true;
+                        return; // Intercept all input so we don't trigger tree actions while typing
+                    }
+
                     // --- NEW: Handle Download Option Inputs (Edit Name & Toggle) ---
                     if let FileBrowserMode::DownloadLocSelection { 
                         container_name, 
@@ -676,6 +697,10 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                         if name.ends_with(".torrent") {
                                             let _ = app.app_command_tx.send(AppCommand::AddTorrentFromFile(path)).await;
                                         }
+
+                                        app.app_state.is_searching = false;      // Stop the search mode
+                                        app.app_state.search_query.clear();      // Clear the filter text
+                                        app.sort_and_filter_torrent_list();      // Refresh the main torrent list
                                         app.app_state.mode = AppMode::Normal;
                                     }
                                 }
@@ -757,6 +782,8 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                         ).await;
                                         app.app_state.pending_torrent_link.clear();
                                     }
+
+
 
                                     // 4. Exit
                                     app.app_state.mode = AppMode::Normal;

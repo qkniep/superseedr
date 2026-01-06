@@ -2546,22 +2546,36 @@ fn draw_torrent_preview_panel(
         layout[1].height as usize
     );
 
+
     let list_items: Vec<ListItem> = visible_rows.iter().map(|item| {
-        let indent = "  ".repeat(item.depth);
-        let icon = if item.node.is_dir { "  " } else { "   " };
-        let size_label = if !item.node.is_dir { 
-            format!(" ({}) ", format_bytes(item.node.payload)) 
-        } else { 
-            "".to_string() 
-        };
+        // 1. Identify if this is the virtual enclosure folder
+        let is_enclosure_root = item.depth == 0 && matches!(browser_mode, FileBrowserMode::DownloadLocSelection { use_container: true, .. });
         
-        let line = Line::from(vec![
-            Span::raw(indent),
-            Span::styled(icon, Style::default().fg(if item.node.is_dir { theme::BLUE } else { theme::TEXT })),
-            Span::raw(&item.node.name),
-            Span::styled(size_label, Style::default().fg(theme::SURFACE2)),
-        ]);
-        ListItem::new(line)
+        // 2. Fix Indentation: If it's a child of the enclosure, we need to account for the '+'
+        // Standard indent is 2 spaces per depth. 
+        let indent_str = "  ".repeat(item.depth);
+        
+        let icon = if item.node.is_dir { "  " } else { "   " };
+        
+        let mut spans = Vec::new();
+
+        if is_enclosure_root {
+            // Entire line for container is Green and starts with '+'
+            spans.push(Span::styled(icon, Style::default().fg(theme::GREEN).bold()));
+            spans.push(Span::styled(&item.node.name, Style::default().fg(theme::GREEN).bold()));
+        } else {
+            // Regular nodes: We add two spaces to the start to align with the "+ " above
+            spans.push(Span::raw(indent_str));
+            spans.push(Span::styled(icon, Style::default().fg(if item.node.is_dir { theme::BLUE } else { theme::TEXT })));
+            spans.push(Span::raw(&item.node.name));
+
+            if !item.node.is_dir {
+                let size_str = format_bytes(item.node.payload);
+                spans.push(Span::styled(format!(" ({}) ", size_str), Style::default().fg(theme::SURFACE2)));
+            }
+        }
+        
+        ListItem::new(Line::from(spans))
     }).collect();
 
     f.render_widget(
