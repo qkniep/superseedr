@@ -984,23 +984,55 @@ impl App {
                         }
                     }
                 } else {
-                    self.app_state.pending_torrent_path = Some(path.clone());
-                    
-                    let initial_path = self.find_most_common_download_path()
-                        .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()))
-                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    // 2. We need to prompt for a location. 
+                    // Read the file bytes to parse metadata for the default name.
+                    if let Ok(buffer) = fs::read(&path) {
+                        if let Ok(torrent) = from_bytes(&buffer) {
+                            // Calculate the info_hash for the default name
+                            let info_hash = if torrent.info.meta_version == Some(2) {
+                                let mut hasher = Sha256::new();
+                                hasher.update(&torrent.info_dict_bencode);
+                                hasher.finalize()[0..20].to_vec()
+                            } else {
+                                let mut hasher = sha1::Sha1::new();
+                                hasher.update(&torrent.info_dict_bencode);
+                                hasher.finalize().to_vec()
+                            };
 
-                    // Launch the new FileBrowser
-                    let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
-                        path: initial_path,
-                        browser_mode: FileBrowserMode::DownloadLocSelection {
-                            torrent_files: vec![], // Populate with file list if parsed later
-                            container_name: "New Download".to_string(),
-                            use_container: true,
-                            is_editing_name: false,
-                        },
-                        highlight_path: None,
-                    });
+                            let info_hash_hex = hex::encode(&info_hash);
+                            let default_container_name = format!("{}_{}", torrent.info.name, info_hash_hex);
+
+                            let file_list = torrent.file_list();
+                            let file_count = file_list.len(); //
+                            let should_enclose = file_count > 1; //
+
+                            // Extract relative file paths for the browser to preview/validate
+                            let torrent_files: Vec<String> = torrent.file_list()
+                                .into_iter()
+                                .map(|(parts, _)| parts.join("/"))
+                                .collect();
+
+                            self.app_state.pending_torrent_path = Some(path.clone());
+                            
+                            let initial_path = self.get_initial_destination_path();
+
+                            // Launch the FileBrowser with the calculated metadata
+                            let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                path: initial_path,
+                                browser_mode: FileBrowserMode::DownloadLocSelection {
+                                    torrent_files,
+                                    container_name: default_container_name,
+                                    use_container: should_enclose, 
+                                    is_editing_name: false,
+                                },
+                                highlight_path: None,
+                            });
+                        } else {
+                            self.app_state.system_error = Some("Failed to parse torrent file for preview.".to_string());
+                        }
+                    } else {
+                        self.app_state.system_error = Some("Failed to read torrent file.".to_string());
+                    }
                 }
             }
             AppCommand::AddTorrentFromPathFile(path) => {
@@ -1032,7 +1064,7 @@ impl App {
                                     browser_mode: FileBrowserMode::DownloadLocSelection {
                                         torrent_files: vec![], // Populate if needed
                                         container_name: "New Download".to_string(),
-                                        use_container: true,
+                                        use_container: false,
                                         is_editing_name: false,
                                     },
                                     highlight_path: None,

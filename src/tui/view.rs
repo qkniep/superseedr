@@ -2295,7 +2295,7 @@ pub fn draw_file_browser(
 
     // 4. Render Preview
     if let (Some(path), Some(preview_area)) = (preview_path, layout.preview) {
-        draw_torrent_preview_panel(f, preview_area, path);
+        draw_torrent_preview_panel(f, preview_area, path, browser_mode);
     }
     
     // --- Draw Search Bar ---
@@ -2464,13 +2464,17 @@ pub fn draw_file_browser(
     );
 }
 
-fn draw_torrent_preview_panel(f: &mut Frame, area: Rect, path: &std::path::Path) {
+fn draw_torrent_preview_panel(
+    f: &mut Frame, 
+    area: Rect, 
+    path: &std::path::Path,
+    browser_mode: &FileBrowserMode // Add this to check enclosure state
+) {
     let chunks = Layout::vertical([
         Constraint::Min(0),
     ]).split(area);
     
     let content_area = chunks[0];
-
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::SAPPHIRE))
@@ -2505,7 +2509,6 @@ fn draw_torrent_preview_panel(f: &mut Frame, area: Rect, path: &std::path::Path)
         Line::from(vec![Span::styled("Name: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(&torrent.info.name)]),
         Line::from(vec![Span::styled("Size: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(format_bytes(total_size as u64))]),
         Line::from(vec![Span::styled("Pieces: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(format!("{} x {}", piece_count, format_bytes(piece_len as u64)))]),
-        Line::from(vec![Span::styled("Version: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(if torrent.info.meta_version == Some(2) { "v2 (Hybrid)" } else { "v1" })]),
     ];
 
     let layout = Layout::vertical([
@@ -2515,52 +2518,29 @@ fn draw_torrent_preview_panel(f: &mut Frame, area: Rect, path: &std::path::Path)
 
     f.render_widget(Paragraph::new(info_text).block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(theme::SURFACE2))), layout[0]);
 
-    // 3. Build Tree Structure (Without the artificial root)
-    // We create a hidden root node to hold the top-level files/folders
-    let mut root_node = tree::RawNode {
-        name: "".to_string(),
-        full_path: std::path::PathBuf::new(),
-        children: Vec::new(),
-        is_dir: true,
-        payload: 0, // Used for size
+    // 3. Build & Render Tree (DYNAMICALY ROOTED)
+    let custom_root = if let FileBrowserMode::DownloadLocSelection { container_name, use_container, .. } = browser_mode {
+        if *use_container {
+            Some(container_name.clone())
+        } else {
+            None
+        }
+    } else {
+        None
     };
 
-    for (path_components, size) in torrent.file_list() {
-        let mut current = &mut root_node;
-        let mut current_path = std::path::PathBuf::new();
-        
-        for (i, component) in path_components.iter().enumerate() {
-            current_path.push(component);
-            let is_last = i == path_components.len() - 1;
-            
-            // Check if component already exists in children
-            let pos = current.children.iter().position(|c| c.name == *component);
-            
-            if let Some(idx) = pos {
-                current = &mut current.children[idx];
-            } else {
-                let new_node = tree::RawNode {
-                    name: component.clone(),
-                    full_path: current_path.clone(),
-                    children: Vec::new(),
-                    is_dir: !is_last,
-                    payload: if is_last { size } else { 0 },
-                };
-                current.children.push(new_node);
-                current = current.children.last_mut().unwrap();
-            }
-        }
+    // 4. Build Tree
+    let file_list = torrent.file_list();
+    let final_nodes = tree::RawNode::from_path_list(custom_root, file_list); //
+    
+    let mut preview_state = tree::TreeViewState::default();
+    for node in &final_nodes {
+        node.expand_all(&mut preview_state); //
     }
 
-    // 4. Render Tree
-    let mut preview_state = tree::TreeViewState::default();
-    // Expand top level children of our hidden root
-    root_node.expand_all(&mut preview_state);
-
     let filter = tree::TreeFilter::default(); 
-    // Pass only the children of our root node to avoid rendering the root itself
     let visible_rows = TreeMathHelper::get_visible_slice(
-        &root_node.children,
+        &final_nodes,
         &preview_state, 
         filter, 
         layout[1].height as usize
@@ -2569,23 +2549,23 @@ fn draw_torrent_preview_panel(f: &mut Frame, area: Rect, path: &std::path::Path)
     let list_items: Vec<ListItem> = visible_rows.iter().map(|item| {
         let indent = "  ".repeat(item.depth);
         let icon = if item.node.is_dir { "  " } else { "   " };
+        let size_label = if !item.node.is_dir { 
+            format!(" ({}) ", format_bytes(item.node.payload)) 
+        } else { 
+            "".to_string() 
+        };
         
-        let mut line_spans = vec![
+        let line = Line::from(vec![
             Span::raw(indent),
             Span::styled(icon, Style::default().fg(if item.node.is_dir { theme::BLUE } else { theme::TEXT })),
             Span::raw(&item.node.name),
-        ];
-
-        if !item.node.is_dir {
-            let size_str = format_bytes(item.node.payload);
-            line_spans.push(Span::styled(format!(" ({}) ", size_str), Style::default().fg(theme::SURFACE2)));
-        }
-        
-        ListItem::new(Line::from(line_spans))
+            Span::styled(size_label, Style::default().fg(theme::SURFACE2)),
+        ]);
+        ListItem::new(line)
     }).collect();
 
     f.render_widget(
-        List::new(list_items).block(Block::default().title(" Internal Structure ")),
+        List::new(list_items).block(Block::default().title(" Resulting Structure ")),
         layout[1]
     );
 }

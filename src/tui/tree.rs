@@ -37,23 +37,36 @@ impl<T: Clone + Default + std::ops::AddAssign> RawNode<T> {
         false
     }
 
-    pub fn from_path_list(root_name: String, files: Vec<(Vec<String>, T)>) -> Self {
-        let root_path = PathBuf::from(&root_name);
-        let mut root = RawNode {
-            name: root_name,
-            full_path: root_path.clone(),
-            children: Vec::new(),
-            payload: T::default(),
-            is_dir: true,
-        };
+    pub fn from_path_list(custom_root: Option<String>, files: Vec<(Vec<String>, T)>) -> Vec<Self> {
+            let mut internal_root = RawNode {
+                name: String::new(),
+                full_path: PathBuf::new(),
+                children: Vec::new(),
+                payload: T::default(),
+                is_dir: true,
+            };
 
-        for (path_parts, payload) in files {
-            root.insert_recursive(&path_parts, payload, &root_path);
+            for (path_parts, payload) in files {
+                internal_root.insert_recursive(&path_parts, payload, Path::new(""));
+            }
+            
+            internal_root.sort_recursive();
+
+            if let Some(root_name) = custom_root {
+                // Wrap the children in the custom root folder
+                let wrapper = RawNode {
+                    name: root_name.clone(),
+                    full_path: PathBuf::from(root_name),
+                    children: internal_root.children,
+                    payload: internal_root.payload, // Summed size from insert_recursive
+                    is_dir: true,
+                };
+                vec![wrapper]
+            } else {
+                // No custom root: return the flat list of files/folders
+                internal_root.children
+            }
         }
-        
-        root.sort_recursive();
-        root
-    }
 
     /// Step 2: Traverse the tree and tell the state to expand everything
     pub fn expand_all(&self, state: &mut TreeViewState) {
