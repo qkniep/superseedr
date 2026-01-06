@@ -2256,16 +2256,23 @@ pub fn draw_file_browser(
 ) {
     // 1. Logic: Determine if we have a preview to show
     let mut preview_path = None;
-    let is_config_mode = matches!(browser_mode, FileBrowserMode::ConfigPathSelection { .. });
 
-    // Guard: No previews in Config Mode
-    if !is_config_mode {
-        if let Some(cursor) = &state.cursor_path {
-            // Only preview .torrent files
-            if cursor.extension().map_or(false, |ext| ext == "torrent") {
-                preview_path = Some(cursor);
+    match browser_mode {
+        // CASE A: User is picking where to save a torrent
+        FileBrowserMode::DownloadLocSelection { .. } => {
+            if let Some(pending) = &app_state.pending_torrent_path {
+                preview_path = Some(pending);
             }
         }
+        // CASE B: User is browsing for a .torrent file to add
+        FileBrowserMode::File(_) => {
+            if let Some(cursor) = &state.cursor_path {
+                if cursor.extension().map_or(false, |ext| ext == "torrent") {
+                    preview_path = Some(cursor);
+                }
+            }
+        }
+        _ => {} // ConfigPathSelection and generic Directory modes hide the preview
     }
 
     // 2. Geometry: Calculate the Popup Area
@@ -2279,7 +2286,6 @@ pub fn draw_file_browser(
 
     // 3. Layout
     let show_options = matches!(browser_mode, FileBrowserMode::DownloadLocSelection { .. });
-    
     let layout = calculate_file_browser_layout(
         area, 
         preview_path.is_some(),
@@ -2464,18 +2470,16 @@ fn draw_torrent_preview_panel(f: &mut Frame, area: Rect, path: &std::path::Path)
     ]).split(area);
     
     let content_area = chunks[0];
-    // chunks[1] is the spacer alignment for the footer
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::SAPPHIRE))
         .title(" Torrent Preview ");
     
-    // Use content_area instead of area
     let inner_area = block.inner(content_area);
     f.render_widget(block, content_area);
 
-    // 1. Read & Parse (Immediate Mode)
+    // 1. Read & Parse
     let file_bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -2492,46 +2496,71 @@ fn draw_torrent_preview_panel(f: &mut Frame, area: Rect, path: &std::path::Path)
         }
     };
 
-    // 2. Format Info
+    // 2. Format Info Header
     let total_size = torrent.info.total_length();
     let piece_len = torrent.info.piece_length;
     let piece_count = if piece_len > 0 { total_size / piece_len } else { 0 };
     
-    let size_str = format_bytes(total_size as u64);
-    let created_by = torrent.created_by.as_deref().unwrap_or("Unknown");
-    let comment = torrent.comment.as_deref().unwrap_or("-");
-    let is_v2 = torrent.info.meta_version == Some(2);
-    let ver_str = if is_v2 { "v2 (Hybrid)" } else { "v1" };
-
     let info_text = vec![
         Line::from(vec![Span::styled("Name: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(&torrent.info.name)]),
-        Line::from(vec![Span::styled("Size: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(size_str)]),
+        Line::from(vec![Span::styled("Size: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(format_bytes(total_size as u64))]),
         Line::from(vec![Span::styled("Pieces: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(format!("{} x {}", piece_count, format_bytes(piece_len as u64)))]),
-        Line::from(vec![Span::styled("Creator: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(created_by)]),
-        Line::from(vec![Span::styled("Version: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(ver_str)]),
-        Line::from(vec![Span::styled("Comment: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(comment)]),
+        Line::from(vec![Span::styled("Version: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(if torrent.info.meta_version == Some(2) { "v2 (Hybrid)" } else { "v1" })]),
     ];
 
     let layout = Layout::vertical([
-        Constraint::Length(info_text.len() as u16 + 2), // Info block
-        Constraint::Min(0) // File Tree
+        Constraint::Length(info_text.len() as u16 + 2), 
+        Constraint::Min(0) 
     ]).split(inner_area);
 
     f.render_widget(Paragraph::new(info_text).block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(theme::SURFACE2))), layout[0]);
 
-    // 3. Build & Render Tree
-    let file_list = torrent.file_list();
-    let root_node = tree::RawNode::from_path_list(torrent.info.name.clone(), file_list);
-    
+    // 3. Build Tree Structure (Without the artificial root)
+    // We create a hidden root node to hold the top-level files/folders
+    let mut root_node = tree::RawNode {
+        name: "".to_string(),
+        full_path: std::path::PathBuf::new(),
+        children: Vec::new(),
+        is_dir: true,
+        payload: 0, // Used for size
+    };
+
+    for (path_components, size) in torrent.file_list() {
+        let mut current = &mut root_node;
+        let mut current_path = std::path::PathBuf::new();
+        
+        for (i, component) in path_components.iter().enumerate() {
+            current_path.push(component);
+            let is_last = i == path_components.len() - 1;
+            
+            // Check if component already exists in children
+            let pos = current.children.iter().position(|c| c.name == *component);
+            
+            if let Some(idx) = pos {
+                current = &mut current.children[idx];
+            } else {
+                let new_node = tree::RawNode {
+                    name: component.clone(),
+                    full_path: current_path.clone(),
+                    children: Vec::new(),
+                    is_dir: !is_last,
+                    payload: if is_last { size } else { 0 },
+                };
+                current.children.push(new_node);
+                current = current.children.last_mut().unwrap();
+            }
+        }
+    }
+
+    // 4. Render Tree
     let mut preview_state = tree::TreeViewState::default();
+    // Expand top level children of our hidden root
     root_node.expand_all(&mut preview_state);
 
-    // Lifetime Fix: Bind array to variable
-    let nodes = [root_node]; 
-
     let filter = tree::TreeFilter::default(); 
+    // Pass only the children of our root node to avoid rendering the root itself
     let visible_rows = TreeMathHelper::get_visible_slice(
-        &nodes,
+        &root_node.children,
         &preview_state, 
         filter, 
         layout[1].height as usize
@@ -2540,19 +2569,23 @@ fn draw_torrent_preview_panel(f: &mut Frame, area: Rect, path: &std::path::Path)
     let list_items: Vec<ListItem> = visible_rows.iter().map(|item| {
         let indent = "  ".repeat(item.depth);
         let icon = if item.node.is_dir { "  " } else { "   " };
-        let size_str = format_bytes(item.node.payload);
         
-        let line = Line::from(vec![
+        let mut line_spans = vec![
             Span::raw(indent),
             Span::styled(icon, Style::default().fg(if item.node.is_dir { theme::BLUE } else { theme::TEXT })),
             Span::raw(&item.node.name),
-            Span::styled(format!(" ({}) ", size_str), Style::default().fg(theme::SURFACE2)),
-        ]);
-        ListItem::new(line)
+        ];
+
+        if !item.node.is_dir {
+            let size_str = format_bytes(item.node.payload);
+            line_spans.push(Span::styled(format!(" ({}) ", size_str), Style::default().fg(theme::SURFACE2)));
+        }
+        
+        ListItem::new(Line::from(line_spans))
     }).collect();
 
     f.render_widget(
-        List::new(list_items).block(Block::default().title(" File Content ")),
+        List::new(list_items).block(Block::default().title(" Internal Structure ")),
         layout[1]
     );
 }
