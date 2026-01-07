@@ -93,6 +93,53 @@ const MINUTES_HISTORY_MAX: usize = 48 * 60; // 48 hours of per-minute data
 const FILE_HANDLE_MINIMUM: usize = 64;
 const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilePriority {
+    #[default]
+    Normal,
+    High,
+    Low,
+    Skip,
+    Mixed, // Used for folders that contain children with different priorities
+}
+
+impl FilePriority {
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Normal => Self::High,
+            Self::High => Self::Low,
+            Self::Low => Self::Skip,
+            Self::Skip => Self::Normal,
+            Self::Mixed => Self::Normal, // Reset mixed to Normal on toggle
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TorrentPreviewPayload {
+    pub file_index: Option<usize>, // None for folders
+    pub size: u64,
+    pub priority: FilePriority,
+}
+
+// Implement AddAssign so RawNode::from_path_list can aggregate folder sizes
+impl std::ops::AddAssign for TorrentPreviewPayload {
+    fn add_assign(&mut self, rhs: Self) {
+        self.size += rhs.size;
+        // Logic to determine folder priority state (e.g., if children differ -> Mixed)
+        if self.priority != rhs.priority {
+            self.priority = FilePriority::Mixed;
+        }
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq)]
+pub enum BrowserPane {
+    #[default]
+    FileSystem,
+    TorrentPreview,
+}
+
 #[derive(Default, Debug, Clone, PartialEq)]
 pub enum FileBrowserMode {
     #[default]
@@ -104,6 +151,9 @@ pub enum FileBrowserMode {
         container_name: String,     // Name of the container folder (e.g. hash_name)
         use_container: bool,        // Toggle state
         is_editing_name: bool,      // Whether the user is currently typing the name
+        focused_pane: BrowserPane,
+        preview_tree: Vec<RawNode<TorrentPreviewPayload>>, // Interactive tree
+        preview_state: TreeViewState,                      // Cursor & expansion state for preview
     },
     ConfigPathSelection {
         target_item: ConfigItem,
@@ -988,7 +1038,6 @@ impl App {
                     // Read the file bytes to parse metadata for the default name.
                     if let Ok(buffer) = fs::read(&path) {
                         if let Ok(torrent) = from_bytes(&buffer) {
-                            // Calculate the info_hash for the default name
                             let info_hash = if torrent.info.meta_version == Some(2) {
                                 let mut hasher = Sha256::new();
                                 hasher.update(&torrent.info_dict_bencode);
@@ -1002,31 +1051,59 @@ impl App {
                             let info_hash_hex = hex::encode(&info_hash);
                             let default_container_name = format!("{} [{}]", torrent.info.name, info_hash_hex);
 
-                            let file_list = torrent.file_list();
-                            let file_count = file_list.len(); //
-                            let should_enclose = file_count > 1; //
+                            let file_list = torrent.file_list(); // Returns Vec<(Vec<String>, u64)>
+                            let file_count = file_list.len(); 
+                            let should_enclose = file_count > 1;
 
-                            // Extract relative file paths for the browser to preview/validate
-                            let torrent_files: Vec<String> = torrent.file_list()
+                            // --- PHASE 2: Build Preview Tree ---
+                            
+                            // A. Create Payloads with File Indices
+                            // We enumerate the file list to get the correct index for the torrent engine
+                            let preview_payloads: Vec<(Vec<String>, TorrentPreviewPayload)> = file_list
                                 .into_iter()
-                                .map(|(parts, _)| parts.join("/"))
+                                .enumerate()
+                                .map(|(idx, (parts, size))| {
+                                    (
+                                        parts,
+                                        TorrentPreviewPayload {
+                                            file_index: Some(idx), // Save index for later priority mapping
+                                            size,
+                                            priority: FilePriority::Normal, // Default priority
+                                        }
+                                    )
+                                })
                                 .collect();
 
-                            self.app_state.pending_torrent_path = Some(path.clone());
+                            // B. Generate the Tree Structure
+                            // Pass `None` for custom_root so it reflects the actual torrent structure
+                            let mut preview_tree = RawNode::from_path_list(None, preview_payloads);
                             
+                            // C. Initialize Tree State
+                            let mut preview_state = TreeViewState::new();
+                            // Auto-expand the root node so the user sees content immediately
+                            for node in &preview_tree {
+                                 node.expand_all(&mut preview_state);
+                            }
+
+                            // D. Launch Browser with New Fields
+                            self.app_state.pending_torrent_path = Some(path.clone());
                             let initial_path = self.get_initial_destination_path();
 
-                            // Launch the FileBrowser with the calculated metadata
                             let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
                                 path: initial_path,
                                 browser_mode: FileBrowserMode::DownloadLocSelection {
-                                    torrent_files,
+                                    torrent_files: vec![], // Legacy field (can optionally remove later)
                                     container_name: default_container_name,
                                     use_container: should_enclose, 
                                     is_editing_name: false,
+                                    // NEW FIELDS:
+                                    preview_tree,
+                                    preview_state,
+                                    focused_pane: BrowserPane::FileSystem, // Start focus on the left (Save Location)
                                 },
                                 highlight_path: None,
                             });
+                            
                         } else {
                             self.app_state.system_error = Some("Failed to parse torrent file for preview.".to_string());
                         }
@@ -1062,10 +1139,14 @@ impl App {
                                 let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
                                     path: initial_path,
                                     browser_mode: FileBrowserMode::DownloadLocSelection {
-                                        torrent_files: vec![], // Populate if needed
-                                        container_name: "New Download".to_string(),
-                                        use_container: false,
+                                        torrent_files: vec![],
+                                        container_name: "Magnet Download".to_string(),
+                                        use_container: true,
                                         is_editing_name: false,
+                                        // NEW FIELDS (Empty for magnets initially):
+                                        preview_tree: Vec::new(),
+                                        preview_state: TreeViewState::default(),
+                                        focused_pane: BrowserPane::FileSystem,
                                     },
                                     highlight_path: None,
                                 });
@@ -1123,6 +1204,10 @@ impl App {
                                         container_name: "Magnet Download".to_string(),
                                         use_container: true,
                                         is_editing_name: false,
+                                        // NEW FIELDS (Empty for magnets initially):
+                                        preview_tree: Vec::new(),
+                                        preview_state: TreeViewState::default(),
+                                        focused_pane: BrowserPane::FileSystem,
                                     },
                                     highlight_path: None,
                                 });

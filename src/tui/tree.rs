@@ -121,6 +121,39 @@ impl<T: Clone + Default + std::ops::AddAssign> RawNode<T> {
             child.sort_recursive();
         }
     }
+
+    pub fn find_and_act<F>(&mut self, target_path: &Path, action: &mut F) -> bool
+    where
+        F: FnMut(&mut Self),
+    {
+        // 1. Is this the target? Act and return true.
+        if self.full_path == target_path {
+            action(self);
+            return true;
+        }
+
+        // 2. Optimization: Only search children if the target path is inside this folder
+        if target_path.starts_with(&self.full_path) {
+            for child in &mut self.children {
+                // CHANGED: Pass 'action' directly (it is already &mut F)
+                if child.find_and_act(target_path, action) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Recursively applies an action to this node and ALL descendants.
+    pub fn apply_recursive<F>(&mut self, action: &F)
+    where
+        F: Fn(&mut Self),
+    {
+        action(self);
+        for child in &mut self.children {
+            child.apply_recursive(action);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -169,7 +202,7 @@ impl<T> TreeFilter<T> {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TreeViewState {
     pub cursor_path: Option<PathBuf>,
     pub current_path: PathBuf,

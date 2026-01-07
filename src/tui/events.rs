@@ -3,6 +3,7 @@
 
 use crate::app::AppState;
 use crate::app::{App, AppMode, ConfigItem, SelectedHeader, TorrentControlState};
+use crate::app::{BrowserPane, FilePriority, TorrentPreviewPayload};
 use crate::app::AppCommand;
 use crate::app::FileBrowserMode;
 use crate::torrent_manager::ManagerCommand;
@@ -18,6 +19,7 @@ use crate::tui::layout::get_torrent_columns;
 use crate::tui::layout::LayoutContext;
 use crate::tui::layout::SmartCol;
 use crate::tui::tree::{TreeMathHelper, TreeAction, TreeFilter};
+use crate::tui::tree::RawNode;
 use crate::tui::formatters::centered_rect;
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
@@ -36,6 +38,12 @@ use clipboard::{ClipboardContext, ClipboardProvider};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 static GLOBAL_ESC_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy)]
+enum PriorityAction {
+    Set(FilePriority),
+    Cycle,
+}
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     if let CrosstermEvent::Resize(w, h) = &event {
@@ -577,6 +585,9 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         container_name, 
                         use_container, 
                         is_editing_name, 
+                        focused_pane,
+                        preview_tree,
+                        preview_state,
                         .. 
                     } = browser_mode 
                     {
@@ -595,21 +606,76 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             }
                             app.app_state.ui_needs_redraw = true;
                             return; // Skip standard tree navigation while editing text
-                        } else {
-                            // Shortcuts when NOT editing text
+                        } 
+
+                        if key.code == KeyCode::Tab {
+                            *focused_pane = match focused_pane {
+                                BrowserPane::FileSystem => BrowserPane::TorrentPreview,
+                                BrowserPane::TorrentPreview => BrowserPane::FileSystem,
+                            };
+                            app.app_state.ui_needs_redraw = true;
+                            return;
+                        }
+
+                        // 3. NEW: Handle Torrent Preview Pane Input
+                        if *focused_pane == BrowserPane::TorrentPreview {
+                            // Calculate visible height for page up/down logic (simplified here)
+                            let area = centered_rect(90, 80, app.app_state.screen_area); // Same as view.rs
+                            // Approx height calculation if needed, or just pass a large number if not paginating
+                            let list_height = area.height.saturating_sub(4) as usize; 
+
+                            // Define filter (Show all in preview usually)
+                            let filter = TreeFilter::default();
+
                             match key.code {
-                                KeyCode::Char(' ') => {
-                                    *use_container = !*use_container;
-                                    app.app_state.ui_needs_redraw = true;
-                                    return;
+                                // Navigation
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Up, filter.clone(), list_height);
                                 }
-                                KeyCode::Char('e') => {
-                                    *is_editing_name = true;
-                                    app.app_state.ui_needs_redraw = true;
-                                    return;
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Down, filter.clone(), list_height);
+                                }
+                                KeyCode::Left | KeyCode::Char('h') => {
+                                    TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Left, filter.clone(), list_height);
+                                }
+                                KeyCode::Right | KeyCode::Char('l') => {
+                                    TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Right, filter.clone(), list_height);
+                                }
+                                
+                                // Priority Toggles
+                                KeyCode::Char(' ') => {
+                                    if let Some(target) = &preview_state.cursor_path {
+                                        apply_priority_action(preview_tree, target, PriorityAction::Cycle);
+                                    }
+                                }
+                                KeyCode::Char('s') => {
+                                    if let Some(target) = &preview_state.cursor_path {
+                                        apply_priority_action(preview_tree, target, PriorityAction::Set(FilePriority::Skip));
+                                    }
+                                }
+                                KeyCode::Char('h') => {
+                                    if let Some(target) = &preview_state.cursor_path {
+                                        apply_priority_action(preview_tree, target, PriorityAction::Set(FilePriority::High));
+                                    }
+                                }
+                                KeyCode::Char('n') => {
+                                    if let Some(target) = &preview_state.cursor_path {
+                                        apply_priority_action(preview_tree, target, PriorityAction::Set(FilePriority::Normal));
+                                    }
+                                }
+                                KeyCode::Char('L') | KeyCode::Char('l') if !matches!(key.code, KeyCode::Char('l')) => {
+                                    // Capital L or check modifier if needed, though 'l' is usually navigation (right).
+                                    // Let's use 'w' for Low (Lo'w') or rely on Space cycling if 'l' conflicts.
+                                    // Actually, let's map 'o' or 'p' for Low to avoid conflict with Vim keys 'l'.
+                                    // OR check modifiers. For now, let's bind 'w' (Low) to avoid conflict.
+                                    if let Some(target) = &preview_state.cursor_path {
+                                        apply_priority_action(preview_tree, target, PriorityAction::Set(FilePriority::Low));
+                                    }
                                 }
                                 _ => {}
                             }
+                            app.app_state.ui_needs_redraw = true;
+                            return; // Stop here, do not process FileSystem navigation
                         }
                     }
 
@@ -835,6 +901,33 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         }
     }
     app.app_state.ui_needs_redraw = true;
+}
+
+fn apply_priority_action(
+    nodes: &mut [RawNode<TorrentPreviewPayload>],
+    target_path: &Path,
+    action: PriorityAction,
+) -> bool {
+    for node in nodes {
+        // CHANGED: We explicitly pass a mutable reference (&mut |...|)
+        let found = node.find_and_act(target_path, &mut |target_node| {
+            // 1. Determine the new priority
+            let new_priority = match action {
+                PriorityAction::Set(p) => p,
+                PriorityAction::Cycle => target_node.payload.priority.next(),
+            };
+
+            // 2. Apply this priority to the target node AND all its children
+            target_node.apply_recursive(&|n| {
+                n.payload.priority = new_priority;
+            });
+        });
+
+        if found {
+            return true;
+        }
+    }
+    false
 }
 
 fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
