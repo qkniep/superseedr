@@ -2580,27 +2580,46 @@ fn draw_torrent_preview_panel(
         ..
     } = browser_mode
     {
-        // 1. Calculate Layout (Info Header vs Tree)
-        let custom_root = if *use_container {
-            Some(container_name.clone())
+        let filter = tree::TreeFilter::default();
+        
+        // 1. Adjust visible height (reserve 1 line for container header if enabled)
+        let list_height = if *use_container {
+            inner_area.height.saturating_sub(1) as usize
         } else {
-            None
+            inner_area.height as usize
         };
 
-        // 2. Get Visible Slice from the Persistent State
-        let filter = tree::TreeFilter::default();
+        // 2. Get Visible Slice from State
         let visible_rows = TreeMathHelper::get_visible_slice(
             preview_tree,
             preview_state,
             filter,
-            inner_area.height as usize,
+            list_height,
         );
 
-        let list_items: Vec<ListItem> = visible_rows
+        let mut list_items = Vec::new();
+
+        // 3. Render Container Header (The Visual Wrapper)
+        if *use_container {
+            let container_style = Style::default().fg(theme::MAUVE).add_modifier(Modifier::BOLD);
+            let header = ListItem::new(Line::from(vec![
+                Span::styled("▼  ", container_style), // Down arrow simulates expanded folder
+                Span::styled(container_name, container_style),
+                Span::styled(" (Container)", Style::default().fg(theme::SURFACE2).add_modifier(Modifier::ITALIC)),
+            ]));
+            list_items.push(header);
+        }
+
+        // 4. Render Tree Items
+        let tree_items: Vec<ListItem> = visible_rows
             .iter()
             .map(|item| {
                 let is_cursor = item.is_cursor;
-                let indent_str = "  ".repeat(item.depth);
+                
+                // Indent everything by one level if container is active
+                let extra_indent = if *use_container { "  " } else { "" };
+                let indent_str = format!("{}{}", extra_indent, "  ".repeat(item.depth));
+                
                 let icon = if item.node.is_dir {
                     "  "
                 } else {
@@ -2676,6 +2695,8 @@ fn draw_torrent_preview_panel(
                 ListItem::new(Line::from(spans))
             })
             .collect();
+
+        list_items.extend(tree_items);
 
         f.render_widget(List::new(list_items), inner_area);
         return;

@@ -714,6 +714,7 @@ impl App {
                     torrent_config.download_path.clone(),
                     torrent_config.validation_status,
                     torrent_config.torrent_control_state,
+                    None,
                 )
                 .await;
             }
@@ -981,6 +982,7 @@ impl App {
                         download_path.to_path_buf(),
                         false,
                         TorrentControlState::Running,
+                        None,
                     )
                     .await;
 
@@ -1125,6 +1127,7 @@ impl App {
                                     download_path,
                                     false,
                                     TorrentControlState::Running,
+                                    None,
                                 )
                                 .await;
                                 self.save_state_to_disk();
@@ -2402,6 +2405,7 @@ impl App {
         download_path: PathBuf,
         is_validated: bool,
         torrent_control_state: TorrentControlState,
+        file_priorities: Option<Vec<u8>>,
     ) {
         let buffer = match fs::read(&path) {
             Ok(buf) => buf,
