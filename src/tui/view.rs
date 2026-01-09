@@ -2318,7 +2318,7 @@ pub fn draw_file_browser(
 
     // 5. Render Preview
     if let (Some(path), Some(preview_area)) = (preview_path, layout.preview) {
-        draw_torrent_preview_panel(f, preview_area, path, browser_mode, preview_border_style);
+        draw_torrent_preview_panel(f, preview_area, path, browser_mode, preview_border_style, &state.current_path);
     }
 
     // --- Draw Search Bar ---
@@ -2518,11 +2518,17 @@ fn draw_torrent_preview_panel(
     path: &std::path::Path,
     browser_mode: &FileBrowserMode,
     border_style: Style,
+    current_fs_path: &std::path::Path, // <--- Used for dynamic title
 ) {
+    // Dynamic Title: Show where the torrent will be saved
+    let raw_title = format!(" Save to: {} ", current_fs_path.to_string_lossy());
+    let avail_width = area.width.saturating_sub(4) as usize;
+    let title = truncate_with_ellipsis(&raw_title, avail_width);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(" Torrent Preview ");
+        .title(title);
 
     let inner_area = block.inner(area);
     f.render_widget(block, area);
@@ -2557,9 +2563,10 @@ fn draw_torrent_preview_panel(
 
         // 3. Render Container Header (The Visual Wrapper)
         if *use_container {
-            let container_style = Style::default().fg(theme::MAUVE).add_modifier(Modifier::BOLD);
+            // Distinct Color: PEACH
+            let container_style = Style::default().fg(theme::PEACH).add_modifier(Modifier::BOLD);
             let header = ListItem::new(Line::from(vec![
-                Span::styled("▼  ", container_style), // Down arrow simulates expanded folder
+                Span::styled("▼  ", container_style),
                 Span::styled(container_name, container_style),
                 Span::styled(" (Container)", Style::default().fg(theme::SURFACE2).add_modifier(Modifier::ITALIC)),
             ]));
@@ -2728,7 +2735,6 @@ fn draw_torrent_preview_panel(
     );
 
     // 3. Build & Render Static Tree
-    // Since this is just a quick preview, we can map the file list to the new payload structure.
     let file_list_payloads: Vec<(Vec<String>, crate::app::TorrentPreviewPayload)> = torrent
         .file_list()
         .into_iter()
@@ -2790,7 +2796,6 @@ fn draw_torrent_preview_panel(
 
     f.render_widget(List::new(list_items), layout[1]);
 }
-
 
 fn draw_welcome_screen(f: &mut Frame) {
     let text = vec![

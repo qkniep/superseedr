@@ -618,8 +618,8 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 app.app_state.ui_needs_redraw = true;
                                 return;
                             }
-                            // [e]: Edit Name
-                            KeyCode::Char('e') => {
+                            // [r]: Edit Name
+                            KeyCode::Char('r') => {
                                 *is_editing_name = true;
                                 app.app_state.ui_needs_redraw = true;
                                 return;
