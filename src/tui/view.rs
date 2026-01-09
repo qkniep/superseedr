@@ -2518,9 +2518,9 @@ fn draw_torrent_preview_panel(
     path: &std::path::Path,
     browser_mode: &FileBrowserMode,
     border_style: Style,
-    current_fs_path: &std::path::Path, // <--- Used for dynamic title
+    current_fs_path: &std::path::Path,
 ) {
-    // Dynamic Title: Show where the torrent will be saved
+    // Keep the title as a fallback context
     let raw_title = format!(" Save to: {} ", current_fs_path.to_string_lossy());
     let avail_width = area.width.saturating_sub(4) as usize;
     let title = truncate_with_ellipsis(&raw_title, avail_width);
@@ -2544,14 +2544,15 @@ fn draw_torrent_preview_panel(
     {
         let filter = tree::TreeFilter::default();
         
-        // 1. Adjust visible height (reserve 1 line for container header if enabled)
-        let list_height = if *use_container {
-            inner_area.height.saturating_sub(1) as usize
-        } else {
-            inner_area.height as usize
-        };
+        // 1. Calculate Reserved Lines for Headers
+        // - Line 1: Root Path (Always shown)
+        // - Line 2: Container (If [x] is checked)
+        let header_lines = if *use_container { 2 } else { 1 };
+        
+        // 2. Calculate remaining height for the file tree
+        let list_height = inner_area.height.saturating_sub(header_lines) as usize;
 
-        // 2. Get Visible Slice from State
+        // 3. Get Visible Slice from State
         let visible_rows = TreeMathHelper::get_visible_slice(
             preview_tree,
             preview_state,
@@ -2561,27 +2562,41 @@ fn draw_torrent_preview_panel(
 
         let mut list_items = Vec::new();
 
-        // 3. Render Container Header (The Visual Wrapper)
+        // 4. Render Root Node (The Download Path)
+        // Style: Blue/Bold to indicate it's the destination root
+        let root_style = Style::default().fg(theme::BLUE).add_modifier(Modifier::BOLD);
+        let root_node = ListItem::new(Line::from(vec![
+            Span::styled("▼  ", root_style),
+            Span::styled(current_fs_path.to_string_lossy(), root_style),
+        ]));
+        list_items.push(root_node);
+
+        // 5. Render Container Header (If active)
         if *use_container {
-            // Distinct Color: PEACH
             let container_style = Style::default().fg(theme::PEACH).add_modifier(Modifier::BOLD);
-            let header = ListItem::new(Line::from(vec![
+            let container_node = ListItem::new(Line::from(vec![
+                Span::raw("  "), // Indent Level 1
                 Span::styled("▼  ", container_style),
                 Span::styled(container_name, container_style),
                 Span::styled(" (Container)", Style::default().fg(theme::SURFACE2).add_modifier(Modifier::ITALIC)),
             ]));
-            list_items.push(header);
+            list_items.push(container_node);
         }
 
-        // 4. Render Tree Items
+        // 6. Render Tree Items
         let tree_items: Vec<ListItem> = visible_rows
             .iter()
             .map(|item| {
                 let is_cursor = item.is_cursor;
                 
-                // Indent everything by one level if container is active
-                let extra_indent = if *use_container { "  " } else { "" };
-                let indent_str = format!("{}{}", extra_indent, "  ".repeat(item.depth));
+                // Indentation Logic:
+                // - Root takes Level 0
+                // - Container takes Level 1
+                // - Files start at Level 1 (no container) or Level 2 (container)
+                // - Plus the item's own tree depth
+                let base_indent_level = if *use_container { 2 } else { 1 };
+                let total_indent = base_indent_level + item.depth;
+                let indent_str = "  ".repeat(total_indent);
                 
                 let icon = if item.node.is_dir {
                     "  "
@@ -2625,11 +2640,8 @@ fn draw_torrent_preview_panel(
                     ),
                 };
 
-                // Highlight cursor
                 let final_name_style = if is_cursor {
-                    name_style
-                        .fg(theme::YELLOW)
-                        .add_modifier(Modifier::BOLD)
+                    name_style.fg(theme::YELLOW).add_modifier(Modifier::BOLD)
                 } else {
                     name_style
                 };
@@ -2646,12 +2658,10 @@ fn draw_torrent_preview_panel(
                         Style::default().fg(theme::SURFACE2),
                     ));
 
-                    // Add Priority Tag
                     if !tag.is_empty() {
                         spans.push(Span::styled(tag, final_name_style));
                     }
                 } else if item.node.payload.priority == FilePriority::Mixed {
-                    // Add indicator for mixed folders
                     spans.push(Span::styled(" [*]", Style::default().fg(theme::YELLOW)));
                 }
 
@@ -2666,7 +2676,7 @@ fn draw_torrent_preview_panel(
     }
 
     // --- CASE B: Static Preview (Browsing .torrent files) ---
-    // 1. Read & Parse
+    // (This part remains unchanged)
     let file_bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -2742,7 +2752,7 @@ fn draw_torrent_preview_panel(
             (
                 path,
                 crate::app::TorrentPreviewPayload {
-                    file_index: None, // Don't care for static preview
+                    file_index: None,
                     size,
                     priority: FilePriority::Normal,
                 },
@@ -2756,7 +2766,6 @@ fn draw_torrent_preview_panel(
         node.expand_all(&mut temp_state);
     }
 
-    // Use get_visible_slice with the temp state
     let visible_rows = TreeMathHelper::get_visible_slice(
         &final_nodes,
         &temp_state,
