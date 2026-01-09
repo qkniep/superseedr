@@ -2248,6 +2248,7 @@ fn draw_power_saving_screen(f: &mut Frame, app_state: &AppState, settings: &Sett
     f.render_widget(footer_paragraph, footer_area);
 }
 
+
 pub fn draw_file_browser(
     f: &mut Frame,
     app_state: &AppState,
@@ -2259,13 +2260,11 @@ pub fn draw_file_browser(
     let mut preview_path = None;
 
     match browser_mode {
-        // CASE A: User is picking where to save a torrent
         FileBrowserMode::DownloadLocSelection { .. } => {
             if let Some(pending) = &app_state.pending_torrent_path {
                 preview_path = Some(pending);
             }
         }
-        // CASE B: User is browsing for a .torrent file to add
         FileBrowserMode::File(_) => {
             if let Some(cursor) = &state.cursor_path {
                 if cursor.extension().map_or(false, |ext| ext == "torrent") {
@@ -2273,8 +2272,16 @@ pub fn draw_file_browser(
                 }
             }
         }
-        _ => {} // ConfigPathSelection and generic Directory modes hide the preview
+        _ => {}
     }
+
+    // Determine current focus
+    let default_pane = BrowserPane::FileSystem;
+    let focused_pane = if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
+        focused_pane
+    } else {
+        &default_pane
+    };
 
     // 2. Geometry: Calculate the Popup Area
     let area = if preview_path.is_some() {
@@ -2286,15 +2293,11 @@ pub fn draw_file_browser(
     f.render_widget(Clear, area);
 
     // 3. Layout
-    let show_options = matches!(
-        browser_mode,
-        FileBrowserMode::DownloadLocSelection { .. }
-    );
     let layout = calculate_file_browser_layout(
         area,
         preview_path.is_some(),
         app_state.is_searching,
-        show_options,
+        focused_pane, // Pass focus here
     );
 
     // 4. Determine Visual Focus Styles
@@ -2310,7 +2313,6 @@ pub fn draw_file_browser(
             ),
         }
     } else {
-        // Default for other modes (always active look for files)
         (Style::default().fg(theme::MAUVE), Style::default().fg(theme::SAPPHIRE))
     };
 
@@ -2339,68 +2341,6 @@ pub fn draw_file_browser(
         f.render_widget(Paragraph::new(search_text).block(search_block), search_area);
     }
 
-    // --- Draw Download Options Panel ---
-    if let (
-        Some(options_area),
-        FileBrowserMode::DownloadLocSelection {
-            container_name,
-            use_container,
-            is_editing_name,
-            ..
-        },
-    ) = (layout.options, browser_mode)
-    {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::MAUVE))
-            .title(" Download Options ");
-
-        let inner = block.inner(options_area);
-        f.render_widget(block, options_area);
-
-        let chunks = Layout::horizontal([Constraint::Length(22), Constraint::Min(0)]).split(inner);
-
-        let check_char = if *use_container { "[x]" } else { "[ ]" };
-        let toggle_style = if *use_container {
-            Style::default().fg(theme::GREEN)
-        } else {
-            Style::default().fg(theme::SUBTEXT0)
-        };
-        let toggle_text = Line::from(vec![
-            Span::styled(check_char, toggle_style.bold()),
-            Span::raw(" Create Subfolder"),
-        ]);
-        f.render_widget(Paragraph::new(toggle_text), chunks[0]);
-
-        let input_style = if *is_editing_name {
-            Style::default().fg(theme::YELLOW)
-        } else {
-            Style::default().fg(theme::TEXT)
-        };
-        let name_text = Line::from(vec![
-            Span::styled(" Name: ", Style::default().fg(theme::SUBTEXT0)),
-            Span::styled(
-                container_name,
-                input_style.bg(if *is_editing_name {
-                    theme::SURFACE0
-                } else {
-                    Color::Reset
-                }),
-            ),
-            if *is_editing_name {
-                Span::styled(
-                    "_",
-                    Style::default()
-                        .fg(theme::YELLOW)
-                        .add_modifier(Modifier::SLOW_BLINK),
-                )
-            } else {
-                Span::raw("")
-            },
-        ]);
-        f.render_widget(Paragraph::new(name_text), chunks[1]);
-    }
-
     // --- DRAW FOOTER ---
     let mut footer_spans = Vec::new();
     match browser_mode {
@@ -2411,16 +2351,32 @@ pub fn draw_file_browser(
             ));
             footer_spans.push(Span::raw(" Select This Dir | "));
         }
-        FileBrowserMode::DownloadLocSelection { .. } => {
+        FileBrowserMode::DownloadLocSelection { focused_pane, .. } => {
+            // Common Navigation
             footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
             footer_spans.push(Span::raw(" Switch Pane | "));
-            footer_spans.push(Span::styled(
-                "[Space]",
-                Style::default().fg(theme::YELLOW),
-            ));
-            footer_spans.push(Span::raw(" Toggle Priority/Container | "));
+
+            // Context Specific
+            match focused_pane {
+                BrowserPane::FileSystem => {
+                    footer_spans.push(Span::styled("[Enter]", Style::default().fg(theme::BLUE)));
+                    footer_spans.push(Span::raw(" Browse Dir | "));
+                }
+                BrowserPane::TorrentPreview => {
+                    footer_spans.push(Span::styled("[Space]", Style::default().fg(theme::YELLOW)));
+                    footer_spans.push(Span::raw(" Cycle Prio | "));
+                    footer_spans.push(Span::styled("[s/h/n/w]", Style::default().fg(theme::YELLOW)));
+                    footer_spans.push(Span::raw(" Set Prio | "));
+                }
+            }
+
+            // Global Actions
+            footer_spans.push(Span::styled("[x]", Style::default().fg(theme::YELLOW)));
+            footer_spans.push(Span::raw(" Container | "));
             footer_spans.push(Span::styled("[e]", Style::default().fg(theme::YELLOW)));
-            footer_spans.push(Span::raw(" Edit Name | "));
+            footer_spans.push(Span::raw(" Rename | "));
+            footer_spans.push(Span::styled("[c]", Style::default().fg(theme::GREEN)));
+            footer_spans.push(Span::raw(" Confirm"));
         }
         _ => {
             footer_spans.push(Span::styled(
@@ -2431,7 +2387,7 @@ pub fn draw_file_browser(
         }
     }
 
-    footer_spans.push(Span::styled("[Esc]", Style::default().fg(theme::RED)));
+    footer_spans.push(Span::styled(" | [Esc]", Style::default().fg(theme::RED)));
     footer_spans.push(Span::raw(" Cancel"));
 
     let footer = Paragraph::new(Line::from(footer_spans))

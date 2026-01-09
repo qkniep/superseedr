@@ -590,7 +590,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         .. 
                     } = browser_mode 
                     {
-                        // 1. Input Guard: Handle Name Editing
+                        // 1. Input Guard (Editing Name)
                         if *is_editing_name {
                             match key.code {
                                 KeyCode::Enter | KeyCode::Esc => *is_editing_name = false,
@@ -602,15 +602,23 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             return; 
                         }
 
-                        // 2. Feature Toggles
+                        // 2. GLOBAL ACTIONS (Work regardless of focus)
                         match key.code {
-                            // [x]: Toggle Container Wrapping
+                            // [Esc]: Cancel
+                            KeyCode::Esc => {
+                                app.app_state.mode = AppMode::Normal;
+                                app.app_state.pending_torrent_path = None;
+                                app.app_state.pending_torrent_link.clear();
+                                app.app_state.ui_needs_redraw = true;
+                                return;
+                            }
+                            // [x]: Toggle Container
                             KeyCode::Char('x') => {
                                 *use_container = !*use_container;
                                 app.app_state.ui_needs_redraw = true;
                                 return;
                             }
-                            // [e]: Edit Container Name
+                            // [e]: Edit Name
                             KeyCode::Char('e') => {
                                 *is_editing_name = true;
                                 app.app_state.ui_needs_redraw = true;
@@ -625,94 +633,97 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 app.app_state.ui_needs_redraw = true;
                                 return;
                             }
-                            _ => {}
-                        }
-
-                        // 3. Preview Pane Navigation (If focused)
-                        if *focused_pane == BrowserPane::TorrentPreview {
-                            let area = centered_rect(90, 80, app.app_state.screen_area);
-                            let list_height = area.height.saturating_sub(4) as usize; 
-                            let filter = TreeFilter::default();
-
-                            match key.code {
-                                KeyCode::Up | KeyCode::Char('k') => { TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Up, filter.clone(), list_height); }
-                                KeyCode::Down | KeyCode::Char('j') => { TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Down, filter.clone(), list_height); }
-                                KeyCode::Left | KeyCode::Char('h') => { TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Left, filter.clone(), list_height); }
-                                KeyCode::Right | KeyCode::Char('l') => { TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Right, filter.clone(), list_height); }
-                                
-                                // Priority Shortcuts
-                                KeyCode::Char(' ') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Cycle); } }
-                                KeyCode::Char('s') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Set(FilePriority::Skip)); } }
-                                KeyCode::Char('H') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Set(FilePriority::High)); } }
-                                KeyCode::Char('n') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Set(FilePriority::Normal)); } }
-                                KeyCode::Char('w') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Set(FilePriority::Low)); } }
-                                _ => {}
-                            }
-                            app.app_state.ui_needs_redraw = true;
-                            return; 
-                        }
-                        
-                        // 4. CONFIRMATION LOGIC [c]
-                        if key.code == KeyCode::Char('c') {
-                            // A. Determine Base Path (Current dir or highlighted dir)
-                            let mut base_path = state.current_path.clone();
-                            if let Some(cursor) = &state.cursor_path {
-                                if cursor.is_dir() {
-                                    base_path = cursor.clone();
-                                }
-                            }
-
-                            // B. Apply Container Logic (The [x] feature)
-                            let final_path = if *use_container {
-                                base_path.join(container_name)
-                            } else {
-                                base_path
-                            };
-
-                            // C. Collect Priorities (Phase 6)
-                            let mut file_priorities = Vec::new();
-                            fn collect_priorities(nodes: &[RawNode<TorrentPreviewPayload>], out: &mut Vec<(usize, u8)>) {
-                                for node in nodes {
-                                    if let Some(idx) = node.payload.file_index {
-                                        let p_val = match node.payload.priority {
-                                            FilePriority::Skip => 0,
-                                            FilePriority::Low => 1,
-                                            FilePriority::Normal => 4,
-                                            FilePriority::High => 7,
-                                            FilePriority::Mixed => 4,
-                                        };
-                                        out.push((idx, p_val));
+                            // [c]: CONFIRM DOWNLOAD
+                            KeyCode::Char('c') => {
+                                // A. Determine Base Path
+                                let mut base_path = state.current_path.clone();
+                                if let Some(cursor) = &state.cursor_path {
+                                    if cursor.is_dir() {
+                                        base_path = cursor.clone();
                                     }
-                                    collect_priorities(&node.children, out);
                                 }
-                            }
-                            collect_priorities(preview_tree, &mut file_priorities);
-                            file_priorities.sort_by_key(|k| k.0);
-                            let priority_vec: Vec<u8> = file_priorities.iter().map(|(_, p)| *p).collect();
 
-                            // D. Dispatch Command
-                            if let Some(pending_path) = app.app_state.pending_torrent_path.take() {
-                                app.add_torrent_from_file(
-                                    pending_path,
-                                    final_path,
-                                    false,
-                                    TorrentControlState::Running,
-                                    Some(priority_vec),
-                                ).await;
-                            } else if !app.app_state.pending_torrent_link.is_empty() {
-                                app.add_magnet_torrent(
-                                    "Fetching name...".to_string(), 
-                                    app.app_state.pending_torrent_link.clone(),
-                                    final_path,
-                                    false,
-                                    TorrentControlState::Running,
-                                ).await;
-                                app.app_state.pending_torrent_link.clear();
-                            }
+                                // B. Apply Container Logic
+                                let final_path = if *use_container {
+                                    base_path.join(container_name)
+                                } else {
+                                    base_path
+                                };
 
-                            app.app_state.mode = AppMode::Normal;
-                            app.app_state.system_error = None;
-                            return;
+                                // C. Collect Priorities
+                                let mut file_priorities = Vec::new();
+                                fn collect_priorities(nodes: &[RawNode<TorrentPreviewPayload>], out: &mut Vec<(usize, u8)>) {
+                                    for node in nodes {
+                                        if let Some(idx) = node.payload.file_index {
+                                            let p_val = match node.payload.priority {
+                                                FilePriority::Skip => 0,
+                                                FilePriority::Low => 1,
+                                                FilePriority::Normal => 4,
+                                                FilePriority::High => 7,
+                                                FilePriority::Mixed => 4,
+                                            };
+                                            out.push((idx, p_val));
+                                        }
+                                        collect_priorities(&node.children, out);
+                                    }
+                                }
+                                collect_priorities(preview_tree, &mut file_priorities);
+                                file_priorities.sort_by_key(|k| k.0);
+                                let priority_vec: Vec<u8> = file_priorities.iter().map(|(_, p)| *p).collect();
+
+                                // D. Dispatch Command
+                                if let Some(pending_path) = app.app_state.pending_torrent_path.take() {
+                                    app.add_torrent_from_file(
+                                        pending_path,
+                                        final_path,
+                                        false,
+                                        TorrentControlState::Running,
+                                        Some(priority_vec),
+                                    ).await;
+                                } else if !app.app_state.pending_torrent_link.is_empty() {
+                                    app.add_magnet_torrent(
+                                        "Fetching name...".to_string(), 
+                                        app.app_state.pending_torrent_link.clone(),
+                                        final_path,
+                                        false,
+                                        TorrentControlState::Running,
+                                    ).await;
+                                    app.app_state.pending_torrent_link.clear();
+                                }
+
+                                app.app_state.mode = AppMode::Normal;
+                                app.app_state.system_error = None;
+                                return;
+                            }
+                            _ => {} // Fall through to Pane Navigation
+                        }
+
+                        // 3. PANE SPECIFIC NAVIGATION
+                        match focused_pane {
+                            BrowserPane::TorrentPreview => {
+                                let area = centered_rect(90, 80, app.app_state.screen_area);
+                                let list_height = area.height.saturating_sub(4) as usize; 
+                                let filter = TreeFilter::default();
+
+                                match key.code {
+                                    KeyCode::Up | KeyCode::Char('k') => { TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Up, filter.clone(), list_height); }
+                                    KeyCode::Down | KeyCode::Char('j') => { TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Down, filter.clone(), list_height); }
+                                    KeyCode::Left | KeyCode::Char('h') => { TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Left, filter.clone(), list_height); }
+                                    KeyCode::Right | KeyCode::Char('l') => { TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Right, filter.clone(), list_height); }
+                                    
+                                    KeyCode::Char(' ') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Cycle); } }
+                                    KeyCode::Char('s') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Set(FilePriority::Skip)); } }
+                                    KeyCode::Char('H') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Set(FilePriority::High)); } }
+                                    KeyCode::Char('n') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Set(FilePriority::Normal)); } }
+                                    KeyCode::Char('w') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Set(FilePriority::Low)); } }
+                                    _ => {}
+                                }
+                                app.app_state.ui_needs_redraw = true;
+                                return; 
+                            }
+                            BrowserPane::FileSystem => {
+                                // Fallthrough to generic FileSystem navigation below
+                            }
                         }
                     }
 

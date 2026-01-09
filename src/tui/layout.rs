@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::app::BrowserPane; // Ensure this is imported at top
 use crate::app::AppState;
 use crate::config::{PeerSortColumn, TorrentSortColumn};
 use ratatui::prelude::*;
@@ -19,15 +20,13 @@ pub struct FileBrowserLayout {
     
     pub search: Option<Rect>,
     pub list: Rect,
-    pub options: Option<Rect>, // Added: Area for Container Toggle/Input
 }
 
-// - Update calculate_file_browser_layout
 pub fn calculate_file_browser_layout(
     area: Rect, 
     show_preview: bool, 
     show_search: bool,
-    show_options: bool // Added parameter
+    focused_pane: &crate::app::BrowserPane, 
 ) -> FileBrowserLayout {
     let mut plan = FileBrowserLayout::default();
     
@@ -41,12 +40,19 @@ pub fn calculate_file_browser_layout(
     plan.content = main_chunks[0];
     plan.footer = main_chunks[1];
 
-    // 2. Horizontal Split: Preview vs Browser
+    // 2. Horizontal Split
     let content_chunks = if show_preview {
-        Layout::horizontal([
-            Constraint::Percentage(35), 
-            Constraint::Percentage(65)
-        ]).split(plan.content)
+        let constraints = match focused_pane {
+            crate::app::BrowserPane::FileSystem => [
+                Constraint::Percentage(35), 
+                Constraint::Percentage(65)
+            ],
+            crate::app::BrowserPane::TorrentPreview => [
+                Constraint::Percentage(60), 
+                Constraint::Percentage(40)
+            ],
+        };
+        Layout::horizontal(constraints).split(plan.content)
     } else {
         Layout::horizontal([
             Constraint::Percentage(0), 
@@ -59,11 +65,10 @@ pub fn calculate_file_browser_layout(
     }
     plan.browser = content_chunks[1];
 
-    // 3. Browser Vertical Split: Search vs List vs Options
+    // 3. Browser Vertical Split: Search vs List (No Options)
     let mut constraints = Vec::new();
-    if show_search { constraints.push(Constraint::Length(3)); } // 0: Search
-    constraints.push(Constraint::Min(0));                       // 1: List
-    if show_options { constraints.push(Constraint::Length(3)); } // 2: Options
+    if show_search { constraints.push(Constraint::Length(3)); } 
+    constraints.push(Constraint::Min(0));                       
 
     let browser_chunks = Layout::vertical(constraints).split(plan.browser);
 
@@ -73,11 +78,6 @@ pub fn calculate_file_browser_layout(
         chunk_index += 1;
     }
     plan.list = browser_chunks[chunk_index];
-    chunk_index += 1;
-    
-    if show_options {
-        plan.options = Some(browser_chunks[chunk_index]);
-    }
 
     plan
 }
