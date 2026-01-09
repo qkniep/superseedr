@@ -2521,7 +2521,7 @@ fn draw_torrent_preview_panel(
     current_fs_path: &std::path::Path,
 ) {
     // Keep the title as a fallback context
-    let raw_title = format!(" Save to: {} ", current_fs_path.to_string_lossy());
+    let raw_title = "Torrent Preview";
     let avail_width = area.width.saturating_sub(4) as usize;
     let title = truncate_with_ellipsis(&raw_title, avail_width);
 
@@ -2641,7 +2641,7 @@ fn draw_torrent_preview_panel(
                 };
 
                 let final_name_style = if is_cursor {
-                    name_style.fg(theme::YELLOW).add_modifier(Modifier::BOLD)
+                    name_style.add_modifier(Modifier::BOLD).add_modifier(Modifier::UNDERLINED)
                 } else {
                     name_style
                 };
