@@ -2355,7 +2355,7 @@ pub fn draw_file_browser(
             }
             
             footer_spans.push(Span::styled("[x]", Style::default().fg(theme::MAUVE)));
-            footer_spans.push(Span::raw(" Container | "));
+            footer_spans.push(Span::raw(" Container Folder | "));
             
             if *use_container {
                 footer_spans.push(Span::styled("[r]", Style::default().fg(theme::SKY)));
@@ -2514,6 +2514,7 @@ fn draw_torrent_preview_panel(
         container_name,
         use_container,
         is_editing_name,
+        cursor_pos,
         ..
     } = browser_mode
     {
@@ -2541,30 +2542,29 @@ fn draw_torrent_preview_panel(
 
         // 5. Render Container Header
         if *use_container {
-            let (container_style, display_name, cursor_span) = if *is_editing_name {
-                (
-                    Style::default().fg(theme::SKY).add_modifier(Modifier::BOLD),
-                    container_name.as_str(),
-                    Some(Span::styled("█", Style::default().fg(theme::SKY).add_modifier(Modifier::SLOW_BLINK)))
-                )
+            let main_sep = std::path::MAIN_SEPARATOR.to_string();
+            let container_style = if *is_editing_name {
+                Style::default().fg(theme::SKY).add_modifier(Modifier::BOLD)
             } else {
-                (
-                    Style::default().fg(theme::MAUVE).add_modifier(Modifier::BOLD),
-                    container_name.as_str(),
-                    None
-                )
+                Style::default().fg(theme::MAUVE).add_modifier(Modifier::BOLD)
             };
 
             let mut spans = vec![
                 Span::raw("  "),
                 Span::styled("▼  ", container_style),
-                Span::styled(display_name, container_style),
             ];
 
-            if let Some(c) = cursor_span {
-                spans.push(c);
+            if *is_editing_name {
+                // Split the string at the cursor position
+                let (before, after) = container_name.split_at(*cursor_pos);
+                spans.push(Span::styled(before, container_style));
+                // Render the block cursor
+                spans.push(Span::styled("█", Style::default().fg(theme::SKY).add_modifier(Modifier::SLOW_BLINK)));
+                spans.push(Span::styled(after, container_style));
             } else {
-                spans.push(Span::styled(" (Container)", Style::default().fg(theme::SURFACE2).add_modifier(Modifier::ITALIC)));
+                // REMOVED: The logic that was appending main_sep here
+                spans.push(Span::styled(container_name.clone(), container_style));
+                spans.push(Span::styled(" (New Container)", Style::default().fg(theme::SURFACE2).add_modifier(Modifier::ITALIC)));
             }
 
             let container_node = ListItem::new(Line::from(spans));

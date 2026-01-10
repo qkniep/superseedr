@@ -588,15 +588,47 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         focused_pane,
                         preview_tree,
                         preview_state,
+                        cursor_pos,
+                        original_name_backup,
+
                         .. 
                     } = browser_mode 
                     {
                         // 1. Input Guard (Editing Name)
                         if *is_editing_name {
                             match key.code {
-                                KeyCode::Enter | KeyCode::Esc => *is_editing_name = false,
-                                KeyCode::Backspace => { container_name.pop(); }
-                                KeyCode::Char(c) => { container_name.push(c); }
+                                KeyCode::Enter => {
+                                    *is_editing_name = false;
+                                }
+                                KeyCode::Esc => {
+                                    // Revert to the backup name and close editor
+                                    *container_name = original_name_backup.clone(); 
+                                    *is_editing_name = false;
+                                    *cursor_pos = container_name.len();
+                                }
+                                KeyCode::Left => {
+                                    *cursor_pos = cursor_pos.saturating_sub(1);
+                                }
+                                KeyCode::Right => {
+                                    if *cursor_pos < container_name.len() {
+                                        *cursor_pos += 1;
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    if *cursor_pos > 0 {
+                                        container_name.remove(*cursor_pos - 1);
+                                        *cursor_pos -= 1;
+                                    }
+                                }
+                                KeyCode::Delete => {
+                                    if *cursor_pos < container_name.len() {
+                                        container_name.remove(*cursor_pos);
+                                    }
+                                }
+                                KeyCode::Char(c) => {
+                                    container_name.insert(*cursor_pos, c);
+                                    *cursor_pos += 1;
+                                }
                                 _ => {}
                             }
                             app.app_state.ui_needs_redraw = true;
@@ -605,7 +637,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 
                         // 2. GLOBAL ACTIONS (Work regardless of focus)
                         match key.code {
-                            // [Esc]: Cancel
                             KeyCode::Esc => {
                                 app.app_state.mode = AppMode::Normal;
                                 app.app_state.pending_torrent_path = None;
@@ -613,21 +644,19 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 app.app_state.ui_needs_redraw = true;
                                 return;
                             }
-                            // [x]: Toggle Container
                             KeyCode::Char('x') => {
                                 *use_container = !*use_container;
                                 app.app_state.ui_needs_redraw = true;
                                 return;
                             }
-                            // [r]: Edit Name
-                            KeyCode::Char('r') => {
-                                if *use_container {
-                                    *is_editing_name = true;
-                                    app.app_state.ui_needs_redraw = true;
-                                }
+                            // Fixed: Corrected match arm for 'r'
+                            KeyCode::Char('r') if *use_container => {
+                                *is_editing_name = true;
+                                *original_name_backup = container_name.clone(); 
+                                *cursor_pos = container_name.len(); 
+                                app.app_state.ui_needs_redraw = true;
                                 return;
                             }
-                            // [Tab]: Switch Panes
                             KeyCode::Tab => {
                                 *focused_pane = match focused_pane {
                                     BrowserPane::FileSystem => BrowserPane::TorrentPreview,
@@ -636,7 +665,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 app.app_state.ui_needs_redraw = true;
                                 return;
                             }
-                            _ => {} // Fall through to Pane Navigation
+                            _ => {} 
                         }
 
                         // 3. PANE SPECIFIC NAVIGATION

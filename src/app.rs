@@ -152,6 +152,8 @@ pub enum FileBrowserMode {
         focused_pane: BrowserPane,
         preview_tree: Vec<RawNode<TorrentPreviewPayload>>, // Interactive tree
         preview_state: TreeViewState,                      // Cursor & expansion state for preview
+        cursor_pos: usize,
+        original_name_backup: String,
     },
     ConfigPathSelection {
         target_item: ConfigItem,
@@ -1093,13 +1095,15 @@ impl App {
                                 path: initial_path,
                                 browser_mode: FileBrowserMode::DownloadLocSelection {
                                     torrent_files: vec![], // Legacy field (can optionally remove later)
-                                    container_name: default_container_name,
+                                    container_name: default_container_name.clone(),
                                     use_container: should_enclose, 
                                     is_editing_name: false,
                                     // NEW FIELDS:
                                     preview_tree,
                                     preview_state,
                                     focused_pane: BrowserPane::FileSystem, // Start focus on the left (Save Location)
+                                    cursor_pos: 0,
+                                    original_name_backup: default_container_name,
                                 },
                                 highlight_path: None,
                             });
@@ -1148,6 +1152,8 @@ impl App {
                                         preview_tree: Vec::new(),
                                         preview_state: TreeViewState::default(),
                                         focused_pane: BrowserPane::FileSystem,
+                                        cursor_pos: 0,
+                                        original_name_backup: "Magnet Download".to_string(),
                                     },
                                     highlight_path: None,
                                 });
@@ -1209,6 +1215,8 @@ impl App {
                                         preview_tree: Vec::new(),
                                         preview_state: TreeViewState::default(),
                                         focused_pane: BrowserPane::FileSystem,
+                                        cursor_pos: 0,
+                                        original_name_backup: "Magnet Download".to_string(),
                                     },
                                     highlight_path: None,
                                 });
