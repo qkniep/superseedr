@@ -2354,11 +2354,11 @@ pub fn draw_file_browser(
                 }
             }
             
-            footer_spans.push(Span::styled("[x]", Style::default().fg(theme::PEACH)));
+            footer_spans.push(Span::styled("[x]", Style::default().fg(theme::MAUVE)));
             footer_spans.push(Span::raw(" Container | "));
             
             if *use_container {
-                footer_spans.push(Span::styled("[r]", Style::default().fg(theme::YELLOW)));
+                footer_spans.push(Span::styled("[r]", Style::default().fg(theme::SKY)));
                 footer_spans.push(Span::raw(" Rename | "));
             }
 
@@ -2543,13 +2543,13 @@ fn draw_torrent_preview_panel(
         if *use_container {
             let (container_style, display_name, cursor_span) = if *is_editing_name {
                 (
-                    Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme::SKY).add_modifier(Modifier::BOLD),
                     container_name.as_str(),
-                    Some(Span::styled("█", Style::default().fg(theme::YELLOW).add_modifier(Modifier::SLOW_BLINK)))
+                    Some(Span::styled("█", Style::default().fg(theme::SKY).add_modifier(Modifier::SLOW_BLINK)))
                 )
             } else {
                 (
-                    Style::default().fg(theme::PEACH).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme::MAUVE).add_modifier(Modifier::BOLD),
                     container_name.as_str(),
                     None
                 )
