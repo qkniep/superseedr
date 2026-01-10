@@ -714,10 +714,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     KeyCode::Right | KeyCode::Char('l') => { TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Right, filter.clone(), list_height); }
                                     
                                     KeyCode::Char(' ') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Cycle); } }
-                                    KeyCode::Char('s') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Set(FilePriority::Skip)); } }
-                                    KeyCode::Char('H') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Set(FilePriority::High)); } }
-                                    KeyCode::Char('n') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Set(FilePriority::Normal)); } }
-                                    KeyCode::Char('w') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Set(FilePriority::Low)); } }
                                     _ => {}
                                 }
                                 app.app_state.ui_needs_redraw = true;

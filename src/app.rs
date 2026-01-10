@@ -106,10 +106,10 @@ pub enum FilePriority {
 impl FilePriority {
     pub fn next(&self) -> Self {
         match self {
-            Self::Normal => Self::High,
+            Self::Normal => Self::Skip,
+            Self::Skip => Self::High,
             Self::High => Self::Low,
-            Self::Low => Self::Skip,
-            Self::Skip => Self::Normal,
+            Self::Low => Self::Normal,
             Self::Mixed => Self::Normal, // Reset mixed to Normal on toggle
         }
     }
