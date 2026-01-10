@@ -104,7 +104,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         {
             let mut help_key_handled = false;
             // On Windows, we only get Press, so we just toggle
-            if key.code == KeyCode::Char('m') && key.kind == KeyEventKind::Press {
+            if key.code == KeyCode::Char('m') && key.kind == KeyEventKind::Press && matches!(app.app_state.mode, AppMode::Normal) {
                 app.app_state.show_help = !app.app_state.show_help;
                 help_key_handled = true;
             }
@@ -125,12 +125,12 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
             let mut help_key_handled = false;
             if app.app_state.show_help {
                 if key.code == KeyCode::Esc
-                    || (key.code == KeyCode::Char('m') && key.kind == KeyEventKind::Release)
+                    || (key.code == KeyCode::Char('m') && key.kind == KeyEventKind::Release && matches!(app.app_state.mode, AppMode::Normal))
                 {
                     app.app_state.show_help = false;
                     help_key_handled = true;
                 }
-            } else if key.code == KeyCode::Char('m') && key.kind == KeyEventKind::Press {
+            } else if key.code == KeyCode::Char('m') && key.kind == KeyEventKind::Press && matches!(app.app_state.mode, AppMode::Normal) {
                 app.app_state.show_help = true;
                 help_key_handled = true;
             }
