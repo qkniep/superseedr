@@ -555,6 +555,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 }
             }
         }
+
         AppMode::FileBrowser { state, data, browser_mode } => {
             if let CrosstermEvent::Key(key) = event {
                 if key.kind == KeyEventKind::Press {
@@ -635,68 +636,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 app.app_state.ui_needs_redraw = true;
                                 return;
                             }
-                            // [c]: CONFIRM DOWNLOAD
-                            KeyCode::Char('c') => {
-                                // A. Determine Base Path
-                                let mut base_path = state.current_path.clone();
-                                if let Some(cursor) = &state.cursor_path {
-                                    if cursor.is_dir() {
-                                        base_path = cursor.clone();
-                                    }
-                                }
-
-                                // B. Apply Container Logic
-                                let final_path = if *use_container {
-                                    base_path.join(container_name)
-                                } else {
-                                    base_path
-                                };
-
-                                // C. Collect Priorities
-                                let mut file_priorities = Vec::new();
-                                fn collect_priorities(nodes: &[RawNode<TorrentPreviewPayload>], out: &mut Vec<(usize, u8)>) {
-                                    for node in nodes {
-                                        if let Some(idx) = node.payload.file_index {
-                                            let p_val = match node.payload.priority {
-                                                FilePriority::Skip => 0,
-                                                FilePriority::Low => 1,
-                                                FilePriority::Normal => 4,
-                                                FilePriority::High => 7,
-                                                FilePriority::Mixed => 4,
-                                            };
-                                            out.push((idx, p_val));
-                                        }
-                                        collect_priorities(&node.children, out);
-                                    }
-                                }
-                                collect_priorities(preview_tree, &mut file_priorities);
-                                file_priorities.sort_by_key(|k| k.0);
-                                let priority_vec: Vec<u8> = file_priorities.iter().map(|(_, p)| *p).collect();
-
-                                // D. Dispatch Command
-                                if let Some(pending_path) = app.app_state.pending_torrent_path.take() {
-                                    app.add_torrent_from_file(
-                                        pending_path,
-                                        final_path,
-                                        false,
-                                        TorrentControlState::Running,
-                                        Some(priority_vec),
-                                    ).await;
-                                } else if !app.app_state.pending_torrent_link.is_empty() {
-                                    app.add_magnet_torrent(
-                                        "Fetching name...".to_string(), 
-                                        app.app_state.pending_torrent_link.clone(),
-                                        final_path,
-                                        false,
-                                        TorrentControlState::Running,
-                                    ).await;
-                                    app.app_state.pending_torrent_link.clear();
-                                }
-
-                                app.app_state.mode = AppMode::Normal;
-                                app.app_state.system_error = None;
-                                return;
-                            }
                             _ => {} // Fall through to Pane Navigation
                         }
 
@@ -768,14 +707,113 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         }
 
                         // [Preserved] Enter Directory / Expand
-                        KeyCode::Right | KeyCode::Char('l') => {
-                             if let Some(path) = state.cursor_path.clone() {
+                        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                            if let Some(path) = state.cursor_path.clone() {
                                 if path.is_dir() {
                                     let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
                                         path,
                                         browser_mode: browser_mode.clone(),
                                         highlight_path: None,
                                     });
+                                }
+                            }
+                        }
+
+                        KeyCode::Char('C') => {
+                            match browser_mode {
+                                FileBrowserMode::ConfigPathSelection { target_item, current_settings, selected_index, items } => {
+                                    let mut new_settings = current_settings.clone();
+                                    let selected_path = state.cursor_path.clone().unwrap_or_else(|| state.current_path.clone());
+
+                                    match target_item {
+                                        ConfigItem::DefaultDownloadFolder => new_settings.default_download_folder = Some(selected_path),
+                                        ConfigItem::WatchFolder => new_settings.watch_folder = Some(selected_path),
+                                        _ => {}
+                                    }
+
+                                    app.app_state.mode = AppMode::Config {
+                                        settings_edit: new_settings,
+                                        selected_index: *selected_index,
+                                        items: items.clone(),
+                                        editing: None,
+                                    };
+                                    app.app_state.ui_needs_redraw = true;
+                                }
+
+                                FileBrowserMode::Directory => {
+                                    app.app_state.mode = AppMode::Normal;
+                                }
+
+                                FileBrowserMode::File(extensions) => {
+                                    if let Some(path) = state.cursor_path.clone() {
+                                        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                        if extensions.iter().any(|ext| name.ends_with(ext)) {
+                                            if name.ends_with(".torrent") {
+                                                let _ = app.app_command_tx.send(AppCommand::AddTorrentFromFile(path)).await;
+                                            }
+                                            app.app_state.is_searching = false;
+                                            app.app_state.search_query.clear();
+                                            app.sort_and_filter_torrent_list();
+                                            app.app_state.mode = AppMode::Normal;
+                                        }
+                                    }
+                                }
+
+                                FileBrowserMode::DownloadLocSelection { container_name, use_container, preview_tree, .. } => {
+                                    let mut base_path = state.current_path.clone();
+                                    if let Some(cursor) = &state.cursor_path {
+                                        if cursor.is_dir() {
+                                            base_path = cursor.clone();
+                                        }
+                                    }
+
+                                    let final_path = if *use_container {
+                                        base_path.join(container_name)
+                                    } else {
+                                        base_path
+                                    };
+
+                                    // Collect priorities if needed
+                                    let mut file_priorities = Vec::new();
+                                    fn collect_priorities(nodes: &[RawNode<TorrentPreviewPayload>], out: &mut Vec<(usize, u8)>) {
+                                        for node in nodes {
+                                            if let Some(idx) = node.payload.file_index {
+                                                let p_val = match node.payload.priority {
+                                                    FilePriority::Skip => 0,
+                                                    FilePriority::Normal => 1,
+                                                    FilePriority::High => 2,
+                                                    FilePriority::Mixed => 1,
+                                                };
+                                                out.push((idx, p_val));
+                                            }
+                                            collect_priorities(&node.children, out);
+                                        }
+                                    }
+                                    collect_priorities(preview_tree, &mut file_priorities);
+                                    file_priorities.sort_by_key(|k| k.0);
+                                    let priority_vec: Vec<u8> = file_priorities.iter().map(|(_, p)| *p).collect();
+
+                                    if let Some(pending_path) = app.app_state.pending_torrent_path.take() {
+                                        app.add_torrent_from_file(
+                                            pending_path,
+                                            final_path,
+                                            false,
+                                            TorrentControlState::Running,
+                                            Some(priority_vec),
+                                        ).await;
+                                    } else if !app.app_state.pending_torrent_link.is_empty() {
+                                        app.add_magnet_torrent(
+                                            "Fetching name...".to_string(),
+                                            app.app_state.pending_torrent_link.clone(),
+                                            final_path,
+                                            false,
+                                            TorrentControlState::Running,
+                                        ).await;
+                                        app.app_state.pending_torrent_link.clear();
+                                    }
+
+                                    app.app_state.mode = AppMode::Normal;
+                                    app.app_state.system_error = None;
                                 }
                             }
                         }
@@ -792,32 +830,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             }
                         }
 
-                        // [Preserved] Enter/Select
-                        KeyCode::Enter => {
-                             if let Some(path) = state.cursor_path.clone() {
-                                if path.is_dir() {
-                                    // Enter directory
-                                    let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
-                                        path,
-                                        browser_mode: browser_mode.clone(),
-                                        highlight_path: None,
-                                    });
-                                } else if let FileBrowserMode::File(extensions) = browser_mode {
-                                    // Confirm file selection
-                                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                                    if extensions.iter().any(|ext| name.ends_with(ext)) {
-                                        if name.ends_with(".torrent") {
-                                            let _ = app.app_command_tx.send(AppCommand::AddTorrentFromFile(path)).await;
-                                        }
-
-                                        app.app_state.is_searching = false;      // Stop the search mode
-                                        app.app_state.search_query.clear();      // Clear the filter text
-                                        app.sort_and_filter_torrent_list();      // Refresh the main torrent list
-                                        app.app_state.mode = AppMode::Normal;
-                                    }
-                                }
-                            }
-                        }
 
                         // --- MODIFIED: Confirm Selection (Tab) ---
                         KeyCode::Tab => {

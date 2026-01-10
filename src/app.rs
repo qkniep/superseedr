@@ -98,7 +98,6 @@ pub enum FilePriority {
     #[default]
     Normal,
     High,
-    Low,
     Skip,
     Mixed, // Used for folders that contain children with different priorities
 }
@@ -108,8 +107,7 @@ impl FilePriority {
         match self {
             Self::Normal => Self::Skip,
             Self::Skip => Self::High,
-            Self::High => Self::Low,
-            Self::Low => Self::Normal,
+            Self::High => Self::Normal,
             Self::Mixed => Self::Normal, // Reset mixed to Normal on toggle
         }
     }

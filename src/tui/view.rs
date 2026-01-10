@@ -2336,37 +2336,39 @@ pub fn draw_file_browser(
     let mut footer_spans = Vec::new();
     match browser_mode {
         FileBrowserMode::ConfigPathSelection { .. } | FileBrowserMode::Directory => {
-            footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
-            footer_spans.push(Span::raw(" Select This Dir | "));
+            // Removed [Tab] Select
+            footer_spans.push(Span::styled("[Shift+C]", Style::default().fg(theme::GREEN)));
+            footer_spans.push(Span::raw(" Confirm Selection | "));
         }
         FileBrowserMode::DownloadLocSelection { focused_pane, use_container, .. } => {
             footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
             footer_spans.push(Span::raw(" Switch Pane | "));
+
             match focused_pane {
                 BrowserPane::FileSystem => {
-                    footer_spans.push(Span::styled("[Enter]", Style::default().fg(theme::BLUE)));
-                    footer_spans.push(Span::raw(" Browse Dir | "));
+                    // Help for FS is generally just Arrows/Enter which are intuitive
                 }
                 BrowserPane::TorrentPreview => {
                     footer_spans.push(Span::styled("[Space]", Style::default().fg(theme::YELLOW)));
-                    footer_spans.push(Span::raw(" Priority "));
+                    footer_spans.push(Span::raw(" Priority | "));
                 }
             }
+            
             footer_spans.push(Span::styled("[x]", Style::default().fg(theme::PEACH)));
             footer_spans.push(Span::raw(" Container | "));
             
-            // ENHANCEMENT 4: Only show Rename if container is enabled
             if *use_container {
                 footer_spans.push(Span::styled("[r]", Style::default().fg(theme::YELLOW)));
                 footer_spans.push(Span::raw(" Rename | "));
             }
 
-            footer_spans.push(Span::styled("[c]", Style::default().fg(theme::GREEN)));
+            footer_spans.push(Span::styled("[Shift+C]", Style::default().fg(theme::GREEN)));
             footer_spans.push(Span::raw(" Confirm"));
         }
-        _ => {
-            footer_spans.push(Span::styled("[Enter]", Style::default().fg(theme::GREEN)));
-            footer_spans.push(Span::raw(" Confirm "));
+        FileBrowserMode::File(_) => {
+            // Changed [Enter] to [c]
+            footer_spans.push(Span::styled("[Shift+C]", Style::default().fg(theme::GREEN)));
+            footer_spans.push(Span::raw(" Confirm File | "));
         }
     }
     footer_spans.push(Span::raw(" | ")); 
@@ -2594,12 +2596,6 @@ fn draw_torrent_preview_panel(
                             .fg(theme::GREEN)
                             .add_modifier(Modifier::BOLD),
                         "[HIGH] ",
-                    ),
-                    FilePriority::Low => (
-                        Style::default()
-                            .fg(theme::BLUE)
-                            .add_modifier(Modifier::DIM),
-                        "[LOW]  ",
                     ),
                     FilePriority::Mixed => (
                         Style::default()
