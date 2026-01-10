@@ -2248,7 +2248,6 @@ fn draw_power_saving_screen(f: &mut Frame, app_state: &AppState, settings: &Sett
     f.render_widget(footer_paragraph, footer_area);
 }
 
-
 pub fn draw_file_browser(
     f: &mut Frame,
     app_state: &AppState,
@@ -2256,9 +2255,8 @@ pub fn draw_file_browser(
     data: &[tree::RawNode<FileMetadata>],
     browser_mode: &FileBrowserMode,
 ) {
-    // 1. Logic: Determine if we have a preview to show
+    // 1. Setup Logic
     let mut preview_path = None;
-
     match browser_mode {
         FileBrowserMode::DownloadLocSelection { .. } => {
             if let Some(pending) = &app_state.pending_torrent_path {
@@ -2275,7 +2273,6 @@ pub fn draw_file_browser(
         _ => {}
     }
 
-    // Determine current focus
     let default_pane = BrowserPane::FileSystem;
     let focused_pane = if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
         focused_pane
@@ -2283,80 +2280,67 @@ pub fn draw_file_browser(
         &default_pane
     };
 
-    // 2. Geometry: Calculate the Popup Area
+    // 2. Geometry & Clearing
     let max_area = centered_rect(90, 80, f.area());
-    f.render_widget(Clear, max_area);
+    f.render_widget(Clear, max_area); 
+    
     let area = if preview_path.is_some() {
-        centered_rect(90, 80, f.area())
+        max_area
     } else {
         centered_rect(75, 80, f.area())
     };
 
-    // 3. Layout
+    // 3. Layout Calculation
     let layout = calculate_file_browser_layout(
         area,
         preview_path.is_some(),
         app_state.is_searching,
-        focused_pane, // Pass focus here
+        focused_pane,
     );
 
-    // 4. Determine Visual Focus Styles
+    // 4. Styles
     let (files_border_style, preview_border_style) = if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
         match focused_pane {
             BrowserPane::FileSystem => (
-                Style::default().fg(theme::MAUVE),     // Active
-                Style::default().fg(theme::SURFACE2)   // Dim
+                Style::default().fg(theme::MAUVE),
+                Style::default().fg(theme::SURFACE2)
             ),
             BrowserPane::TorrentPreview => (
-                Style::default().fg(theme::SURFACE2),  // Dim
-                Style::default().fg(theme::MAUVE)      // Active
+                Style::default().fg(theme::SURFACE2),
+                Style::default().fg(theme::MAUVE)
             ),
         }
     } else {
         (Style::default().fg(theme::MAUVE), Style::default().fg(theme::SAPPHIRE))
     };
 
-    // 5. Render Preview
+    // 5. Render Components
     if let (Some(path), Some(preview_area)) = (preview_path, layout.preview) {
         draw_torrent_preview_panel(f, preview_area, path, browser_mode, preview_border_style, &state.current_path);
     }
 
-    // --- Draw Search Bar ---
     if let Some(search_area) = layout.search {
         let search_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::YELLOW))
             .title(" Search Filter ");
-
         let search_text = Line::from(vec![
             Span::styled("/", Style::default().fg(theme::SUBTEXT0)),
             Span::raw(&app_state.search_query),
-            Span::styled(
-                "_",
-                Style::default()
-                    .fg(theme::YELLOW)
-                    .add_modifier(Modifier::SLOW_BLINK),
-            ),
+            Span::styled("_", Style::default().fg(theme::YELLOW).add_modifier(Modifier::SLOW_BLINK)),
         ]);
         f.render_widget(Paragraph::new(search_text).block(search_block), search_area);
     }
 
-    // --- DRAW FOOTER ---
     let mut footer_spans = Vec::new();
     match browser_mode {
         FileBrowserMode::ConfigPathSelection { .. } | FileBrowserMode::Directory => {
-            footer_spans.push(Span::styled(
-                "[Tab]",
-                Style::default().fg(theme::SAPPHIRE),
-            ));
+            footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
             footer_spans.push(Span::raw(" Select This Dir | "));
         }
         FileBrowserMode::DownloadLocSelection { focused_pane, .. } => {
-            // Common Navigation
             footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
             footer_spans.push(Span::raw(" Switch Pane | "));
-
-            // Context Specific
             match focused_pane {
                 BrowserPane::FileSystem => {
                     footer_spans.push(Span::styled("[Enter]", Style::default().fg(theme::BLUE)));
@@ -2369,8 +2353,6 @@ pub fn draw_file_browser(
                     footer_spans.push(Span::raw(" Set Prio | "));
                 }
             }
-
-            // Global Actions
             footer_spans.push(Span::styled("[x]", Style::default().fg(theme::YELLOW)));
             footer_spans.push(Span::raw(" Container | "));
             footer_spans.push(Span::styled("[r]", Style::default().fg(theme::YELLOW)));
@@ -2379,28 +2361,23 @@ pub fn draw_file_browser(
             footer_spans.push(Span::raw(" Confirm"));
         }
         _ => {
-            footer_spans.push(Span::styled(
-                "[Enter]",
-                Style::default().fg(theme::GREEN),
-            ));
+            footer_spans.push(Span::styled("[Enter]", Style::default().fg(theme::GREEN)));
             footer_spans.push(Span::raw(" Confirm | "));
         }
     }
-
     footer_spans.push(Span::styled(" | [Esc]", Style::default().fg(theme::RED)));
     footer_spans.push(Span::raw(" Cancel"));
-
     let footer = Paragraph::new(Line::from(footer_spans))
         .alignment(Alignment::Center)
         .style(Style::default().fg(theme::SUBTEXT1));
     f.render_widget(footer, layout.footer);
 
-    // --- DRAW LIST ---
+    // 6. DRAW LIST (SANITIZED & SIMPLIFIED)
     let inner_height = layout.list.height.saturating_sub(2) as usize;
+    let list_width = layout.list.width.saturating_sub(2) as usize;
+
     let filter = match browser_mode {
-        FileBrowserMode::Directory
-        | FileBrowserMode::DownloadLocSelection { .. }
-        | FileBrowserMode::ConfigPathSelection { .. } => {
+        FileBrowserMode::Directory | FileBrowserMode::DownloadLocSelection { .. } | FileBrowserMode::ConfigPathSelection { .. } => {
             TreeFilter::from_text(&app_state.search_query)
         }
         FileBrowserMode::File(extensions) => {
@@ -2413,13 +2390,8 @@ pub fn draw_file_browser(
 
     let abs_path = state.current_path.to_string_lossy();
     let item_count = data.len();
-    let count_label = if item_count == 0 {
-        " (empty)".to_string()
-    } else {
-        format!(" ({} items)", item_count)
-    };
+    let count_label = if item_count == 0 { " (empty)".to_string() } else { format!(" ({} items)", item_count) };
     let left_title = format!(" {}/{} ", abs_path, count_label);
-
     let right_title = match browser_mode {
         FileBrowserMode::Directory => " Select Directory ".to_string(),
         FileBrowserMode::DownloadLocSelection { .. } => " Select Download Location ".to_string(),
@@ -2431,55 +2403,61 @@ pub fn draw_file_browser(
     let mut list_items = Vec::new();
 
     if data.is_empty() {
-        list_items.push(ListItem::new(Line::from(vec![Span::styled(
-            "   (Directory is empty)",
-            Style::default().fg(theme::OVERLAY0).italic(),
-        )])));
+        list_items.push(ListItem::new(Line::from(vec![Span::styled("   (Directory is empty)", Style::default().fg(theme::OVERLAY0).italic())])));
     } else if visible_items.is_empty() {
-        list_items.push(ListItem::new(Line::from(vec![Span::styled(
-            format!("   (No matching files among {} items)", item_count),
-            Style::default().fg(theme::OVERLAY0).italic(),
-        )])));
+        list_items.push(ListItem::new(Line::from(vec![Span::styled(format!("   (No matching files among {} items)", item_count), Style::default().fg(theme::OVERLAY0).italic())])));
     } else {
         for item in visible_items {
             let is_cursor = item.is_cursor;
-            let indent = "  ".repeat(item.depth);
-            let icon_str = if item.node.is_dir {
-                "  "
+            
+            // 1. Basic Dimensions
+            let indent_str = "  ".repeat(item.depth);
+            let indent_len = indent_str.len(); 
+            let icon_str = if item.node.is_dir { "  " } else { "   " };
+            let icon_len = 4;
+
+            // 2. Prepare Date String
+            let (date_str, date_len) = if !item.node.is_dir {
+                let datetime: chrono::DateTime<chrono::Local> = item.node.payload.modified.into();
+                let s = format!(" ({})", datetime.format("%b %d %H:%M"));
+                (s.clone(), s.len())
             } else {
-                "   "
+                (String::new(), 0)
             };
 
+            // 3. Determine available space for filename
+            let fixed_used = indent_len + icon_len + date_len + 1;
+            let available_for_name = list_width.saturating_sub(fixed_used);
+
+            // --- FIX: SANITIZE FILENAME ---
+            // Remove control characters (like \r) which break the TUI rendering
+            let clean_name: String = item.node.name
+                .chars()
+                .map(|c| if c.is_control() { '?' } else { c })
+                .collect();
+
+            // 4. Truncate SANITIZED name
+            let display_name = truncate_with_ellipsis(&clean_name, available_for_name);
+
+            // 5. Styles
             let (icon_style, text_style) = if is_cursor {
-                (
-                    Style::default()
-                        .fg(theme::YELLOW)
-                        .add_modifier(Modifier::BOLD),
-                    Style::default()
-                        .fg(theme::YELLOW)
-                        .add_modifier(Modifier::BOLD),
-                )
+                (Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD), Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD))
             } else {
-                let i_style = if item.node.is_dir {
-                    Style::default().fg(theme::BLUE)
-                } else {
-                    Style::default().fg(theme::TEXT)
-                };
+                let i_style = if item.node.is_dir { Style::default().fg(theme::BLUE) } else { Style::default().fg(theme::TEXT) };
                 (i_style, Style::default().fg(theme::TEXT))
             };
 
+            // 6. Construct Line
             let mut line_spans = vec![
-                Span::raw(indent),
+                Span::raw(indent_str),
                 Span::styled(icon_str, icon_style),
-                Span::styled(format!("{}", item.node.name), text_style),
+                Span::styled(display_name, text_style),
             ];
 
+            // Simply append the date with a single space if it's a file
             if !item.node.is_dir {
-                let datetime: chrono::DateTime<chrono::Local> = item.node.payload.modified.into();
-                line_spans.push(Span::styled(
-                    format!(" ({})", datetime.format("%b %d %H:%M")),
-                    Style::default().fg(theme::SURFACE2).italic(),
-                ));
+                line_spans.push(Span::raw(" "));
+                line_spans.push(Span::styled(date_str, Style::default().fg(theme::SURFACE2).italic()));
             }
 
             list_items.push(ListItem::new(Line::from(line_spans)));
@@ -2490,22 +2468,10 @@ pub fn draw_file_browser(
         List::new(list_items)
             .block(
                 Block::default()
-                    .title(
-                        block::Title::from(Span::styled(
-                            left_title,
-                            Style::default().fg(theme::MAUVE).bold(),
-                        ))
-                        .alignment(Alignment::Left),
-                    )
-                    .title(
-                        block::Title::from(Span::styled(
-                            right_title,
-                            Style::default().fg(theme::MAUVE).italic(),
-                        ))
-                        .alignment(Alignment::Right),
-                    )
+                    .title(block::Title::from(Span::styled(left_title, Style::default().fg(theme::MAUVE).bold())).alignment(Alignment::Left))
+                    .title(block::Title::from(Span::styled(right_title, Style::default().fg(theme::MAUVE).italic())).alignment(Alignment::Right))
                     .borders(Borders::ALL)
-                    .border_style(files_border_style), // Applied dynamic border
+                    .border_style(files_border_style),
             )
             .highlight_symbol("▶ "),
         layout.list,
