@@ -2284,13 +2284,13 @@ pub fn draw_file_browser(
     };
 
     // 2. Geometry: Calculate the Popup Area
+    let max_area = centered_rect(90, 80, f.area());
+    f.render_widget(Clear, max_area);
     let area = if preview_path.is_some() {
         centered_rect(90, 80, f.area())
     } else {
         centered_rect(75, 80, f.area())
     };
-
-    f.render_widget(Clear, area);
 
     // 3. Layout
     let layout = calculate_file_browser_layout(
@@ -2373,7 +2373,7 @@ pub fn draw_file_browser(
             // Global Actions
             footer_spans.push(Span::styled("[x]", Style::default().fg(theme::YELLOW)));
             footer_spans.push(Span::raw(" Container | "));
-            footer_spans.push(Span::styled("[e]", Style::default().fg(theme::YELLOW)));
+            footer_spans.push(Span::styled("[r]", Style::default().fg(theme::YELLOW)));
             footer_spans.push(Span::raw(" Rename | "));
             footer_spans.push(Span::styled("[c]", Style::default().fg(theme::GREEN)));
             footer_spans.push(Span::raw(" Confirm"));
@@ -2539,6 +2539,7 @@ fn draw_torrent_preview_panel(
         preview_state,
         container_name,
         use_container,
+        is_editing_name,
         ..
     } = browser_mode
     {
@@ -2573,13 +2574,35 @@ fn draw_torrent_preview_panel(
 
         // 5. Render Container Header (If active)
         if *use_container {
-            let container_style = Style::default().fg(theme::PEACH).add_modifier(Modifier::BOLD);
-            let container_node = ListItem::new(Line::from(vec![
+            let (container_style, display_name, cursor_span) = if *is_editing_name {
+                // Editing Mode: Yellow + Blinking Cursor
+                (
+                    Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD),
+                    container_name.as_str(),
+                    Some(Span::styled("█", Style::default().fg(theme::YELLOW).add_modifier(Modifier::SLOW_BLINK)))
+                )
+            } else {
+                // Normal Mode: Peach + "(Container)" label
+                (
+                    Style::default().fg(theme::PEACH).add_modifier(Modifier::BOLD),
+                    container_name.as_str(),
+                    None
+                )
+            };
+
+            let mut spans = vec![
                 Span::raw("  "), // Indent Level 1
                 Span::styled("▼  ", container_style),
-                Span::styled(container_name, container_style),
-                Span::styled(" (Container)", Style::default().fg(theme::SURFACE2).add_modifier(Modifier::ITALIC)),
-            ]));
+                Span::styled(display_name, container_style),
+            ];
+
+            if let Some(c) = cursor_span {
+                spans.push(c); // Add cursor
+            } else {
+                spans.push(Span::styled(" (Container)", Style::default().fg(theme::SURFACE2).add_modifier(Modifier::ITALIC)));
+            }
+
+            let container_node = ListItem::new(Line::from(spans));
             list_items.push(container_node);
         }
 

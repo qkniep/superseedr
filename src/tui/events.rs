@@ -620,8 +620,10 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             }
                             // [r]: Edit Name
                             KeyCode::Char('r') => {
-                                *is_editing_name = true;
-                                app.app_state.ui_needs_redraw = true;
+                                if *use_container {
+                                    *is_editing_name = true;
+                                    app.app_state.ui_needs_redraw = true;
+                                }
                                 return;
                             }
                             // [Tab]: Switch Panes
