@@ -653,11 +653,8 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             KeyCode::Char('r') if *use_container => {
                                 *is_editing_name = true;
                                 *original_name_backup = container_name.clone(); 
-                                *cursor_pos = container_name
-                                    .rfind(" [")
-                                    .unwrap_or(container_name.len()); 
+                                *cursor_pos = container_name.len(); 
                                 *focused_pane = BrowserPane::TorrentPreview;
-
                                 app.app_state.ui_needs_redraw = true;
                                 return;
                             }
