@@ -256,7 +256,7 @@ pub struct TrackerState {
     pub seeding_interval: Option<Duration>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum TorrentActivity {
     #[default]
     Initializing,
@@ -1997,7 +1997,16 @@ impl TorrentState {
                         data_path: path.clone(),
                     });
                 } else {
-                    event!(Level::WARN, "Action::Delete triggered but torrent_data_path or mfi is missing.");
+                    if self.torrent_status != TorrentStatus::AwaitingMetadata && self.torrent_status != TorrentStatus::Validating {
+                        event!(Level::WARN, "Action::Delete triggered but torrent_data_path or mfi is missing.");
+                    } else {
+                        event!(Level::INFO, "Aborting torrent before storage initialization.");
+                    }
+
+                    effects.push(Effect::EmitManagerEvent(ManagerEvent::DeletionComplete(
+                        self.info_hash.clone(),
+                        Ok(())
+                    )));
                 }
                 effects
             }
@@ -5977,6 +5986,45 @@ mod tests {
 
         assert!(!has_requests, "PROTOCOL ERROR: Engine requested blocks before a download path was selected!");
         assert!(state.peers[&peer_id].pending_requests.is_empty(), "Peer should have 0 pending requests when path is missing");
+    }
+
+    #[test]
+    fn test_delete_action_without_path_emits_completion() {
+        // 1. GIVEN: A state with metadata but NO torrent_data_path or multi_file_info
+        let mut state = create_empty_state();
+        let torrent = create_dummy_torrent(5);
+        let info_hash = state.info_hash.clone();
+        
+        state.torrent = Some(torrent);
+        state.torrent_data_path = None;
+        state.multi_file_info = None;
+        // status will be Validating because torrent is Some
+        state.torrent_status = TorrentStatus::Validating; 
+
+        // 2. WHEN: Action::Delete is triggered
+        let effects = state.update(Action::Delete);
+
+        // 3. THEN: It should NOT emit Effect::DeleteFiles
+        let has_delete_files = effects.iter().any(|e| matches!(e, Effect::DeleteFiles { .. }));
+        assert!(!has_delete_files, "Should not attempt to delete files when path is missing");
+
+        // 4. THEN: It SHOULD emit Effect::EmitManagerEvent(ManagerEvent::DeletionComplete)
+        let completion_event = effects.iter().find(|e| {
+            if let Effect::EmitManagerEvent(ManagerEvent::DeletionComplete(hash, result)) = e {
+                return hash == &info_hash && result.is_ok();
+            }
+            false
+        });
+
+        assert!(
+            completion_event.is_some(), 
+            "Manager must emit DeletionComplete(Ok) to notify the app to remove the UI entry"
+        );
+        
+        // 5. THEN: Internal state should be reset correctly
+        assert!(state.is_paused);
+        assert_eq!(state.torrent_status, TorrentStatus::Validating);
+        assert_eq!(state.last_activity, TorrentActivity::Initializing);
     }
 }
 

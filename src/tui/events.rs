@@ -640,6 +640,26 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                 match key.code {
                     KeyCode::Esc => {
                         tracing::info!(target: "superseedr", "ESC pressed: Cancelling download selection");
+                        if !app.app_state.pending_torrent_link.is_empty() {
+                            if let (Some(info_hash), _) = crate::app::parse_hybrid_hashes(&app.app_state.pending_torrent_link) {
+                                // 1. Grab reference to channel
+                                if let Some(manager_tx) = app.torrent_manager_command_txs.get(&info_hash) {
+                                    let tx = manager_tx.clone();
+                                    // 2. Send Kill Command asynchronously
+                                    tokio::spawn(async move {
+                                        if let Err(e) = tx.send(ManagerCommand::DeleteFile).await {
+                                            tracing::error!("Failed to send DeleteFile to cancelled manager: {}", e);
+                                        }
+                                    });
+                                }
+                                
+                                // 3. Remove from UI immediately (Manager will kill itself upon receipt of DeleteFile)
+                                app.torrent_manager_command_txs.remove(&info_hash);
+                                app.app_state.torrents.remove(&info_hash);
+                                app.app_state.torrent_list_order.retain(|h| h != &info_hash);
+                            }
+                        }
+
                         app.app_state.mode = AppMode::Normal;
                         app.app_state.pending_torrent_path = None;
                         app.app_state.pending_torrent_link.clear();
@@ -863,7 +883,7 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                             if let (Some(info_hash), _) = crate::app::parse_hybrid_hashes(&app.app_state.pending_torrent_link) {
                                 // 2. Shut down the manager
                                 if let Some(manager_tx) = app.torrent_manager_command_txs.remove(&info_hash) {
-                                    let _ = manager_tx.try_send(ManagerCommand::Shutdown);
+                                    let _ = manager_tx.try_send(ManagerCommand::DeleteFile);
                                 }
                                 // 3. Remove from UI state
                                 app.app_state.torrents.remove(&info_hash);
