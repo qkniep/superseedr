@@ -263,7 +263,10 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                 let text_to_show = if app_state.anonymize_torrent_names {
                     "/path/to/torrent/file"
                 } else {
-                    path_cow = torrent.latest_state.download_path.to_string_lossy();
+                    path_cow = torrent.latest_state.download_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy())
+                        .unwrap_or_else(|| std::borrow::Cow::Borrowed("Unknown path"));
                     &path_cow
                 };
 
@@ -1985,7 +1988,9 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
             let download_path_str = torrent_to_delete
                 .latest_state
                 .download_path
-                .to_string_lossy();
+                .as_ref()
+                .map(|p| p.to_string_lossy())
+                .unwrap_or_else(|| std::borrow::Cow::Borrowed("Unknown path"));
 
             let mut text = vec![
                 Line::from(Span::styled(

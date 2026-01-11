@@ -785,9 +785,9 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                             }
 
                             let final_path = if *use_container {
-                                base_path.join(container_name)
+                                Some(base_path.join(container_name))
                             } else {
-                                base_path
+                                Some(base_path)
                             };
 
                             tracing::info!(target: "superseedr", "Final resolved path: {:?}", final_path);
@@ -1063,23 +1063,20 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
     if pasted_text.starts_with("magnet:") {
         tracing::info!(target: "magnet_flow", "Magnet link detected in clipboard");
         
-        if let Some(download_path) = app.client_configs.default_download_folder.clone() {
-            app.add_magnet_torrent(
-                "Fetching name...".to_string(),
-                pasted_text.to_string(),
-                download_path,
-                false,
-                TorrentControlState::Running,
-            )
-            .await;
-        } else {
-            // FIX 1: Save the link to state so the manager can find it later
+        let download_path = app.client_configs.default_download_folder.clone();
+
+        app.add_magnet_torrent(
+            "Fetching name...".to_string(),
+            pasted_text.to_string(),
+            download_path.clone(),
+            false,
+            TorrentControlState::Running,
+        )
+        .await;
+
+        if download_path.is_none() {
             app.app_state.pending_torrent_link = pasted_text.to_string();
-            tracing::info!(target: "magnet_flow", "No default folder. Saved pending_link: {}", app.app_state.pending_torrent_link);
-            
             let initial_path = app.get_initial_destination_path();
-            
-            // FIX 2: Open browser specifically in DownloadLocSelection mode
             let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
                 path: initial_path,
                 browser_mode: FileBrowserMode::DownloadLocSelection {
@@ -1102,7 +1099,7 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
             if let Some(download_path) = app.client_configs.default_download_folder.clone() {
                 app.add_torrent_from_file(
                     path.to_path_buf(),
-                    download_path,
+                    Some(download_path),
                     false,
                     TorrentControlState::Running,
                     None,

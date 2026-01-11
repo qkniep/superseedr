@@ -130,7 +130,7 @@ pub struct TorrentSettings {
     pub torrent_or_magnet: String,
     pub name: String,
     pub validation_status: bool,
-    pub download_path: PathBuf,
+    pub download_path: Option<PathBuf>,
     pub torrent_control_state: TorrentControlState,
 }
 
@@ -280,7 +280,7 @@ mod tests {
         assert!(settings.torrents[0].validation_status);
         assert_eq!(
             settings.torrents[0].download_path,
-            PathBuf::from("/downloads/my_test_torrent")
+            Some(PathBuf::from("/downloads/my_test_torrent"))
         );
         // Check that omitting the field used the default
         assert_eq!(settings.torrents[1].name, "Another Torrent");
@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(settings.torrents[0].name, "Partial Torrent");
         assert_eq!(
             settings.torrents[0].download_path,
-            PathBuf::from("/partial/path")
+            Some(PathBuf::from("/partial/path"))
         );
         assert_eq!(settings.torrents[0].torrent_or_magnet, ""); // Default for String
         assert!(!settings.torrents[0].validation_status); // Default for bool

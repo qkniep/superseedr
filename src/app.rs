@@ -421,7 +421,7 @@ pub struct TorrentMetrics {
     pub info_hash: Vec<u8>,
     pub torrent_or_magnet: String,
     pub torrent_name: String,
-    pub download_path: PathBuf,
+    pub download_path: Option<PathBuf>,
     pub number_of_successfully_connected_peers: usize,
     pub number_of_pieces_total: u32,
     pub number_of_pieces_completed: u32,
@@ -979,7 +979,7 @@ impl App {
                 if let Some(download_path) = &self.client_configs.default_download_folder {
                     self.add_torrent_from_file(
                         path.to_path_buf(),
-                        download_path.to_path_buf(),
+                        Some(download_path.to_path_buf()),
                         false,
                         TorrentControlState::Running,
                         None,
@@ -1126,7 +1126,7 @@ impl App {
                             {
                                 self.add_torrent_from_file(
                                     torrent_file_path,
-                                    download_path,
+                                    Some(download_path),
                                     false,
                                     TorrentControlState::Running,
                                     None,
@@ -1187,7 +1187,7 @@ impl App {
                                 self.add_magnet_torrent(
                                     "Fetching name...".to_string(),
                                     magnet_link.trim().to_string(),
-                                    download_path,
+                                    Some(download_path),
                                     false,
                                     TorrentControlState::Running,
                                 )
@@ -2369,8 +2369,10 @@ impl App {
         let mut counts: HashMap<PathBuf, usize> = HashMap::new();
 
         for state in self.app_state.torrents.values() {
-            if let Some(parent_path) = state.latest_state.download_path.parent() {
-                *counts.entry(parent_path.to_path_buf()).or_insert(0) += 1;
+            if let Some(download_path) = &state.latest_state.download_path {
+                if let Some(parent_path) = download_path.parent() {
+                    *counts.entry(parent_path.to_path_buf()).or_insert(0) += 1;
+                }
             }
         }
 
@@ -2401,7 +2403,7 @@ impl App {
     pub async fn add_torrent_from_file(
         &mut self,
         path: PathBuf,
-        download_path: PathBuf,
+        download_path: Option<PathBuf>,
         is_validated: bool,
         torrent_control_state: TorrentControlState,
         file_priorities: Option<Vec<u8>>,
@@ -2557,7 +2559,7 @@ impl App {
             incoming_peer_rx,
             metrics_tx: torrent_tx_clone,
             torrent_validation_status: is_validated,
-            torrent_data_path: Some(download_path),
+            torrent_data_path: download_path,
             manager_command_rx,
             manager_event_tx: manager_event_tx_clone,
             settings: Arc::clone(&Arc::new(self.client_configs.clone())),
@@ -2592,7 +2594,7 @@ impl App {
         &mut self,
         torrent_name: String,
         magnet_link: String,
-        download_path: PathBuf,
+        download_path: Option<PathBuf>,
         is_validated: bool,
         torrent_control_state: TorrentControlState,
     ) {
@@ -2612,7 +2614,14 @@ impl App {
             .expect("Magnet link missing both btih and btmh hashes");
 
         if self.app_state.torrents.contains_key(&info_hash) {
-            tracing_event!(Level::INFO, "Ignoring already present torrent from magnet");
+            if let Some(path) = download_path {
+                if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
+                     let _ = manager_tx.try_send(ManagerCommand::SetUserTorrentConfig { 
+                         torrent_data_path: path 
+                     });
+                }
+            }
+            tracing_event!(Level::INFO, "Updated path for existing torrent from magnet");
             return;
         }
 
@@ -2650,7 +2659,7 @@ impl App {
             incoming_peer_rx,
             metrics_tx: torrent_tx_clone,
             torrent_validation_status: is_validated,
-            torrent_data_path: Some(download_path),
+            torrent_data_path: download_path.clone(),
             manager_command_rx,
             manager_event_tx: manager_event_tx_clone,
             settings: Arc::clone(&Arc::new(self.client_configs.clone())),
