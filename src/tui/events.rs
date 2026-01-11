@@ -778,12 +778,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                         FileBrowserMode::DownloadLocSelection { container_name, use_container, preview_tree, .. } => {
                             tracing::info!(target: "superseedr", "Confirming Download Location Selection");
                             let mut base_path = state.current_path.clone();
-                            if let Some(cursor) = &state.cursor_path {
-                                if cursor.is_dir() {
-                                    base_path = cursor.clone();
-                                }
-                            }
-
                             let final_path = if *use_container {
                                 Some(base_path.join(container_name))
                             } else {
