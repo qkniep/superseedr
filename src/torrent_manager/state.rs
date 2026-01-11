@@ -7857,7 +7857,7 @@ mod integration_tests {
             incoming_peer_rx,
             metrics_tx,
             torrent_validation_status: false,
-            download_dir: temp_dir,
+            torrent_data_path: Some(temp_dir),
             manager_command_rx: cmd_rx,
             manager_event_tx: event_tx,
             settings,

@@ -169,7 +169,7 @@ impl TorrentManager {
             dht_handle,
             incoming_peer_rx,
             metrics_tx,
-            download_dir,
+            torrent_data_path,
             manager_command_rx,
             manager_event_tx,
             settings,
@@ -268,7 +268,7 @@ impl TorrentManager {
         };
 
         let validation_status = torrent_parameters.torrent_validation_status;
-        let torrent_data_path = torrent_parameters.download_dir.clone();
+        let torrent_data_path = torrent_parameters.torrent_data_path.clone();
 
         // 3. Initialize Base Manager (Awaiting Metadata)
         let mut manager = Self::init_base(torrent_parameters, info_hash, trackers, validation_status);
@@ -289,9 +289,11 @@ impl TorrentManager {
             metadata_length,
         });
 
-        manager.apply_action(Action::SetUserTorrentConfig {
-            torrent_data_path
-        });
+        if let Some(torrent_data_path) = torrent_data_path {
+            manager.apply_action(Action::SetUserTorrentConfig {
+                torrent_data_path
+            });
+        }
 
         Ok(manager)
     }
@@ -2567,7 +2569,7 @@ mod tests {
             incoming_peer_rx,
             metrics_tx,
             torrent_validation_status: false,
-            download_dir: PathBuf::from("."),
+            torrent_data_path: Some(PathBuf::from(".")),
             manager_command_rx,
             manager_event_tx,
             settings,
@@ -2730,7 +2732,7 @@ mod resource_tests {
             incoming_peer_rx: _incoming_rx,
             metrics_tx,
             torrent_validation_status: false,
-            download_dir: PathBuf::from("."),
+            torrent_data_path: Some(PathBuf::from(".")),
             manager_command_rx: cmd_rx,
             manager_event_tx: event_tx,
             settings,
@@ -2953,7 +2955,7 @@ mod resource_tests {
             incoming_peer_rx: incoming_rx,
             metrics_tx,
             torrent_validation_status: false,
-            download_dir: temp_dir.clone(),
+            torrent_data_path: Some(temp_dir.clone()),
             manager_command_rx: cmd_rx,
             manager_event_tx: event_tx,
             settings: settings.clone(),
@@ -3200,7 +3202,7 @@ mod resource_tests {
             incoming_peer_rx: incoming_rx,
             metrics_tx,
             torrent_validation_status: false,
-            download_dir: temp_dir.clone(),
+            torrent_data_path: Some(temp_dir.clone()),
             manager_command_rx: cmd_rx,
             manager_event_tx: event_tx,
             settings: settings.clone(),
@@ -3802,7 +3804,7 @@ mod resource_tests {
             incoming_peer_rx: _incoming_rx,
             metrics_tx,
             torrent_validation_status: false,
-            download_dir: PathBuf::from("."),
+            torrent_data_path: Some(PathBuf::from(".")),
             manager_command_rx: cmd_rx,
             manager_event_tx: event_tx,
             settings,

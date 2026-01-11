@@ -35,7 +35,7 @@ pub struct TorrentParameters {
     pub incoming_peer_rx: Receiver<(TcpStream, Vec<u8>)>,
     pub metrics_tx: broadcast::Sender<TorrentMetrics>,
     pub torrent_validation_status: bool,
-    pub download_dir: PathBuf,
+    pub torrent_data_path: Option<PathBuf>,
     pub manager_command_rx: Receiver<ManagerCommand>,
     pub manager_event_tx: Sender<ManagerEvent>,
     pub settings: Arc<Settings>,
