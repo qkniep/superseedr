@@ -268,6 +268,7 @@ impl TorrentManager {
         };
 
         let validation_status = torrent_parameters.torrent_validation_status;
+        let torrent_data_path = torrent_parameters.download_dir.clone();
 
         // 3. Initialize Base Manager (Awaiting Metadata)
         let mut manager = Self::init_base(torrent_parameters, info_hash, trackers, validation_status);
@@ -289,7 +290,7 @@ impl TorrentManager {
         });
 
         manager.apply_action(Action::SetUserTorrentConfig {
-            torrent_data_path: torrent_parameters.download_dir.clone()
+            torrent_data_path
         });
 
         Ok(manager)
