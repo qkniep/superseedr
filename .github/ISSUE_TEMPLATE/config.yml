@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 GitHub Discussions
+    url: https://github.com/Jagalite/superseedr/discussions
+    about: Ask questions, share ideas, and discuss with the community
+  - name: 📖 Documentation
+    url: https://github.com/Jagalite/superseedr#readme
+    about: Read the project documentation and setup guides
+  - name: ❓ FAQ
+    url: https://github.com/Jagalite/superseedr/blob/main/FAQ.md
+    about: Check frequently asked questions
+  - name: 🗺️ Roadmap
+    url: https://github.com/Jagalite/superseedr/blob/main/ROADMAP.md
+    about: See planned features and project direction
