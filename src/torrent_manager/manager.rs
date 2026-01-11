@@ -1849,7 +1849,7 @@ impl TorrentManager {
             let multi_file_info = match self.state.multi_file_info.as_ref() {
                 Some(mfi) => mfi,
                 None => {
-                    event!(Level::WARN, "Cannot send metrics: File info not available.");
+                    event!(Level::DEBUG, "Cannot send metrics: File info not available.");
                     return;
                 }
             };
@@ -2413,49 +2413,51 @@ impl TorrentManager {
                             }
                         },
 
-                            TorrentCommand::DhtTorrent(torrent, metadata_length) => {
-                                #[cfg(all(feature = "dht", feature = "pex"))]
-                                if torrent.info.private == Some(1) {
-                                    break Ok(());
-                                }
+                        TorrentCommand::MetadataTorrent(torrent, metadata_length) => {
+                            tracing::info!("METADATA TORRENT RECIEVED");
 
-                                let mut torrent = *torrent;
+                            #[cfg(all(feature = "dht", feature = "pex"))]
+                            if torrent.info.private == Some(1) {
+                                break Ok(());
+                            }
 
-                                // 1. Identify if this is a Hybrid, if so, use v1 protocol
-                                let is_hybrid = !torrent.info.pieces.is_empty() && torrent.info.meta_version == Some(2);
-                                if is_hybrid {
-                                    tracing::info!("HYBRID DETECTED: Forcing V1-only treatment for simplicity.");
-                                    // Strip V2 fields so the rest of the app sees a standard V1 torrent
-                                    torrent.info.meta_version = None;
-                                    torrent.info.file_tree = None;
-                                    torrent.piece_layers = None;
-                                }
+                            let mut torrent = *torrent;
 
-                                let calculated_hash = if torrent.info.meta_version == Some(2) {
-                                    use sha2::{Digest, Sha256};
-                                    let mut hasher = Sha256::new();
-                                    hasher.update(&torrent.info_dict_bencode);
-                                    hasher.finalize()[0..20].to_vec()
-                                } else {
-                                    let mut hasher = sha1::Sha1::new();
-                                    hasher.update(&torrent.info_dict_bencode);
-                                    hasher.finalize().to_vec()
-                                };
+                            // 1. Identify if this is a Hybrid, if so, use v1 protocol
+                            let is_hybrid = !torrent.info.pieces.is_empty() && torrent.info.meta_version == Some(2);
+                            if is_hybrid {
+                                tracing::info!("HYBRID DETECTED: Forcing V1-only treatment for simplicity.");
+                                // Strip V2 fields so the rest of the app sees a standard V1 torrent
+                                torrent.info.meta_version = None;
+                                torrent.info.file_tree = None;
+                                torrent.piece_layers = None;
+                            }
 
-                                if calculated_hash == self.state.info_hash {
-                                    tracing::debug!("METADATA VALIDATED - {}: Proceeding with metadata hydration.", hex::encode(calculated_hash));
-                                    self.apply_action(Action::MetadataReceived {
-                                        torrent: Box::new(torrent),
-                                        metadata_length,
-                                    });
-                                } else {
-                                    tracing::debug!(
-                                        "Metadata Hash Mismatch! Expected: {:?}, Got: {:?}",
-                                        hex::encode(&self.state.info_hash),
-                                        hex::encode(&calculated_hash)
-                                    );
-                                }
-                            },
+                            let calculated_hash = if torrent.info.meta_version == Some(2) {
+                                use sha2::{Digest, Sha256};
+                                let mut hasher = Sha256::new();
+                                hasher.update(&torrent.info_dict_bencode);
+                                hasher.finalize()[0..20].to_vec()
+                            } else {
+                                let mut hasher = sha1::Sha1::new();
+                                hasher.update(&torrent.info_dict_bencode);
+                                hasher.finalize().to_vec()
+                            };
+
+                            if calculated_hash == self.state.info_hash {
+                                tracing::debug!("METADATA VALIDATED - {}: Proceeding with metadata hydration.", hex::encode(calculated_hash));
+                                self.apply_action(Action::MetadataReceived {
+                                    torrent: Box::new(torrent),
+                                    metadata_length,
+                                });
+                            } else {
+                                tracing::debug!(
+                                    "Metadata Hash Mismatch! Expected: {:?}, Got: {:?}",
+                                    hex::encode(&self.state.info_hash),
+                                    hex::encode(&calculated_hash)
+                                );
+                            }
+                        },
 
                         TorrentCommand::AnnounceResponse(url, response) => {
                             self.apply_action(Action::TrackerResponse {

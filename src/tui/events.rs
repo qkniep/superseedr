@@ -862,6 +862,22 @@ AppMode::FileBrowser { state, data, browser_mode } => {
 
                 KeyCode::Esc => {
                     tracing::info!(target: "superseedr", "ESC pressed: closing browser");
+                    
+                    if let FileBrowserMode::DownloadLocSelection { .. } = browser_mode {
+                        if !app.app_state.pending_torrent_link.is_empty() {
+                            // 1. Calculate the hash to find the entry
+                            if let (Some(info_hash), _) = crate::app::parse_hybrid_hashes(&app.app_state.pending_torrent_link) {
+                                // 2. Shut down the manager
+                                if let Some(manager_tx) = app.torrent_manager_command_txs.remove(&info_hash) {
+                                    let _ = manager_tx.try_send(ManagerCommand::Shutdown);
+                                }
+                                // 3. Remove from UI state
+                                app.app_state.torrents.remove(&info_hash);
+                                app.app_state.torrent_list_order.retain(|h| h != &info_hash);
+                            }
+                        }
+                    }
+
                     app.app_state.mode = AppMode::Normal;
                     app.app_state.pending_torrent_path = None;
                     app.app_state.pending_torrent_link.clear();
