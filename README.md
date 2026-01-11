@@ -20,7 +20,7 @@ Superseedr is a modern Rust BitTorrent client featuring a high-performance termi
 
 ### 🎯 Why Superseedr?
 
-Superseedr brings the BitTorrent into the modern terminal environment, focusing on speed, visibility, and reliability.
+Superseedr brings BitTorrent into the modern terminal environment, focusing on speed, visibility, and reliability.
 
 * **Deep Swarm Analytics:** Moves beyond simple progress bars by providing high performance real-time heatmaps, peer metrics, and network graphs for complete swarm observability.
 * **Modern Rust Engine:** Leverages Rust and Model-Based Testing to ensure memory safety, high performance, and unparalleled reliability.
@@ -40,15 +40,18 @@ Superseedr brings the BitTorrent into the modern terminal environment, focusing 
 
 ## Installation
 
+### Installers
+Download platform-specific installers from the [releases page](https://github.com/Jagalite/superseedr/releases) **(includes browser magnet link support)**:
+- Windows: `.msi` installer
+- macOS: `.pkg` installer  
+- Debian/Ubuntu: `.deb` package
+
+### Package Managers
+- **Cargo:** `cargo install superseedr`
+- **Brew:** `brew install superseedr`
+- **Arch Linux:** `yay -S superseedr` (via AUR)
+
 [![Packaging status](https://repology.org/badge/vertical-allrepos/superseedr.svg)](https://repology.org/project/superseedr/versions)
-
-Download the latest release for your platform:
-- Windows (.msi)
-- macOS (.pkg)
-- Debian (.deb)
-- Arch Linux (pkgbuild) from [AUR](https://aur.archlinux.org/packages/superseedr)
-
-👉 Available on the [releases page](https://github.com/Jagalite/superseedr/releases).
 
 ## Usage
 Open up a terminal and run:
@@ -80,11 +83,8 @@ superseedr
 - 🗺️[Roadmap](ROADMAP.md): Discover upcoming features and future plans for Superseedr.
 - 🧑‍🤝‍🧑[Code of Conduct](CODE_OF_CONDUCT.md): Understand the community standards and expectations.
 
-## ⚡ Quick Start (Advanced)
+## ⚡ Docker Quick Start (Advanced)
 ```bash
-# Recommended (native install)
-cargo install superseedr
-
 # Docker (No VPN):
 # Uses internal container storage. Data persists until the container is removed.
 docker run -it jagatranvo/superseedr:latest
