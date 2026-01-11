@@ -94,6 +94,7 @@ pub enum ManagerCommand {
     DeleteFile,
     SetDataRate(u64),
     UpdateListenPort(u16),
+    SetUserTorrentConfig { torrent_data_path: PathBuf },
 
     #[cfg(feature = "dht")]
     UpdateDhtHandle(AsyncDht),

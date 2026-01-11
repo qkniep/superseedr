@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use tracing::event;
+use tracing::Level;
+
 use crate::command::TorrentCommand;
 use crate::networking::BlockInfo;
 use crate::torrent_manager::ManagerEvent;
@@ -14,6 +17,7 @@ use tokio::sync::Semaphore;
 
 use std::mem::Discriminant;
 use std::sync::Arc;
+use std::path::PathBuf;
 
 use crate::torrent_file::{Torrent, V2RootInfo};
 use crate::torrent_manager::piece_manager::PieceManager;
@@ -145,6 +149,7 @@ pub enum Action {
     Resume,
     Delete,
     UpdateListenPort,
+    SetUserTorrentConfig { torrent_data_path: PathBuf },
     ValidationProgress {
         count: u32,
     },
@@ -218,7 +223,6 @@ pub enum Effect {
         url: String,
     },
 
-    InitializeStorage,
     StartValidation,
     AnnounceToTracker {
         url: String,
@@ -232,7 +236,10 @@ pub enum Effect {
     },
 
     ClearAllUploads,
-    DeleteFiles,
+    DeleteFiles {
+        multi_file_info: MultiFileInfo,
+        data_path: PathBuf,
+    },
     TriggerDhtSearch,
     PrepareShutdown {
         tracker_urls: Vec<String>,
@@ -310,6 +317,7 @@ pub struct TorrentState {
     pub v2_pending_data: HashMap<u32, (u32, Vec<u8>)>,
     pub piece_to_roots: HashMap<u32, Vec<V2RootInfo>>,
     pub verifying_pieces: HashSet<u32>,
+    pub torrent_data_path: Option<PathBuf>,
     pub multi_file_info: Option<MultiFileInfo>,
 }
 impl Default for TorrentState {
@@ -343,6 +351,7 @@ impl Default for TorrentState {
             v2_pending_data: HashMap::new(),
             piece_to_roots: HashMap::new(),
             verifying_pieces: HashSet::new(),
+            torrent_data_path: None,
             multi_file_info: None,
         }
     }
@@ -1681,11 +1690,12 @@ impl TorrentState {
                 }
 
                 self.validation_pieces_found = 0;
-                self.torrent_status = TorrentStatus::Validating;
-
-                let effects = vec![Effect::InitializeStorage, Effect::StartValidation];
-
-                effects
+                self.rebuild_multi_file_info();
+                if self.multi_file_info.is_some() {
+                    self.torrent_status = TorrentStatus::Validating;
+                    return vec![Effect::StartValidation]
+                } 
+                vec![Effect::DoNothing]
             }
 
             Action::ValidationComplete { completed_pieces } => {
@@ -1973,7 +1983,16 @@ impl TorrentState {
                 };
                 self.last_activity = TorrentActivity::Initializing;
 
-                vec![Effect::DeleteFiles]
+                let mut effects = Vec::new();
+                if let (Some(path), Some(mfi)) = (&self.torrent_data_path, &self.multi_file_info) {
+                    effects.push(Effect::DeleteFiles {
+                        multi_file_info: mfi.clone(),
+                        data_path: path.clone(),
+                    });
+                } else {
+                    event!(Level::WARN, "Action::Delete triggered but torrent_data_path or mfi is missing.");
+                }
+                effects
             }
 
             Action::UpdateListenPort => {
@@ -1985,6 +2004,21 @@ impl TorrentState {
                 }
 
                 effects
+            }
+
+            Action::SetUserTorrentConfig { torrent_data_path } => {
+                self.torrent_data_path = Some(torrent_data_path);
+                
+                // If metadata was already present, we attempt to initialize storage now
+                if self.torrent.is_some() && self.multi_file_info.is_none() {
+                    self.rebuild_multi_file_info();
+                    
+                    if self.multi_file_info.is_some() {
+                        self.torrent_status = TorrentStatus::Validating;
+                        return vec![Effect::StartValidation];
+                    }
+                }
+                vec![Effect::DoNothing]
             }
 
             Action::ValidationProgress { count } => {
@@ -2088,6 +2122,54 @@ impl TorrentState {
             }
         }
         (data_len, 0, data_len)
+    }
+
+    pub fn rebuild_multi_file_info(&mut self) {
+        // Guard 1: Ensure metadata exists
+        let torrent = match &self.torrent {
+            Some(t) => t,
+            None => {
+                event!(Level::DEBUG, "rebuild_multi_file_info: Skipping. No torrent metadata available.");
+                return;
+            }
+        };
+
+        // Guard 2: Handle the Option<PathBuf>
+        let path = match &self.torrent_data_path {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            Some(_) => {
+                event!(Level::WARN, 
+                    torrent_name = %torrent.info.name, 
+                    "rebuild_multi_file_info: torrent_data_path is Some, but the path is empty."
+                );
+                return;
+            }
+            None => {
+                event!(Level::WARN, 
+                    torrent_name = %torrent.info.name, 
+                    "rebuild_multi_file_info: torrent_data_path is None."
+                );
+                return;
+            }
+        };
+
+        // Execution: Attempt to create MFI
+        self.multi_file_info = MultiFileInfo::new(
+            path,
+            &torrent.info.name,
+            if torrent.info.files.is_empty() { None } else { Some(&torrent.info.files) },
+            if torrent.info.files.is_empty() { Some(torrent.info.length as u64) } else { None },
+        ).map_err(|e| {
+            event!(Level::ERROR, error = %e, "rebuild_multi_file_info: Failed to create MultiFileInfo");
+            e
+        }).ok();
+
+        if self.multi_file_info.is_some() {
+            event!(Level::INFO, 
+                torrent_name = %torrent.info.name, 
+                "rebuild_multi_file_info: Storage successfully initialized in state."
+            );
+        }
     }
 }
 
@@ -2213,24 +2295,24 @@ mod tests {
 
     #[test]
     fn test_metadata_received_triggers_initialization_flow() {
-        // GIVEN: An empty state
         let mut state = create_empty_state();
-        let torrent = create_dummy_torrent(5); // 5 pieces
+        state.torrent_data_path = Some(PathBuf::from("/tmp")); // Set a path for MFI rebuild
+        let torrent = create_dummy_torrent(5);
 
-        // WHEN: Metadata is received
         let action = Action::MetadataReceived {
             torrent: Box::new(torrent),
             metadata_length: 123,
         };
         let effects = state.update(action);
 
-        // THEN: It should transition to Validating and trigger storage init + validation
         assert_eq!(state.torrent_status, TorrentStatus::Validating);
         assert!(state.torrent.is_some());
+        
+        // Check internal state instead of Effect::InitializeStorage
+        assert!(state.multi_file_info.is_some(), "MFI should be initialized internally");
 
-        // Verify specific order of effects
-        assert!(matches!(effects[0], Effect::InitializeStorage));
-        assert!(matches!(effects[1], Effect::StartValidation));
+        // The first effect is now StartValidation
+        assert!(matches!(effects[0], Effect::StartValidation));
     }
 
     // --- SCENARIO 2: Choking Logic (Leeching) ---
@@ -4678,6 +4760,7 @@ mod tests {
     fn test_v2_magnet_metadata_sequence() {
         // GIVEN: An empty state (simulating a fresh V2 Magnet connection)
         let mut state = create_empty_state();
+        state.torrent_data_path = Some(PathBuf::from("/tmp/test"));
         state.torrent_status = TorrentStatus::AwaitingMetadata;
 
         // Construct a V2-Only Torrent (Empty V1 pieces, Has V2 Roots)
@@ -4725,9 +4808,6 @@ mod tests {
 
         // THEN 1: Sequencing - Should transition to Validating and Init Storage
         assert_eq!(state.torrent_status, TorrentStatus::Validating);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, Effect::InitializeStorage)));
         assert!(effects.iter().any(|e| matches!(e, Effect::StartValidation)));
 
         // THEN 2: V2 Initialization - Piece count must be 5 (calculated from length)
@@ -4754,6 +4834,7 @@ mod tests {
     fn test_v2_magnet_metadata_sequence_multi_file() {
         // GIVEN: An empty state (simulating a fresh V2 Magnet connection)
         let mut state = create_empty_state();
+        state.torrent_data_path = Some(PathBuf::from("/tmp/test"));
         state.torrent_status = TorrentStatus::AwaitingMetadata;
 
         // Construct a V2-Only Torrent
@@ -4831,9 +4912,6 @@ mod tests {
 
         // THEN 1: Transitions
         assert_eq!(state.torrent_status, TorrentStatus::Validating);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, Effect::InitializeStorage)));
 
         // THEN 2: Piece Count Calculation (16384+16384 / 16384 = 2)
         assert_eq!(
@@ -5482,6 +5560,7 @@ mod tests {
 
         // 1. SETUP: Empty State
         let mut state = create_empty_state();
+        state.torrent_data_path = Some(PathBuf::from("/tmp/test_download"));
         let num_pieces = 100; // Standard V1 swarm
         let piece_len = 16384;
 
@@ -5649,6 +5728,7 @@ mod tests {
 
         // 1. SETUP: Empty State
         let mut state = create_empty_state();
+        state.torrent_data_path = Some(PathBuf::from("/tmp/test_download"));
         let num_pieces = 1000;
         let piece_len = 1024;
         let total_len = (num_pieces as u64) * (piece_len as u64);
@@ -7521,6 +7601,7 @@ mod prop_tests {
                     torrent_status: status,
                     is_paused: ref_state.paused,
                     piece_manager,
+                    torrent_data_path: Some(PathBuf::from("/tmp/fuzz")),
                     ..Default::default()
                 }
             }

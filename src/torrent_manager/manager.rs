@@ -110,9 +110,6 @@ const JITTER_MS: u64 = 100;
 pub struct TorrentManager {
     state: TorrentState,
 
-    root_download_path: PathBuf,
-    multi_file_info: Option<MultiFileInfo>,
-
     torrent_manager_tx: Sender<TorrentCommand>,
     torrent_manager_rx: Receiver<TorrentCommand>,
 
@@ -212,8 +209,6 @@ impl TorrentManager {
 
         Self {
             state,
-            root_download_path: download_dir,
-            multi_file_info: None, // Will be initialized via Action::MetadataReceived
             torrent_manager_tx,
             torrent_manager_rx,
             dht_handle,
@@ -291,6 +286,10 @@ impl TorrentManager {
         manager.apply_action(Action::MetadataReceived {
             torrent: Box::new(torrent),
             metadata_length,
+        });
+
+        manager.apply_action(Action::SetUserTorrentConfig {
+            torrent_data_path: torrent_parameters.download_dir.clone()
         });
 
         Ok(manager)
@@ -640,7 +639,7 @@ impl TorrentManager {
                 piece_index,
                 data,
             } => {
-                let multi_file_info = match self.multi_file_info.as_ref() {
+                let multi_file_info = match self.state.multi_file_info.as_ref() {
                     Some(m) => m.clone(),
                     None => {
                         event!(Level::ERROR, "WriteToDisk failed: Storage not ready");
@@ -727,7 +726,7 @@ impl TorrentManager {
                     Err(_) => return,
                 };
 
-                let multi_file_info = match self.multi_file_info.as_ref() {
+                let multi_file_info = match self.state.multi_file_info.as_ref() {
                     Some(m) => m.clone(),
                     None => {
                         event!(Level::ERROR, "WriteToDisk failed: Storage not ready");
@@ -814,40 +813,12 @@ impl TorrentManager {
                 self.connect_to_peer(ip, port);
             }
 
-            Effect::InitializeStorage => {
-                if let Some(torrent) = &self.state.torrent {
-                    let mfi = match MultiFileInfo::new(
-                        &self.root_download_path,
-                        &torrent.info.name,
-                        if torrent.info.files.is_empty() {
-                            None
-                        } else {
-                            Some(&torrent.info.files)
-                        },
-                        if torrent.info.files.is_empty() {
-                            Some(torrent.info.length as u64)
-                        } else {
-                            None
-                        },
-                    ) {
-                        Ok(mfi) => mfi,
-                        Err(e) => {
-                            debug_assert!(false, "Failed to init storage from metadata: {}", e);
-                            event!(Level::ERROR, "Failed to initialize storage from metadata: {}. Aborting storage initialization.", e);
-                            return;
-                        }
-                    };
-
-                    self.multi_file_info = Some(mfi.clone());
-                }
-            }
-
             Effect::StartValidation => {
-                let mfi = match self.multi_file_info.as_ref() {
+                let mfi = match self.state.multi_file_info.as_ref() {
                     Some(m) => m.clone(),
                     None => {
                         debug_assert!(
-                            self.multi_file_info.is_some(),
+                            self.state.multi_file_info.is_some(),
                             "Storage not ready for validation"
                         );
                         event!(
@@ -900,6 +871,7 @@ impl TorrentManager {
 
             Effect::ConnectToPeersFromTrackers => {
                 let torrent_size_left = self
+                    .state
                     .multi_file_info
                     .as_ref()
                     .map_or(0, |mfi| mfi.total_size as usize);
@@ -947,7 +919,7 @@ impl TorrentManager {
                 let ul = self.state.session_total_uploaded as usize;
                 let dl = self.state.session_total_downloaded as usize;
 
-                let torrent_size_left = if let Some(mfi) = &self.multi_file_info {
+                let torrent_size_left = if let Some(mfi) = &self.state.multi_file_info {
                     let completed = self
                         .state
                         .piece_manager
@@ -1023,42 +995,34 @@ impl TorrentManager {
                 let _ = self.dht_trigger_tx.send(());
             }
 
-            Effect::DeleteFiles => {
+            Effect::DeleteFiles { multi_file_info, data_path } => {
                 let info_hash = self.state.info_hash.clone();
-                let root_path = self.root_download_path.clone();
-                let multi_file_info = self.multi_file_info.clone();
                 let tx = self.manager_event_tx.clone();
                 let torrent_name = self.state.torrent.as_ref().map(|t| t.info.name.clone());
 
                 tokio::spawn(async move {
                     let mut result = Ok(());
 
-                    if let Some(mfi) = multi_file_info {
-                        for file_info in &mfi.files {
-                            if let Err(e) = fs::remove_file(&file_info.path).await {
-                                if e.kind() != std::io::ErrorKind::NotFound {
-                                    let error_msg = format!(
-                                        "Failed to delete file {:?}: {}",
-                                        &file_info.path, e
-                                    );
-                                    event!(Level::ERROR, "{}", error_msg);
-                                    result = Err(error_msg);
-                                }
+                    for file_info in &multi_file_info.files {
+                        if let Err(e) = fs::remove_file(&file_info.path).await {
+                            if e.kind() != std::io::ErrorKind::NotFound {
+                                let error_msg = format!(
+                                    "Failed to delete file {:?}: {}",
+                                    &file_info.path, e
+                                );
+                                event!(Level::ERROR, "{}", error_msg);
+                                result = Err(error_msg);
                             }
                         }
+                    }
 
-                        if result.is_ok() && mfi.files.len() > 1 {
+                        if result.is_ok() && multi_file_info.files.len() > 1 {
                             if let Some(name) = torrent_name {
-                                let content_dir = root_path.join(name);
+                                let content_dir = data_path.join(name);
                                 event!(Level::INFO, "Cleaning up directory: {:?}", &content_dir);
                                 let _ = fs::remove_dir(&content_dir).await;
                             }
                         }
-                    } else {
-                        let msg = "Cannot delete files: Metadata missing.".to_string();
-                        event!(Level::WARN, "{}", msg);
-                        result = Err(msg);
-                    }
 
                     let _ = tx
                         .send(ManagerEvent::DeletionComplete(info_hash, result))
@@ -1768,7 +1732,7 @@ impl TorrentManager {
     }
 
     pub async fn validate_local_file(&mut self) -> Result<(), StorageError> {
-        let mfi = match &self.multi_file_info {
+        let mfi = match &self.state.multi_file_info {
             Some(i) => i.clone(),
             None => return Ok(()),
         };
@@ -1879,7 +1843,7 @@ impl TorrentManager {
 
     fn send_metrics(&mut self, bytes_dl: u64, bytes_ul: u64) {
         if let Some(ref torrent) = self.state.torrent {
-            let multi_file_info = match self.multi_file_info.as_ref() {
+            let multi_file_info = match self.state.multi_file_info.as_ref() {
                 Some(mfi) => mfi,
                 None => {
                     event!(Level::WARN, "Cannot send metrics: File info not available.");
@@ -2139,6 +2103,9 @@ impl TorrentManager {
                             }
 
                         },
+                        ManagerCommand::SetUserTorrentConfig { torrent_data_path } => {
+                            self.apply_action(Action::SetUserTorrentConfig { torrent_data_path });
+                        }
                         ManagerCommand::SetDataRate(new_rate_ms) => {
                             data_rate_ms = new_rate_ms;
                             tick = tokio::time::interval(Duration::from_millis(data_rate_ms));
@@ -3885,7 +3852,7 @@ mod resource_tests {
 
         // 4.Set Download Path BEFORE Metadata
         // This ensures InitializeStorage uses the correct temp_dir
-        manager.root_download_path = temp_dir.clone();
+        manager.state.torrent_data_path = Some(temp_dir.clone());
 
         manager.apply_action(Action::MetadataReceived {
             torrent: Box::new(torrent),
@@ -3999,7 +3966,7 @@ mod resource_tests {
         torrent.info.pieces = Vec::new();
         torrent.info.meta_version = Some(2);
 
-        manager.root_download_path = temp_dir.clone();
+        manager.state.torrent_data_path = Some(temp_dir.clone());
 
         manager.apply_action(Action::MetadataReceived {
             torrent: Box::new(torrent),
@@ -4307,7 +4274,7 @@ mod resource_tests {
         torrent.piece_layers = Some(serde_bencode::value::Value::Dict(layer_map));
 
         manager.state.torrent = Some(torrent.clone());
-        manager.multi_file_info = Some(
+        manager.state.multi_file_info = Some(
             crate::storage::MultiFileInfo::new(&temp_dir, "v2_tail_file", None, Some(file_len))
                 .unwrap(),
         );
@@ -4332,7 +4299,7 @@ mod resource_tests {
         );
 
         let result = TorrentManager::perform_validation(
-            manager.multi_file_info.unwrap(),
+            manager.state.multi_file_info.unwrap(),
             torrent,
             rm_client,
             _shutdown_tx.subscribe(),
