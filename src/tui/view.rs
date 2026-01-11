@@ -2261,23 +2261,23 @@ pub fn draw_file_browser(
     data: &[tree::RawNode<FileMetadata>],
     browser_mode: &FileBrowserMode,
 ) {
-    // 1. Setup Logic
-    let mut preview_path = None;
-    match browser_mode {
+    let has_preview_content = match browser_mode {
         FileBrowserMode::DownloadLocSelection { .. } => {
-            if let Some(pending) = &app_state.pending_torrent_path {
-                preview_path = Some(pending);
-            }
+            app_state.pending_torrent_path.is_some() || !app_state.pending_torrent_link.is_empty()
         }
         FileBrowserMode::File(_) => {
-            if let Some(cursor) = &state.cursor_path {
-                if cursor.extension().map_or(false, |ext| ext == "torrent") {
-                    preview_path = Some(cursor);
-                }
-            }
+            state.cursor_path.as_ref().map_or(false, |p| {
+                p.extension().map_or(false, |ext| ext == "torrent")
+            })
         }
-        _ => {}
-    }
+        _ => false,
+    };
+
+    let preview_file_path = match browser_mode {
+        FileBrowserMode::DownloadLocSelection { .. } => app_state.pending_torrent_path.as_ref(),
+        FileBrowserMode::File(_) => state.cursor_path.as_ref(),
+        _ => None,
+    };
 
     let default_pane = BrowserPane::FileSystem;
     let focused_pane = if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
@@ -2286,45 +2286,39 @@ pub fn draw_file_browser(
         &default_pane
     };
 
-    // 2. Geometry & Clearing
     let max_area = centered_rect(90, 80, f.area());
     f.render_widget(Clear, max_area); 
     
-    let area = if preview_path.is_some() {
-        max_area
-    } else {
-        centered_rect(75, 80, f.area())
-    };
+    let area = if has_preview_content { max_area } else { centered_rect(75, 80, f.area()) };
 
-    // 3. Layout Calculation
     let layout = calculate_file_browser_layout(
         area,
-        preview_path.is_some(),
+        has_preview_content,
         app_state.is_searching,
         focused_pane,
     );
 
-    // 4. Styles
+    // Styles logic (omitted for brevity, same as your source)
     let (files_border_style, preview_border_style) = if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
         match focused_pane {
-            BrowserPane::FileSystem => (
-                Style::default().fg(theme::MAUVE),
-                Style::default().fg(theme::SURFACE2)
-            ),
-            BrowserPane::TorrentPreview => (
-                Style::default().fg(theme::SURFACE2),
-                Style::default().fg(theme::MAUVE)
-            ),
+            BrowserPane::FileSystem => (Style::default().fg(theme::MAUVE), Style::default().fg(theme::SURFACE2)),
+            BrowserPane::TorrentPreview => (Style::default().fg(theme::SURFACE2), Style::default().fg(theme::MAUVE)),
         }
     } else {
         (Style::default().fg(theme::MAUVE), Style::default().fg(theme::SAPPHIRE))
     };
 
-    // 5. Render Components
-    if let (Some(path), Some(preview_area)) = (preview_path, layout.preview) {
-        draw_torrent_preview_panel(f, preview_area, path, browser_mode, preview_border_style, &state.current_path);
+    // FIX: Use layout.preview to trigger the draw call
+    if let Some(preview_area) = layout.preview {
+        draw_torrent_preview_panel(
+            f, 
+            preview_area, 
+            preview_file_path.map(|p| p.as_path()), // Passes Option<&Path>
+            browser_mode, 
+            preview_border_style, 
+            &state.current_path
+        );
     }
-
     if let Some(search_area) = layout.search {
         let search_block = Block::default()
             .borders(Borders::ALL)
@@ -2495,7 +2489,7 @@ pub fn draw_file_browser(
 fn draw_torrent_preview_panel(
     f: &mut Frame,
     area: Rect,
-    path: &std::path::Path,
+    path: Option<&std::path::Path>,
     browser_mode: &FileBrowserMode,
     border_style: Style,
     current_fs_path: &std::path::Path,
@@ -2677,132 +2671,133 @@ fn draw_torrent_preview_panel(
     }
 
     // --- CASE B: Static Preview (Browsing .torrent files) ---
-    // (Unchanged)
-    let file_bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            f.render_widget(
-                Paragraph::new(format!("Error reading file:\n{}", e))
-                    .style(Style::default().fg(theme::RED)),
-                inner_area,
-            );
-            return;
-        }
-    };
-
-    let torrent = match crate::torrent_file::parser::from_bytes(&file_bytes) {
-        Ok(t) => t,
-        Err(e) => {
-            f.render_widget(
-                Paragraph::new(format!("Invalid Torrent:\n{}", e))
-                    .style(Style::default().fg(theme::RED)),
-                inner_area,
-            );
-            return;
-        }
-    };
-
-    let total_size = torrent.info.total_length();
-    let piece_len = torrent.info.piece_length;
-    let piece_count = if piece_len > 0 {
-        total_size / piece_len
-    } else {
-        0
-    };
-
-    let info_text = vec![
-        Line::from(vec![
-            Span::styled("Name: ", Style::default().fg(theme::SUBTEXT0)),
-            Span::raw(&torrent.info.name),
-        ]),
-        Line::from(vec![
-            Span::styled("Size: ", Style::default().fg(theme::SUBTEXT0)),
-            Span::raw(format_bytes(total_size as u64)),
-        ]),
-        Line::from(vec![
-            Span::styled("Pieces: ", Style::default().fg(theme::SUBTEXT0)),
-            Span::raw(format!(
-                "{} x {}",
-                piece_count,
-                format_bytes(piece_len as u64)
-            )),
-        ]),
-    ];
-
-    let layout = Layout::vertical([
-        Constraint::Length(info_text.len() as u16 + 2),
-        Constraint::Min(0),
-    ])
-    .split(inner_area);
-
-    f.render_widget(
-        Paragraph::new(info_text).block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(theme::SURFACE2)),
-        ),
-        layout[0],
-    );
-
-    let file_list_payloads: Vec<(Vec<String>, crate::app::TorrentPreviewPayload)> = torrent
-        .file_list()
-        .into_iter()
-        .map(|(path, size)| {
-            (
-                path,
-                crate::app::TorrentPreviewPayload {
-                    file_index: None,
-                    size,
-                    priority: FilePriority::Normal,
-                },
-            )
-        })
-        .collect();
-
-    let final_nodes = crate::tui::tree::RawNode::from_path_list(None, file_list_payloads);
-    let mut temp_state = crate::tui::tree::TreeViewState::default();
-    for node in &final_nodes {
-        node.expand_all(&mut temp_state);
-    }
-
-    let visible_rows = TreeMathHelper::get_visible_slice(
-        &final_nodes,
-        &temp_state,
-        tree::TreeFilter::default(),
-        layout[1].height as usize,
-    );
-
-    let list_items: Vec<ListItem> = visible_rows
-        .iter()
-        .map(|item| {
-            let indent = "  ".repeat(item.depth);
-            let icon = if item.node.is_dir {
-                "  "
-            } else {
-                "   "
-            };
-            let style = if item.node.is_dir {
-                Style::default().fg(theme::BLUE)
-            } else {
-                Style::default().fg(theme::TEXT)
-            };
-
-            let mut spans = vec![
-                Span::raw(indent),
-                Span::styled(icon, style),
-                Span::styled(&item.node.name, style),
-            ];
-            if !item.node.is_dir {
-                spans.push(Span::styled(
-                    format!(" ({})", format_bytes(item.node.payload.size)),
-                    Style::default().fg(theme::SURFACE2),
-                ));
+    if let Some(p) = path {
+        let file_bytes = match std::fs::read(p) {
+            Ok(b) => b,
+            Err(e) => {
+                f.render_widget(
+                    Paragraph::new(format!("Error reading file:\n{}", e))
+                        .style(Style::default().fg(theme::RED)),
+                    inner_area,
+                );
+                return;
             }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
+        };
 
-    f.render_widget(List::new(list_items), layout[1]);
+        let torrent = match crate::torrent_file::parser::from_bytes(&file_bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                f.render_widget(
+                    Paragraph::new(format!("Invalid Torrent:\n{}", e))
+                        .style(Style::default().fg(theme::RED)),
+                    inner_area,
+                );
+                return;
+            }
+        };
+
+        let total_size = torrent.info.total_length();
+        let piece_len = torrent.info.piece_length;
+        let piece_count = if piece_len > 0 {
+            total_size / piece_len
+        } else {
+            0
+        };
+
+        let info_text = vec![
+            Line::from(vec![
+                Span::styled("Name: ", Style::default().fg(theme::SUBTEXT0)),
+                Span::raw(&torrent.info.name),
+            ]),
+            Line::from(vec![
+                Span::styled("Size: ", Style::default().fg(theme::SUBTEXT0)),
+                Span::raw(format_bytes(total_size as u64)),
+            ]),
+            Line::from(vec![
+                Span::styled("Pieces: ", Style::default().fg(theme::SUBTEXT0)),
+                Span::raw(format!(
+                    "{} x {}",
+                    piece_count,
+                    format_bytes(piece_len as u64)
+                )),
+            ]),
+        ];
+
+        let layout = Layout::vertical([
+            Constraint::Length(info_text.len() as u16 + 2),
+            Constraint::Min(0),
+        ])
+        .split(inner_area);
+
+        f.render_widget(
+            Paragraph::new(info_text).block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(theme::SURFACE2)),
+            ),
+            layout[0],
+        );
+
+        let file_list_payloads: Vec<(Vec<String>, crate::app::TorrentPreviewPayload)> = torrent
+            .file_list()
+            .into_iter()
+            .map(|(path, size)| {
+                (
+                    path,
+                    crate::app::TorrentPreviewPayload {
+                        file_index: None,
+                        size,
+                        priority: FilePriority::Normal,
+                    },
+                )
+            })
+            .collect();
+
+        let final_nodes = crate::tui::tree::RawNode::from_path_list(None, file_list_payloads);
+        let mut temp_state = crate::tui::tree::TreeViewState::default();
+        for node in &final_nodes {
+            node.expand_all(&mut temp_state);
+        }
+
+        let visible_rows = TreeMathHelper::get_visible_slice(
+            &final_nodes,
+            &temp_state,
+            tree::TreeFilter::default(),
+            layout[1].height as usize,
+        );
+
+        let list_items: Vec<ListItem> = visible_rows
+            .iter()
+            .map(|item| {
+                let indent = "  ".repeat(item.depth);
+                let icon = if item.node.is_dir {
+                    "  "
+                } else {
+                    "   "
+                };
+                let style = if item.node.is_dir {
+                    Style::default().fg(theme::BLUE)
+                } else {
+                    Style::default().fg(theme::TEXT)
+                };
+
+                let mut spans = vec![
+                    Span::raw(indent),
+                    Span::styled(icon, style),
+                    Span::styled(&item.node.name, style),
+                ];
+                if !item.node.is_dir {
+                    spans.push(Span::styled(
+                        format!(" ({})", format_bytes(item.node.payload.size)),
+                        Style::default().fg(theme::SURFACE2),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+
+        f.render_widget(List::new(list_items), layout[1]);
+    }
 }
 
 fn draw_welcome_screen(f: &mut Frame) {

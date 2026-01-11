@@ -11,6 +11,8 @@ use crate::Settings;
 
 use crate::token_bucket::TokenBucket;
 
+use crate::torrent_file::Torrent;
+
 use crate::app::TorrentMetrics;
 
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -84,6 +86,7 @@ pub enum ManagerEvent {
     BlockSent {
         info_hash: Vec<u8>,
     },
+    MetadataLoaded { info_hash: Vec<u8>, torrent: Box<Torrent> },
 }
 
 #[derive(Debug, Clone)]

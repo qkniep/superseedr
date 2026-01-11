@@ -2445,9 +2445,9 @@ impl TorrentManager {
                             };
 
                             if calculated_hash == self.state.info_hash {
-                                tracing::debug!("METADATA VALIDATED - {}: Proceeding with metadata hydration.", hex::encode(calculated_hash));
+                                tracing::debug!("METADATA VALIDATED - {}: Proceeding with metadata hydration.", hex::encode(&calculated_hash));
                                 self.apply_action(Action::MetadataReceived {
-                                    torrent: Box::new(torrent),
+                                    torrent: Box::new(torrent.clone()),
                                     metadata_length,
                                 });
                             } else {
@@ -2457,6 +2457,11 @@ impl TorrentManager {
                                     hex::encode(&calculated_hash)
                                 );
                             }
+
+                            let _ = self.manager_event_tx.try_send(ManagerEvent::MetadataLoaded {
+                                info_hash: calculated_hash,
+                                torrent: Box::new(torrent),
+                            });
                         },
 
                         TorrentCommand::AnnounceResponse(url, response) => {

@@ -29,6 +29,7 @@ use crate::storage::build_fs_tree;
 use crate::resource_manager::ResourceType;
 
 use crate::torrent_file::parser::from_bytes;
+use crate::torrent_file::Torrent;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
 use crate::torrent_manager::TorrentManager;
@@ -1527,6 +1528,67 @@ impl App {
                     torrent.latest_state.blocks_out_this_tick += 1;
                 }
             }
+
+            ManagerEvent::MetadataLoaded { info_hash, torrent } => {
+                if let AppMode::FileBrowser { browser_mode, .. } = &mut self.app_state.mode {
+                    if let FileBrowserMode::DownloadLocSelection { 
+                        preview_tree, 
+                        preview_state, 
+                        container_name, 
+                        original_name_backup,
+                        use_container, 
+                        .. 
+                    } = browser_mode {
+                        
+                        // 1. REDUNDANCY GUARD: Check if metadata was already processed
+                        // If the tree is already populated, ignore subsequent peer metadata arrivals
+                        if !preview_tree.is_empty() {
+                            tracing::debug!(target: "superseedr", "Metadata already hydrated for {:?}, ignoring redundant peer update", hex::encode(&info_hash));
+                            return;
+                        }
+
+                        // 2. Build the tree payloads
+                        let file_list = torrent.file_list();
+                        let payloads: Vec<(Vec<String>, TorrentPreviewPayload)> = file_list
+                            .into_iter()
+                            .enumerate()
+                            .map(|(idx, (parts, size))| {
+                                (parts, TorrentPreviewPayload {
+                                    file_index: Some(idx),
+                                    size,
+                                    priority: FilePriority::Normal,
+                                })
+                            })
+                            .collect();
+
+                        // 3. Hydrate the tree structure
+                        let has_multiple_files = payloads.len() > 1;
+                        *preview_tree = RawNode::from_path_list(None, payloads);
+                        
+                        // 4. Update Display Name and State
+                        let info_hash_hex = hex::encode(&info_hash);
+                        let name = format!("{} [{}]", torrent.info.name, &info_hash_hex);
+                        *container_name = name.clone();
+                        *original_name_backup = name;
+                        *use_container = has_multiple_files;
+
+                        // 5. INITIALIZE UI STATE: Set the initial cursor
+                        if let Some(first) = preview_tree.first() {
+                            preview_state.cursor_path = Some(std::path::PathBuf::from(&first.name));
+                        }
+
+                        // 6. Auto-expand all folders
+                        for node in preview_tree.iter_mut() {
+                            node.expand_all(preview_state);
+                        }
+
+                        // 7. Force UI redraw
+                        self.app_state.ui_needs_redraw = true;
+                        tracing::info!(target: "superseedr", "Magnet preview tree hydrated (first arrival)");
+                    }
+                }
+            }
+
         }
     }
     fn setup_file_watcher(
