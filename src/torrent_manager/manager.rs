@@ -162,15 +162,16 @@ pub struct TorrentManager {
 }
 
 impl TorrentManager {
-    pub fn from_torrent(
+    fn init_base(
         torrent_parameters: TorrentParameters,
-        torrent: Torrent,
-    ) -> Result<Self, String> {
+        info_hash: Vec<u8>,
+        trackers: HashMap<String, TrackerState>,
+        torrent_validation_status: bool,
+    ) -> Self {
         let TorrentParameters {
             dht_handle,
             incoming_peer_rx,
             metrics_tx,
-            torrent_validation_status,
             download_dir,
             manager_command_rx,
             manager_event_tx,
@@ -178,13 +179,67 @@ impl TorrentManager {
             resource_manager,
             global_dl_bucket,
             global_ul_bucket,
+            ..
         } = torrent_parameters;
 
-        let bencoded_data = serde_bencode::to_bytes(&torrent)
-            .map_err(|e| format!("Failed to re-encode torrent struct: {}", e))?;
+        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(1000);
+        let (shutdown_tx, _) = broadcast::channel(1);
 
-        let torrent_length = bencoded_data.len();
+        #[cfg(feature = "dht")]
+        let (dht_tx, dht_rx) = mpsc::channel::<Vec<SocketAddrV4>>(10);
+        #[cfg(not(feature = "dht"))]
+        let (dht_tx, dht_rx) = mpsc::channel::<()>(1);
 
+        #[cfg(feature = "dht")]
+        let dht_task_handle = None;
+        #[cfg(not(feature = "dht"))]
+        let dht_task_handle = ();
+
+        #[cfg(feature = "dht")]
+        let (dht_trigger_tx, _) = watch::channel(());
+        #[cfg(not(feature = "dht"))]
+        let dht_trigger_tx = ();
+
+        // Initialize empty state (AwaitingMetadata)
+        let state = TorrentState::new(
+            info_hash,
+            None, // No Torrent yet
+            None, // No Metadata length yet
+            PieceManager::new(),
+            trackers,
+            torrent_validation_status,
+        );
+
+        Self {
+            state,
+            root_download_path: download_dir,
+            multi_file_info: None, // Will be initialized via Action::MetadataReceived
+            torrent_manager_tx,
+            torrent_manager_rx,
+            dht_handle,
+            dht_tx,
+            dht_rx,
+            dht_task_handle,
+            shutdown_tx,
+            incoming_peer_rx,
+            metrics_tx,
+            manager_command_rx,
+            manager_event_tx,
+            in_flight_uploads: HashMap::new(),
+            in_flight_writes: HashMap::new(),
+            dht_trigger_tx,
+            settings,
+            resource_manager,
+            global_dl_bucket,
+            global_ul_bucket,
+        }
+    }
+
+    pub fn from_torrent(
+        torrent_parameters: TorrentParameters,
+        torrent: Torrent,
+    ) -> Result<Self, String> {
+        // 1. Extract Trackers
         let mut trackers = HashMap::new();
         if let Some(ref announce) = torrent.announce {
             trackers.insert(
@@ -197,6 +252,7 @@ impl TorrentManager {
             );
         }
 
+        // 2. Calculate Info Hash
         let info_hash = if torrent.info.meta_version == Some(2) {
             if !torrent.info.pieces.is_empty() {
                 // Hybrid Torrent (V1 compatible). Using SHA-1.
@@ -216,81 +272,28 @@ impl TorrentManager {
             hasher.finalize().to_vec()
         };
 
-        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(1000);
-        let (shutdown_tx, _) = broadcast::channel(1);
+        let validation_status = torrent_parameters.torrent_validation_status;
 
-        #[cfg(feature = "dht")]
-        let (dht_tx, dht_rx) = mpsc::channel::<Vec<SocketAddrV4>>(10);
-        #[cfg(not(feature = "dht"))]
-        let (dht_tx, dht_rx) = mpsc::channel::<()>(1);
+        // 3. Initialize Base Manager (Awaiting Metadata)
+        let mut manager = Self::init_base(torrent_parameters, info_hash, trackers, validation_status);
 
-        #[cfg(feature = "dht")]
-        let dht_task_handle = None;
-        #[cfg(not(feature = "dht"))]
-        let dht_task_handle = ();
+        // 4. Calculate Metadata Length (Required for protocol)
+        let bencoded_data = serde_bencode::to_bytes(&torrent)
+            .map_err(|e| format!("Failed to re-encode torrent struct: {}", e))?;
+        let metadata_length = bencoded_data.len() as i64;
 
-        #[cfg(feature = "dht")]
-        let (dht_trigger_tx, _) = watch::channel(());
-        #[cfg(not(feature = "dht"))]
-        let dht_trigger_tx = ();
+        // 5. Inject Metadata via Action
+        // This triggers the exact same logic flow as a Magnet link receiving metadata:
+        // -> Sets status to Validating
+        // -> Initializes MultiFileInfo (Storage)
+        // -> Calculates Piece Mapping (V1/V2)
+        // -> Resizes Bitfields
+        manager.apply_action(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length,
+        });
 
-        let mapping = torrent.calculate_v2_mapping();
-        let num_pieces = torrent.total_piece_count(mapping.piece_count);
-
-        let mut piece_manager = PieceManager::new();
-        piece_manager.set_initial_fields(num_pieces, torrent_validation_status);
-
-        let multi_file_info = MultiFileInfo::new(
-            &download_dir,
-            &torrent.info.name,
-            if torrent.info.files.is_empty() {
-                None
-            } else {
-                Some(&torrent.info.files)
-            },
-            if torrent.info.files.is_empty() {
-                Some(torrent.info.length as u64)
-            } else {
-                None
-            },
-        )
-        .map_err(|e| format!("Failed to initialize file manager: {}", e))?;
-
-        let mut state = TorrentState::new(
-            info_hash.to_vec(),
-            Some(torrent),
-            Some(torrent_length as i64),
-            piece_manager,
-            trackers,
-            torrent_validation_status,
-        );
-
-        // Assign the populated map to state
-        state.piece_to_roots = mapping.piece_to_roots;
-
-        Ok(Self {
-            state,
-            root_download_path: download_dir,
-            multi_file_info: Some(multi_file_info),
-            torrent_manager_tx,
-            torrent_manager_rx,
-            dht_handle,
-            dht_tx,
-            dht_rx,
-            dht_task_handle,
-            incoming_peer_rx,
-            metrics_tx,
-            shutdown_tx,
-            manager_command_rx,
-            manager_event_tx,
-            in_flight_uploads: HashMap::new(),
-            in_flight_writes: HashMap::new(),
-            dht_trigger_tx,
-            settings,
-            resource_manager,
-            global_dl_bucket,
-            global_ul_bucket,
-        })
+        Ok(manager)
     }
 
     pub fn from_magnet(
@@ -298,29 +301,14 @@ impl TorrentManager {
         magnet: Magnet,
         raw_magnet_str: &str,
     ) -> Result<Self, String> {
-        let TorrentParameters {
-            dht_handle,
-            incoming_peer_rx,
-            metrics_tx,
-            torrent_validation_status,
-            download_dir,
-            manager_command_rx,
-            manager_event_tx,
-            settings,
-            resource_manager,
-            global_dl_bucket,
-            global_ul_bucket,
-        } = torrent_parameters;
-
+        // 1. Parse Info Hash
         let (v1_hash, v2_hash) = crate::app::parse_hybrid_hashes(raw_magnet_str);
 
-        // Pure V1: info_hash = v1, alt = None
-        // Pure V2: info_hash = v2, alt = None
-        // Hybrid:  info_hash = v1, alt = v2 (based on your current preference)
+        // Hybrid: use v1_hash as primary, v2 as alt (or vice versa depending on policy)
         let (info_hash, _v2_info_hash) = match (v1_hash, v2_hash) {
-            (Some(v1), Some(v2)) => (v1, Some(v2)), // Hybrid
-            (Some(v1), None) => (v1, None),         // Pure V1
-            (None, Some(v2)) => (v2, None),         // Pure V2
+            (Some(v1), Some(v2)) => (v1, Some(v2)),
+            (Some(v1), None) => (v1, None),
+            (None, Some(v2)) => (v2, None),
             _ => return Err("No valid hashes found".into()),
         };
 
@@ -330,6 +318,7 @@ impl TorrentManager {
             hex::encode(&info_hash)
         );
 
+        // 2. Extract and Decode Trackers
         let trackers_set: HashSet<String> = magnet
             .trackers()
             .iter()
@@ -344,6 +333,7 @@ impl TorrentManager {
                 }
             })
             .collect();
+
         let mut trackers = HashMap::new();
         for url in trackers_set {
             trackers.insert(
@@ -356,56 +346,13 @@ impl TorrentManager {
             );
         }
 
-        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(1000);
-        let (shutdown_tx, _) = broadcast::channel(1);
+        let validation_status = torrent_parameters.torrent_validation_status;
 
-        #[cfg(feature = "dht")]
-        let (dht_tx, dht_rx) = mpsc::channel::<Vec<SocketAddrV4>>(10);
-        #[cfg(not(feature = "dht"))]
-        let (dht_tx, dht_rx) = mpsc::channel::<()>(1);
+        // 3. Initialize Base Manager
+        // It stays in AwaitingMetadata state until peers provide the info dict
+        let manager = Self::init_base(torrent_parameters, info_hash, trackers, validation_status);
 
-        #[cfg(feature = "dht")]
-        let dht_task_handle = None;
-        #[cfg(not(feature = "dht"))]
-        let dht_task_handle = ();
-
-        #[cfg(feature = "dht")]
-        let (dht_trigger_tx, _) = watch::channel(());
-        #[cfg(not(feature = "dht"))]
-        let dht_trigger_tx = ();
-
-        let state = TorrentState::new(
-            info_hash,
-            None,
-            None,
-            PieceManager::new(),
-            trackers,
-            torrent_validation_status,
-        );
-
-        Ok(Self {
-            state,
-            root_download_path: download_dir,
-            multi_file_info: None,
-            torrent_manager_tx,
-            torrent_manager_rx,
-            dht_handle,
-            dht_tx,
-            dht_rx,
-            dht_task_handle,
-            shutdown_tx,
-            incoming_peer_rx,
-            metrics_tx,
-            manager_command_rx,
-            manager_event_tx,
-            in_flight_uploads: HashMap::new(),
-            in_flight_writes: HashMap::new(),
-            dht_trigger_tx,
-            settings,
-            resource_manager,
-            global_dl_bucket,
-            global_ul_bucket,
-        })
+        Ok(manager)
     }
 
     // Apply actions to update state and get effects resulting from the mutate.

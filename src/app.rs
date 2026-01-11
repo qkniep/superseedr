@@ -1135,25 +1135,20 @@ impl App {
                                 self.save_state_to_disk();
                             } else {
                                 self.app_state.pending_torrent_path = Some(torrent_file_path);
-                                
-                                let initial_path = UserDirs::new()
-                                    .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
-                                    .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()))
-                                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                                let initial_path = self.get_initial_destination_path();
 
                                 let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
                                     path: initial_path,
                                     browser_mode: FileBrowserMode::DownloadLocSelection {
                                         torrent_files: vec![],
-                                        container_name: "Magnet Download".to_string(),
+                                        container_name: "New Torrent".to_string(),
                                         use_container: true,
                                         is_editing_name: false,
-                                        // NEW FIELDS (Empty for magnets initially):
-                                        preview_tree: Vec::new(),
+                                        preview_tree: Vec::new(), 
                                         preview_state: TreeViewState::default(),
                                         focused_pane: BrowserPane::FileSystem,
                                         cursor_pos: 0,
-                                        original_name_backup: "Magnet Download".to_string(),
+                                        original_name_backup: "New Torrent".to_string(),
                                     },
                                     highlight_path: None,
                                 });
@@ -1200,19 +1195,17 @@ impl App {
                                 self.save_state_to_disk();
                             } 
                             else {
-                                let initial_path = self.find_most_common_download_path()
-                                    .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()))
-                                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                                self.app_state.pending_torrent_link = magnet_link;
+                                let initial_path = self.get_initial_destination_path();
 
                                 let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
                                     path: initial_path,
                                     browser_mode: FileBrowserMode::DownloadLocSelection {
                                         torrent_files: vec![],
-                                        container_name: "Magnet Download".to_string(),
+                                        container_name: "Magnet Download".to_string(), // Default name for magnets
                                         use_container: true,
                                         is_editing_name: false,
-                                        // NEW FIELDS (Empty for magnets initially):
-                                        preview_tree: Vec::new(),
+                                        preview_tree: Vec::new(),           // Magnets start with empty metadata
                                         preview_state: TreeViewState::default(),
                                         focused_pane: BrowserPane::FileSystem,
                                         cursor_pos: 0,
@@ -2603,6 +2596,7 @@ impl App {
         is_validated: bool,
         torrent_control_state: TorrentControlState,
     ) {
+        tracing::info!(target: "magnet_flow", "Engine: add_magnet_torrent entry. Link: {}", magnet_link); //
         let magnet = match Magnet::new(&magnet_link) {
             Ok(m) => m,
             Err(e) => {

@@ -4,6 +4,7 @@
 use crate::command::TorrentCommand;
 use crate::networking::BlockInfo;
 use crate::torrent_manager::ManagerEvent;
+use crate::storage::MultiFileInfo;
 
 use std::time::Duration;
 use std::time::Instant;
@@ -309,6 +310,7 @@ pub struct TorrentState {
     pub v2_pending_data: HashMap<u32, (u32, Vec<u8>)>,
     pub piece_to_roots: HashMap<u32, Vec<V2RootInfo>>,
     pub verifying_pieces: HashSet<u32>,
+    pub multi_file_info: Option<MultiFileInfo>,
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -341,6 +343,7 @@ impl Default for TorrentState {
             v2_pending_data: HashMap::new(),
             piece_to_roots: HashMap::new(),
             verifying_pieces: HashSet::new(),
+            multi_file_info: None,
         }
     }
 }

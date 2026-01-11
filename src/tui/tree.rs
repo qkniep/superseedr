@@ -14,19 +14,19 @@ pub struct RawNode<T> {
     pub payload: T, 
     pub is_dir: bool,
 }
-impl<T: Clone + Default + std::ops::AddAssign> RawNode<T> {
-    /// Recursively finds a node by path and updates its children with new results.
-    /// Returns true if the node was found and updated.
+
+// ------------------------------------------------------------------
+// BLOCK 1: General methods (Relaxed bounds)
+// These methods work for any T that can be Cloned.
+// ------------------------------------------------------------------
+impl<T: Clone> RawNode<T> {
+    /// Recursively finds a node by path and updates its children.
     pub fn merge_subtree(&mut self, incoming: RawNode<T>) -> bool {
-        // 1. Check if this is the target node
         if self.full_path == incoming.full_path {
             self.children = incoming.children;
-            // Note: In your case, you'll need a way to set is_loaded to true
-            // if you move the merging logic here.
             return true;
         }
 
-        // 2. If the incoming path is a descendant, search children
         if incoming.full_path.starts_with(&self.full_path) {
             for child in self.children.iter_mut() {
                 if child.merge_subtree(incoming.clone()) {
@@ -37,38 +37,6 @@ impl<T: Clone + Default + std::ops::AddAssign> RawNode<T> {
         false
     }
 
-    pub fn from_path_list(custom_root: Option<String>, files: Vec<(Vec<String>, T)>) -> Vec<Self> {
-            let mut internal_root = RawNode {
-                name: String::new(),
-                full_path: PathBuf::new(),
-                children: Vec::new(),
-                payload: T::default(),
-                is_dir: true,
-            };
-
-            for (path_parts, payload) in files {
-                internal_root.insert_recursive(&path_parts, payload, Path::new(""));
-            }
-            
-            internal_root.sort_recursive();
-
-            if let Some(root_name) = custom_root {
-                // Wrap the children in the custom root folder
-                let wrapper = RawNode {
-                    name: root_name.clone(),
-                    full_path: PathBuf::from(root_name),
-                    children: internal_root.children,
-                    payload: internal_root.payload, // Summed size from insert_recursive
-                    is_dir: true,
-                };
-                vec![wrapper]
-            } else {
-                // No custom root: return the flat list of files/folders
-                internal_root.children
-            }
-        }
-
-    /// Step 2: Traverse the tree and tell the state to expand everything
     pub fn expand_all(&self, state: &mut TreeViewState) {
         if self.is_dir {
             state.expanded_paths.insert(self.full_path.clone());
@@ -78,8 +46,84 @@ impl<T: Clone + Default + std::ops::AddAssign> RawNode<T> {
         }
     }
 
+    pub fn sort_recursive(&mut self) {
+        self.children.sort_by(|a, b| {
+            match (a.is_dir, b.is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.name.cmp(&b.name),
+            }
+        });
+        for child in &mut self.children {
+            child.sort_recursive();
+        }
+    }
+
+    pub fn find_and_act<F>(&mut self, target_path: &Path, action: &mut F) -> bool
+    where
+        F: FnMut(&mut Self),
+    {
+        if self.full_path == target_path {
+            action(self);
+            return true;
+        }
+        if target_path.starts_with(&self.full_path) {
+            for child in &mut self.children {
+                if child.find_and_act(target_path, action) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn apply_recursive<F>(&mut self, action: &F)
+    where
+        F: Fn(&mut Self),
+    {
+        action(self);
+        for child in &mut self.children {
+            child.apply_recursive(action);
+        }
+    }
+}
+
+// ------------------------------------------------------------------
+// BLOCK 2: Math-heavy methods (Strict bounds)
+// These explicitly require T to be summable (AddAssign).
+// ------------------------------------------------------------------
+impl<T: Clone + Default + std::ops::AddAssign> RawNode<T> {
+    pub fn from_path_list(custom_root: Option<String>, files: Vec<(Vec<String>, T)>) -> Vec<Self> {
+        let mut internal_root = RawNode {
+            name: String::new(),
+            full_path: PathBuf::new(),
+            children: Vec::new(),
+            payload: T::default(),
+            is_dir: true,
+        };
+
+        for (path_parts, payload) in files {
+            internal_root.insert_recursive(&path_parts, payload, Path::new(""));
+        }
+        
+        internal_root.sort_recursive();
+
+        if let Some(root_name) = custom_root {
+            let wrapper = RawNode {
+                name: root_name.clone(),
+                full_path: PathBuf::from(root_name),
+                children: internal_root.children,
+                payload: internal_root.payload, 
+                is_dir: true,
+            };
+            vec![wrapper]
+        } else {
+            internal_root.children
+        }
+    }
+
     fn insert_recursive(&mut self, path_parts: &[String], payload: T, parent_path: &Path) {
-        // Update current folder size (if T is size)
+        // This line is the reason we need AddAssign
         self.payload += payload.clone(); 
 
         if path_parts.is_empty() { return; }
@@ -106,52 +150,6 @@ impl<T: Clone + Default + std::ops::AddAssign> RawNode<T> {
             self.children[child_idx].payload = payload;
         } else {
             self.children[child_idx].insert_recursive(&path_parts[1..], payload, &current_path);
-        }
-    }
-
-    fn sort_recursive(&mut self) {
-        self.children.sort_by(|a, b| {
-            match (a.is_dir, b.is_dir) {
-                (true, false) => std::cmp::Ordering::Less, // Dirs on top
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.name.cmp(&b.name), // Alphabetical
-            }
-        });
-        for child in &mut self.children {
-            child.sort_recursive();
-        }
-    }
-
-    pub fn find_and_act<F>(&mut self, target_path: &Path, action: &mut F) -> bool
-    where
-        F: FnMut(&mut Self),
-    {
-        // 1. Is this the target? Act and return true.
-        if self.full_path == target_path {
-            action(self);
-            return true;
-        }
-
-        // 2. Optimization: Only search children if the target path is inside this folder
-        if target_path.starts_with(&self.full_path) {
-            for child in &mut self.children {
-                // CHANGED: Pass 'action' directly (it is already &mut F)
-                if child.find_and_act(target_path, action) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// Recursively applies an action to this node and ALL descendants.
-    pub fn apply_recursive<F>(&mut self, action: &F)
-    where
-        F: Fn(&mut Self),
-    {
-        action(self);
-        for child in &mut self.children {
-            child.apply_recursive(action);
         }
     }
 }
