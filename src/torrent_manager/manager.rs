@@ -1175,6 +1175,13 @@ impl TorrentManager {
         _event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
+
+        tracing::info!(
+            "PERFORMING VALIDATION - {:?}",
+            multi_file_info
+
+        );
+
         tokio::select! {
             biased;
             _ = shutdown_rx.recv() => return Err(StorageError::Io(std::io::Error::other("Shutdown"))),
@@ -1185,7 +1192,6 @@ impl TorrentManager {
         let piece_len = torrent.info.piece_length as u64;
 
         // PATH A: BitTorrent V2 (Aligned File Validation)
-
         if torrent.info.meta_version == Some(2) {
             let v2_roots_list = torrent.get_v2_roots();
             let mut path_to_root: HashMap<String, Vec<u8>> = HashMap::new();
@@ -1370,6 +1376,9 @@ impl TorrentManager {
 
                     if is_valid {
                         completed_pieces.push(piece_index);
+                    }
+                    else {
+                        event!(Level::INFO, "HASHING INCORRECT MATCH - {}", piece_index);
                     }
                 } else if skip_hashing {
                     completed_pieces.push(piece_index);

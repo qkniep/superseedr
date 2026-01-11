@@ -676,6 +676,9 @@ impl TorrentState {
                 if self.piece_manager.bitfield.is_empty() {
                     return vec![Effect::DoNothing];
                 }
+                if self.torrent_data_path.is_none() {
+                    return vec![Effect::DoNothing];
+                }
                 if self.piece_manager.need_queue.is_empty()
                     && self.piece_manager.pending_queue.is_empty()
                 {
@@ -684,6 +687,10 @@ impl TorrentState {
                 if self.torrent.is_none() {
                     return vec![Effect::DoNothing];
                 }
+
+
+
+                event!(Level::ERROR, "ASSIGNING WORK TEST.");
 
                 // Prepare size calculation closure with disjoint borrows.
                 let torrent_ref = &self.torrent;
@@ -1690,8 +1697,8 @@ impl TorrentState {
                 }
 
                 self.validation_pieces_found = 0;
-                self.rebuild_multi_file_info();
-                if self.multi_file_info.is_some() {
+                if self.torrent_data_path.is_some() {
+                    self.rebuild_multi_file_info();
                     self.torrent_status = TorrentStatus::Validating;
                     return vec![Effect::StartValidation]
                 } 
@@ -2250,6 +2257,7 @@ mod tests {
             peers: HashMap::new(),
             piece_manager: PieceManager::new(),
             trackers: HashMap::new(),
+            torrent_data_path: Some(PathBuf::from("/tmp/superseedr_test")),
             ..Default::default()
         }
     }
@@ -5362,6 +5370,7 @@ mod tests {
         // This simulates exactly what TorrentState::new does incorrectly for V2.
         // The BlockManager now thinks the tail piece is full (16384 bytes).
         state.torrent_status = TorrentStatus::Standard;
+        state.torrent_data_path = Some(std::path::PathBuf::from("/tmp/superseedr_test"));
         state.piece_manager.set_initial_fields(num_pieces, false);
         state
             .piece_manager
@@ -5920,6 +5929,54 @@ mod tests {
             peer_final.am_interested,
             "We should be interested in the seeder (failed if bitfield was wiped)"
         );
+    }
+
+    #[test]
+    fn test_assign_work_is_blocked_when_path_is_missing() {
+        // 1. GIVEN: A torrent state with metadata but NO download path
+        let mut state = create_empty_state();
+        let num_pieces = 5;
+        let torrent = create_dummy_torrent(num_pieces);
+        
+        // Set metadata as if it just arrived from a peer
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(num_pieces, false);
+        state.piece_manager.block_manager.set_geometry(
+            16384, 
+            (16384 * num_pieces) as u64, 
+            vec![], 
+            vec![], 
+            HashMap::new(), 
+            false
+        );
+        
+        // Status moves to Standard/Endgame normally after metadata hydration
+        state.torrent_status = TorrentStatus::Standard;
+        state.piece_manager.need_queue = (0..num_pieces as u32).collect();
+        
+        // CRITICAL: Ensure path is None (User is still in File Browser)
+        state.torrent_data_path = None;
+
+        // 2. GIVEN: A connected, unchoked peer who has all pieces
+        let peer_id = "seeder_peer".to_string();
+        add_peer(&mut state, &peer_id);
+        let peer = state.peers.get_mut(&peer_id).unwrap();
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.bitfield = vec![true; num_pieces];
+
+        // 3. WHEN: We try to assign work
+        let effects = state.update(Action::AssignWork {
+            peer_id: peer_id.clone(),
+        });
+
+        // 4. THEN: No requests should be generated
+        let has_requests = effects.iter().any(|e| {
+            matches!(e, Effect::SendToPeer { cmd, .. } 
+                if matches!(**cmd, TorrentCommand::BulkRequest(_)))
+        });
+
+        assert!(!has_requests, "PROTOCOL ERROR: Engine requested blocks before a download path was selected!");
+        assert!(state.peers[&peer_id].pending_requests.is_empty(), "Peer should have 0 pending requests when path is missing");
     }
 }
 
