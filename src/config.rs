@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::collections::HashMap;
 
 use crate::app::TorrentControlState;
+use crate::app::FilePriority;
+
 
 use strum_macros::EnumCount;
 use strum_macros::EnumIter;
@@ -132,6 +135,7 @@ pub struct TorrentSettings {
     pub validation_status: bool,
     pub download_path: Option<PathBuf>,
     pub torrent_control_state: TorrentControlState,
+    pub file_priorities: HashMap<usize, FilePriority>,
 }
 
 /// This is now the single source of truth for app directories.

@@ -9,6 +9,8 @@ use crate::networking::BlockInfo;
 use crate::torrent_manager::ManagerEvent;
 use crate::storage::MultiFileInfo;
 
+use crate::app::FilePriority;
+
 use std::time::Duration;
 use std::time::Instant;
 
@@ -149,7 +151,10 @@ pub enum Action {
     Resume,
     Delete,
     UpdateListenPort,
-    SetUserTorrentConfig { torrent_data_path: PathBuf },
+    SetUserTorrentConfig { 
+        torrent_data_path: PathBuf,
+        file_priorities: HashMap<usize, FilePriority>,
+    },
     ValidationProgress {
         count: u32,
     },
@@ -319,6 +324,7 @@ pub struct TorrentState {
     pub verifying_pieces: HashSet<u32>,
     pub torrent_data_path: Option<PathBuf>,
     pub multi_file_info: Option<MultiFileInfo>,
+    pub file_priorities: HashMap<usize, FilePriority>,
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -353,6 +359,7 @@ impl Default for TorrentState {
             verifying_pieces: HashSet::new(),
             torrent_data_path: None,
             multi_file_info: None,
+            file_priorities: HashMap::new()
         }
     }
 }
@@ -2022,8 +2029,9 @@ impl TorrentState {
                 effects
             }
 
-            Action::SetUserTorrentConfig { torrent_data_path } => {
+            Action::SetUserTorrentConfig { torrent_data_path, file_priorities } => {
                 self.torrent_data_path = Some(torrent_data_path);
+                self.file_priorities = file_priorities;
                 
                 // If metadata was already present, we attempt to initialize storage now
                 if self.torrent.is_some() && self.multi_file_info.is_none() {
@@ -7969,6 +7977,7 @@ mod integration_tests {
             resource_manager: rm_client.clone(),
             global_dl_bucket: bucket.clone(),
             global_ul_bucket: bucket,
+            file_priorities: HashMap::new(),
         };
 
         (

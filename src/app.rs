@@ -94,7 +94,7 @@ const MINUTES_HISTORY_MAX: usize = 48 * 60; // 48 hours of per-minute data
 const FILE_HANDLE_MINIMUM: usize = 64;
 const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FilePriority {
     #[default]
     Normal,
@@ -423,6 +423,7 @@ pub struct TorrentMetrics {
     pub torrent_or_magnet: String,
     pub torrent_name: String,
     pub download_path: Option<PathBuf>,
+    pub file_priorities: HashMap<usize, FilePriority>,
     pub number_of_successfully_connected_peers: usize,
     pub number_of_pieces_total: u32,
     pub number_of_pieces_completed: u32,
@@ -707,6 +708,7 @@ impl App {
                     torrent_config.download_path.clone(),
                     torrent_config.validation_status,
                     torrent_config.torrent_control_state,
+                    torrent_config.file_priorities,
                 )
                 .await;
             } else {
@@ -715,7 +717,7 @@ impl App {
                     torrent_config.download_path.clone(),
                     torrent_config.validation_status,
                     torrent_config.torrent_control_state,
-                    None,
+                    torrent_config.file_priorities.clone(),
                 )
                 .await;
             }
@@ -983,7 +985,7 @@ impl App {
                         Some(download_path.to_path_buf()),
                         false,
                         TorrentControlState::Running,
-                        None,
+                        HashMap::new(),
                     )
                     .await;
 
@@ -1130,7 +1132,7 @@ impl App {
                                     Some(download_path),
                                     false,
                                     TorrentControlState::Running,
-                                    None,
+                                    HashMap::new(),
                                 )
                                 .await;
                                 self.save_state_to_disk();
@@ -1191,6 +1193,7 @@ impl App {
                                     Some(download_path),
                                     false,
                                     TorrentControlState::Running,
+                                    HashMap::new(),
                                 )
                                 .await;
                                 self.save_state_to_disk();
@@ -2281,6 +2284,7 @@ impl App {
                     validation_status: final_validation_status,
                     download_path: torrent_state.download_path.clone(),
                     torrent_control_state: torrent_state.torrent_control_state.clone(),
+                    file_priorities: torrent_state.file_priorities.clone(),
                 }
             })
             .collect();
@@ -2468,7 +2472,7 @@ impl App {
         download_path: Option<PathBuf>,
         is_validated: bool,
         torrent_control_state: TorrentControlState,
-        file_priorities: Option<Vec<u8>>,
+        file_priorities: HashMap<usize, FilePriority>,
     ) {
         let buffer = match fs::read(&path) {
             Ok(buf) => buf,
@@ -2589,6 +2593,7 @@ impl App {
                 torrent_name: torrent.info.name.clone(),
                 download_path: download_path.clone(),
                 number_of_pieces_total,
+                file_priorities: file_priorities.clone(),
                 ..Default::default()
             },
             ..Default::default()
@@ -2628,6 +2633,7 @@ impl App {
             resource_manager: resource_manager_clone,
             global_dl_bucket: global_dl_bucket_clone,
             global_ul_bucket: global_ul_bucket_clone,
+            file_priorities: file_priorities.clone(),
         };
 
         match TorrentManager::from_torrent(torrent_params, torrent) {
@@ -2659,6 +2665,7 @@ impl App {
         download_path: Option<PathBuf>,
         is_validated: bool,
         torrent_control_state: TorrentControlState,
+        file_priorities: HashMap<usize, FilePriority>,
     ) {
         tracing::info!(target: "magnet_flow", "Engine: add_magnet_torrent entry. Link: {}", magnet_link); //
         let magnet = match Magnet::new(&magnet_link) {
@@ -2679,7 +2686,8 @@ impl App {
             if let Some(path) = download_path {
                 if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
                      let _ = manager_tx.try_send(ManagerCommand::SetUserTorrentConfig { 
-                         torrent_data_path: path 
+                        torrent_data_path: path,
+                        file_priorities: file_priorities.clone(),
                      });
                 }
             }
@@ -2728,6 +2736,7 @@ impl App {
             resource_manager: resource_manager_clone,
             global_dl_bucket: global_dl_bucket_clone,
             global_ul_bucket: global_ul_bucket_clone,
+            file_priorities: file_priorities.clone(),
         };
 
         match TorrentManager::from_magnet(torrent_params, magnet, &magnet_link) {

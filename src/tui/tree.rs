@@ -154,6 +154,22 @@ impl<T: Clone + Default + std::ops::AddAssign> RawNode<T> {
     }
 }
 
+impl RawNode<crate::app::TorrentPreviewPayload> {
+    /// Recursively collects all file indices and their associated priorities.
+    /// This is used when confirming a download to pass the user's selection to the engine.
+    pub fn collect_priorities(&self, out: &mut std::collections::HashMap<usize, crate::app::FilePriority>) {
+        // If this node is a file (has an index), record its priority
+        if let Some(idx) = self.payload.file_index {
+            out.insert(idx, self.payload.priority);
+        }
+
+        // Recurse through all children
+        for child in &self.children {
+            child.collect_priorities(out);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TreeFilter<T> {
     pub queries: Vec<String>,

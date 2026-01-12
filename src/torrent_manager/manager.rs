@@ -176,6 +176,7 @@ impl TorrentManager {
             resource_manager,
             global_dl_bucket,
             global_ul_bucket,
+            file_priorities,
             ..
         } = torrent_parameters;
 
@@ -269,6 +270,7 @@ impl TorrentManager {
 
         let validation_status = torrent_parameters.torrent_validation_status;
         let torrent_data_path = torrent_parameters.torrent_data_path.clone();
+        let file_priorities = torrent_parameters.file_priorities.clone();
 
         // 3. Initialize Base Manager (Awaiting Metadata)
         let mut manager = Self::init_base(torrent_parameters, info_hash, trackers, validation_status);
@@ -291,7 +293,8 @@ impl TorrentManager {
 
         if let Some(torrent_data_path) = torrent_data_path {
             manager.apply_action(Action::SetUserTorrentConfig {
-                torrent_data_path
+                torrent_data_path,
+                file_priorities,
             });
         }
 
@@ -2115,8 +2118,11 @@ impl TorrentManager {
                             }
 
                         },
-                        ManagerCommand::SetUserTorrentConfig { torrent_data_path } => {
-                            self.apply_action(Action::SetUserTorrentConfig { torrent_data_path });
+                        ManagerCommand::SetUserTorrentConfig { torrent_data_path, file_priorities } => {
+                            self.apply_action(Action::SetUserTorrentConfig { 
+                                torrent_data_path, 
+                                file_priorities,
+                            });
                         }
                         ManagerCommand::SetDataRate(new_rate_ms) => {
                             data_rate_ms = new_rate_ms;
@@ -2592,6 +2598,7 @@ mod tests {
             resource_manager: resource_manager_client,
             global_dl_bucket: dl_bucket,
             global_ul_bucket: ul_bucket,
+            file_priorities: HashMap::new(),
         };
 
         let manager = TorrentManager::from_magnet(params, magnet, magnet_link)
@@ -2755,6 +2762,7 @@ mod resource_tests {
             resource_manager: rm_client,
             global_dl_bucket: dl_bucket,
             global_ul_bucket: ul_bucket,
+            file_priorities: HashMap::new(),
         };
 
         let manager = TorrentManager::from_magnet(params, magnet, magnet_link).unwrap();
@@ -2978,6 +2986,7 @@ mod resource_tests {
             resource_manager: rm_client,
             global_dl_bucket: dl_bucket,
             global_ul_bucket: ul_bucket,
+            file_priorities: HashMap::new(),
         };
 
         let mut manager = TorrentManager::from_torrent(params, torrent).unwrap();
@@ -3225,6 +3234,7 @@ mod resource_tests {
             resource_manager: rm_client,
             global_dl_bucket: dl_bucket,
             global_ul_bucket: ul_bucket,
+            file_priorities: HashMap::new(),
         };
 
         let mut manager = TorrentManager::from_torrent(params, torrent.clone()).unwrap();
@@ -3827,6 +3837,7 @@ mod resource_tests {
             resource_manager: rm_client.clone(),
             global_dl_bucket: dl_bucket,
             global_ul_bucket: ul_bucket,
+            file_priorities: HashMap::new(),
         };
 
         let manager = TorrentManager::from_magnet(params, magnet, magnet_link).unwrap();

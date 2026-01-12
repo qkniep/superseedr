@@ -28,6 +28,7 @@ use ratatui::prelude::Rect;
 use ratatui::style::{Color, Style};
 
 use std::path::Path;
+use std::collections::HashMap;
 use tracing::{event as tracing_event, Level};
 
 use directories::UserDirs;
@@ -805,28 +806,11 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                             };
 
                             tracing::info!(target: "superseedr", "Final resolved path: {:?}", final_path);
-
-                            // Priority Collection Logic
-                            let mut file_priorities = Vec::new();
-                            fn collect_priorities(nodes: &[RawNode<TorrentPreviewPayload>], out: &mut Vec<(usize, u8)>) {
-                                for node in nodes {
-                                    if let Some(idx) = node.payload.file_index {
-                                        let p_val = match node.payload.priority {
-                                            FilePriority::Skip => 0,
-                                            FilePriority::Normal => 1,
-                                            FilePriority::High => 2,
-                                            FilePriority::Mixed => 1,
-                                        };
-                                        out.push((idx, p_val));
-                                    }
-                                    collect_priorities(&node.children, out);
-                                }
+                            let mut file_priorities = HashMap::new();
+                            for node in preview_tree {
+                                node.collect_priorities(&mut file_priorities);
                             }
-                            collect_priorities(preview_tree, &mut file_priorities);
-                            file_priorities.sort_by_key(|k| k.0);
-                            let priority_vec: Vec<u8> = file_priorities.iter().map(|(_, p)| *p).collect();
 
-                            // Execution
                             if let Some(pending_path) = app.app_state.pending_torrent_path.take() {
                                 tracing::info!(target: "superseedr", "Executing: Add torrent from file");
                                 app.add_torrent_from_file(
@@ -834,7 +818,7 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                                     final_path,
                                     false,
                                     TorrentControlState::Running,
-                                    Some(priority_vec),
+                                    file_priorities,
                                 ).await;
                             } else if !app.app_state.pending_torrent_link.is_empty() {
                                 tracing::info!(target: "superseedr", "Executing: Add magnet link");
@@ -844,6 +828,7 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                                     final_path,
                                     false,
                                     TorrentControlState::Running,
+                                    file_priorities,
                                 ).await;
                                 app.app_state.pending_torrent_link.clear();
                             } else {
@@ -1101,6 +1086,7 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
             download_path.clone(),
             false,
             TorrentControlState::Running,
+            HashMap::new(),
         )
         .await;
 
@@ -1132,7 +1118,7 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
                     Some(download_path),
                     false,
                     TorrentControlState::Running,
-                    None,
+                    HashMap::new(),
                 )
                 .await;
             } else {
