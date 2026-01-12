@@ -1989,6 +1989,7 @@ impl TorrentManager {
                 next_announce_in,
                 total_size: total_size_bytes,
                 bytes_written,
+                file_priorities: self.state.file_priorities.clone(),
                 ..Default::default()
             };
             tokio::spawn(async move {
