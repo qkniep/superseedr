@@ -15,6 +15,14 @@ pub enum PieceStatus {
     Done,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum EffectivePiecePriority {
+    Skip,
+    #[default]
+    Normal,
+    High,
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct PieceManager {
     // --- Public Fields (Required by state.rs) ---
@@ -23,6 +31,7 @@ pub struct PieceManager {
     pub pending_queue: HashMap<u32, Vec<String>>,
     pub piece_rarity: HashMap<u32, usize>,
     pub pieces_remaining: usize,
+    pub piece_priorities: Vec<EffectivePiecePriority>,
 
     // --- The Block Engine ---
     pub block_manager: BlockManager,
@@ -36,6 +45,7 @@ impl PieceManager {
             pending_queue: HashMap::new(),
             piece_rarity: HashMap::new(),
             pieces_remaining: 0,
+            piece_priorities: Vec::new(),
             block_manager: BlockManager::new(),
         }
     }
@@ -64,6 +74,8 @@ impl PieceManager {
         let mut bitfield = vec![PieceStatus::Need; num_pieces];
         self.need_queue.clear();
 
+        self.piece_priorities.clear();
+
         if validation_complete {
             bitfield.fill(PieceStatus::Done);
         } else {
@@ -75,6 +87,60 @@ impl PieceManager {
         }
         self.bitfield = bitfield;
         self.pieces_remaining = self.need_queue.len();
+    }
+
+    pub fn apply_priorities(&mut self, new_priorities: Vec<EffectivePiecePriority>) -> Vec<u32> {
+        let mut cancelled_pieces = Vec::new();
+
+        // Safety check
+        if new_priorities.len() != self.bitfield.len() {
+            if !self.piece_priorities.is_empty() {
+                self.piece_priorities.clear(); // Reset on mismatch
+            }
+            return Vec::new();
+        }
+
+        // Lazy Init: If we are currently empty (Standard), fill with Normal to allow diffing
+        if self.piece_priorities.is_empty() {
+            self.piece_priorities = vec![EffectivePiecePriority::Normal; self.bitfield.len()];
+        }
+
+        for (idx, &new_prio) in new_priorities.iter().enumerate() {
+            let p_idx = idx as u32;
+            let old_prio = self.piece_priorities[idx];
+
+            if new_prio != old_prio {
+                self.piece_priorities[idx] = new_prio;
+                
+                let is_done = self.bitfield[idx] == PieceStatus::Done;
+                if !is_done {
+                    // Transition TO Skip
+                    if new_prio == EffectivePiecePriority::Skip {
+                        // Remove from Need
+                        if let Some(pos) = self.need_queue.iter().position(|&x| x == p_idx) {
+                            self.need_queue.swap_remove(pos);
+                        }
+                        // Mark for Cancel if Pending
+                        if self.pending_queue.contains_key(&p_idx) {
+                            cancelled_pieces.push(p_idx);
+                        }
+                    } 
+                    // Transition FROM Skip (to Normal/High)
+                    else if old_prio == EffectivePiecePriority::Skip {
+                        if !self.need_queue.contains(&p_idx) && !self.pending_queue.contains_key(&p_idx) {
+                            self.need_queue.push(p_idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Optimization: If everything is Normal, clear the vector to use Fast Path
+        if self.piece_priorities.iter().all(|&p| p == EffectivePiecePriority::Normal) {
+            self.piece_priorities.clear();
+        }
+
+        cancelled_pieces
     }
 
     pub fn handle_block(
@@ -139,17 +205,21 @@ impl PieceManager {
             self.pieces_remaining += 1;
         }
 
-        // Always force status to Need (handles Done -> Need and Pending -> Need)
         if let Some(status) = self.bitfield.get_mut(piece_index as usize) {
             *status = PieceStatus::Need;
         }
 
-        // Ensure it is in the Need queue
-        if !self.need_queue.contains(&piece_index) {
+        // Only requeue if NOT skipped
+        let is_skipped = if !self.piece_priorities.is_empty() {
+             self.piece_priorities[piece_index as usize] == EffectivePiecePriority::Skip
+        } else {
+             false
+        };
+        
+        if !is_skipped && !self.need_queue.contains(&piece_index) {
             self.need_queue.push(piece_index);
         }
 
-        // IMPORTANT: Tell BlockManager to revert completion status
         self.block_manager.revert_v1_piece_completion(piece_index);
     }
 
@@ -170,39 +240,64 @@ impl PieceManager {
             .collect();
     }
 
-    // --- SELECTION LOGIC (High-Level Strategy) ---
-    // This logic remains here because it orchestrates the high-level queues
-    // (need_queue, pending_queue) which define the download strategy.
-
-    #[allow(dead_code)]
     pub fn choose_piece_for_peer(
         &self,
         peer_bitfield: &[bool],
         peer_pending: &HashSet<u32>,
         torrent_status: &TorrentStatus,
     ) -> Option<u32> {
-        if *torrent_status != TorrentStatus::Endgame {
-            // STANDARD MODE: Rarest First
-            self.need_queue
-                .iter()
-                .filter(|&&piece_idx| peer_bitfield.get(piece_idx as usize) == Some(&true))
-                .filter(|&&piece_idx| !peer_pending.contains(&piece_idx))
-                .min_by_key(|&&piece_idx| self.piece_rarity.get(&piece_idx).unwrap_or(&usize::MAX))
-                .copied()
-        } else {
-            // ENDGAME MODE: Random from Pending + Need
-            let candidate_pieces: Vec<u32> = self
-                .pending_queue
-                .keys()
-                .chain(self.need_queue.iter())
-                .filter(|&&piece_idx| peer_bitfield.get(piece_idx as usize) == Some(&true))
-                .filter(|&&piece_idx| !peer_pending.contains(&piece_idx))
-                .copied()
-                .collect();
-
-            candidate_pieces.choose(&mut rand::rng()).copied()
+        // FAST PATH: Standard Mode (Empty Vector)
+        if self.piece_priorities.is_empty() {
+            if *torrent_status != TorrentStatus::Endgame {
+                return self.need_queue
+                    .iter()
+                    .filter(|&&p| peer_bitfield.get(p as usize) == Some(&true))
+                    .filter(|&&p| !peer_pending.contains(&p))
+                    .min_by_key(|&&p| self.piece_rarity.get(&p).unwrap_or(&usize::MAX))
+                    .copied();
+            } else {
+                let candidates: Vec<u32> = self.pending_queue.keys()
+                    .chain(self.need_queue.iter())
+                    .filter(|&&p| peer_bitfield.get(p as usize) == Some(&true))
+                    .filter(|&&p| !peer_pending.contains(&p))
+                    .copied()
+                    .collect();
+                return candidates.choose(&mut rand::rng()).copied();
+            }
         }
+
+        let compare_pieces = |a: &&u32, b: &&u32| {
+            // Dereference twice to get the actual u32 piece index
+            let idx_a = **a;
+            let idx_b = **b;
+
+            let prio_a = self.piece_priorities[idx_a as usize];
+            let prio_b = self.piece_priorities[idx_b as usize];
+
+            match prio_b.cmp(&prio_a) {
+                std::cmp::Ordering::Equal => {
+                    let rare_a = self.piece_rarity.get(&idx_a).unwrap_or(&usize::MAX);
+                    let rare_b = self.piece_rarity.get(&idx_b).unwrap_or(&usize::MAX);
+                    rare_a.cmp(rare_b)
+                }
+                other => other,
+            }
+        };
+
+        let source_iter: Box<dyn Iterator<Item = &u32>> = if *torrent_status != TorrentStatus::Endgame {
+            Box::new(self.need_queue.iter())
+        } else {
+            Box::new(self.pending_queue.keys().chain(self.need_queue.iter()))
+        };
+
+        source_iter
+            .filter(|&&p| peer_bitfield.get(p as usize) == Some(&true))
+            .filter(|&&p| !peer_pending.contains(&p))
+            .filter(|&&p| self.piece_priorities[p as usize] != EffectivePiecePriority::Skip)
+            .min_by(compare_pieces)
+            .copied()
     }
+
 
     pub fn mark_as_pending(&mut self, piece_index: u32, peer_id: String) {
         self.need_queue.retain(|&p| p != piece_index);
@@ -653,5 +748,142 @@ mod tests {
         // Let's verify we got the data we put in.
         assert_eq!(data[0], 1);
         assert_eq!(data[16384], 2);
+    }
+
+    #[test]
+    fn test_priority_sorting_order() {
+        // GIVEN: A manager with 3 pieces needed
+        let mut pm = setup_manager(3); // [0, 1, 2]
+        
+        // SETUP: 
+        // Piece 0 -> Normal (Default)
+        // Piece 1 -> High
+        // Piece 2 -> Skip
+        pm.apply_priorities(vec![
+            EffectivePiecePriority::Normal,
+            EffectivePiecePriority::High,
+            EffectivePiecePriority::Skip
+        ]);
+
+        let peer_bitfield = vec![true, true, true];
+        let peer_pending = HashSet::new();
+        let status = TorrentStatus::Standard;
+
+        // WHEN: We ask for a piece
+        let first_choice = pm.choose_piece_for_peer(&peer_bitfield, &peer_pending, &status);
+
+        // THEN: High priority (1) must win
+        assert_eq!(first_choice, Some(1), "High priority piece should be chosen first");
+
+        // Mark 1 as pending so we get the next one
+        let mut peer_pending_2 = HashSet::new();
+        peer_pending_2.insert(1);
+
+        let second_choice = pm.choose_piece_for_peer(&peer_bitfield, &peer_pending_2, &status);
+
+        // THEN: Normal priority (0) must be next. Piece 2 (Skip) must be ignored.
+        assert_eq!(second_choice, Some(0), "Normal priority should be chosen second");
+
+        // Mark 0 as pending
+        peer_pending_2.insert(0);
+        let third_choice = pm.choose_piece_for_peer(&peer_bitfield, &peer_pending_2, &status);
+
+        // THEN: Skip piece (2) should never be chosen
+        assert_eq!(third_choice, None, "Skipped piece should not be chosen");
+    }
+
+    #[test]
+    fn test_dynamic_priority_switching() {
+        // GIVEN: 1 piece that starts as Normal
+        let mut pm = setup_manager(1);
+        assert!(pm.need_queue.contains(&0));
+
+        // WHEN: We switch it to SKIP
+        let cancelled = pm.apply_priorities(vec![EffectivePiecePriority::Skip]);
+        
+        // THEN: It should disappear from the need queue
+        assert!(pm.need_queue.is_empty(), "Skip should remove from need_queue");
+        
+        // WHEN: We switch it back to HIGH
+        pm.apply_priorities(vec![EffectivePiecePriority::High]);
+
+        // THEN: It should reappear in the need queue
+        assert!(pm.need_queue.contains(&0), "Un-skipping should add back to need_queue");
+        assert_eq!(pm.piece_priorities[0], EffectivePiecePriority::High);
+    }
+
+    #[test]
+    fn test_priority_overrides_rarity() {
+        // GIVEN: 
+        // Piece 0: Rare (1 copy) but Normal Priority
+        // Piece 1: Common (100 copies) but High Priority
+        let mut pm = setup_manager(2);
+        
+        pm.piece_rarity.insert(0, 1);   // Rare
+        pm.piece_rarity.insert(1, 100); // Common
+
+        pm.apply_priorities(vec![
+            EffectivePiecePriority::Normal, // 0
+            EffectivePiecePriority::High,   // 1
+        ]);
+
+        let peer_bitfield = vec![true, true];
+        let pending = HashSet::new();
+
+        // WHEN: We choose
+        let choice = pm.choose_piece_for_peer(&peer_bitfield, &pending, &TorrentStatus::Standard);
+
+        // THEN: High Priority (1) must win, even though 0 is much rarer
+        assert_eq!(choice, Some(1), "High priority should override Rarity");
+    }
+
+    #[test]
+    fn test_mixed_priority_endgame() {
+        // GIVEN: Endgame Mode
+        // Pending: Piece 0 (High)
+        // Need: Piece 1 (Normal)
+        let mut pm = setup_manager(2);
+        pm.mark_as_pending(0, "peer_A".into());
+        // Piece 1 remains in Need
+
+        pm.apply_priorities(vec![
+            EffectivePiecePriority::High,   // 0 (Pending)
+            EffectivePiecePriority::Normal, // 1 (Need)
+        ]);
+
+        let peer_bitfield = vec![true, true];
+        let pending = HashSet::new(); // Local peer has nothing pending yet
+
+        // WHEN: We choose in Endgame mode
+        let choice = pm.choose_piece_for_peer(&peer_bitfield, &pending, &TorrentStatus::Endgame);
+
+        // THEN: We should attempt to "steal" the High Priority pending piece (0)
+        // before taking the unassigned Normal piece (1).
+        assert_eq!(choice, Some(0), "Endgame should race for High Priority pieces first");
+    }
+
+    #[test]
+    fn test_all_skipped_behavior() {
+        // GIVEN: A manager with 5 pieces, initially all needed
+        let mut pm = setup_manager(5);
+        assert_eq!(pm.need_queue.len(), 5);
+
+        // WHEN: We apply SKIP to ALL pieces
+        let priorities = vec![EffectivePiecePriority::Skip; 5];
+        let cancelled = pm.apply_priorities(priorities);
+
+        // THEN:
+        // 1. The Need Queue must be completely empty
+        assert!(pm.need_queue.is_empty(), "Need queue should be empty when all pieces are skipped");
+        
+        // 2. Cancellation list should be empty (since nothing was pending in this test)
+        assert!(cancelled.is_empty());
+
+        // 3. Selection should return None
+        let peer_bitfield = vec![true; 5];
+        let pending = HashSet::new();
+        let choice = pm.choose_piece_for_peer(&peer_bitfield, &pending, &TorrentStatus::Standard);
+        
+        assert_eq!(choice, None, "Should choose nothing if all pieces are skipped");
     }
 }

@@ -4300,7 +4300,7 @@ mod resource_tests {
 
         manager.state.torrent = Some(torrent.clone());
         manager.state.multi_file_info = Some(
-            crate::storage::MultiFileInfo::new(&temp_dir, "v2_tail_file", None, Some(file_len))
+            crate::storage::MultiFileInfo::new(&temp_dir, "v2_tail_file", None, Some(file_len), &HashMap::new())
                 .unwrap(),
         );
 
