@@ -705,7 +705,7 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                     app.app_state.ui_needs_redraw = true;
                     // If focused on TorrentPreview, we don't want FileSystem navigation to trigger
                     // except for confirming the whole thing via SHIFT+C.
-                    if key.code != KeyCode::Char('C') {
+                    if key.code != KeyCode::Char('Y') {
                         return;
                     }
                 }
@@ -766,7 +766,7 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                 }
 
                 // --- THE CRITICAL CONFIRMATION ACTION ---
-                KeyCode::Char('C') => {
+                KeyCode::Char('Y') => {
                     tracing::info!(target: "superseedr", "SHIFT+C triggered for confirmation");
                     match browser_mode {
                         FileBrowserMode::ConfigPathSelection { target_item, current_settings, selected_index, items } => {

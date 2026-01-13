@@ -2336,7 +2336,7 @@ pub fn draw_file_browser(
     match browser_mode {
         FileBrowserMode::ConfigPathSelection { .. } | FileBrowserMode::Directory => {
             // Removed [Tab] Select
-            footer_spans.push(Span::styled("[Shift+C]", Style::default().fg(theme::GREEN)));
+            footer_spans.push(Span::styled("[Shift+Y]", Style::default().fg(theme::GREEN)));
             footer_spans.push(Span::raw(" Confirm Selection | "));
         }
         FileBrowserMode::DownloadLocSelection { focused_pane, use_container, .. } => {
@@ -2361,12 +2361,12 @@ pub fn draw_file_browser(
                 footer_spans.push(Span::raw(" Rename | "));
             }
 
-            footer_spans.push(Span::styled("[Shift+C]", Style::default().fg(theme::GREEN)));
+            footer_spans.push(Span::styled("[Shift+Y]", Style::default().fg(theme::GREEN)));
             footer_spans.push(Span::raw(" Confirm"));
         }
         FileBrowserMode::File(_) => {
             // Changed [Enter] to [c]
-            footer_spans.push(Span::styled("[Shift+C]", Style::default().fg(theme::GREEN)));
+            footer_spans.push(Span::styled("[Shift+Y]", Style::default().fg(theme::GREEN)));
             footer_spans.push(Span::raw(" Confirm File | "));
         }
     }
