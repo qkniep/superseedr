@@ -1179,12 +1179,6 @@ impl TorrentManager {
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
 
-        tracing::info!(
-            "PERFORMING VALIDATION - {:?}",
-            multi_file_info
-
-        );
-
         tokio::select! {
             biased;
             _ = shutdown_rx.recv() => return Err(StorageError::Io(std::io::Error::other("Shutdown"))),

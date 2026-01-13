@@ -2030,6 +2030,7 @@ impl TorrentState {
             }
 
             Action::SetUserTorrentConfig { torrent_data_path, file_priorities } => {
+                event!(Level::INFO, "Recieved User config {:?} - {:?}", torrent_data_path, file_priorities);
                 self.torrent_data_path = Some(torrent_data_path);
                 self.file_priorities = file_priorities;
                 

@@ -561,14 +561,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 AppMode::FileBrowser { state, data, browser_mode } => {
     if let CrosstermEvent::Key(key) = event {
         if key.kind == KeyEventKind::Press {
-            // --- TOP LEVEL LOGGING ---
-            tracing::info!(
-                target: "superseedr", 
-                "FILE_BROWSER_EVENT: Key={:?}, SearchMode={}, ModeType={:?}", 
-                key.code, 
-                app.app_state.is_searching,
-                browser_mode
-            );
 
             // 1. Search Interceptor
             if app.app_state.is_searching {

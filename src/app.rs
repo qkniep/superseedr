@@ -1684,7 +1684,7 @@ impl App {
                             .recently_processed_files
                             .insert(path.clone(), now);
                         tracing_event!(
-                            Level::INFO,
+                            Level::DEBUG,
                             "Processing file event: {:?} for path: {:?}",
                             event.kind,
                             path

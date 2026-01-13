@@ -4,6 +4,8 @@
 use figment::providers::{Env, Format};
 use figment::{providers::Toml, Figment};
 
+use tracing::{event as tracing_event, Level};
+
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -135,7 +137,47 @@ pub struct TorrentSettings {
     pub validation_status: bool,
     pub download_path: Option<PathBuf>,
     pub torrent_control_state: TorrentControlState,
+
+    #[serde(with = "string_usize_map")]
     pub file_priorities: HashMap<usize, FilePriority>,
+}
+
+mod string_usize_map {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+    use std::collections::HashMap;
+    use std::str::FromStr;
+    use crate::app::FilePriority;
+
+    pub fn serialize<S>(map: &HashMap<usize, FilePriority>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // 1. Convert usize keys to Strings for TOML compatibility
+        let string_map: HashMap<String, FilePriority> = map
+            .iter()
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect();
+        
+        // 2. Simply serialize the new map. 
+        // Do NOT call serializer.serialize_map() manually before this.
+        serde::Serialize::serialize(&string_map, serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<usize, FilePriority>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // 1. Load the TOML map as Strings first
+        let string_map: HashMap<String, FilePriority> = HashMap::deserialize(deserializer)?;
+        let mut result = HashMap::new();
+        
+        // 2. Convert strings back to usize
+        for (k, v) in string_map {
+            let k_usize = usize::from_str(&k).map_err(serde::de::Error::custom)?;
+            result.insert(k_usize, v);
+        }
+        Ok(result)
+    }
 }
 
 /// This is now the single source of truth for app directories.
@@ -177,25 +219,72 @@ pub fn load_settings() -> Settings {
     if let Some((config_dir, _)) = get_app_paths() {
         let config_file_path = config_dir.join("settings.toml");
 
-        return Figment::new()
-            .merge(Toml::file(config_file_path))
+        match Figment::new()
+            .merge(Toml::file(&config_file_path))
             .merge(Env::prefixed("SUPERSEEDR_"))
-            .extract()
-            .unwrap_or_default();
+            .extract::<Settings>() 
+        {
+            Ok(s) => return s,
+            Err(e) => {
+                tracing_event!(
+                    Level::ERROR,
+                    "Failed to load settings at {:?}: {}",
+                    config_file_path,
+                    e
+                );
+            }
+        }
     }
-
-    // Fallback if we can't even determine the application paths.
     Settings::default()
 }
 
-/// Saves the provided settings to the config file.
 pub fn save_settings(settings: &Settings) -> io::Result<()> {
     if let Some((config_dir, _)) = get_app_paths() {
         let config_file_path = config_dir.join("settings.toml");
-        let temp_file_path = config_dir.join("settings.toml.tmp");
+        
+        // 1. Create a backup directory
+        let backup_dir = config_dir.join("backups_settings_files");
+        fs::create_dir_all(&backup_dir)?;
+
+        // 2. Create a timestamped filename (e.g., settings_20240112_1906.toml)
+        let now = chrono::Local::now();
+        let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
+        let backup_path = backup_dir.join(format!("settings_{}.toml", timestamp));
+
+        // 3. Serialize the current settings
         let content = toml::to_string_pretty(settings).map_err(io::Error::other)?;
-        fs::write(&temp_file_path, content)?;
+
+        // 4. Write the main file and the backup
+        let temp_file_path = config_dir.join("settings.toml.tmp");
+        fs::write(&temp_file_path, &content)?;
         fs::rename(&temp_file_path, &config_file_path)?;
+        
+        // Only keep a reasonable number of backups (e.g., last 10) to save space
+        fs::write(backup_path, content)?;
+        cleanup_old_backups(&backup_dir, 64)?;
+    }
+    Ok(())
+}
+
+fn cleanup_old_backups(backup_dir: &PathBuf, limit: usize) -> io::Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(backup_dir)?
+        .filter_map(|res| res.ok())
+        .map(|e| e.path())
+        // Filter: Only include files that look like your backups
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.starts_with("settings_") && s.ends_with(".toml"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if entries.len() > limit {
+        // Since names are timestamped, alphabetical sort is chronological sort
+        entries.sort(); 
+        for path in entries.iter().take(entries.len() - limit) {
+            fs::remove_file(path)?;
+        }
     }
     Ok(())
 }
