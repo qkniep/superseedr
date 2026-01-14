@@ -65,7 +65,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 
             // If the last Esc was less than 200ms ago, ignore this one
             if now.saturating_sub(last) < 200 {
-                tracing::info!("GLOBAL DEBOUNCE: Ignoring rapid Esc key press");
                 return; 
             }
 
@@ -564,7 +563,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
 
             // 1. Search Interceptor
             if app.app_state.is_searching {
-                tracing::debug!(target: "superseedr", "Key captured by search buffer");
                 match key.code {
                     KeyCode::Esc => {
                         app.app_state.is_searching = false;
@@ -600,7 +598,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
             {
                 // Input Guard for Renaming the Container
                 if *is_editing_name {
-                    tracing::debug!(target: "superseedr", "Key captured by rename editor");
                     match key.code {
                         KeyCode::Enter => { *is_editing_name = false; }
                         KeyCode::Esc => {
@@ -632,7 +629,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                 // Global Actions (within Download Selection)
                 match key.code {
                     KeyCode::Esc => {
-                        tracing::info!(target: "superseedr", "ESC pressed: Cancelling download selection");
                         if !app.app_state.pending_torrent_link.is_empty() {
                             if let (Some(info_hash), _) = crate::app::parse_hybrid_hashes(&app.app_state.pending_torrent_link) {
                                 // 1. Grab reference to channel
@@ -661,12 +657,10 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                     }
                     KeyCode::Char('x') => {
                         *use_container = !*use_container;
-                        tracing::info!(target: "superseedr", "Toggle container folder: {}", *use_container);
                         app.app_state.ui_needs_redraw = true;
                         return;
                     }
                     KeyCode::Char('r') if *use_container => {
-                        tracing::info!(target: "superseedr", "Triggering rename of container folder");
                         *is_editing_name = true;
                         *original_name_backup = container_name.clone(); 
                         *cursor_pos = container_name.len(); 
@@ -679,7 +673,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                             BrowserPane::FileSystem => BrowserPane::TorrentPreview,
                             BrowserPane::TorrentPreview => BrowserPane::FileSystem,
                         };
-                        tracing::info!(target: "superseedr", "Tab pressed: Switched focus to {:?}", focused_pane);
                         app.app_state.ui_needs_redraw = true;
                         return;
                     }
@@ -698,9 +691,7 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                         KeyCode::Left | KeyCode::Char('h') => { TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Left, filter, list_height); }
                         KeyCode::Right | KeyCode::Char('l') => { TreeMathHelper::apply_action(preview_state, preview_tree, TreeAction::Right, filter, list_height); }
                         KeyCode::Char(' ') => { if let Some(t) = &preview_state.cursor_path { apply_priority_action(preview_tree, t, PriorityAction::Cycle); } }
-                        _ => { 
-                            tracing::debug!(target: "superseedr", "Key {:?} unhandled in TorrentPreview pane", key.code);
-                        }
+                        _ => {} 
                     }
                     app.app_state.ui_needs_redraw = true;
                     // If focused on TorrentPreview, we don't want FileSystem navigation to trigger
@@ -744,7 +735,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                 KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                     if let Some(path) = state.cursor_path.clone() {
                         if path.is_dir() {
-                            tracing::info!(target: "superseedr", "Entering directory: {:?}", path);
                             let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
                                 path,
                                 browser_mode: browser_mode.clone(),
@@ -756,7 +746,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                 KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
                     let child_to_highlight = state.current_path.clone();
                     if let Some(parent) = state.current_path.parent() {
-                        tracing::info!(target: "superseedr", "Navigating to parent: {:?}", parent);
                         let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
                             path: parent.to_path_buf(),
                             browser_mode: browser_mode.clone(),
@@ -767,7 +756,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
 
                 // --- THE CRITICAL CONFIRMATION ACTION ---
                 KeyCode::Char('Y') => {
-                    tracing::info!(target: "superseedr", "SHIFT+C triggered for confirmation");
                     match browser_mode {
                         FileBrowserMode::ConfigPathSelection { target_item, current_settings, selected_index, items } => {
                             tracing::info!(target: "superseedr", "Confirming Config Path Selection");
@@ -789,7 +777,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                         }
 
                         FileBrowserMode::DownloadLocSelection { container_name, use_container, preview_tree, .. } => {
-                            tracing::info!(target: "superseedr", "Confirming Download Location Selection");
                             let mut base_path = state.current_path.clone();
                             let final_path = if *use_container {
                                 Some(base_path.join(container_name))
@@ -797,14 +784,12 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                                 Some(base_path)
                             };
 
-                            tracing::info!(target: "superseedr", "Final resolved path: {:?}", final_path);
                             let mut file_priorities = HashMap::new();
                             for node in preview_tree {
                                 node.collect_priorities(&mut file_priorities);
                             }
 
                             if let Some(pending_path) = app.app_state.pending_torrent_path.take() {
-                                tracing::info!(target: "superseedr", "Executing: Add torrent from file");
                                 app.add_torrent_from_file(
                                     pending_path,
                                     final_path,
@@ -813,7 +798,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                                     file_priorities,
                                 ).await;
                             } else if !app.app_state.pending_torrent_link.is_empty() {
-                                tracing::info!(target: "superseedr", "Executing: Add magnet link");
                                 app.add_magnet_torrent(
                                     "Fetching name...".to_string(),
                                     app.app_state.pending_torrent_link.clone(),
@@ -831,7 +815,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                         }
 
                         FileBrowserMode::File(extensions) => {
-                            tracing::info!(target: "superseedr", "Confirming File Selection");
                             if let Some(path) = state.cursor_path.clone() {
                                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                                 if extensions.iter().any(|ext| name.ends_with(ext)) {
@@ -844,7 +827,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                         }
                         
                         _ => {
-                            tracing::info!(target: "superseedr", "SHIFT+C pressed in generic directory mode: closing browser");
                             app.app_state.mode = AppMode::Normal;
                         }
                     }
@@ -852,8 +834,6 @@ AppMode::FileBrowser { state, data, browser_mode } => {
                 }
 
                 KeyCode::Esc => {
-                    tracing::info!(target: "superseedr", "ESC pressed: closing browser");
-                    
                     if let FileBrowserMode::DownloadLocSelection { .. } = browser_mode {
                         if !app.app_state.pending_torrent_link.is_empty() {
                             // 1. Calculate the hash to find the entry
@@ -1068,7 +1048,6 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
     let pasted_text = pasted_text.trim();
     
     if pasted_text.starts_with("magnet:") {
-        tracing::info!(target: "magnet_flow", "Magnet link detected in clipboard");
         
         let download_path = app.client_configs.default_download_folder.clone();
 
@@ -1114,8 +1093,6 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
                 )
                 .await;
             } else {
-                // FIX 3: Redirect to AddTorrentFromFile command
-                // This lets app.rs handle metadata parsing and tree building
                 let _ = app.app_command_tx.try_send(AppCommand::AddTorrentFromFile(path.to_path_buf()));
             }
         } else {

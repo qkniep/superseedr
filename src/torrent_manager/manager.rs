@@ -280,12 +280,7 @@ impl TorrentManager {
             .map_err(|e| format!("Failed to re-encode torrent struct: {}", e))?;
         let metadata_length = bencoded_data.len() as i64;
 
-        // 5. Inject Metadata via Action
-        // This triggers the exact same logic flow as a Magnet link receiving metadata:
-        // -> Sets status to Validating
-        // -> Initializes MultiFileInfo (Storage)
-        // -> Calculates Piece Mapping (V1/V2)
-        // -> Resizes Bitfields
+        // 5. Inject Metadata via Action - triggers same flow as magnet link
         manager.apply_action(Action::MetadataReceived {
             torrent: Box::new(torrent),
             metadata_length,
@@ -318,8 +313,8 @@ impl TorrentManager {
         };
 
         event!(
-            Level::INFO,
-            "Active INFO HASH: {:?}",
+            Level::DEBUG,
+            "Active info hash: {:?}",
             hex::encode(&info_hash)
         );
 
@@ -1109,7 +1104,6 @@ impl TorrentManager {
                 let torrent_manager_tx = self.torrent_manager_tx.clone();
                 let (peer_tx, peer_rx) = tokio::sync::mpsc::channel(32);
 
-                // Use the full URL as the peer_id so the worker and manager agree on the ID
                 let peer_id = full_url.clone();
 
                 self.apply_action(Action::RegisterPeer {
@@ -1129,7 +1123,7 @@ impl TorrentManager {
                         torrent.info.files.iter().map(|f| f.length as u64).sum()
                     };
 
-                    event!(Level::INFO, "Starting WebSeed Worker: {}", full_url);
+                    event!(Level::DEBUG, "Starting WebSeed Worker: {}", full_url);
 
                     tokio::spawn(async move {
                         web_seed_worker(
@@ -1380,7 +1374,7 @@ impl TorrentManager {
                         completed_pieces.push(piece_index);
                     }
                     else {
-                        event!(Level::INFO, "HASHING INCORRECT MATCH - {}", piece_index);
+                        event!(Level::DEBUG, "Hash mismatch for piece {}", piece_index);
                     }
                 } else if skip_hashing {
                     completed_pieces.push(piece_index);
@@ -2429,8 +2423,6 @@ impl TorrentManager {
                         },
 
                         TorrentCommand::MetadataTorrent(torrent, metadata_length) => {
-                            tracing::info!("METADATA TORRENT RECIEVED");
-
                             #[cfg(all(feature = "dht", feature = "pex"))]
                             if torrent.info.private == Some(1) {
                                 break Ok(());
@@ -2441,7 +2433,7 @@ impl TorrentManager {
                             // 1. Identify if this is a Hybrid, if so, use v1 protocol
                             let is_hybrid = !torrent.info.pieces.is_empty() && torrent.info.meta_version == Some(2);
                             if is_hybrid {
-                                tracing::info!("HYBRID DETECTED: Forcing V1-only treatment for simplicity.");
+                                tracing::debug!("Hybrid torrent detected, using V1 protocol");
                                 // Strip V2 fields so the rest of the app sees a standard V1 torrent
                                 torrent.info.meta_version = None;
                                 torrent.info.file_tree = None;
@@ -2810,14 +2802,7 @@ mod resource_tests {
             .unwrap();
         let duration = start.elapsed();
 
-        // Logic:
-        // - Channel send is instant.
-        // - Loop picks up Block -> dispatches to 'spawn_blocking' -> loops again.
-        // - Loop picks up Shutdown -> exits.
-        // Total time should be extremely fast (< 5ms), regardless of how slow SHA1 is.
-        // If it takes > 20ms, it implies we waited for the hash.
-
-        println!("Event loop processed Block+Shutdown in {:?}", duration);
+        // Verify hashing is non-blocking: Block dispatch spawns work, loop continues
         assert!(
             duration.as_millis() < 20,
             "CPU Test Failed! Manager loop blocked on hashing."
@@ -2826,18 +2811,13 @@ mod resource_tests {
 
     #[tokio::test]
     async fn test_slow_disk_backpressure() {
-        // GOAL: gerify memory behavior when Disk is slower than Network.
-        // WARNING: This test currently exposes that we DO NOT have backpressure (OOM Risk).
+        // Goal: Verify memory behavior when disk is slower than network (OOM risk)
 
         let (manager, torrent_tx, manager_cmd_tx, _shutdown_tx, resource_manager) =
             setup_test_harness();
 
-        // We start the resource manager but we DO NOT grant any write permits yet.
-        // Effectively, the disk speed is 0 MB/s.
+        // Disk speed effectively 0 MB/s - no write permits granted
         tokio::spawn(resource_manager.run());
-
-        // Note: Ideally we'd modify limits here to be 0, but our mock RM starts fresh.
-        // The current manager implementation spawns tasks that WAIT for permits.
 
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
@@ -2872,10 +2852,7 @@ mod resource_tests {
             block_count, input_duration
         );
 
-        // If we ingest 100MB instantly (< 200ms) while the "Disk" is stalled,
-        // it means we are buffering everything in RAM (spawning thousands of tasks).
-        // A robust system would slow down ingestion (backpressure).
-
+        // Warning: Unbounded memory growth if ingestion is instant despite stalled disk
         if input_duration.as_millis() < 200 {
             println!(
                 "⚠️  PERFORMANCE WARNING: Manager accepted 100MB instantly despite stalled disk."
