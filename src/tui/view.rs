@@ -192,14 +192,22 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                             let def = &all_cols[real_idx];
                             match def.id {
                                 ColumnId::Status => {
-                                    let p = if state.number_of_pieces_total > 0 {
-                                        (state.number_of_pieces_completed as f64
-                                            / state.number_of_pieces_total as f64)
-                                            * 100.0
-                                    } else {
-                                        0.0
-                                    };
-                                    Cell::from(format!("{:.1}%", p))
+                                    let total = state.number_of_pieces_total;
+                                    let skipped_count = state.file_priorities.values()
+                                        .filter(|&&p| p == FilePriority::Skip).count() as u32;
+                                    let effective_total = total.saturating_sub(skipped_count);
+                                    
+                                    let display_pct = if state.number_of_pieces_total > 0 && effective_total > 0 {
+                                        let completed = state.number_of_pieces_completed;
+                                        if torrent.latest_state.activity_message.contains("Seeding") || 
+                                           torrent.latest_state.activity_message.contains("Finished") {
+                                            100.0
+                                        } else {
+                                            // Use effective_total to show progress relative to what is wanted
+                                            ((completed as f64 / effective_total as f64) * 100.0).min(100.0)
+                                        }
+                                    } else { 0.0 };
+                                    Cell::from(format!("{:.1}%", display_pct))
                                 }
                                 ColumnId::Name => {
                                     let name = if app_state.anonymize_torrent_names {
@@ -814,9 +822,14 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
             f.render_widget(Paragraph::new("Progress: "), progress_chunks[0]);
 
             let (progress_ratio, progress_label_text) = if state.number_of_pieces_total > 0 {
-                let ratio =
-                    state.number_of_pieces_completed as f64 / state.number_of_pieces_total as f64;
-                (ratio, format!("{:.1}%", ratio * 100.0))
+                if state.torrent_control_state != TorrentControlState::Running || 
+                   state.activity_message.contains("Seeding") || 
+                   state.activity_message.contains("Finished") {
+                    (1.0, "100.0%".to_string())
+                } else {
+                    let ratio = state.number_of_pieces_completed as f64 / state.number_of_pieces_total as f64;
+                    (ratio, format!("{:.1}%", ratio * 100.0))
+                }
             } else {
                 (0.0, "0.0%".to_string())
             };

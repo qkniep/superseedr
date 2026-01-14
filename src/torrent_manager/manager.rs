@@ -1179,11 +1179,16 @@ impl TorrentManager {
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
 
-        tokio::select! {
+        let is_fresh_download = tokio::select! {
             biased;
             _ = shutdown_rx.recv() => return Err(StorageError::Io(std::io::Error::other("Shutdown"))),
             res = create_and_allocate_files(&multi_file_info) => res?,
         };
+        if is_fresh_download {
+            tracing::info!("Storage: Fresh download detected. Skipping validation loop.");
+            let _ = manager_tx.send(TorrentCommand::ValidationProgress(0)).await;
+            return Ok(Vec::new());
+        }
 
         let mut completed_pieces = Vec::new();
         let piece_len = torrent.info.piece_length as u64;
@@ -1884,11 +1889,11 @@ impl TorrentManager {
             let torrent_name_clone = torrent.info.name.clone();
             let number_of_pieces_total = self.state.piece_manager.bitfield.len() as u32;
             let number_of_pieces_completed =
-                if self.state.torrent_status == TorrentStatus::Validating {
-                    self.state.validation_pieces_found
-                } else {
-                    number_of_pieces_total - self.state.piece_manager.pieces_remaining as u32
-                };
+            if self.state.torrent_status == TorrentStatus::Validating {
+                self.state.validation_pieces_found
+            } else {
+                number_of_pieces_total - self.state.piece_manager.pieces_remaining as u32
+            };
 
             let number_of_successfully_connected_peers = self.state.peers.len();
 

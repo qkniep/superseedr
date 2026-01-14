@@ -98,17 +98,22 @@ impl MultiFileInfo {
 /// This function works for both single and multi-file torrents.
 pub async fn create_and_allocate_files(
     multi_file_info: &MultiFileInfo,
-) -> Result<(), StorageError> {
+) -> Result<bool, StorageError> {
+
+    let mut is_fresh_download = true;
+
     for file_info in &multi_file_info.files {
         // Optimization: Don't allocate padding or skipped files
         if file_info.is_padding {
             continue;
         }
         
-        // NEW: If skipped AND missing, do not create.
-        // If it already exists (e.g. from previous session), we leave it alone.
+        let exists = try_exists(&file_info.path).await?;
+        if exists {
+            is_fresh_download = false;
+        }
         if file_info.is_skipped {
-            if !try_exists(&file_info.path).await? {
+            if !exists {
                 continue;
             }
         }
@@ -131,7 +136,7 @@ pub async fn create_and_allocate_files(
             file.set_len(file_info.length).await?;
         }
     }
-    Ok(())
+    Ok(is_fresh_download)
 }
 
 pub async fn read_data_from_disk(
