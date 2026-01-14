@@ -8,14 +8,13 @@ use tracing::{event as tracing_event, Level};
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::collections::HashMap;
 
-use crate::app::TorrentControlState;
 use crate::app::FilePriority;
-
+use crate::app::TorrentControlState;
 
 use strum_macros::EnumCount;
 use strum_macros::EnumIter;
@@ -143,22 +142,23 @@ pub struct TorrentSettings {
 }
 
 mod string_usize_map {
+    use crate::app::FilePriority;
     use serde::{self, Deserialize, Deserializer, Serializer};
     use std::collections::HashMap;
     use std::str::FromStr;
-    use crate::app::FilePriority;
 
-    pub fn serialize<S>(map: &HashMap<usize, FilePriority>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(
+        map: &HashMap<usize, FilePriority>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         // 1. Convert usize keys to Strings for TOML compatibility
-        let string_map: HashMap<String, FilePriority> = map
-            .iter()
-            .map(|(k, v)| (k.to_string(), *v))
-            .collect();
-        
-        // 2. Simply serialize the new map. 
+        let string_map: HashMap<String, FilePriority> =
+            map.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+
+        // 2. Simply serialize the new map.
         // Do NOT call serializer.serialize_map() manually before this.
         serde::Serialize::serialize(&string_map, serializer)
     }
@@ -170,7 +170,7 @@ mod string_usize_map {
         // 1. Load the TOML map as Strings first
         let string_map: HashMap<String, FilePriority> = HashMap::deserialize(deserializer)?;
         let mut result = HashMap::new();
-        
+
         // 2. Convert strings back to usize
         for (k, v) in string_map {
             let k_usize = usize::from_str(&k).map_err(serde::de::Error::custom)?;
@@ -222,7 +222,7 @@ pub fn load_settings() -> Settings {
         match Figment::new()
             .merge(Toml::file(&config_file_path))
             .merge(Env::prefixed("SUPERSEEDR_"))
-            .extract::<Settings>() 
+            .extract::<Settings>()
         {
             Ok(s) => return s,
             Err(e) => {
@@ -241,7 +241,7 @@ pub fn load_settings() -> Settings {
 pub fn save_settings(settings: &Settings) -> io::Result<()> {
     if let Some((config_dir, _)) = get_app_paths() {
         let config_file_path = config_dir.join("settings.toml");
-        
+
         // 1. Create a backup directory
         let backup_dir = config_dir.join("backups_settings_files");
         fs::create_dir_all(&backup_dir)?;
@@ -258,7 +258,7 @@ pub fn save_settings(settings: &Settings) -> io::Result<()> {
         let temp_file_path = config_dir.join("settings.toml.tmp");
         fs::write(&temp_file_path, &content)?;
         fs::rename(&temp_file_path, &config_file_path)?;
-        
+
         // Only keep a reasonable number of backups (e.g., last 10) to save space
         fs::write(backup_path, content)?;
         cleanup_old_backups(&backup_dir, 64)?;
@@ -281,7 +281,7 @@ fn cleanup_old_backups(backup_dir: &PathBuf, limit: usize) -> io::Result<()> {
 
     if entries.len() > limit {
         // Since names are timestamped, alphabetical sort is chronological sort
-        entries.sort(); 
+        entries.sort();
         for path in entries.iter().take(entries.len() - limit) {
             fs::remove_file(path)?;
         }

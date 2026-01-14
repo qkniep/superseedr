@@ -1,21 +1,21 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use ratatui::{prelude::*, symbols, widgets::*};
 use ratatui::symbols::Marker;
+use ratatui::{prelude::*, symbols, widgets::*};
 
 use crate::tui::formatters::*;
-use crate::tui::layout::{get_torrent_columns, ColumnId};
 use crate::tui::layout::calculate_file_browser_layout; // Import the new function
-use crate::tui::tree::{TreeMathHelper, RenderItem, TreeFilter};
+use crate::tui::layout::{get_torrent_columns, ColumnId};
 use crate::tui::tree;
+use crate::tui::tree::{TreeFilter, TreeMathHelper};
 
+use crate::app::FileBrowserMode;
 use crate::app::FileMetadata;
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
-use crate::app::FileBrowserMode;
 use crate::app::{AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState};
-use crate::app::{FilePriority, BrowserPane};
+use crate::app::{BrowserPane, FilePriority};
 
 use crate::tui::layout::get_peer_columns;
 use crate::tui::layout::PeerColumnId;
@@ -65,8 +65,13 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
             draw_delete_confirm_dialog(f, app_state);
             return;
         }
-        AppMode::FileBrowser { state, data, browser_mode } => {
-            let is_torrent_mode = app_state.pending_torrent_path.is_some() || !app_state.pending_torrent_link.is_empty();
+        AppMode::FileBrowser {
+            state,
+            data,
+            browser_mode,
+        } => {
+            let _is_torrent_mode = app_state.pending_torrent_path.is_some()
+                || !app_state.pending_torrent_link.is_empty();
             draw_file_browser(f, app_state, state, data, browser_mode);
             return;
         }
@@ -193,20 +198,33 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                             match def.id {
                                 ColumnId::Status => {
                                     let total = state.number_of_pieces_total;
-                                    let skipped_count = state.file_priorities.values()
-                                        .filter(|&&p| p == FilePriority::Skip).count() as u32;
+                                    let skipped_count = state
+                                        .file_priorities
+                                        .values()
+                                        .filter(|&&p| p == FilePriority::Skip)
+                                        .count()
+                                        as u32;
                                     let effective_total = total.saturating_sub(skipped_count);
-                                    
-                                    let display_pct = if state.number_of_pieces_total > 0 && effective_total > 0 {
+
+                                    let display_pct = if state.number_of_pieces_total > 0
+                                        && effective_total > 0
+                                    {
                                         let completed = state.number_of_pieces_completed;
-                                        if torrent.latest_state.activity_message.contains("Seeding") || 
-                                           torrent.latest_state.activity_message.contains("Finished") {
+                                        if torrent.latest_state.activity_message.contains("Seeding")
+                                            || torrent
+                                                .latest_state
+                                                .activity_message
+                                                .contains("Finished")
+                                        {
                                             100.0
                                         } else {
                                             // Use effective_total to show progress relative to what is wanted
-                                            ((completed as f64 / effective_total as f64) * 100.0).min(100.0)
+                                            ((completed as f64 / effective_total as f64) * 100.0)
+                                                .min(100.0)
                                         }
-                                    } else { 0.0 };
+                                    } else {
+                                        0.0
+                                    };
                                     Cell::from(format!("{:.1}%", display_pct))
                                 }
                                 ColumnId::Name => {
@@ -271,7 +289,9 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                 let text_to_show = if app_state.anonymize_torrent_names {
                     "/path/to/torrent/file"
                 } else {
-                    path_cow = torrent.latest_state.download_path
+                    path_cow = torrent
+                        .latest_state
+                        .download_path
                         .as_ref()
                         .map(|p| p.to_string_lossy())
                         .unwrap_or_else(|| std::borrow::Cow::Borrowed("Unknown path"));
@@ -822,12 +842,14 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
             f.render_widget(Paragraph::new("Progress: "), progress_chunks[0]);
 
             let (progress_ratio, progress_label_text) = if state.number_of_pieces_total > 0 {
-                if state.torrent_control_state != TorrentControlState::Running || 
-                   state.activity_message.contains("Seeding") || 
-                   state.activity_message.contains("Finished") {
+                if state.torrent_control_state != TorrentControlState::Running
+                    || state.activity_message.contains("Seeding")
+                    || state.activity_message.contains("Finished")
+                {
                     (1.0, "100.0%".to_string())
                 } else {
-                    let ratio = state.number_of_pieces_completed as f64 / state.number_of_pieces_total as f64;
+                    let ratio = state.number_of_pieces_completed as f64
+                        / state.number_of_pieces_total as f64;
                     (ratio, format!("{:.1}%", ratio * 100.0))
                 }
             } else {
@@ -2266,7 +2288,6 @@ fn draw_power_saving_screen(f: &mut Frame, app_state: &AppState, settings: &Sett
     f.render_widget(footer_paragraph, footer_area);
 }
 
-
 pub fn draw_file_browser(
     f: &mut Frame,
     app_state: &AppState,
@@ -2278,11 +2299,10 @@ pub fn draw_file_browser(
         FileBrowserMode::DownloadLocSelection { .. } => {
             app_state.pending_torrent_path.is_some() || !app_state.pending_torrent_link.is_empty()
         }
-        FileBrowserMode::File(_) => {
-            state.cursor_path.as_ref().map_or(false, |p| {
-                p.extension().map_or(false, |ext| ext == "torrent")
-            })
-        }
+        FileBrowserMode::File(_) => state
+            .cursor_path
+            .as_ref()
+            .is_some_and(|p| p.extension().is_some_and(|ext| ext == "torrent")),
         _ => false,
     };
 
@@ -2293,16 +2313,21 @@ pub fn draw_file_browser(
     };
 
     let default_pane = BrowserPane::FileSystem;
-    let focused_pane = if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
-        focused_pane
-    } else {
-        &default_pane
-    };
+    let focused_pane =
+        if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
+            focused_pane
+        } else {
+            &default_pane
+        };
 
     let max_area = centered_rect(90, 80, f.area());
-    f.render_widget(Clear, max_area); 
-    
-    let area = if has_preview_content { max_area } else { centered_rect(75, 80, f.area()) };
+    f.render_widget(Clear, max_area);
+
+    let area = if has_preview_content {
+        max_area
+    } else {
+        centered_rect(75, 80, f.area())
+    };
 
     let layout = calculate_file_browser_layout(
         area,
@@ -2312,24 +2337,34 @@ pub fn draw_file_browser(
     );
 
     // Styles logic (omitted for brevity, same as your source)
-    let (files_border_style, preview_border_style) = if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
-        match focused_pane {
-            BrowserPane::FileSystem => (Style::default().fg(theme::MAUVE), Style::default().fg(theme::SURFACE2)),
-            BrowserPane::TorrentPreview => (Style::default().fg(theme::SURFACE2), Style::default().fg(theme::MAUVE)),
-        }
-    } else {
-        (Style::default().fg(theme::MAUVE), Style::default().fg(theme::SAPPHIRE))
-    };
+    let (files_border_style, preview_border_style) =
+        if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
+            match focused_pane {
+                BrowserPane::FileSystem => (
+                    Style::default().fg(theme::MAUVE),
+                    Style::default().fg(theme::SURFACE2),
+                ),
+                BrowserPane::TorrentPreview => (
+                    Style::default().fg(theme::SURFACE2),
+                    Style::default().fg(theme::MAUVE),
+                ),
+            }
+        } else {
+            (
+                Style::default().fg(theme::MAUVE),
+                Style::default().fg(theme::SAPPHIRE),
+            )
+        };
 
     // FIX: Use layout.preview to trigger the draw call
     if let Some(preview_area) = layout.preview {
         draw_torrent_preview_panel(
-            f, 
-            preview_area, 
+            f,
+            preview_area,
             preview_file_path.map(|p| p.as_path()), // Passes Option<&Path>
-            browser_mode, 
-            preview_border_style, 
-            &state.current_path
+            browser_mode,
+            preview_border_style,
+            &state.current_path,
         );
     }
     if let Some(search_area) = layout.search {
@@ -2340,7 +2375,12 @@ pub fn draw_file_browser(
         let search_text = Line::from(vec![
             Span::styled("/", Style::default().fg(theme::SUBTEXT0)),
             Span::raw(&app_state.search_query),
-            Span::styled("_", Style::default().fg(theme::YELLOW).add_modifier(Modifier::SLOW_BLINK)),
+            Span::styled(
+                "_",
+                Style::default()
+                    .fg(theme::YELLOW)
+                    .add_modifier(Modifier::SLOW_BLINK),
+            ),
         ]);
         f.render_widget(Paragraph::new(search_text).block(search_block), search_area);
     }
@@ -2352,7 +2392,11 @@ pub fn draw_file_browser(
             footer_spans.push(Span::styled("[Shift+Y]", Style::default().fg(theme::GREEN)));
             footer_spans.push(Span::raw(" Confirm Selection | "));
         }
-        FileBrowserMode::DownloadLocSelection { focused_pane, use_container, .. } => {
+        FileBrowserMode::DownloadLocSelection {
+            focused_pane,
+            use_container,
+            ..
+        } => {
             footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
             footer_spans.push(Span::raw(" Switch Pane | "));
 
@@ -2365,10 +2409,10 @@ pub fn draw_file_browser(
                     footer_spans.push(Span::raw(" Priority | "));
                 }
             }
-            
+
             footer_spans.push(Span::styled("[x]", Style::default().fg(theme::MAUVE)));
             footer_spans.push(Span::raw(" Container Folder | "));
-            
+
             if *use_container {
                 footer_spans.push(Span::styled("[r]", Style::default().fg(theme::SKY)));
                 footer_spans.push(Span::raw(" Rename | "));
@@ -2383,7 +2427,7 @@ pub fn draw_file_browser(
             footer_spans.push(Span::raw(" Confirm File | "));
         }
     }
-    footer_spans.push(Span::raw(" | ")); 
+    footer_spans.push(Span::raw(" | "));
     footer_spans.push(Span::styled("[Esc]", Style::default().fg(theme::RED)));
     footer_spans.push(Span::raw(" Cancel"));
 
@@ -2397,22 +2441,31 @@ pub fn draw_file_browser(
     let list_width = layout.list.width.saturating_sub(2) as usize;
 
     let filter = match browser_mode {
-        FileBrowserMode::Directory | FileBrowserMode::DownloadLocSelection { .. } | FileBrowserMode::ConfigPathSelection { .. } => {
+        FileBrowserMode::Directory
+        | FileBrowserMode::DownloadLocSelection { .. }
+        | FileBrowserMode::ConfigPathSelection { .. } => {
             TreeFilter::from_text(&app_state.search_query)
         }
         FileBrowserMode::File(extensions) => {
             let exts = extensions.clone();
             tree::TreeFilter::new(&app_state.search_query, move |node| {
-                node.is_dir || exts.iter().any(|ext| node.name.to_lowercase().ends_with(ext))
+                node.is_dir
+                    || exts
+                        .iter()
+                        .any(|ext| node.name.to_lowercase().ends_with(ext))
             })
         }
     };
 
     let abs_path = state.current_path.to_string_lossy();
     let item_count = data.len();
-    let count_label = if item_count == 0 { " (empty)".to_string() } else { format!(" ({} items)", item_count) };
+    let count_label = if item_count == 0 {
+        " (empty)".to_string()
+    } else {
+        format!(" ({} items)", item_count)
+    };
     let left_title = format!(" {}/{} ", abs_path, count_label);
-    
+
     // ENHANCEMENT 3: Removed "Select Download Location" from right title
     let right_title = match browser_mode {
         FileBrowserMode::Directory => " Select Directory ".to_string(),
@@ -2425,17 +2478,27 @@ pub fn draw_file_browser(
     let mut list_items = Vec::new();
 
     if data.is_empty() {
-        list_items.push(ListItem::new(Line::from(vec![Span::styled("   (Directory is empty)", Style::default().fg(theme::OVERLAY0).italic())])));
+        list_items.push(ListItem::new(Line::from(vec![Span::styled(
+            "   (Directory is empty)",
+            Style::default().fg(theme::OVERLAY0).italic(),
+        )])));
     } else if visible_items.is_empty() {
-        list_items.push(ListItem::new(Line::from(vec![Span::styled(format!("   (No matching files among {} items)", item_count), Style::default().fg(theme::OVERLAY0).italic())])));
+        list_items.push(ListItem::new(Line::from(vec![Span::styled(
+            format!("   (No matching files among {} items)", item_count),
+            Style::default().fg(theme::OVERLAY0).italic(),
+        )])));
     } else {
         for item in visible_items {
             let is_cursor = item.is_cursor;
-            
+
             // 1. Basic Dimensions
             let indent_str = "  ".repeat(item.depth);
-            let indent_len = indent_str.len(); 
-            let icon_str = if item.node.is_dir { "  " } else { "   " };
+            let indent_len = indent_str.len();
+            let icon_str = if item.node.is_dir {
+                "  "
+            } else {
+                "   "
+            };
             let icon_len = 4;
 
             // 2. Prepare Date String
@@ -2452,7 +2515,9 @@ pub fn draw_file_browser(
             let available_for_name = list_width.saturating_sub(fixed_used);
 
             // SANITIZE FILENAME (Fix for Icon\r etc)
-            let clean_name: String = item.node.name
+            let clean_name: String = item
+                .node
+                .name
                 .chars()
                 .map(|c| if c.is_control() { '?' } else { c })
                 .collect();
@@ -2462,9 +2527,20 @@ pub fn draw_file_browser(
 
             // 5. Styles
             let (icon_style, text_style) = if is_cursor {
-                (Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD), Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD))
+                (
+                    Style::default()
+                        .fg(theme::YELLOW)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::YELLOW)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                let i_style = if item.node.is_dir { Style::default().fg(theme::BLUE) } else { Style::default().fg(theme::TEXT) };
+                let i_style = if item.node.is_dir {
+                    Style::default().fg(theme::BLUE)
+                } else {
+                    Style::default().fg(theme::TEXT)
+                };
                 (i_style, Style::default().fg(theme::TEXT))
             };
 
@@ -2478,7 +2554,10 @@ pub fn draw_file_browser(
             // Simply append the date with a single space if it's a file
             if !item.node.is_dir {
                 line_spans.push(Span::raw(" "));
-                line_spans.push(Span::styled(date_str, Style::default().fg(theme::SURFACE2).italic()));
+                line_spans.push(Span::styled(
+                    date_str,
+                    Style::default().fg(theme::SURFACE2).italic(),
+                ));
             }
 
             list_items.push(ListItem::new(Line::from(line_spans)));
@@ -2489,8 +2568,20 @@ pub fn draw_file_browser(
         List::new(list_items)
             .block(
                 Block::default()
-                    .title(block::Title::from(Span::styled(left_title, Style::default().fg(theme::MAUVE).bold())).alignment(Alignment::Left))
-                    .title(block::Title::from(Span::styled(right_title, Style::default().fg(theme::MAUVE).italic())).alignment(Alignment::Right))
+                    .title(
+                        block::Title::from(Span::styled(
+                            left_title,
+                            Style::default().fg(theme::MAUVE).bold(),
+                        ))
+                        .alignment(Alignment::Left),
+                    )
+                    .title(
+                        block::Title::from(Span::styled(
+                            right_title,
+                            Style::default().fg(theme::MAUVE).italic(),
+                        ))
+                        .alignment(Alignment::Right),
+                    )
                     .borders(Borders::ALL)
                     .border_style(files_border_style),
             )
@@ -2509,7 +2600,7 @@ fn draw_torrent_preview_panel(
 ) {
     let raw_title = "Torrent Preview";
     let avail_width = area.width.saturating_sub(4) as usize;
-    let title = truncate_with_ellipsis(&raw_title, avail_width);
+    let title = truncate_with_ellipsis(raw_title, avail_width);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2531,21 +2622,19 @@ fn draw_torrent_preview_panel(
     } = browser_mode
     {
         let filter = tree::TreeFilter::default();
-        
+
         let header_lines = if *use_container { 2 } else { 1 };
         let list_height = inner_area.height.saturating_sub(header_lines) as usize;
 
-        let visible_rows = TreeMathHelper::get_visible_slice(
-            preview_tree,
-            preview_state,
-            filter,
-            list_height,
-        );
+        let visible_rows =
+            TreeMathHelper::get_visible_slice(preview_tree, preview_state, filter, list_height);
 
         let mut list_items = Vec::new();
 
         // 4. Render Root Node
-        let root_style = Style::default().fg(theme::BLUE).add_modifier(Modifier::BOLD);
+        let root_style = Style::default()
+            .fg(theme::BLUE)
+            .add_modifier(Modifier::BOLD);
         let root_node = ListItem::new(Line::from(vec![
             Span::styled("▼  ", root_style),
             Span::styled(current_fs_path.to_string_lossy(), root_style),
@@ -2554,29 +2643,38 @@ fn draw_torrent_preview_panel(
 
         // 5. Render Container Header
         if *use_container {
-            let main_sep = std::path::MAIN_SEPARATOR.to_string();
+            let _main_sep = std::path::MAIN_SEPARATOR.to_string();
             let container_style = if *is_editing_name {
                 Style::default().fg(theme::SKY).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme::MAUVE).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme::MAUVE)
+                    .add_modifier(Modifier::BOLD)
             };
 
-            let mut spans = vec![
-                Span::raw("  "),
-                Span::styled("▼  ", container_style),
-            ];
+            let mut spans = vec![Span::raw("  "), Span::styled("▼  ", container_style)];
 
             if *is_editing_name {
                 // Split the string at the cursor position
                 let (before, after) = container_name.split_at(*cursor_pos);
                 spans.push(Span::styled(before, container_style));
                 // Render the block cursor
-                spans.push(Span::styled("█", Style::default().fg(theme::SKY).add_modifier(Modifier::SLOW_BLINK)));
+                spans.push(Span::styled(
+                    "█",
+                    Style::default()
+                        .fg(theme::SKY)
+                        .add_modifier(Modifier::SLOW_BLINK),
+                ));
                 spans.push(Span::styled(after, container_style));
             } else {
                 // REMOVED: The logic that was appending main_sep here
                 spans.push(Span::styled(container_name.clone(), container_style));
-                spans.push(Span::styled(" (New Container)", Style::default().fg(theme::SURFACE2).add_modifier(Modifier::ITALIC)));
+                spans.push(Span::styled(
+                    " (New Container)",
+                    Style::default()
+                        .fg(theme::SURFACE2)
+                        .add_modifier(Modifier::ITALIC),
+                ));
             }
 
             let container_node = ListItem::new(Line::from(spans));
@@ -2588,12 +2686,16 @@ fn draw_torrent_preview_panel(
             .iter()
             .map(|item| {
                 let is_cursor = item.is_cursor;
-                
+
                 let base_indent_level = if *use_container { 2 } else { 1 };
                 let total_indent = base_indent_level + item.depth;
                 let indent_str = "  ".repeat(total_indent);
-                
-                let icon = if item.node.is_dir { "  " } else { "   " };
+
+                let icon = if item.node.is_dir {
+                    "  "
+                } else {
+                    "   "
+                };
 
                 // --- 1. Base Content Style (Color + Strikethrough) ---
                 let (base_content_style, tag) = match item.node.payload.priority {
@@ -2642,34 +2744,31 @@ fn draw_torrent_preview_panel(
                     .remove_modifier(Modifier::UNDERLINED);
 
                 let mut spans = Vec::new();
-                
+
                 // Indent: CLEAN
                 spans.push(Span::styled(indent_str, structure_style));
-                
+
                 // Icon: CLEAN
-                spans.push(Span::styled(icon, structure_style)); 
-                
+                spans.push(Span::styled(icon, structure_style));
+
                 // Name: STRUCK (if skipped)
                 spans.push(Span::styled(&item.node.name, final_content_style));
 
                 if !item.node.is_dir {
                     let size_str = format_bytes(item.node.payload.size);
-                    
+
                     // Spacer between Name & Size: CLEAN (No strikethrough)
                     spans.push(Span::styled(" ", structure_style));
 
                     // Size: CLEAN (No strikethrough, but keeps priority color)
-                    spans.push(Span::styled(
-                        format!("({}) ", size_str),
-                        structure_style, 
-                    ));
+                    spans.push(Span::styled(format!("({}) ", size_str), structure_style));
 
                     // Tag ([SKIP]): CLEAN
                     if !tag.is_empty() {
                         spans.push(Span::styled(tag, structure_style));
                     }
                 } else if item.node.payload.priority == FilePriority::Mixed {
-                     // Mixed Priority [*] Tag: CLEAN
+                    // Mixed Priority [*] Tag: CLEAN
                     spans.push(Span::styled(" [*]", structure_style));
                 }
 

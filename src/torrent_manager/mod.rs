@@ -15,8 +15,8 @@ use crate::token_bucket::TokenBucket;
 
 use crate::torrent_file::Torrent;
 
-use crate::app::TorrentMetrics;
 use crate::app::FilePriority;
+use crate::app::TorrentMetrics;
 
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::Duration;
@@ -90,7 +90,10 @@ pub enum ManagerEvent {
     BlockSent {
         info_hash: Vec<u8>,
     },
-    MetadataLoaded { info_hash: Vec<u8>, torrent: Box<Torrent> },
+    MetadataLoaded {
+        info_hash: Vec<u8>,
+        torrent: Box<Torrent>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -101,7 +104,7 @@ pub enum ManagerCommand {
     DeleteFile,
     SetDataRate(u64),
     UpdateListenPort(u16),
-    SetUserTorrentConfig { 
+    SetUserTorrentConfig {
         torrent_data_path: PathBuf,
         file_priorities: HashMap<usize, FilePriority>,
     },

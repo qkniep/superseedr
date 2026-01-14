@@ -169,14 +169,14 @@ impl TorrentManager {
             dht_handle,
             incoming_peer_rx,
             metrics_tx,
-            torrent_data_path,
+            torrent_data_path: _,
             manager_command_rx,
             manager_event_tx,
             settings,
             resource_manager,
             global_dl_bucket,
             global_ul_bucket,
-            file_priorities,
+            file_priorities: _,
             ..
         } = torrent_parameters;
 
@@ -273,7 +273,8 @@ impl TorrentManager {
         let file_priorities = torrent_parameters.file_priorities.clone();
 
         // 3. Initialize Base Manager (Awaiting Metadata)
-        let mut manager = Self::init_base(torrent_parameters, info_hash, trackers, validation_status);
+        let mut manager =
+            Self::init_base(torrent_parameters, info_hash, trackers, validation_status);
 
         // 4. Calculate Metadata Length (Required for protocol)
         let bencoded_data = serde_bencode::to_bytes(&torrent)
@@ -996,7 +997,10 @@ impl TorrentManager {
                 let _ = self.dht_trigger_tx.send(());
             }
 
-            Effect::DeleteFiles { multi_file_info, data_path } => {
+            Effect::DeleteFiles {
+                multi_file_info,
+                data_path,
+            } => {
                 let info_hash = self.state.info_hash.clone();
                 let tx = self.manager_event_tx.clone();
                 let torrent_name = self.state.torrent.as_ref().map(|t| t.info.name.clone());
@@ -1007,23 +1011,21 @@ impl TorrentManager {
                     for file_info in &multi_file_info.files {
                         if let Err(e) = fs::remove_file(&file_info.path).await {
                             if e.kind() != std::io::ErrorKind::NotFound {
-                                let error_msg = format!(
-                                    "Failed to delete file {:?}: {}",
-                                    &file_info.path, e
-                                );
+                                let error_msg =
+                                    format!("Failed to delete file {:?}: {}", &file_info.path, e);
                                 event!(Level::ERROR, "{}", error_msg);
                                 result = Err(error_msg);
                             }
                         }
                     }
 
-                        if result.is_ok() && multi_file_info.files.len() > 1 {
-                            if let Some(name) = torrent_name {
-                                let content_dir = data_path.join(name);
-                                event!(Level::INFO, "Cleaning up directory: {:?}", &content_dir);
-                                let _ = fs::remove_dir(&content_dir).await;
-                            }
+                    if result.is_ok() && multi_file_info.files.len() > 1 {
+                        if let Some(name) = torrent_name {
+                            let content_dir = data_path.join(name);
+                            event!(Level::INFO, "Cleaning up directory: {:?}", &content_dir);
+                            let _ = fs::remove_dir(&content_dir).await;
                         }
+                    }
 
                     let _ = tx
                         .send(ManagerEvent::DeletionComplete(info_hash, result))
@@ -1172,7 +1174,6 @@ impl TorrentManager {
         _event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
-
         let is_fresh_download = tokio::select! {
             biased;
             _ = shutdown_rx.recv() => return Err(StorageError::Io(std::io::Error::other("Shutdown"))),
@@ -1372,8 +1373,7 @@ impl TorrentManager {
 
                     if is_valid {
                         completed_pieces.push(piece_index);
-                    }
-                    else {
+                    } else {
                         event!(Level::DEBUG, "Hash mismatch for piece {}", piece_index);
                     }
                 } else if skip_hashing {
@@ -1854,7 +1854,10 @@ impl TorrentManager {
             let multi_file_info = match self.state.multi_file_info.as_ref() {
                 Some(mfi) => mfi,
                 None => {
-                    event!(Level::DEBUG, "Cannot send metrics: File info not available.");
+                    event!(
+                        Level::DEBUG,
+                        "Cannot send metrics: File info not available."
+                    );
                     return;
                 }
             };
@@ -1883,11 +1886,11 @@ impl TorrentManager {
             let torrent_name_clone = torrent.info.name.clone();
             let number_of_pieces_total = self.state.piece_manager.bitfield.len() as u32;
             let number_of_pieces_completed =
-            if self.state.torrent_status == TorrentStatus::Validating {
-                self.state.validation_pieces_found
-            } else {
-                number_of_pieces_total - self.state.piece_manager.pieces_remaining as u32
-            };
+                if self.state.torrent_status == TorrentStatus::Validating {
+                    self.state.validation_pieces_found
+                } else {
+                    number_of_pieces_total - self.state.piece_manager.pieces_remaining as u32
+                };
 
             let number_of_successfully_connected_peers = self.state.peers.len();
 
@@ -2113,8 +2116,8 @@ impl TorrentManager {
 
                         },
                         ManagerCommand::SetUserTorrentConfig { torrent_data_path, file_priorities } => {
-                            self.apply_action(Action::SetUserTorrentConfig { 
-                                torrent_data_path, 
+                            self.apply_action(Action::SetUserTorrentConfig {
+                                torrent_data_path,
                                 file_priorities,
                             });
                         }
@@ -4282,8 +4285,14 @@ mod resource_tests {
 
         manager.state.torrent = Some(torrent.clone());
         manager.state.multi_file_info = Some(
-            crate::storage::MultiFileInfo::new(&temp_dir, "v2_tail_file", None, Some(file_len), &HashMap::new())
-                .unwrap(),
+            crate::storage::MultiFileInfo::new(
+                &temp_dir,
+                "v2_tail_file",
+                None,
+                Some(file_len),
+                &HashMap::new(),
+            )
+            .unwrap(),
         );
 
         manager.state.piece_to_roots.insert(

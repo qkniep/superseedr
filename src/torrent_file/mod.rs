@@ -187,7 +187,9 @@ impl Torrent {
     pub fn file_list(&self) -> Vec<(Vec<String>, u64)> {
         if !self.info.files.is_empty() {
             // Multi-file case
-            self.info.files.iter()
+            self.info
+                .files
+                .iter()
                 .map(|f| (f.path.clone(), f.length as u64))
                 .collect()
         } else {

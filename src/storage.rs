@@ -74,7 +74,7 @@ impl MultiFileInfo {
         } else {
             let total_size = length.unwrap_or(0);
             let file_path = root_dir.join(torrent_name);
-            
+
             // Single file torrents: Index 0
             let priority = file_priorities.get(&0).unwrap_or(&FilePriority::Normal);
             let is_skipped = *priority == FilePriority::Skip;
@@ -99,7 +99,6 @@ impl MultiFileInfo {
 pub async fn create_and_allocate_files(
     multi_file_info: &MultiFileInfo,
 ) -> Result<bool, StorageError> {
-
     let mut is_fresh_download = true;
 
     for file_info in &multi_file_info.files {
@@ -107,15 +106,13 @@ pub async fn create_and_allocate_files(
         if file_info.is_padding {
             continue;
         }
-        
+
         let exists = try_exists(&file_info.path).await?;
         if exists {
             is_fresh_download = false;
         }
-        if file_info.is_skipped {
-            if !exists {
-                continue;
-            }
+        if file_info.is_skipped && !exists {
+            continue;
         }
 
         // Ensure the parent directory for the file exists.
@@ -175,8 +172,8 @@ pub async fn read_data_from_disk(
                     };
 
                     if should_fake_read {
-                         let zeros = vec![0u8; bytes_to_read_in_this_file];
-                         buffer.extend_from_slice(&zeros);
+                        let zeros = vec![0u8; bytes_to_read_in_this_file];
+                        buffer.extend_from_slice(&zeros);
                     } else {
                         // Normal Read (Existing Skipped Files or Normal Files)
                         let mut file = File::open(&file_info.path).await?;
@@ -227,12 +224,12 @@ pub async fn write_data_to_disk(
                 if !file_info.is_padding {
                     // Note: We ALLOW writing to skipped files if necessary (e.g. boundary pieces).
                     // This will create them lazily if they were skipped during allocation.
-                    
+
                     // Ensure directory exists (lazy creation for skipped boundary files)
                     if file_info.is_skipped {
-                         if let Some(parent) = file_info.path.parent() {
-                             fs::create_dir_all(parent).await?;
-                         }
+                        if let Some(parent) = file_info.path.parent() {
+                            fs::create_dir_all(parent).await?;
+                        }
                     }
 
                     let mut file = OpenOptions::new()
@@ -272,7 +269,10 @@ pub async fn write_data_to_disk(
     )))
 }
 
-pub async fn build_fs_tree(path: &Path, depth: usize) -> Result<Vec<RawNode<FileMetadata>>, std::io::Error> {
+pub async fn build_fs_tree(
+    path: &Path,
+    depth: usize,
+) -> Result<Vec<RawNode<FileMetadata>>, std::io::Error> {
     let mut nodes = Vec::new();
     let mut entries = match fs::read_dir(path).await {
         Ok(e) => e,
@@ -285,13 +285,15 @@ pub async fn build_fs_tree(path: &Path, depth: usize) -> Result<Vec<RawNode<File
         let name = entry.file_name().to_string_lossy().into_owned();
         let full_path = entry.path();
         let size = meta.len();
-        
+
         let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
         let mut is_loaded = true;
         let children = if is_dir {
             if depth > 0 {
-                Box::pin(build_fs_tree(&entry.path(), depth - 1)).await.unwrap_or_default()
+                Box::pin(build_fs_tree(&entry.path(), depth - 1))
+                    .await
+                    .unwrap_or_default()
             } else {
                 is_loaded = false;
                 Vec::new()
@@ -304,8 +306,8 @@ pub async fn build_fs_tree(path: &Path, depth: usize) -> Result<Vec<RawNode<File
             name,
             full_path,
             is_dir,
-            payload: FileMetadata { 
-                size, 
+            payload: FileMetadata {
+                size,
                 is_loaded,
                 modified,
                 is_virtual: false,
@@ -321,14 +323,14 @@ pub async fn build_fs_tree(path: &Path, depth: usize) -> Result<Vec<RawNode<File
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::FilePriority;
     use crate::errors::StorageError;
     use crate::torrent_file::InfoFile;
-    use crate::app::FilePriority;
 
+    use std::collections::HashMap;
     use tempfile::tempdir;
     use tokio::fs::File;
     use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
-    use std::collections::HashMap;
 
     // --- HELPER FUNCTIONS ---
 
@@ -339,7 +341,8 @@ mod tests {
         let torrent_name = "single_file.txt";
         let length = 100;
         // FIX: Pass empty map for default priorities
-        let mfi = MultiFileInfo::new(root, torrent_name, None, Some(length), &HashMap::new()).unwrap();
+        let mfi =
+            MultiFileInfo::new(root, torrent_name, None, Some(length), &HashMap::new()).unwrap();
         (dir, mfi)
     }
 
@@ -364,7 +367,8 @@ mod tests {
         ];
         // Total size 120
         // FIX: Pass empty map
-        let mfi = MultiFileInfo::new(root, torrent_name, Some(&files), None, &HashMap::new()).unwrap();
+        let mfi =
+            MultiFileInfo::new(root, torrent_name, Some(&files), None, &HashMap::new()).unwrap();
         (dir, mfi)
     }
 
@@ -398,7 +402,8 @@ mod tests {
             },
         ];
         // FIX: Pass empty map
-        let mfi = MultiFileInfo::new(root, torrent_name, Some(&files), None, &HashMap::new()).unwrap();
+        let mfi =
+            MultiFileInfo::new(root, torrent_name, Some(&files), None, &HashMap::new()).unwrap();
         (dir, mfi)
     }
 
@@ -606,13 +611,23 @@ mod tests {
         let root = dir.path();
         let torrent_name = "skip_test";
         let files = vec![
-            InfoFile { path: vec!["normal.txt".to_string()], length: 50, md5sum: None, attr: None },
-            InfoFile { path: vec!["skipped.txt".to_string()], length: 50, md5sum: None, attr: None },
+            InfoFile {
+                path: vec!["normal.txt".to_string()],
+                length: 50,
+                md5sum: None,
+                attr: None,
+            },
+            InfoFile {
+                path: vec!["skipped.txt".to_string()],
+                length: 50,
+                md5sum: None,
+                attr: None,
+            },
         ];
-        
+
         // Skip index 1
         let mut priorities = HashMap::new();
-        priorities.insert(1, FilePriority::Skip); 
+        priorities.insert(1, FilePriority::Skip);
 
         let mfi = MultiFileInfo::new(root, torrent_name, Some(&files), None, &priorities).unwrap();
 
@@ -623,8 +638,14 @@ mod tests {
         create_and_allocate_files(&mfi).await.unwrap();
 
         // THEN:
-        assert!(tokio::fs::try_exists(&mfi.files[0].path).await.unwrap(), "Normal file should exist");
-        assert!(!tokio::fs::try_exists(&mfi.files[1].path).await.unwrap(), "Skipped file should NOT exist");
+        assert!(
+            tokio::fs::try_exists(&mfi.files[0].path).await.unwrap(),
+            "Normal file should exist"
+        );
+        assert!(
+            !tokio::fs::try_exists(&mfi.files[1].path).await.unwrap(),
+            "Skipped file should NOT exist"
+        );
     }
 
     #[tokio::test]
@@ -633,15 +654,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let torrent_name = "skip_read_test";
-        let files = vec![
-            InfoFile { path: vec!["skipped.txt".to_string()], length: 100, md5sum: None, attr: None },
-        ];
-        
+        let files = vec![InfoFile {
+            path: vec!["skipped.txt".to_string()],
+            length: 100,
+            md5sum: None,
+            attr: None,
+        }];
+
         let mut priorities = HashMap::new();
         priorities.insert(0, FilePriority::Skip);
 
         let mfi = MultiFileInfo::new(root, torrent_name, Some(&files), None, &priorities).unwrap();
-        
+
         // Ensure not created
         create_and_allocate_files(&mfi).await.unwrap();
         assert!(!tokio::fs::try_exists(&mfi.files[0].path).await.unwrap());
@@ -650,7 +674,11 @@ mod tests {
         let data = read_data_from_disk(&mfi, 0, 10).await.unwrap();
 
         // THEN: Return zeros (simulating missing data), NOT error
-        assert_eq!(data, vec![0; 10], "Should return zeros for missing skipped file");
+        assert_eq!(
+            data,
+            vec![0; 10],
+            "Should return zeros for missing skipped file"
+        );
     }
 
     #[tokio::test]
@@ -659,26 +687,33 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let torrent_name = "skip_exist_test";
-        let files = vec![
-            InfoFile { path: vec!["existing.txt".to_string()], length: 10, md5sum: None, attr: None },
-        ];
-        
+        let files = vec![InfoFile {
+            path: vec!["existing.txt".to_string()],
+            length: 10,
+            md5sum: None,
+            attr: None,
+        }];
+
         let mut priorities = HashMap::new();
         priorities.insert(0, FilePriority::Skip);
 
         let mfi = MultiFileInfo::new(root, torrent_name, Some(&files), None, &priorities).unwrap();
-        
+
         // Setup: Manually create the file with data "11111..."
         {
-             let mut file = File::create(&mfi.files[0].path).await.unwrap();
-             file.write_all(&vec![1u8; 10]).await.unwrap();
+            let mut file = File::create(&mfi.files[0].path).await.unwrap();
+            file.write_all(&[1u8; 10]).await.unwrap();
         }
 
         // WHEN: Read from existing skipped file
         let data = read_data_from_disk(&mfi, 0, 10).await.unwrap();
 
         // THEN: Return actual data
-        assert_eq!(data, vec![1u8; 10], "Should read actual data if skipped file exists");
+        assert_eq!(
+            data,
+            vec![1u8; 10],
+            "Should read actual data if skipped file exists"
+        );
     }
 
     #[tokio::test]
@@ -689,15 +724,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let torrent_name = "lazy_write_test";
-        let files = vec![
-            InfoFile { path: vec!["lazy.txt".to_string()], length: 50, md5sum: None, attr: None },
-        ];
-        
+        let files = vec![InfoFile {
+            path: vec!["lazy.txt".to_string()],
+            length: 50,
+            md5sum: None,
+            attr: None,
+        }];
+
         let mut priorities = HashMap::new();
         priorities.insert(0, FilePriority::Skip);
 
         let mfi = MultiFileInfo::new(root, torrent_name, Some(&files), None, &priorities).unwrap();
-        
+
         // 1. Allocator skips it
         create_and_allocate_files(&mfi).await.unwrap();
         assert!(!tokio::fs::try_exists(&mfi.files[0].path).await.unwrap());
@@ -707,8 +745,11 @@ mod tests {
         write_data_to_disk(&mfi, 0, &data).await.unwrap();
 
         // 3. File should now exist and contain data
-        assert!(tokio::fs::try_exists(&mfi.files[0].path).await.unwrap(), "Should lazy create skipped file on write");
-        
+        assert!(
+            tokio::fs::try_exists(&mfi.files[0].path).await.unwrap(),
+            "Should lazy create skipped file on write"
+        );
+
         let mut file = File::open(&mfi.files[0].path).await.unwrap();
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.unwrap();
@@ -726,10 +767,30 @@ mod tests {
         let root = dir.path();
         let torrent_name = "mixed_batch";
         let files = vec![
-            InfoFile { path: vec!["0_normal.txt".to_string()], length: 10, md5sum: None, attr: None },
-            InfoFile { path: vec!["1_skip.txt".to_string()], length: 10, md5sum: None, attr: None },
-            InfoFile { path: vec!["2_pad.txt".to_string()], length: 5, md5sum: None, attr: Some("p".into()) },
-            InfoFile { path: vec!["3_normal.txt".to_string()], length: 10, md5sum: None, attr: None },
+            InfoFile {
+                path: vec!["0_normal.txt".to_string()],
+                length: 10,
+                md5sum: None,
+                attr: None,
+            },
+            InfoFile {
+                path: vec!["1_skip.txt".to_string()],
+                length: 10,
+                md5sum: None,
+                attr: None,
+            },
+            InfoFile {
+                path: vec!["2_pad.txt".to_string()],
+                length: 5,
+                md5sum: None,
+                attr: Some("p".into()),
+            },
+            InfoFile {
+                path: vec!["3_normal.txt".to_string()],
+                length: 10,
+                md5sum: None,
+                attr: None,
+            },
         ];
 
         let mut priorities = HashMap::new();
@@ -740,9 +801,21 @@ mod tests {
         create_and_allocate_files(&mfi).await.unwrap();
 
         // Checks
-        assert!(tokio::fs::try_exists(&mfi.files[0].path).await.unwrap(), "Normal 0 missing");
-        assert!(!tokio::fs::try_exists(&mfi.files[1].path).await.unwrap(), "Skip 1 present (should be missing)");
-        assert!(!tokio::fs::try_exists(&mfi.files[2].path).await.unwrap(), "Padding 2 present (should be missing)");
-        assert!(tokio::fs::try_exists(&mfi.files[3].path).await.unwrap(), "Normal 3 missing");
+        assert!(
+            tokio::fs::try_exists(&mfi.files[0].path).await.unwrap(),
+            "Normal 0 missing"
+        );
+        assert!(
+            !tokio::fs::try_exists(&mfi.files[1].path).await.unwrap(),
+            "Skip 1 present (should be missing)"
+        );
+        assert!(
+            !tokio::fs::try_exists(&mfi.files[2].path).await.unwrap(),
+            "Padding 2 present (should be missing)"
+        );
+        assert!(
+            tokio::fs::try_exists(&mfi.files[3].path).await.unwrap(),
+            "Normal 3 missing"
+        );
     }
 }

@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::app::BrowserPane; // Ensure this is imported at top
 use crate::app::AppState;
 use crate::config::{PeerSortColumn, TorrentSortColumn};
 use ratatui::prelude::*;
@@ -14,28 +13,25 @@ pub struct FileBrowserLayout {
     pub area: Rect,
     pub content: Rect,
     pub footer: Rect,
-    
+
     pub preview: Option<Rect>,
     pub browser: Rect,
-    
+
     pub search: Option<Rect>,
     pub list: Rect,
 }
 
 pub fn calculate_file_browser_layout(
-    area: Rect, 
-    show_preview: bool, 
+    area: Rect,
+    show_preview: bool,
     show_search: bool,
-    focused_pane: &crate::app::BrowserPane, 
+    focused_pane: &crate::app::BrowserPane,
 ) -> FileBrowserLayout {
     let mut plan = FileBrowserLayout::default();
-    
+
     // 1. Global Split: Content vs Footer
-    let main_chunks = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ]).split(area);
-    
+    let main_chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+
     plan.area = area;
     plan.content = main_chunks[0];
     plan.footer = main_chunks[1];
@@ -43,21 +39,17 @@ pub fn calculate_file_browser_layout(
     // 2. Horizontal Split
     let content_chunks = if show_preview {
         let constraints = match focused_pane {
-            crate::app::BrowserPane::FileSystem => [
-                Constraint::Percentage(35), 
-                Constraint::Percentage(65)
-            ],
-            crate::app::BrowserPane::TorrentPreview => [
-                Constraint::Percentage(60), 
-                Constraint::Percentage(40)
-            ],
+            crate::app::BrowserPane::FileSystem => {
+                [Constraint::Percentage(35), Constraint::Percentage(65)]
+            }
+            crate::app::BrowserPane::TorrentPreview => {
+                [Constraint::Percentage(60), Constraint::Percentage(40)]
+            }
         };
         Layout::horizontal(constraints).split(plan.content)
     } else {
-        Layout::horizontal([
-            Constraint::Percentage(0), 
-            Constraint::Percentage(100)
-        ]).split(plan.content)
+        Layout::horizontal([Constraint::Percentage(0), Constraint::Percentage(100)])
+            .split(plan.content)
     };
 
     if show_preview {
@@ -67,8 +59,10 @@ pub fn calculate_file_browser_layout(
 
     // 3. Browser Vertical Split: Search vs List (No Options)
     let mut constraints = Vec::new();
-    if show_search { constraints.push(Constraint::Length(3)); } 
-    constraints.push(Constraint::Min(0));                       
+    if show_search {
+        constraints.push(Constraint::Length(3));
+    }
+    constraints.push(Constraint::Min(0));
 
     let browser_chunks = Layout::vertical(constraints).split(plan.browser);
 

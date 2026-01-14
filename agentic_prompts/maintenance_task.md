@@ -19,5 +19,6 @@ I am preparing to merge my branch to main. Please perform the following 4 tasks 
 4. **Verify:**
    - Run the full test suite using: `cargo test --all-targets --all-features`
    - Notify me only if all tests pass.
+   - Review your changes one last time, ensure no logic was changed.
 
 **IMPORTANT:** Do NOT run `git commit` or `git push`. Just modify the files and verify the build.
