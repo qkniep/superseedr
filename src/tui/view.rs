@@ -2016,76 +2016,85 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
     } = &app_state.mode
     {
         if let Some(torrent_to_delete) = app_state.torrents.get(info_hash) {
-            let area = centered_rect(50, 25, f.area());
+            let terminal_area = f.area();
+            
+            // Adaptive scaling: use more screen percentage on smaller windows
+            let rect_width = if terminal_area.width < 60 { 90 } else { 50 };
+            let rect_height = if terminal_area.height < 20 { 95 } else { 18 };
+            
+            let area = centered_rect(rect_width, rect_height, terminal_area); 
             f.render_widget(Clear, area);
 
-            let torrent_name = &torrent_to_delete.latest_state.torrent_name;
-            let download_path_str = torrent_to_delete
-                .latest_state
-                .download_path
-                .as_ref()
-                .map(|p| p.to_string_lossy())
-                .unwrap_or_else(|| std::borrow::Cow::Borrowed("Unknown path"));
+            // Adaptive padding: remove vertical padding if space is tight
+            let vert_padding = if area.height < 10 { 0 } else { 1 };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::RED))
+                .padding(Padding::new(2, 2, vert_padding, vert_padding));
+            
+            let inner_area = block.inner(area);
+            f.render_widget(block, area);
 
-            let mut text = vec![
-                Line::from(Span::styled(
-                    "Confirm Deletion",
-                    Style::default().fg(theme::RED),
-                )),
-                Line::from(""),
-                Line::from(torrent_name.as_str()),
-                Line::from(Span::styled(
-                    download_path_str.to_string(),
-                    Style::default().fg(theme::SUBTEXT1),
-                )),
-                Line::from(""),
-            ];
+            // Use Min(0) for the middle chunk to allow it to collapse on small screens
+            let chunks = Layout::vertical([
+                Constraint::Length(2), // Torrent Name & Path
+                Constraint::Min(0),    // Warning Body (Collapses if needed)
+                Constraint::Length(1), // Spacer
+                Constraint::Length(1), // Keybinds (Pinned footer)
+            ])
+            .split(inner_area);
 
-            if *with_files {
-                text.push(Line::from("Are you sure you want to remove this torrent?"));
-                text.push(Line::from(""));
-                text.push(Line::from(Span::styled(
-                    "This will also permanently delete associated files.",
-                    Style::default().fg(theme::YELLOW).bold().underlined(),
-                )));
-            } else {
-                text.push(Line::from("Are you sure you want to remove this torrent?"));
-                text.push(Line::from(""));
-                text.push(Line::from(vec![
-                    Span::raw("The downloaded files will "),
-                    Span::styled(
-                        "NOT",
-                        Style::default().fg(theme::YELLOW).bold().underlined(),
-                    ),
-                    Span::raw(" be deleted."),
-                ]));
-                text.push(Line::from(""));
-                text.push(Line::from(vec![
-                    Span::styled("Press ", Style::default().fg(theme::SUBTEXT1)),
-                    Span::styled("[D]", Style::default().fg(theme::YELLOW).bold()),
-                    Span::styled(
-                        " instead to remove the torrent and delete associated files.",
-                        Style::default().fg(theme::SUBTEXT1),
-                    ),
-                ]));
+            // 1. Torrent Identity
+            let name = &torrent_to_delete.latest_state.torrent_name;
+            let path = torrent_to_delete.latest_state.download_path.as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown Path".to_string());
+
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(name, Style::default().fg(theme::YELLOW).bold().underlined())),
+                    Line::from(Span::styled(path, Style::default().fg(theme::TEXT))),
+                ]).alignment(Alignment::Center),
+                chunks[0],
+            );
+
+            // 2. Warning Body (Only render if there is enough height)
+            if chunks[1].height > 0 {
+                let body = if *with_files {
+                    vec![
+                        Line::from(""),
+                        Line::from(Span::styled("⚠️ PERMANENT DISK WIPE ⚠️", Style::default().fg(theme::RED).bold())),
+                        Line::from(vec![
+                            Span::raw("All local data will be "),
+                            Span::styled("ERASED", Style::default().fg(theme::RED).bold().underlined()),
+                        ]),
+                    ]
+                } else {
+                    vec![
+                        Line::from(""),
+                        Line::from(Span::styled("Safe Removal (Files Kept)", Style::default().fg(theme::GREEN))),
+                        Line::from(vec![
+                            Span::raw("Use "),
+                            Span::styled("[D]", Style::default().fg(theme::YELLOW).bold()),
+                            Span::raw(" to remove files..."),
+                        ]),
+                    ]
+                };
+                f.render_widget(
+                    Paragraph::new(body).alignment(Alignment::Center).wrap(Wrap { trim: true }), 
+                    chunks[1]
+                );
             }
 
-            text.push(Line::from(""));
-            text.push(Line::from(vec![
-                Span::styled("[Enter]", Style::default().fg(theme::GREEN)),
+            // 3. Action Buttons (Footer)
+            let actions = Line::from(vec![
+                Span::styled("[Enter]", Style::default().fg(theme::GREEN).bold()),
                 Span::raw(" Confirm  "),
                 Span::styled("[Esc]", Style::default().fg(theme::RED)),
                 Span::raw(" Cancel"),
-            ]));
-
-            let block = Block::default()
-                .title("Confirmation")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::SURFACE2));
-            let paragraph = Paragraph::new(text)
-                .block(block)
-                .style(Style::default().fg(theme::TEXT));
-            f.render_widget(paragraph, area);
+            ]);
+            
+            f.render_widget(Paragraph::new(actions).alignment(Alignment::Center), chunks[3]);
         }
     }
 }
