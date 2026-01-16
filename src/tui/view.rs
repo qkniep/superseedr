@@ -2598,15 +2598,15 @@ pub fn draw_file_browser(
         List::new(list_items)
             .block(
                 Block::default()
-                    .title(
-                        block::Title::from(Span::styled(
+                    .title_top(
+                        Line::from(Span::styled(
                             left_title,
                             Style::default().fg(theme::MAUVE).bold(),
                         ))
                         .alignment(Alignment::Left),
                     )
-                    .title(
-                        block::Title::from(Span::styled(
+                    .title_top(
+                        Line::from(Span::styled(
                             right_title,
                             Style::default().fg(theme::MAUVE).italic(),
                         ))
