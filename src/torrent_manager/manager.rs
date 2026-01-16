@@ -91,7 +91,6 @@ use tokio_stream::StreamExt;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "dht")]
@@ -2557,6 +2556,7 @@ mod tests {
     use crate::torrent_manager::{ManagerCommand, TorrentParameters};
     use magnet_url::Magnet;
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::{broadcast, mpsc};
