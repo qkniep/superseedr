@@ -2154,7 +2154,9 @@ impl App {
                 display_state.latest_state.eta = message.eta;
                 display_state.latest_state.next_announce_in = message.next_announce_in;
 
-                // Also update the name if the manager discovered it from metadata
+                if let Some(path) = message.download_path {
+                    display_state.latest_state.download_path = Some(path);
+                }
                 if !message.torrent_name.is_empty() {
                     display_state.latest_state.torrent_name = message.torrent_name;
                 }

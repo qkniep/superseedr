@@ -268,10 +268,12 @@ pub enum TorrentActivity {
     Initializing,
     Paused,
     ConnectingToPeers,
+    RequestingPieces,
     DownloadingPiece(u32),
     SendingPiece(u32),
     VerifyingPiece(u32),
     AnnouncingToTracker,
+    ProcessingPeers(usize),
 
     #[cfg(feature = "dht")]
     SearchingDht,
@@ -1011,6 +1013,10 @@ impl TorrentState {
                 }
 
                 if !request_batch.is_empty() {
+                    if !matches!(self.last_activity, TorrentActivity::DownloadingPiece(_)) {
+                        self.last_activity = TorrentActivity::RequestingPieces;
+                    }
+
                     peer.inflight_requests += request_batch.len();
                     effects.push(Effect::SendToPeer {
                         peer_id: peer_id.clone(),
@@ -1060,6 +1066,9 @@ impl TorrentState {
             Action::PeerDisconnected { peer_id } => {
                 let mut effects = Vec::new();
                 if let Some(removed_peer) = self.peers.remove(&peer_id) {
+                    self.number_of_successfully_connected_peers = self.peers.len();
+                    self.last_activity = TorrentActivity::ProcessingPeers(self.peers.len());
+
                     for piece_index in removed_peer.pending_requests {
                         if self.piece_manager.bitfield.get(piece_index as usize)
                             != Some(&PieceStatus::Done)

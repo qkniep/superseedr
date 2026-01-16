@@ -1806,6 +1806,10 @@ impl TorrentManager {
             return "Paused".to_string();
         }
 
+        if let TorrentActivity::ProcessingPeers(count) = &self.state.last_activity {
+            return format!("Processing peers ({})", count);
+        }
+
         if self.state.torrent_status == TorrentStatus::AwaitingMetadata {
             return "Retrieving Metadata...".to_string();
         }
@@ -1822,6 +1826,8 @@ impl TorrentManager {
             };
         }
 
+
+        // 1. Prioritize active Data Transfer
         if dl_speed > 0 {
             return match &self.state.last_activity {
                 TorrentActivity::DownloadingPiece(p) => format!("Receiving piece #{}", p),
@@ -1837,16 +1843,36 @@ impl TorrentManager {
             };
         }
 
-        if !self.state.peers.is_empty() {
-            return "Stalled".to_string();
+        // 2. Handle specific non-transfer activities
+        match &self.state.last_activity {
+            TorrentActivity::RequestingPieces => return "Requesting pieces...".to_string(),
+            TorrentActivity::AnnouncingToTracker => return "Contacting tracker...".to_string(),
+            #[cfg(feature = "dht")]
+            TorrentActivity::SearchingDht => return "Searching DHT for peers...".to_string(),
+            _ => {}
         }
 
-        match &self.state.last_activity {
-            #[cfg(feature = "dht")]
-            TorrentActivity::SearchingDht => "Searching DHT for peers...".to_string(),
-            TorrentActivity::AnnouncingToTracker => "Contacting tracker...".to_string(),
-            _ => "Connecting to peers...".to_string(),
+        // 3. Refined "Stalled" vs "Connecting" Logic
+        let connected_peers = self.state.peers.len();
+        if connected_peers == 0 {
+            return "Connecting to peers...".to_string();
         }
+
+        // If we have peers but no download speed:
+        let is_interested_in_anyone = self.state.peers.values().any(|p| p.am_interested);
+        let need_pieces = !self.state.piece_manager.need_queue.is_empty();
+
+        if need_pieces {
+            if is_interested_in_anyone {
+                // We want data, we have peers, but no one is giving it to us (Choked or Slow)
+                return "Stalled (Waiting for unchoke)".to_string();
+            } else {
+                // We have peers, but none of them have the pieces we need
+                return "Stalled (No peers have required pieces)".to_string();
+            }
+        }
+
+        "Idle".to_string()
     }
 
     fn send_metrics(&mut self, bytes_dl: u64, bytes_ul: u64) {
@@ -1972,6 +1998,7 @@ impl TorrentManager {
             let torrent_state = TorrentMetrics {
                 info_hash: info_hash_clone,
                 torrent_name: torrent_name_clone,
+                download_path: self.state.torrent_data_path.clone(),
                 number_of_successfully_connected_peers,
                 number_of_pieces_total,
                 number_of_pieces_completed,
