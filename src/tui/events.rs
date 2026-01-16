@@ -5,7 +5,7 @@ use crate::app::AppCommand;
 use crate::app::AppState;
 use crate::app::FileBrowserMode;
 use crate::app::{App, AppMode, ConfigItem, SelectedHeader, TorrentControlState};
-use crate::app::{BrowserPane, FilePriority, TorrentPreviewPayload};
+use crate::app::{BrowserPane, TorrentPreviewPayload};
 use crate::torrent_manager::ManagerCommand;
 
 use strum::IntoEnumIterator;
@@ -41,7 +41,6 @@ static GLOBAL_ESC_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
 enum PriorityAction {
-    Set(FilePriority),
     Cycle,
 }
 
@@ -1030,7 +1029,6 @@ fn apply_priority_action(
         let found = node.find_and_act(target_path, &mut |target_node| {
             // 1. Determine the new priority
             let new_priority = match action {
-                PriorityAction::Set(p) => p,
                 PriorityAction::Cycle => target_node.payload.priority.next(),
             };
 

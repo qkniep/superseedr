@@ -165,10 +165,9 @@ pub enum FileBrowserMode {
 
 #[derive(Debug, Clone)]
 pub struct FileMetadata {
+    #[allow(dead_code)]
     pub size: u64,
-    pub is_loaded: bool,
     pub modified: std::time::SystemTime,
-    pub is_virtual: bool,
 }
 
 #[derive(Debug, Default)]

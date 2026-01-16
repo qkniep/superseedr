@@ -288,14 +288,12 @@ pub async fn build_fs_tree(
 
         let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
-        let mut is_loaded = true;
         let children = if is_dir {
             if depth > 0 {
                 Box::pin(build_fs_tree(&entry.path(), depth - 1))
                     .await
                     .unwrap_or_default()
             } else {
-                is_loaded = false;
                 Vec::new()
             }
         } else {
@@ -306,12 +304,7 @@ pub async fn build_fs_tree(
             name,
             full_path,
             is_dir,
-            payload: FileMetadata {
-                size,
-                is_loaded,
-                modified,
-                is_virtual: false,
-            },
+            payload: FileMetadata { size, modified },
             children,
         });
     }

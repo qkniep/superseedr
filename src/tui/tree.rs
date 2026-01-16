@@ -311,7 +311,6 @@ pub enum TreeAction {
     Left,
     Right,
     Toggle,
-    Select,
 }
 
 pub struct TreeMathHelper;
@@ -468,14 +467,6 @@ impl TreeMathHelper {
                     }
                 }
             }
-            TreeAction::Select => {
-                let path = &full_list[current_idx].path;
-                if state.selected_paths.contains(path) {
-                    state.selected_paths.remove(path);
-                } else {
-                    state.selected_paths.insert(path.clone());
-                }
-            }
         }
 
         state.cursor_path = Some(full_list[new_idx].path.clone());
@@ -486,13 +477,6 @@ impl TreeMathHelper {
             state.top_most_offset = (new_idx + 1).saturating_sub(effective_height);
         }
         true
-    }
-
-    pub fn get_parent_path(state: &TreeViewState) -> Option<PathBuf> {
-        state
-            .cursor_path
-            .as_ref()
-            .and_then(|path| path.parent().map(|p| p.to_path_buf()))
     }
 }
 
