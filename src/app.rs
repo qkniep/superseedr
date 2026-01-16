@@ -1002,19 +1002,21 @@ impl App {
                         .as_ref()
                         .is_some_and(|p| parent_dir == Some(p));
 
-                    let is_system_watch =
-                        get_watch_path().is_some_and(|(p, _)| parent_dir == Some(&p));
+                    // 1. Get system watch info specifically to access the 'processed' path
+                    let system_watch_info = get_watch_path();
+                    let is_system_watch = system_watch_info
+                        .as_ref()
+                        .is_some_and(|(p, _)| parent_dir == Some(p));
 
                     if is_user_watch || is_system_watch {
                         let move_successful =
-                            if let Some(watch_folder) = &self.client_configs.watch_folder {
+                            // 2. Always target the system 'processed_path' for consistency
+                            if let Some((_, processed_path)) = system_watch_info {
                                 (|| {
-                                    let parent = watch_folder.parent()?;
-                                    let processed_folder = parent.join("processed_torrents");
-                                    fs::create_dir_all(&processed_folder).ok()?;
+                                    fs::create_dir_all(&processed_path).ok()?;
 
                                     let file_name = path.file_name()?;
-                                    let new_path = processed_folder.join(file_name);
+                                    let new_path = processed_path.join(file_name);
                                     fs::rename(&path, &new_path).ok()?;
 
                                     Some(())
