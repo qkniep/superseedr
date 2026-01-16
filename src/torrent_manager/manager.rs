@@ -1826,7 +1826,6 @@ impl TorrentManager {
             };
         }
 
-
         // 1. Prioritize active Data Transfer
         if dl_speed > 0 {
             return match &self.state.last_activity {

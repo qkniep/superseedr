@@ -2017,12 +2017,12 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
     {
         if let Some(torrent_to_delete) = app_state.torrents.get(info_hash) {
             let terminal_area = f.area();
-            
+
             // Adaptive scaling: use more screen percentage on smaller windows
             let rect_width = if terminal_area.width < 60 { 90 } else { 50 };
             let rect_height = if terminal_area.height < 20 { 95 } else { 18 };
-            
-            let area = centered_rect(rect_width, rect_height, terminal_area); 
+
+            let area = centered_rect(rect_width, rect_height, terminal_area);
             f.render_widget(Clear, area);
 
             // Adaptive padding: remove vertical padding if space is tight
@@ -2031,7 +2031,7 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::RED))
                 .padding(Padding::new(2, 2, vert_padding, vert_padding));
-            
+
             let inner_area = block.inner(area);
             f.render_widget(block, area);
 
@@ -2046,15 +2046,22 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
 
             // 1. Torrent Identity
             let name = &torrent_to_delete.latest_state.torrent_name;
-            let path = torrent_to_delete.latest_state.download_path.as_ref()
+            let path = torrent_to_delete
+                .latest_state
+                .download_path
+                .as_ref()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown Path".to_string());
 
             f.render_widget(
                 Paragraph::new(vec![
-                    Line::from(Span::styled(name, Style::default().fg(theme::YELLOW).bold().underlined())),
+                    Line::from(Span::styled(
+                        name,
+                        Style::default().fg(theme::YELLOW).bold().underlined(),
+                    )),
                     Line::from(Span::styled(path, Style::default().fg(theme::TEXT))),
-                ]).alignment(Alignment::Center),
+                ])
+                .alignment(Alignment::Center),
                 chunks[0],
             );
 
@@ -2063,16 +2070,25 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
                 let body = if *with_files {
                     vec![
                         Line::from(""),
-                        Line::from(Span::styled("⚠️ PERMANENT DISK WIPE ⚠️", Style::default().fg(theme::RED).bold())),
+                        Line::from(Span::styled(
+                            "⚠️ PERMANENT DISK WIPE ⚠️",
+                            Style::default().fg(theme::RED).bold(),
+                        )),
                         Line::from(vec![
                             Span::raw("All local data will be "),
-                            Span::styled("ERASED", Style::default().fg(theme::RED).bold().underlined()),
+                            Span::styled(
+                                "ERASED",
+                                Style::default().fg(theme::RED).bold().underlined(),
+                            ),
                         ]),
                     ]
                 } else {
                     vec![
                         Line::from(""),
-                        Line::from(Span::styled("Safe Removal (Files Kept)", Style::default().fg(theme::GREEN))),
+                        Line::from(Span::styled(
+                            "Safe Removal (Files Kept)",
+                            Style::default().fg(theme::GREEN),
+                        )),
                         Line::from(vec![
                             Span::raw("Use "),
                             Span::styled("[D]", Style::default().fg(theme::YELLOW).bold()),
@@ -2081,8 +2097,10 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
                     ]
                 };
                 f.render_widget(
-                    Paragraph::new(body).alignment(Alignment::Center).wrap(Wrap { trim: true }), 
-                    chunks[1]
+                    Paragraph::new(body)
+                        .alignment(Alignment::Center)
+                        .wrap(Wrap { trim: true }),
+                    chunks[1],
                 );
             }
 
@@ -2093,8 +2111,11 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
                 Span::styled("[Esc]", Style::default().fg(theme::RED)),
                 Span::raw(" Cancel"),
             ]);
-            
-            f.render_widget(Paragraph::new(actions).alignment(Alignment::Center), chunks[3]);
+
+            f.render_widget(
+                Paragraph::new(actions).alignment(Alignment::Center),
+                chunks[3],
+            );
         }
     }
 }
