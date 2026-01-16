@@ -2,10 +2,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::torrent_manager::block_manager::BlockManager;
+
+#[cfg(test)]
 use crate::torrent_manager::state::TorrentStatus;
 
+#[cfg(test)]
 use rand::prelude::IndexedRandom;
-use std::collections::{HashMap, HashSet};
+
+#[cfg(test)]
+use std::collections::HashSet;
+
+use std::collections::HashMap;
 use tracing::{event, Level};
 
 #[derive(PartialEq, Clone, Copy, Debug, Default)]
@@ -245,6 +252,7 @@ impl PieceManager {
             .collect();
     }
 
+    #[cfg(test)]
     pub fn choose_piece_for_peer(
         &self,
         peer_bitfield: &[bool],

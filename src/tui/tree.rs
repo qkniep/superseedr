@@ -20,23 +20,6 @@ pub struct RawNode<T> {
 // These methods work for any T that can be Cloned.
 // ------------------------------------------------------------------
 impl<T: Clone> RawNode<T> {
-    /// Recursively finds a node by path and updates its children.
-    pub fn merge_subtree(&mut self, incoming: RawNode<T>) -> bool {
-        if self.full_path == incoming.full_path {
-            self.children = incoming.children;
-            return true;
-        }
-
-        if incoming.full_path.starts_with(&self.full_path) {
-            for child in self.children.iter_mut() {
-                if child.merge_subtree(incoming.clone()) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     pub fn expand_all(&self, state: &mut TreeViewState) {
         if self.is_dir {
             state.expanded_paths.insert(self.full_path.clone());
@@ -241,42 +224,6 @@ impl TreeViewState {
     pub fn new() -> Self {
         Self::default()
     }
-
-    pub fn rename_path(&mut self, old_path: &Path, new_path: &Path) {
-        let rewrite = |path: &PathBuf| -> Option<PathBuf> {
-            if let Ok(suffix) = path.strip_prefix(old_path) {
-                Some(new_path.join(suffix))
-            } else {
-                None
-            }
-        };
-
-        let expanded_replacements: Vec<_> = self
-            .expanded_paths
-            .iter()
-            .filter_map(|p| rewrite(p).map(|new| (p.clone(), new)))
-            .collect();
-        for (old, new) in expanded_replacements {
-            self.expanded_paths.remove(&old);
-            self.expanded_paths.insert(new);
-        }
-
-        let selected_replacements: Vec<_> = self
-            .selected_paths
-            .iter()
-            .filter_map(|p| rewrite(p).map(|new| (p.clone(), new)))
-            .collect();
-        for (old, new) in selected_replacements {
-            self.selected_paths.remove(&old);
-            self.selected_paths.insert(new);
-        }
-
-        if let Some(cursor) = &self.cursor_path {
-            if let Some(new_cursor) = rewrite(cursor) {
-                self.cursor_path = Some(new_cursor);
-            }
-        }
-    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -310,7 +257,6 @@ pub enum TreeAction {
     Down,
     Left,
     Right,
-    Toggle,
 }
 
 pub struct TreeMathHelper;
@@ -345,24 +291,6 @@ impl TreeMathHelper {
         let mut full_list = Vec::new();
         Self::project_recursive(nodes, state, &filter, 0, &mut full_list);
         Self::handle_action(state, &full_list, action, max_height)
-    }
-
-    pub fn jump_to_path<T>(
-        state: &mut TreeViewState,
-        nodes: &[RawNode<T>],
-        target_path: &Path,
-        filter: TreeFilter<T>,
-        max_height: usize,
-    ) -> bool {
-        let mut full_list = Vec::new();
-        Self::project_recursive(nodes, state, &filter, 0, &mut full_list);
-        if let Some(target_idx) = full_list.iter().position(|item| item.path == target_path) {
-            state.cursor_path = Some(target_path.to_path_buf());
-            let half = max_height / 2;
-            state.top_most_offset = target_idx.saturating_sub(half);
-            return true;
-        }
-        false
     }
 
     fn project_recursive<'a, T>(
@@ -454,16 +382,6 @@ impl TreeMathHelper {
                             .iter()
                             .position(|i| i.path == p.path)
                             .unwrap_or(current_idx);
-                    }
-                }
-            }
-            TreeAction::Toggle => {
-                let item = &full_list[current_idx];
-                if item.node.is_dir {
-                    if state.expanded_paths.contains(&item.path) {
-                        state.expanded_paths.remove(&item.path);
-                    } else {
-                        state.expanded_paths.insert(item.path.clone());
                     }
                 }
             }
@@ -584,20 +502,11 @@ mod tests {
         TreeMathHelper::apply_action(
             &mut state,
             &tree,
-            TreeAction::Up,
+            TreeAction::Left,
             TreeFilter::from_text(""),
             10,
         );
         assert_eq!(state.top_most_offset, 0);
-
-        TreeMathHelper::apply_action(
-            &mut state,
-            &tree,
-            TreeAction::Toggle,
-            TreeFilter::from_text(""),
-            2,
-        );
-        assert_eq!(state.top_most_offset, 1);
     }
 
     #[test]
@@ -674,48 +583,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_stability_on_item_removal() {
-        let mut tree = vec![
-            RawNode {
-                name: "A".into(),
-                full_path: PathBuf::from("A"),
-                is_dir: false,
-                payload: TestPayload { progress: 0.0 },
-                children: vec![],
-            },
-            RawNode {
-                name: "B".into(),
-                full_path: PathBuf::from("B"),
-                is_dir: false,
-                payload: TestPayload { progress: 0.0 },
-                children: vec![],
-            },
-            RawNode {
-                name: "C".into(),
-                full_path: PathBuf::from("C"),
-                is_dir: false,
-                payload: TestPayload { progress: 0.0 },
-                children: vec![],
-            },
-        ];
-        let mut state = TreeViewState {
-            cursor_path: Some(PathBuf::from("B")),
-            ..Default::default()
-        };
-
-        tree.remove(1);
-
-        TreeMathHelper::apply_action(
-            &mut state,
-            &tree,
-            TreeAction::Toggle,
-            TreeFilter::from_text(""),
-            10,
-        );
-        assert_eq!(state.cursor_path, Some(PathBuf::from("A")));
-    }
-
-    #[test]
     fn test_list_reordering_preserves_cursor() {
         let mut tree = vec![
             RawNode {
@@ -764,7 +631,7 @@ mod tests {
         TreeMathHelper::apply_action(
             &mut state,
             &tree,
-            TreeAction::Toggle,
+            TreeAction::Right,
             TreeFilter::from_text(""),
             10,
         );
@@ -871,197 +738,5 @@ mod tests {
         );
         assert!(!state.expanded_paths.contains(&PathBuf::from("Root")));
         assert!(state.selected_paths.contains(&child_path));
-    }
-
-    #[test]
-    fn test_jump_to_path_centers_view() {
-        let nodes: Vec<RawNode<TestPayload>> = (0..20)
-            .map(|i| RawNode {
-                name: format!("Item {}", i),
-                full_path: PathBuf::from(format!("Item {}", i)),
-                is_dir: false,
-                payload: TestPayload { progress: 0.0 },
-                children: vec![],
-            })
-            .collect();
-
-        let mut state = TreeViewState::default();
-        let max_height = 5;
-
-        let target_path = PathBuf::from("Item 10");
-        let found = TreeMathHelper::jump_to_path(
-            &mut state,
-            &nodes,
-            &target_path,
-            TreeFilter::from_text(""),
-            max_height,
-        );
-
-        assert!(found);
-        assert_eq!(state.cursor_path, Some(target_path));
-        assert_eq!(state.top_most_offset, 8);
-    }
-
-    #[test]
-    fn test_jump_to_nonexistent_path() {
-        let nodes = vec![RawNode {
-            name: "A".into(),
-            full_path: PathBuf::from("A"),
-            is_dir: false,
-            payload: TestPayload { progress: 0.0 },
-            children: vec![],
-        }];
-        let mut state = TreeViewState::default();
-
-        let found = TreeMathHelper::jump_to_path(
-            &mut state,
-            &nodes,
-            &PathBuf::from("Ghost"),
-            TreeFilter::from_text(""),
-            10,
-        );
-
-        assert!(!found);
-        assert_eq!(state.cursor_path, None);
-    }
-
-    #[test]
-    fn test_navigation_and_expansion_logic_survives_rename() {
-        let mut tree = vec![RawNode {
-            name: "docs".into(),
-            full_path: PathBuf::from("docs"),
-            is_dir: true,
-            payload: TestPayload { progress: 0.0 },
-            children: vec![RawNode {
-                name: "work".into(),
-                full_path: PathBuf::from("docs/work"),
-                is_dir: false,
-                payload: TestPayload { progress: 0.0 },
-                children: vec![],
-            }],
-        }];
-
-        let mut state = TreeViewState::default();
-        let old_root = PathBuf::from("docs");
-
-        state.expanded_paths.insert(old_root.clone());
-        state.cursor_path = Some(old_root.clone());
-
-        tree[0].name = "files".to_string();
-        tree[0].full_path = PathBuf::from("files");
-        tree[0].children[0].full_path = PathBuf::from("files/work");
-
-        let new_root = PathBuf::from("files");
-        state.rename_path(&old_root, &new_root);
-
-        assert_eq!(state.cursor_path, Some(new_root.clone()));
-
-        TreeMathHelper::apply_action(
-            &mut state,
-            &tree,
-            TreeAction::Right,
-            TreeFilter::from_text(""),
-            10,
-        );
-        let expected_child = new_root.join("work");
-        assert_eq!(state.cursor_path, Some(expected_child.clone()));
-
-        TreeMathHelper::apply_action(
-            &mut state,
-            &tree,
-            TreeAction::Left,
-            TreeFilter::from_text(""),
-            10,
-        );
-        assert_eq!(state.cursor_path, Some(new_root.clone()));
-
-        TreeMathHelper::apply_action(
-            &mut state,
-            &tree,
-            TreeAction::Left,
-            TreeFilter::from_text(""),
-            10,
-        );
-        assert!(!state.expanded_paths.contains(&new_root));
-    }
-
-    #[test]
-    fn test_deep_tree_merging() {
-        // 1. Create an initial "Skeleton" tree (mimicking first crawl)
-        let mut tree = vec![
-            RawNode {
-                name: "docs".to_string(),
-                full_path: PathBuf::from("/home/user/docs"),
-                is_dir: true,
-                payload: (),
-                children: vec![RawNode {
-                    name: "work".to_string(),
-                    full_path: PathBuf::from("/home/user/docs/work"),
-                    is_dir: true,
-                    payload: (),
-                    children: vec![], // Currently empty/not loaded
-                }],
-            },
-            RawNode {
-                name: "photos".to_string(),
-                full_path: PathBuf::from("/home/user/photos"),
-                is_dir: true,
-                payload: (),
-                children: vec![],
-            },
-        ];
-
-        // 2. Simulate a background crawl result for the "work" subfolder
-        let crawl_result = RawNode {
-            name: "work".to_string(),
-            full_path: PathBuf::from("/home/user/docs/work"),
-            is_dir: true,
-            payload: (),
-            children: vec![RawNode {
-                name: "resume.pdf".to_string(),
-                full_path: PathBuf::from("/home/user/docs/work/resume.pdf"),
-                is_dir: false,
-                payload: (),
-                children: vec![],
-            }],
-        };
-
-        // 3. Perform the merge
-        let mut merged = false;
-        for root_node in tree.iter_mut() {
-            if root_node.merge_subtree(crawl_result.clone()) {
-                merged = true;
-                break;
-            }
-        }
-
-        // 4. Assertions
-        assert!(merged, "The merge should report success");
-        assert_eq!(
-            tree.len(),
-            2,
-            "The root level should still have exactly 2 nodes (docs and photos)"
-        );
-
-        let docs_node = &tree[0];
-        assert_eq!(
-            docs_node.children.len(),
-            1,
-            "Docs should still have 1 child (work)"
-        );
-
-        let work_node = &docs_node.children[0];
-        assert_eq!(
-            work_node.children.len(),
-            1,
-            "Work node should now contain the merged resume.pdf"
-        );
-        assert_eq!(work_node.children[0].name, "resume.pdf");
-
-        let photos_node = &tree[1];
-        assert_eq!(
-            photos_node.name, "photos",
-            "The sibling node 'photos' should remain unaffected"
-        );
     }
 }
