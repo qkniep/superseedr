@@ -2071,11 +2071,11 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
                     vec![
                         Line::from(""),
                         Line::from(Span::styled(
-                            "⚠️ PERMANENT DISK WIPE ⚠️",
+                            "⚠️ PERMANENT TORRENT FILES DELETION ON ⚠️",
                             Style::default().fg(theme::RED).bold(),
                         )),
                         Line::from(vec![
-                            Span::raw("All local data will be "),
+                            Span::raw("All local data for this torrent will be "),
                             Span::styled(
                                 "ERASED",
                                 Style::default().fg(theme::RED).bold().underlined(),
