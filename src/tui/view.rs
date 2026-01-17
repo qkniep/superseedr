@@ -2354,9 +2354,9 @@ pub fn draw_file_browser(
     f.render_widget(Clear, max_area);
 
     let area = if has_preview_content {
-        max_area
+        if f.area().width < 60 { f.area() } else { centered_rect(90, 80, f.area()) }
     } else {
-        centered_rect(75, 80, f.area())
+        if f.area().width < 40 { f.area() } else { centered_rect(75, 80, f.area()) }
     };
 
     let layout = calculate_file_browser_layout(
@@ -2386,7 +2386,6 @@ pub fn draw_file_browser(
             )
         };
 
-    // FIX: Use layout.preview to trigger the draw call
     if let Some(preview_area) = layout.preview {
         draw_torrent_preview_panel(
             f,
@@ -2504,6 +2503,14 @@ pub fn draw_file_browser(
         FileBrowserMode::File(exts) => format!(" Select File [{}] ", exts.join(", ")),
     };
 
+    let layout = calculate_file_browser_layout(
+        area,
+        has_preview_content,
+        app_state.is_searching,
+        focused_pane,
+    );
+
+    let list_inner_height = layout.list.height.saturating_sub(2) as usize;
     let visible_items = TreeMathHelper::get_visible_slice(data, state, filter, inner_height);
     let mut list_items = Vec::new();
 
@@ -2532,16 +2539,17 @@ pub fn draw_file_browser(
             let icon_len = 4;
 
             // 2. Prepare Date String
-            let (date_str, date_len) = if !item.node.is_dir {
+            let (meta_str, meta_len) = if !item.node.is_dir {
                 let datetime: chrono::DateTime<chrono::Local> = item.node.payload.modified.into();
-                let s = format!(" ({})", datetime.format("%b %d %H:%M"));
+                let size_str = format_bytes(item.node.payload.size); 
+                let s = format!(" {} ({})", size_str, datetime.format("%b %d %H:%M"));
                 (s.clone(), s.len())
             } else {
                 (String::new(), 0)
             };
 
             // 3. Determine available space for filename
-            let fixed_used = indent_len + icon_len + date_len + 1;
+            let fixed_used = indent_len + icon_len + meta_len + 1;
             let available_for_name = list_width.saturating_sub(fixed_used);
 
             // SANITIZE FILENAME (Fix for Icon\r etc)
@@ -2585,7 +2593,7 @@ pub fn draw_file_browser(
             if !item.node.is_dir {
                 line_spans.push(Span::raw(" "));
                 line_spans.push(Span::styled(
-                    date_str,
+                    meta_str,
                     Style::default().fg(theme::SURFACE2).italic(),
                 ));
             }
@@ -2628,9 +2636,16 @@ fn draw_torrent_preview_panel(
     border_style: Style,
     current_fs_path: &std::path::Path,
 ) {
+    let is_narrow = area.width < 50; // Threshold for vertical/narrow mode
     let raw_title = "Torrent Preview";
+    
+    // Dynamically truncate title based on available width
     let avail_width = area.width.saturating_sub(4) as usize;
-    let title = truncate_with_ellipsis(raw_title, avail_width);
+    let title = if is_narrow {
+        truncate_with_ellipsis("Preview", avail_width)
+    } else {
+        truncate_with_ellipsis(raw_title, avail_width)
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2652,7 +2667,6 @@ fn draw_torrent_preview_panel(
     } = browser_mode
     {
         let filter = tree::TreeFilter::default();
-
         let header_lines = if *use_container { 2 } else { 1 };
         let list_height = inner_area.height.saturating_sub(header_lines) as usize;
 
@@ -2661,153 +2675,92 @@ fn draw_torrent_preview_panel(
 
         let mut list_items = Vec::new();
 
-        // 4. Render Root Node
+        // Render Root Node with adaptive path display
         let root_style = Style::default()
             .fg(theme::BLUE)
             .add_modifier(Modifier::BOLD);
-        let root_node = ListItem::new(Line::from(vec![
-            Span::styled("▼  ", root_style),
-            Span::styled(current_fs_path.to_string_lossy(), root_style),
-        ]));
-        list_items.push(root_node);
+        
+        let path_display = if is_narrow {
+            current_fs_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "/".to_string())
+        } else {
+            current_fs_path.to_string_lossy().to_string()
+        };
 
-        // 5. Render Container Header
+        list_items.push(ListItem::new(Line::from(vec![
+            Span::styled("▼  ", root_style),
+            Span::styled(path_display, root_style),
+        ])));
+
+        // Render Container Header
         if *use_container {
-            let _main_sep = std::path::MAIN_SEPARATOR.to_string();
             let container_style = if *is_editing_name {
                 Style::default().fg(theme::SKY).add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
-                    .fg(theme::MAUVE)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(theme::MAUVE).add_modifier(Modifier::BOLD)
             };
 
             let mut spans = vec![Span::raw("  "), Span::styled("▼  ", container_style)];
 
             if *is_editing_name {
-                // Split the string at the cursor position
                 let (before, after) = container_name.split_at(*cursor_pos);
                 spans.push(Span::styled(before, container_style));
-                // Render the block cursor
-                spans.push(Span::styled(
-                    "█",
-                    Style::default()
-                        .fg(theme::SKY)
-                        .add_modifier(Modifier::SLOW_BLINK),
-                ));
+                spans.push(Span::styled("█", Style::default().fg(theme::SKY).add_modifier(Modifier::SLOW_BLINK)));
                 spans.push(Span::styled(after, container_style));
             } else {
-                // REMOVED: The logic that was appending main_sep here
                 spans.push(Span::styled(container_name.clone(), container_style));
-                spans.push(Span::styled(
-                    " (New Container)",
-                    Style::default()
-                        .fg(theme::SURFACE2)
-                        .add_modifier(Modifier::ITALIC),
-                ));
+                if !is_narrow {
+                    spans.push(Span::styled(" (New)", Style::default().fg(theme::SURFACE2).add_modifier(Modifier::ITALIC)));
+                }
             }
-
-            let container_node = ListItem::new(Line::from(spans));
-            list_items.push(container_node);
+            list_items.push(ListItem::new(Line::from(spans)));
         }
 
-        // 6. Render Tree Items
+        // Render Tree Items with reduced indentation for narrow screens
         let tree_items: Vec<ListItem> = visible_rows
             .iter()
             .map(|item| {
                 let is_cursor = item.is_cursor;
-
                 let base_indent_level = if *use_container { 2 } else { 1 };
-                let total_indent = base_indent_level + item.depth;
-                let indent_str = "  ".repeat(total_indent);
+                
+                // Reduce indent multiplier from 2 to 1 on narrow screens to save space
+                let indent_multiplier = if is_narrow { 1 } else { 2 };
+                let indent_str = " ".repeat((base_indent_level + item.depth) * indent_multiplier);
 
-                let icon = if item.node.is_dir {
-                    "  "
-                } else {
-                    "   "
-                };
+                let icon = if item.node.is_dir { "  " } else { "   " };
 
-                // --- 1. Base Content Style (Color + Strikethrough) ---
                 let (base_content_style, tag) = match item.node.payload.priority {
-                    FilePriority::Skip => (
-                        Style::default()
-                            .fg(theme::SURFACE2)
-                            .add_modifier(Modifier::CROSSED_OUT),
-                        "[SKIP] ",
-                    ),
-                    FilePriority::High => (
-                        Style::default()
-                            .fg(theme::GREEN)
-                            .add_modifier(Modifier::BOLD),
-                        "[HIGH] ",
-                    ),
-                    FilePriority::Mixed => (
-                        Style::default()
-                            .fg(theme::YELLOW)
-                            .add_modifier(Modifier::ITALIC),
-                        "[*]    ",
-                    ),
-                    FilePriority::Normal => (
-                        if item.node.is_dir {
-                            Style::default().fg(theme::BLUE)
-                        } else {
-                            Style::default().fg(theme::TEXT)
-                        },
-                        "",
-                    ),
+                    FilePriority::Skip => (Style::default().fg(theme::SURFACE1).add_modifier(Modifier::CROSSED_OUT), "[S] "),
+                    FilePriority::High => (Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD), "[H] "),
+                    FilePriority::Mixed => (Style::default().fg(theme::YELLOW).add_modifier(Modifier::ITALIC), "[*] "),
+                    FilePriority::Normal => (if item.node.is_dir { Style::default().fg(theme::BLUE) } else { Style::default().fg(theme::TEXT) }, ""),
                 };
 
-                // --- 2. Final Content Style (Name Only) ---
-                // Applies Underline (if selected) and Strikethrough (if skipped)
                 let final_content_style = if is_cursor {
-                    base_content_style
-                        .add_modifier(Modifier::BOLD)
-                        .add_modifier(Modifier::UNDERLINED)
+                    base_content_style.add_modifier(Modifier::BOLD).add_modifier(Modifier::UNDERLINED)
                 } else {
                     base_content_style
                 };
 
-                // --- 3. Structure Style (Indents, Icons, SPACERS, TAGS, SIZE) ---
-                // Retains Color but STRIPS Strikethrough/Underline
-                let structure_style = final_content_style
-                    .remove_modifier(Modifier::CROSSED_OUT)
-                    .remove_modifier(Modifier::UNDERLINED);
-
-                let mut spans = Vec::new();
-
-                // Indent: CLEAN
-                spans.push(Span::styled(indent_str, structure_style));
-
-                // Icon: CLEAN
-                spans.push(Span::styled(icon, structure_style));
-
-                // Name: STRUCK (if skipped)
-                spans.push(Span::styled(&item.node.name, final_content_style));
+                let structure_style = final_content_style.remove_modifier(Modifier::CROSSED_OUT).remove_modifier(Modifier::UNDERLINED);
+                let mut spans = vec![
+                    Span::styled(indent_str, structure_style),
+                    Span::styled(icon, structure_style),
+                    Span::styled(&item.node.name, final_content_style),
+                ];
 
                 if !item.node.is_dir {
-                    let size_str = format_bytes(item.node.payload.size);
-
-                    // Spacer between Name & Size: CLEAN (No strikethrough)
-                    spans.push(Span::styled(" ", structure_style));
-
-                    // Size: CLEAN (No strikethrough, but keeps priority color)
-                    spans.push(Span::styled(format!("({}) ", size_str), structure_style));
-
-                    // Tag ([SKIP]): CLEAN
+                    if !is_narrow {
+                        spans.push(Span::styled(format!(" ({}) ", format_bytes(item.node.payload.size)), structure_style));
+                    }
                     if !tag.is_empty() {
                         spans.push(Span::styled(tag, structure_style));
                     }
-                } else if item.node.payload.priority == FilePriority::Mixed {
-                    // Mixed Priority [*] Tag: CLEAN
-                    spans.push(Span::styled(" [*]", structure_style));
                 }
-
                 ListItem::new(Line::from(spans))
             })
             .collect();
 
         list_items.extend(tree_items);
-
         f.render_widget(List::new(list_items), inner_area);
         return;
     }
@@ -2817,11 +2770,7 @@ fn draw_torrent_preview_panel(
         let file_bytes = match std::fs::read(p) {
             Ok(b) => b,
             Err(e) => {
-                f.render_widget(
-                    Paragraph::new(format!("Error reading file:\n{}", e))
-                        .style(Style::default().fg(theme::RED)),
-                    inner_area,
-                );
+                f.render_widget(Paragraph::new(format!("Read Error: {}", e)).style(Style::default().fg(theme::RED)), inner_area);
                 return;
             }
         };
@@ -2829,114 +2778,40 @@ fn draw_torrent_preview_panel(
         let torrent = match crate::torrent_file::parser::from_bytes(&file_bytes) {
             Ok(t) => t,
             Err(e) => {
-                f.render_widget(
-                    Paragraph::new(format!("Invalid Torrent:\n{}", e))
-                        .style(Style::default().fg(theme::RED)),
-                    inner_area,
-                );
+                f.render_widget(Paragraph::new(format!("Invalid Torrent: {}", e)).style(Style::default().fg(theme::RED)), inner_area);
                 return;
             }
         };
 
         let total_size = torrent.info.total_length();
-        let piece_len = torrent.info.piece_length;
-        let piece_count = if piece_len > 0 {
-            total_size / piece_len
-        } else {
-            0
-        };
-
         let info_text = vec![
-            Line::from(vec![
-                Span::styled("Name: ", Style::default().fg(theme::SUBTEXT0)),
-                Span::raw(&torrent.info.name),
-            ]),
-            Line::from(vec![
-                Span::styled("Size: ", Style::default().fg(theme::SUBTEXT0)),
-                Span::raw(format_bytes(total_size as u64)),
-            ]),
-            Line::from(vec![
-                Span::styled("Pieces: ", Style::default().fg(theme::SUBTEXT0)),
-                Span::raw(format!(
-                    "{} x {}",
-                    piece_count,
-                    format_bytes(piece_len as u64)
-                )),
-            ]),
+            Line::from(vec![Span::styled("Name: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(&torrent.info.name)]),
+            Line::from(vec![Span::styled("Size: ", Style::default().fg(theme::SUBTEXT0)), Span::raw(format_bytes(total_size as u64))]),
         ];
 
-        let layout = Layout::vertical([
-            Constraint::Length(info_text.len() as u16 + 2),
-            Constraint::Min(0),
-        ])
-        .split(inner_area);
+        let layout = Layout::vertical([Constraint::Length(info_text.len() as u16 + 1), Constraint::Min(0)]).split(inner_area);
+        f.render_widget(Paragraph::new(info_text).block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(theme::SURFACE2))), layout[0]);
 
-        f.render_widget(
-            Paragraph::new(info_text).block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(theme::SURFACE2)),
-            ),
-            layout[0],
-        );
-
-        let file_list_payloads: Vec<(Vec<String>, crate::app::TorrentPreviewPayload)> = torrent
-            .file_list()
-            .into_iter()
-            .map(|(path, size)| {
-                (
-                    path,
-                    crate::app::TorrentPreviewPayload {
-                        file_index: None,
-                        size,
-                        priority: FilePriority::Normal,
-                    },
-                )
-            })
+        let file_list_payloads: Vec<(Vec<String>, crate::app::TorrentPreviewPayload)> = torrent.file_list().into_iter()
+            .map(|(path, size)| (path, crate::app::TorrentPreviewPayload { file_index: None, size, priority: FilePriority::Normal }))
             .collect();
 
         let final_nodes = crate::tui::tree::RawNode::from_path_list(None, file_list_payloads);
         let mut temp_state = crate::tui::tree::TreeViewState::default();
-        for node in &final_nodes {
-            node.expand_all(&mut temp_state);
-        }
+        for node in &final_nodes { node.expand_all(&mut temp_state); }
 
-        let visible_rows = TreeMathHelper::get_visible_slice(
-            &final_nodes,
-            &temp_state,
-            tree::TreeFilter::default(),
-            layout[1].height as usize,
-        );
+        let visible_rows = TreeMathHelper::get_visible_slice(&final_nodes, &temp_state, tree::TreeFilter::default(), layout[1].height as usize);
 
-        let list_items: Vec<ListItem> = visible_rows
-            .iter()
-            .map(|item| {
-                let indent = "  ".repeat(item.depth);
-                let icon = if item.node.is_dir {
-                    "  "
-                } else {
-                    "   "
-                };
-                let style = if item.node.is_dir {
-                    Style::default().fg(theme::BLUE)
-                } else {
-                    Style::default().fg(theme::TEXT)
-                };
-
-                let mut spans = vec![
-                    Span::raw(indent),
-                    Span::styled(icon, style),
-                    Span::styled(&item.node.name, style),
-                ];
-                if !item.node.is_dir {
-                    spans.push(Span::styled(
-                        format!(" ({})", format_bytes(item.node.payload.size)),
-                        Style::default().fg(theme::SURFACE2),
-                    ));
-                }
-                ListItem::new(Line::from(spans))
-            })
-            .collect();
+        let list_items: Vec<ListItem> = visible_rows.iter().map(|item| {
+            let indent = if is_narrow { " ".repeat(item.depth) } else { "  ".repeat(item.depth) };
+            let icon = if item.node.is_dir { "  " } else { "   " };
+            let style = if item.node.is_dir { Style::default().fg(theme::BLUE) } else { Style::default().fg(theme::TEXT) };
+            let mut spans = vec![Span::raw(indent), Span::styled(icon, style), Span::styled(&item.node.name, style)];
+            if !item.node.is_dir && !is_narrow {
+                spans.push(Span::styled(format!(" ({})", format_bytes(item.node.payload.size)), Style::default().fg(theme::SURFACE2)));
+            }
+            ListItem::new(Line::from(spans))
+        }).collect();
 
         f.render_widget(List::new(list_items), layout[1]);
     }
