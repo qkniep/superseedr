@@ -63,7 +63,7 @@ pub enum Action {
     },
     PeerDisconnected {
         peer_id: String,
-        force: bool
+        force: bool,
     },
     UpdatePeerId {
         peer_addr: String,
@@ -1091,7 +1091,9 @@ impl TorrentState {
                 for pid in batch {
                     if let Some(removed_peer) = self.peers.remove(&pid) {
                         for piece_index in removed_peer.pending_requests {
-                            if self.piece_manager.bitfield.get(piece_index as usize) != Some(&PieceStatus::Done) {
+                            if self.piece_manager.bitfield.get(piece_index as usize)
+                                != Some(&PieceStatus::Done)
+                            {
                                 self.piece_manager.requeue_pending_to_need(piece_index);
                             }
                         }
@@ -1103,7 +1105,8 @@ impl TorrentState {
                 }
 
                 self.number_of_successfully_connected_peers = self.peers.len();
-                self.piece_manager.update_rarity(self.peers.values().map(|p| &p.bitfield));
+                self.piece_manager
+                    .update_rarity(self.peers.values().map(|p| &p.bitfield));
 
                 effects
             }
@@ -1698,10 +1701,17 @@ impl TorrentState {
                     let mut effects = Vec::new();
                     let batch = std::mem::take(&mut self.pending_failures);
                     for addr in batch {
-                        let (count, _) = self.timed_out_peers.get(&addr).cloned().unwrap_or((0, self.now));
+                        let (count, _) = self
+                            .timed_out_peers
+                            .get(&addr)
+                            .cloned()
+                            .unwrap_or((0, self.now));
                         let new_count = (count + 1).min(10);
                         let backoff_secs = (15 * 2u64.pow(new_count - 1)).min(1800);
-                        self.timed_out_peers.insert(addr, (new_count, self.now + Duration::from_secs(backoff_secs)));
+                        self.timed_out_peers.insert(
+                            addr,
+                            (new_count, self.now + Duration::from_secs(backoff_secs)),
+                        );
                     }
                     return effects;
                 }
@@ -1896,7 +1906,9 @@ impl TorrentState {
                     .retain(|_, (retry_count, _)| *retry_count < MAX_TIMEOUT_COUNT);
 
                 let max_ram_usage = 1024 * 1024 * 1024; // 1 GB
-                let piece_len = self.torrent.as_ref()
+                let piece_len = self
+                    .torrent
+                    .as_ref()
                     .map(|t| t.info.piece_length as usize)
                     .unwrap_or(16_384);
                 let max_pending_items = max_ram_usage / piece_len;
@@ -1906,8 +1918,9 @@ impl TorrentState {
 
                 let mut stuck_peers = Vec::new();
                 for (id, peer) in &self.peers {
-                    if peer.peer_id.is_empty() 
-                        && self.now.saturating_duration_since(peer.created_at) > Duration::from_secs(5) 
+                    if peer.peer_id.is_empty()
+                        && self.now.saturating_duration_since(peer.created_at)
+                            > Duration::from_secs(5)
                     {
                         stuck_peers.push(id.clone());
                     }
@@ -1923,7 +1936,11 @@ impl TorrentState {
                 }));
 
                 let am_seeding = !self.piece_manager.bitfield.is_empty()
-                    && self.piece_manager.bitfield.iter().all(|&s| s == PieceStatus::Done);
+                    && self
+                        .piece_manager
+                        .bitfield
+                        .iter()
+                        .all(|&s| s == PieceStatus::Done);
 
                 if am_seeding && self.torrent_status != TorrentStatus::Done {
                     self.torrent_status = TorrentStatus::Done;
@@ -1933,7 +1950,9 @@ impl TorrentState {
                 if am_seeding {
                     let mut peers_to_disconnect = Vec::new();
                     for (peer_id, peer) in &self.peers {
-                        if !peer.bitfield.is_empty() && peer.bitfield.iter().all(|&has_piece| has_piece) {
+                        if !peer.bitfield.is_empty()
+                            && peer.bitfield.iter().all(|&has_piece| has_piece)
+                        {
                             peers_to_disconnect.push(peer_id.clone());
                         }
                     }
@@ -1971,7 +1990,7 @@ impl TorrentState {
                     },
                     Effect::ClearAllUploads,
                     Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
-                        info_hash: self.info_hash.clone()
+                        info_hash: self.info_hash.clone(),
                     }),
                 ]
             }
@@ -2794,7 +2813,7 @@ mod tests {
         // WHEN: Peer disconnects
         let effects = state.update(Action::PeerDisconnected {
             peer_id: "peer_X".to_string(),
-            force: true
+            force: true,
         });
 
         // THEN: Peer removed, count decremented, Disconnect effect emitted
@@ -3193,7 +3212,7 @@ mod tests {
 
         state.update(Action::PeerDisconnected {
             peer_id: peer_id.clone(),
-            force: true
+            force: true,
         });
         assert_eq!(
             state.number_of_successfully_connected_peers, 0,
@@ -6451,12 +6470,12 @@ mod tests {
     fn test_peer_disconnect_batches_until_threshold() {
         let mut state = create_empty_state();
         state.torrent_status = TorrentStatus::Standard;
-        
+
         // Add 101 peers to ensure we cross the threshold
         for i in 0..101 {
             let pid = format!("peer_{}", i);
             add_peer(&mut state, &pid);
-            
+
             let effects = state.update(Action::PeerDisconnected {
                 peer_id: pid.clone(),
                 force: false,
@@ -6472,7 +6491,7 @@ mod tests {
                 assert!(state.pending_disconnects.is_empty());
             }
         }
-        
+
         // The 101st peer should now be sitting alone in the new batch
         assert_eq!(state.pending_disconnects.len(), 1);
     }
@@ -6480,7 +6499,7 @@ mod tests {
     #[test]
     fn test_peer_disconnect_force_flush() {
         let mut state = create_empty_state();
-        
+
         // Add only 5 peers (well below the 100 threshold)
         for i in 0..5 {
             let pid = format!("peer_{}", i);
@@ -6490,7 +6509,7 @@ mod tests {
                 force: false,
             });
         }
-        
+
         assert_eq!(state.pending_disconnects.len(), 5);
 
         // Trigger a forced flush (passing an empty ID as Cleanup would)
@@ -6512,7 +6531,11 @@ mod tests {
 
         // Add a "stuck" peer (empty peer_id, created 10 seconds ago)
         let (tx, _) = tokio::sync::mpsc::channel(1);
-        let mut peer = PeerState::new("127.0.0.1:1234".to_string(), tx, state.now - Duration::from_secs(10));
+        let mut peer = PeerState::new(
+            "127.0.0.1:1234".to_string(),
+            tx,
+            state.now - Duration::from_secs(10),
+        );
         peer.peer_id = Vec::new(); // Empty ID = Stuck
         state.peers.insert("127.0.0.1:1234".to_string(), peer);
 
@@ -6521,8 +6544,13 @@ mod tests {
 
         // Verify the peer was removed via the batching logic called by Cleanup
         assert!(state.peers.is_empty());
-        assert!(effects.iter().any(|e| matches!(e, Effect::DisconnectPeer { .. })));
-        assert!(effects.iter().any(|e| matches!(e, Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { .. }))));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::DisconnectPeer { .. })));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { .. })
+        )));
     }
 }
 
@@ -7478,7 +7506,10 @@ mod prop_tests {
                 .prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id }),
             peer_id_strat
                 .clone()
-                .prop_map(|id| Action::PeerDisconnected { peer_id: id, force: true }),
+                .prop_map(|id| Action::PeerDisconnected {
+                    peer_id: id,
+                    force: true
+                }),
             any::<String>().prop_map(|addr| Action::PeerConnectionFailed { peer_addr: addr }),
             (any::<String>(), proptest::collection::vec(any::<u8>(), 20)).prop_map(|(addr, id)| {
                 Action::UpdatePeerId {
@@ -8205,7 +8236,10 @@ mod prop_tests {
                     strategies.push(
                         peer_strategy
                             .clone()
-                            .prop_map(|id| Action::PeerDisconnected { peer_id: id, force: true })
+                            .prop_map(|id| Action::PeerDisconnected {
+                                peer_id: id,
+                                force: true,
+                            })
                             .boxed(),
                     );
                     strategies.push(
@@ -8269,7 +8303,10 @@ mod prop_tests {
                     Action::PeerSuccessfullyConnected { peer_id } => {
                         state.connected_peers.insert(peer_id.clone());
                     }
-                    Action::PeerDisconnected { peer_id, force: true } => {
+                    Action::PeerDisconnected {
+                        peer_id,
+                        force: true,
+                    } => {
                         state.connected_peers.remove(peer_id);
                     }
                     Action::Pause | Action::FatalError => {

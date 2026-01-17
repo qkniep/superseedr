@@ -354,7 +354,8 @@ impl TorrentManager {
 
         // 3. Initialize Base Manager
         // It stays in AwaitingMetadata state until peers provide the info dict
-        let mut manager = Self::init_base(torrent_parameters, info_hash, trackers, validation_status);
+        let mut manager =
+            Self::init_base(torrent_parameters, info_hash, trackers, validation_status);
 
         if let Some(torrent_data_path) = torrent_data_path {
             manager.apply_action(Action::SetUserTorrentConfig {
