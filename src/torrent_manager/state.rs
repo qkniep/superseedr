@@ -1096,6 +1096,9 @@ impl TorrentState {
                             }
                         }
                         effects.push(Effect::DisconnectPeer { peer_id: pid });
+                        effects.push(Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
+                            info_hash: self.info_hash.clone(),
+                        }));
                     }
                 }
 
@@ -1968,7 +1971,7 @@ impl TorrentState {
                     },
                     Effect::ClearAllUploads,
                     Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
-                        info_hash: self.info_hash.clone(),
+                        info_hash: self.info_hash.clone()
                     }),
                 ]
             }
@@ -2791,6 +2794,7 @@ mod tests {
         // WHEN: Peer disconnects
         let effects = state.update(Action::PeerDisconnected {
             peer_id: "peer_X".to_string(),
+            force: true
         });
 
         // THEN: Peer removed, count decremented, Disconnect effect emitted
@@ -3189,6 +3193,7 @@ mod tests {
 
         state.update(Action::PeerDisconnected {
             peer_id: peer_id.clone(),
+            force: true
         });
         assert_eq!(
             state.number_of_successfully_connected_peers, 0,
@@ -7395,7 +7400,7 @@ mod prop_tests {
                 .prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id }),
             peer_id_strat
                 .clone()
-                .prop_map(|id| Action::PeerDisconnected { peer_id: id }),
+                .prop_map(|id| Action::PeerDisconnected { peer_id: id, force: true }),
             any::<String>().prop_map(|addr| Action::PeerConnectionFailed { peer_addr: addr }),
             (any::<String>(), proptest::collection::vec(any::<u8>(), 20)).prop_map(|(addr, id)| {
                 Action::UpdatePeerId {
@@ -7601,7 +7606,8 @@ mod prop_tests {
                     peer_id: id.clone()
                 }, // Re-connect
                 Action::PeerDisconnected {
-                    peer_id: id.clone()
+                    peer_id: id.clone(),
+                    force: true,
                 },
                 // Should be ignored or handled gracefully, not panic
                 Action::IncomingBlock {
@@ -8121,7 +8127,7 @@ mod prop_tests {
                     strategies.push(
                         peer_strategy
                             .clone()
-                            .prop_map(|id| Action::PeerDisconnected { peer_id: id })
+                            .prop_map(|id| Action::PeerDisconnected { peer_id: id, force: true })
                             .boxed(),
                     );
                     strategies.push(
@@ -8185,7 +8191,7 @@ mod prop_tests {
                     Action::PeerSuccessfullyConnected { peer_id } => {
                         state.connected_peers.insert(peer_id.clone());
                     }
-                    Action::PeerDisconnected { peer_id } => {
+                    Action::PeerDisconnected { peer_id, force: true } => {
                         state.connected_peers.remove(peer_id);
                     }
                     Action::Pause | Action::FatalError => {
