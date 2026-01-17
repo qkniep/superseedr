@@ -722,57 +722,79 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 
                         // Pane-Specific Navigation (Intercepting tree keys if focused on preview)
                         if let BrowserPane::TorrentPreview = focused_pane {
-                            let area = centered_rect(90, 80, app.app_state.screen_area);
-                            let list_height = area.height.saturating_sub(4) as usize;
-                            let filter = TreeFilter::default();
+                            // -----------------------------------------------------------------
+                            // FIX: Calculate EXACT layout for Preview Pane to determine height
+                            // -----------------------------------------------------------------
+                            
+                            // 1. Re-calculate area logic from view.rs
+                            let screen = app.app_state.screen_area;
+                            let area = if screen.width < 60 { screen } else { centered_rect(90, 80, screen) };
 
-                            match key.code {
-                                KeyCode::Up | KeyCode::Char('k') => {
-                                    TreeMathHelper::apply_action(
-                                        preview_state,
-                                        preview_tree,
-                                        TreeAction::Up,
-                                        filter,
-                                        list_height,
-                                    );
-                                }
-                                KeyCode::Down | KeyCode::Char('j') => {
-                                    TreeMathHelper::apply_action(
-                                        preview_state,
-                                        preview_tree,
-                                        TreeAction::Down,
-                                        filter,
-                                        list_height,
-                                    );
-                                }
-                                KeyCode::Left | KeyCode::Char('h') => {
-                                    TreeMathHelper::apply_action(
-                                        preview_state,
-                                        preview_tree,
-                                        TreeAction::Left,
-                                        filter,
-                                        list_height,
-                                    );
-                                }
-                                KeyCode::Right | KeyCode::Char('l') => {
-                                    TreeMathHelper::apply_action(
-                                        preview_state,
-                                        preview_tree,
-                                        TreeAction::Right,
-                                        filter,
-                                        list_height,
-                                    );
-                                }
-                                KeyCode::Char(' ') => {
-                                    if let Some(t) = &preview_state.cursor_path {
-                                        apply_priority_action(
+                            // 2. Run the layout calculator
+                            let layout = calculate_file_browser_layout(
+                                area,
+                                true, // DownloadLocSelection always has preview content
+                                app.app_state.is_searching,
+                                focused_pane,
+                            );
+
+                            if let Some(preview_rect) = layout.preview {
+                                // 3. Calculate inner list height
+                                let inner_height = preview_rect.height.saturating_sub(2); // Remove borders
+                                // If using container, we have 2 header rows. Else 1.
+                                let header_rows = if *use_container { 2 } else { 1 };
+                                let list_height = inner_height.saturating_sub(header_rows) as usize;
+
+                                let filter = TreeFilter::default();
+
+                                match key.code {
+                                    KeyCode::Up | KeyCode::Char('k') => {
+                                        TreeMathHelper::apply_action(
+                                            preview_state,
                                             preview_tree,
-                                            t,
-                                            PriorityAction::Cycle,
+                                            TreeAction::Up,
+                                            filter,
+                                            list_height,
                                         );
                                     }
+                                    KeyCode::Down | KeyCode::Char('j') => {
+                                        TreeMathHelper::apply_action(
+                                            preview_state,
+                                            preview_tree,
+                                            TreeAction::Down,
+                                            filter,
+                                            list_height,
+                                        );
+                                    }
+                                    KeyCode::Left | KeyCode::Char('h') => {
+                                        TreeMathHelper::apply_action(
+                                            preview_state,
+                                            preview_tree,
+                                            TreeAction::Left,
+                                            filter,
+                                            list_height,
+                                        );
+                                    }
+                                    KeyCode::Right | KeyCode::Char('l') => {
+                                        TreeMathHelper::apply_action(
+                                            preview_state,
+                                            preview_tree,
+                                            TreeAction::Right,
+                                            filter,
+                                            list_height,
+                                        );
+                                    }
+                                    KeyCode::Char(' ') => {
+                                        if let Some(t) = &preview_state.cursor_path {
+                                            apply_priority_action(
+                                                preview_tree,
+                                                t,
+                                                PriorityAction::Cycle,
+                                            );
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                             app.app_state.ui_needs_redraw = true;
                             // If focused on TorrentPreview, we don't want FileSystem navigation to trigger
@@ -822,7 +844,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                     // 5. Get EXACT List Height (Height - 2 for Borders)
                     let list_height = layout.list.height.saturating_sub(2) as usize;
 
-                    // 6. Setup Filter
                     let filter = match browser_mode {
                         FileBrowserMode::Directory
                         | FileBrowserMode::DownloadLocSelection { .. }
@@ -837,7 +858,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         }
                     };
 
-                    // 7. Handle Navigation with calculated height
                     match key.code {
                         KeyCode::Char('/') => {
                             app.app_state.is_searching = true;
