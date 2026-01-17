@@ -30,7 +30,7 @@ pub fn calculate_file_browser_layout(
 ) -> FileBrowserLayout {
     let mut plan = FileBrowserLayout::default();
     let main_chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
-    
+
     plan.area = area;
     plan.content = main_chunks[0];
     plan.footer = main_chunks[1];
@@ -42,23 +42,36 @@ pub fn calculate_file_browser_layout(
         if is_narrow {
             // Stack vertically when narrow
             let constraints = match focused_pane {
-                crate::app::BrowserPane::FileSystem => [Constraint::Percentage(35), Constraint::Percentage(65)],
-                crate::app::BrowserPane::TorrentPreview => [Constraint::Percentage(60), Constraint::Percentage(40)],
+                crate::app::BrowserPane::FileSystem => {
+                    [Constraint::Percentage(35), Constraint::Percentage(65)]
+                }
+                crate::app::BrowserPane::TorrentPreview => {
+                    [Constraint::Percentage(60), Constraint::Percentage(40)]
+                }
             };
             Layout::vertical(constraints).split(plan.content)
         } else {
             // Side-by-side when wide
             let constraints = match focused_pane {
-                crate::app::BrowserPane::FileSystem => [Constraint::Percentage(35), Constraint::Percentage(65)],
-                crate::app::BrowserPane::TorrentPreview => [Constraint::Percentage(60), Constraint::Percentage(40)],
+                crate::app::BrowserPane::FileSystem => {
+                    [Constraint::Percentage(35), Constraint::Percentage(65)]
+                }
+                crate::app::BrowserPane::TorrentPreview => {
+                    [Constraint::Percentage(60), Constraint::Percentage(40)]
+                }
             };
             Layout::horizontal(constraints).split(plan.content)
         }
     } else {
-        Layout::horizontal([Constraint::Percentage(0), Constraint::Percentage(100)]).split(plan.content)
+        Layout::horizontal([Constraint::Percentage(0), Constraint::Percentage(100)])
+            .split(plan.content)
     };
 
-    plan.preview = if show_preview { Some(content_chunks[0]) } else { None };
+    plan.preview = if show_preview {
+        Some(content_chunks[0])
+    } else {
+        None
+    };
     plan.browser = content_chunks[1];
 
     // Split browser into Search and List
@@ -68,8 +81,16 @@ pub fn calculate_file_browser_layout(
         Layout::vertical([Constraint::Min(0)]).split(plan.browser)
     };
 
-    plan.search = if show_search { Some(browser_chunks[0]) } else { None };
-    plan.list = if show_search { browser_chunks[1] } else { browser_chunks[0] };
+    plan.search = if show_search {
+        Some(browser_chunks[0])
+    } else {
+        None
+    };
+    plan.list = if show_search {
+        browser_chunks[1]
+    } else {
+        browser_chunks[0]
+    };
 
     plan
 }
@@ -294,10 +315,6 @@ impl LayoutContext {
             height: area.height,
             settings_sidebar_percent: sidebar_pct,
         }
-    }
-
-    pub fn is_narrow_mode(&self) -> bool {
-        self.width < 100 || (self.height as f32 > (self.width as f32 * 0.6))
     }
 }
 

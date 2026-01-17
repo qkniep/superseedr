@@ -12,6 +12,8 @@ use strum::IntoEnumIterator;
 
 use crate::config::SortDirection;
 
+use crate::tui::formatters::centered_rect;
+use crate::tui::layout::calculate_file_browser_layout;
 use crate::tui::layout::calculate_layout;
 use crate::tui::layout::compute_smart_table_layout;
 use crate::tui::layout::get_peer_columns;
@@ -21,8 +23,6 @@ use crate::tui::layout::SmartCol;
 use crate::tui::tree::RawNode;
 use crate::tui::tree::TreeViewState;
 use crate::tui::tree::{TreeAction, TreeFilter, TreeMathHelper};
-use crate::tui::layout::calculate_file_browser_layout;
-use crate::tui::formatters::centered_rect;
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::prelude::Rect;
@@ -722,10 +722,13 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 
                         // Pane-Specific Navigation (Intercepting tree keys if focused on preview)
                         if let BrowserPane::TorrentPreview = focused_pane {
-                            
                             // 1. Re-calculate area logic from view.rs
                             let screen = app.app_state.screen_area;
-                            let area = if screen.width < 60 { screen } else { centered_rect(90, 80, screen) };
+                            let area = if screen.width < 60 {
+                                screen
+                            } else {
+                                centered_rect(90, 80, screen)
+                            };
 
                             // 2. Run the layout calculator
                             let layout = calculate_file_browser_layout(
@@ -738,7 +741,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             if let Some(preview_rect) = layout.preview {
                                 // 3. Calculate inner list height
                                 let inner_height = preview_rect.height.saturating_sub(2); // Remove borders
-                                // If using container, we have 2 header rows. Else 1.
+                                                                                          // If using container, we have 2 header rows. Else 1.
                                 let header_rows = if *use_container { 2 } else { 1 };
                                 let list_height = inner_height.saturating_sub(header_rows) as usize;
 
@@ -805,7 +808,8 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                     // 1. Determine Preview Status
                     let has_preview_content = match browser_mode {
                         FileBrowserMode::DownloadLocSelection { .. } => {
-                            app.app_state.pending_torrent_path.is_some() || !app.app_state.pending_torrent_link.is_empty()
+                            app.app_state.pending_torrent_path.is_some()
+                                || !app.app_state.pending_torrent_link.is_empty()
                         }
                         FileBrowserMode::File(_) => state
                             .cursor_path
@@ -816,18 +820,29 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 
                     // 2. Determine Focused Pane
                     let default_pane = BrowserPane::FileSystem;
-                    let focused_pane = if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
-                        focused_pane
-                    } else {
-                        &default_pane
-                    };
+                    let focused_pane =
+                        if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } =
+                            browser_mode
+                        {
+                            focused_pane
+                        } else {
+                            &default_pane
+                        };
 
                     // 3. Determine Area (Matching view.rs logic exactly)
                     let screen = app.app_state.screen_area;
                     let area = if has_preview_content {
-                        if screen.width < 60 { screen } else { centered_rect(90, 80, screen) }
+                        if screen.width < 60 {
+                            screen
+                        } else {
+                            centered_rect(90, 80, screen)
+                        }
                     } else {
-                        if screen.width < 40 { screen } else { centered_rect(75, 80, screen) }
+                        if screen.width < 40 {
+                            screen
+                        } else {
+                            centered_rect(75, 80, screen)
+                        }
                     };
 
                     // 4. Calculate Layout
@@ -890,7 +905,10 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 }
                             }
                         }
-                        KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('u') => {
+                        KeyCode::Backspace
+                        | KeyCode::Left
+                        | KeyCode::Char('h')
+                        | KeyCode::Char('u') => {
                             let child_to_highlight = state.current_path.clone();
                             if let Some(parent) = state.current_path.parent() {
                                 let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
