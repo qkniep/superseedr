@@ -5589,6 +5589,7 @@ mod tests {
             PieceManager::new(),
             HashMap::new(),
             false,
+            None,
         );
 
         // This simulates exactly what TorrentState::new does incorrectly for V2.
@@ -8547,6 +8548,7 @@ mod integration_tests {
             metrics_tx,
             torrent_validation_status: false,
             torrent_data_path: Some(temp_dir),
+            container_name: None,
             manager_command_rx: cmd_rx,
             manager_event_tx: event_tx,
             settings,
