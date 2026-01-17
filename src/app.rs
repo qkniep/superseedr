@@ -600,7 +600,7 @@ impl App {
             tokio::net::TcpListener::bind(format!("0.0.0.0:{}", client_configs.client_port))
                 .await?;
 
-        let (manager_event_tx, manager_event_rx) = mpsc::channel::<ManagerEvent>(100);
+        let (manager_event_tx, manager_event_rx) = mpsc::channel::<ManagerEvent>(1000);
         let (app_command_tx, app_command_rx) = mpsc::channel::<AppCommand>(10);
         let (tui_event_tx, tui_event_rx) = mpsc::channel::<CrosstermEvent>(100);
         let (torrent_tx, torrent_rx) = broadcast::channel::<TorrentMetrics>(100);
@@ -2212,7 +2212,6 @@ impl App {
                 }
 
                 self.sort_and_filter_torrent_list();
-                self.app_state.ui_needs_redraw = true;
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 tracing_event!(Level::DEBUG, "TUI metrics lagged, skipped {} updates", n);

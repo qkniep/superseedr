@@ -63,6 +63,7 @@ pub enum Action {
     },
     PeerDisconnected {
         peer_id: String,
+        force: bool
     },
     UpdatePeerId {
         peer_addr: String,
@@ -329,6 +330,8 @@ pub struct TorrentState {
     pub container_name: Option<String>,
     pub multi_file_info: Option<MultiFileInfo>,
     pub file_priorities: HashMap<usize, FilePriority>,
+    pub pending_disconnects: Vec<String>,
+    pub pending_failures: Vec<String>,
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -365,6 +368,8 @@ impl Default for TorrentState {
             container_name: None,
             multi_file_info: None,
             file_priorities: HashMap::new(),
+            pending_disconnects: Vec::with_capacity(100),
+            pending_failures: Vec::with_capacity(100),
         }
     }
 }
@@ -1067,32 +1072,35 @@ impl TorrentState {
                 })]
             }
 
-            Action::PeerDisconnected { peer_id } => {
-                let mut effects = Vec::new();
-                if let Some(removed_peer) = self.peers.remove(&peer_id) {
-                    self.number_of_successfully_connected_peers = self.peers.len();
-                    self.last_activity = TorrentActivity::ProcessingPeers(self.peers.len());
-
-                    for piece_index in removed_peer.pending_requests {
-                        if self.piece_manager.bitfield.get(piece_index as usize)
-                            != Some(&PieceStatus::Done)
-                        {
-                            self.piece_manager.requeue_pending_to_need(piece_index);
-                        }
-                    }
-
-                    self.number_of_successfully_connected_peers = self.peers.len();
-
-                    self.piece_manager
-                        .update_rarity(self.peers.values().map(|p| &p.bitfield));
-
-                    effects.push(Effect::DisconnectPeer {
-                        peer_id: peer_id.clone(),
-                    });
-                    effects.push(Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
-                        info_hash: self.info_hash.clone(),
-                    }));
+            Action::PeerDisconnected { peer_id, force } => {
+                if !peer_id.is_empty() {
+                    self.pending_disconnects.push(peer_id);
                 }
+
+                if !force && self.pending_disconnects.len() < 100 {
+                    return vec![Effect::DoNothing];
+                }
+
+                if self.pending_disconnects.is_empty() {
+                    return vec![Effect::DoNothing];
+                }
+
+                let mut effects = Vec::new();
+                let batch = std::mem::take(&mut self.pending_disconnects);
+
+                for pid in batch {
+                    if let Some(removed_peer) = self.peers.remove(&pid) {
+                        for piece_index in removed_peer.pending_requests {
+                            if self.piece_manager.bitfield.get(piece_index as usize) != Some(&PieceStatus::Done) {
+                                self.piece_manager.requeue_pending_to_need(piece_index);
+                            }
+                        }
+                        effects.push(Effect::DisconnectPeer { peer_id: pid });
+                    }
+                }
+
+                self.number_of_successfully_connected_peers = self.peers.len();
+                self.piece_manager.update_rarity(self.peers.values().map(|p| &p.bitfield));
 
                 effects
             }
@@ -1682,17 +1690,18 @@ impl TorrentState {
             }
 
             Action::PeerConnectionFailed { peer_addr } => {
-                let (count, _) = self
-                    .timed_out_peers
-                    .get(&peer_addr)
-                    .cloned()
-                    .unwrap_or((0, self.now));
-                let new_count = (count + 1).min(10);
-                let backoff_secs = (15 * 2u64.pow(new_count - 1)).min(1800);
-                let next_attempt = self.now + Duration::from_secs(backoff_secs);
-
-                self.timed_out_peers
-                    .insert(peer_addr, (new_count, next_attempt));
+                self.pending_failures.push(peer_addr);
+                if self.pending_failures.len() >= 100 {
+                    let mut effects = Vec::new();
+                    let batch = std::mem::take(&mut self.pending_failures);
+                    for addr in batch {
+                        let (count, _) = self.timed_out_peers.get(&addr).cloned().unwrap_or((0, self.now));
+                        let new_count = (count + 1).min(10);
+                        let backoff_secs = (15 * 2u64.pow(new_count - 1)).min(1800);
+                        self.timed_out_peers.insert(addr, (new_count, self.now + Duration::from_secs(backoff_secs)));
+                    }
+                    return effects;
+                }
                 vec![Effect::DoNothing]
             }
 
@@ -1883,10 +1892,8 @@ impl TorrentState {
                 self.timed_out_peers
                     .retain(|_, (retry_count, _)| *retry_count < MAX_TIMEOUT_COUNT);
 
-                let max_ram_usage = 1024 * 1024 * 1024; // 1 GB in bytes
-                let piece_len = self
-                    .torrent
-                    .as_ref()
+                let max_ram_usage = 1024 * 1024 * 1024; // 1 GB
+                let piece_len = self.torrent.as_ref()
                     .map(|t| t.info.piece_length as usize)
                     .unwrap_or(16_384);
                 let max_pending_items = max_ram_usage / piece_len;
@@ -1896,41 +1903,24 @@ impl TorrentState {
 
                 let mut stuck_peers = Vec::new();
                 for (id, peer) in &self.peers {
-                    if peer.peer_id.is_empty()
-                        && self.now.saturating_duration_since(peer.created_at)
-                            > Duration::from_secs(5)
+                    if peer.peer_id.is_empty() 
+                        && self.now.saturating_duration_since(peer.created_at) > Duration::from_secs(5) 
                     {
                         stuck_peers.push(id.clone());
                     }
                 }
 
                 for peer_id in stuck_peers {
-                    if let Some(removed_peer) = self.peers.remove(&peer_id) {
-                        for piece_index in removed_peer.pending_requests {
-                            if self.piece_manager.bitfield.get(piece_index as usize)
-                                != Some(&PieceStatus::Done)
-                            {
-                                self.piece_manager.requeue_pending_to_need(piece_index);
-                            }
-                        }
-
-                        effects.push(Effect::DisconnectPeer {
-                            peer_id: peer_id.clone(),
-                        });
-                        effects.push(Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
-                            info_hash: self.info_hash.clone(),
-                        }));
-                    }
+                    self.pending_disconnects.push(peer_id);
                 }
 
-                self.number_of_successfully_connected_peers = self.peers.len();
+                effects.extend(self.update(Action::PeerDisconnected {
+                    peer_id: String::new(),
+                    force: true,
+                }));
 
                 let am_seeding = !self.piece_manager.bitfield.is_empty()
-                    && self
-                        .piece_manager
-                        .bitfield
-                        .iter()
-                        .all(|&s| s == PieceStatus::Done);
+                    && self.piece_manager.bitfield.iter().all(|&s| s == PieceStatus::Done);
 
                 if am_seeding && self.torrent_status != TorrentStatus::Done {
                     self.torrent_status = TorrentStatus::Done;
@@ -1940,9 +1930,7 @@ impl TorrentState {
                 if am_seeding {
                     let mut peers_to_disconnect = Vec::new();
                     for (peer_id, peer) in &self.peers {
-                        let peer_is_seed = !peer.bitfield.is_empty()
-                            && peer.bitfield.iter().all(|&has_piece| has_piece);
-                        if peer_is_seed {
+                        if !peer.bitfield.is_empty() && peer.bitfield.iter().all(|&has_piece| has_piece) {
                             peers_to_disconnect.push(peer_id.clone());
                         }
                     }
@@ -1950,6 +1938,7 @@ impl TorrentState {
                         effects.push(Effect::DisconnectPeer { peer_id });
                     }
                 }
+
                 effects
             }
 
