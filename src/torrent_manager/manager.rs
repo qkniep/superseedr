@@ -997,32 +997,38 @@ impl TorrentManager {
             }
 
             Effect::DeleteFiles {
-                multi_file_info,
-                data_path,
+                files,
+                directories,
             } => {
                 let info_hash = self.state.info_hash.clone();
                 let tx = self.manager_event_tx.clone();
-                let torrent_name = self.state.torrent.as_ref().map(|t| t.info.name.clone());
 
                 tokio::spawn(async move {
                     let mut result = Ok(());
 
-                    for file_info in &multi_file_info.files {
-                        if let Err(e) = fs::remove_file(&file_info.path).await {
+                    // 1. Delete Files
+                    for file_path in files {
+                        if let Err(e) = fs::remove_file(&file_path).await {
+                            // If it's already gone, that's fine (success).
                             if e.kind() != std::io::ErrorKind::NotFound {
-                                let error_msg =
-                                    format!("Failed to delete file {:?}: {}", &file_info.path, e);
+                                let error_msg = format!("Failed to delete file {:?}: {}", &file_path, e);
                                 event!(Level::ERROR, "{}", error_msg);
                                 result = Err(error_msg);
                             }
                         }
                     }
 
-                    if result.is_ok() && multi_file_info.files.len() > 1 {
-                        if let Some(name) = torrent_name {
-                            let content_dir = data_path.join(name);
-                            event!(Level::INFO, "Cleaning up directory: {:?}", &content_dir);
-                            let _ = fs::remove_dir(&content_dir).await;
+                    // 2. Delete Directories (in sorted order: Deepest -> Shallowest)
+                    // We use remove_dir (not remove_dir_all) for safety. 
+                    // It will simply fail (safely) if the directory is not empty 
+                    // (e.g., user added their own files to the folder).
+                    for dir_path in directories {
+                        if let Err(e) = fs::remove_dir(&dir_path).await {
+                            if e.kind() != std::io::ErrorKind::NotFound {
+                                event!(Level::INFO, "Skipped dir deletion {:?}: {}", &dir_path, e);
+                            }
+                        } else {
+                            event!(Level::INFO, "Cleaned up directory: {:?}", &dir_path);
                         }
                     }
 

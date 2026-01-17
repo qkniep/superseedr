@@ -2856,10 +2856,24 @@ fn draw_torrent_preview_panel(
         };
 
         let total_size = torrent.info.total_length();
+        let protocol_version = match torrent.info.meta_version {
+            Some(2) => {
+                if !torrent.info.pieces.is_empty() {
+                    "BitTorrent v2 (Hybrid)"
+                } else {
+                    "BitTorrent v2 (Pure)"
+                }
+            }
+            _ => "BitTorrent v1",
+        };
         let info_text = vec![
             Line::from(vec![
                 Span::styled("Name: ", Style::default().fg(theme::SUBTEXT0)),
                 Span::raw(&torrent.info.name),
+            ]),
+            Line::from(vec![
+                Span::styled("Protocol: ", Style::default().fg(theme::SUBTEXT0)),
+                Span::styled(protocol_version, Style::default().fg(theme::MAUVE).bold()),
             ]),
             Line::from(vec![
                 Span::styled("Size: ", Style::default().fg(theme::SUBTEXT0)),
