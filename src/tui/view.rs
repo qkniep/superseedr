@@ -2417,9 +2417,15 @@ pub fn draw_file_browser(
     let mut footer_spans = Vec::new();
     match browser_mode {
         FileBrowserMode::ConfigPathSelection { .. } | FileBrowserMode::Directory => {
-            // Removed [Tab] Select
+            footer_spans.push(Span::styled("[Arrows/Vim]", Style::default().fg(theme::BLUE)));
+            footer_spans.push(Span::raw(" Nav | "));
+            footer_spans.push(Span::styled("[Backspace]", Style::default().fg(theme::YELLOW)));
+            footer_spans.push(Span::raw(" Up | "));
+            footer_spans.push(Span::styled("[Enter]", Style::default().fg(theme::YELLOW)));
+            footer_spans.push(Span::raw(" Down | "));
             footer_spans.push(Span::styled("[Shift+Y]", Style::default().fg(theme::GREEN)));
             footer_spans.push(Span::raw(" Confirm Selection | "));
+
         }
         FileBrowserMode::DownloadLocSelection {
             focused_pane,

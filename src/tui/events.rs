@@ -722,9 +722,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 
                         // Pane-Specific Navigation (Intercepting tree keys if focused on preview)
                         if let BrowserPane::TorrentPreview = focused_pane {
-                            // -----------------------------------------------------------------
-                            // FIX: Calculate EXACT layout for Preview Pane to determine height
-                            // -----------------------------------------------------------------
                             
                             // 1. Re-calculate area logic from view.rs
                             let screen = app.app_state.screen_area;
@@ -893,7 +890,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 }
                             }
                         }
-                        KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+                        KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('u') => {
                             let child_to_highlight = state.current_path.clone();
                             if let Some(parent) = state.current_path.parent() {
                                 let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
@@ -915,10 +912,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 } => {
                                     tracing::info!(target: "superseedr", "Confirming Config Path Selection");
                                     let mut new_settings = current_settings.clone();
-                                    let selected_path = state
-                                        .cursor_path
-                                        .clone()
-                                        .unwrap_or_else(|| state.current_path.clone());
+                                    let selected_path = state.current_path.clone();
 
                                     match target_item {
                                         ConfigItem::DefaultDownloadFolder => {
@@ -1010,6 +1004,23 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         }
 
                         KeyCode::Esc => {
+                            if let FileBrowserMode::ConfigPathSelection {
+                                current_settings,
+                                selected_index,
+                                items,
+                                ..
+                            } = browser_mode
+                            {
+                                app.app_state.mode = AppMode::Config {
+                                    settings_edit: current_settings.clone(),
+                                    selected_index: *selected_index,
+                                    items: items.clone(),
+                                    editing: None,
+                                };
+                                app.app_state.ui_needs_redraw = true;
+                                return;
+                            }
+
                             if let FileBrowserMode::DownloadLocSelection { .. } = browser_mode {
                                 if !app.app_state.pending_torrent_link.is_empty() {
                                     // 1. Calculate the hash to find the entry
