@@ -14,12 +14,12 @@ use crate::app::FilePriority;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Semaphore;
 
-use std::time::Duration;
-use std::time::Instant;
-use std::path::Path;
 use std::mem::Discriminant;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::torrent_file::{Torrent, V2RootInfo};
 use crate::torrent_manager::piece_manager::EffectivePiecePriority;
@@ -377,6 +377,7 @@ impl TorrentState {
         piece_manager: PieceManager,
         trackers: HashMap<String, TrackerState>,
         torrent_validation_status: bool,
+        container_name: Option<String>,
     ) -> Self {
         let torrent_status = if torrent.is_some() {
             TorrentStatus::Validating
@@ -392,6 +393,7 @@ impl TorrentState {
             piece_manager,
             trackers,
             torrent_validation_status,
+            container_name,
             optimistic_unchoke_timer: Some(
                 Instant::now()
                     .checked_sub(Duration::from_secs(31))
@@ -2059,10 +2061,7 @@ impl TorrentState {
                 if let (Some(path), Some(mfi)) = (&self.torrent_data_path, &self.multi_file_info) {
                     let container = self.container_name.as_deref();
                     let (files, directories) = calculate_deletion_lists(mfi, path, container);
-                    effects.push(Effect::DeleteFiles {
-                        files,
-                        directories,
-                    });
+                    effects.push(Effect::DeleteFiles { files, directories });
                 } else {
                     if self.torrent_status != TorrentStatus::AwaitingMetadata
                         && self.torrent_status != TorrentStatus::Validating
@@ -6462,15 +6461,21 @@ mod deletion_tests {
 
     // Helper to mock MFI
     fn mock_mfi(paths: Vec<&str>) -> MultiFileInfo {
-        let files = paths.into_iter().map(|p| FileInfo {
-            path: PathBuf::from(p),
-            length: 100,
-            global_start_offset: 0,
-            is_padding: false,
-            is_skipped: false,
-        }).collect();
-        
-        MultiFileInfo { files, total_size: 100 }
+        let files = paths
+            .into_iter()
+            .map(|p| FileInfo {
+                path: PathBuf::from(p),
+                length: 100,
+                global_start_offset: 0,
+                is_padding: false,
+                is_skipped: false,
+            })
+            .collect();
+
+        MultiFileInfo {
+            files,
+            total_size: 100,
+        }
     }
 
     #[test]
@@ -6483,19 +6488,19 @@ mod deletion_tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], PathBuf::from("/Downloads/linux.iso"));
-        
+
         // Critical: Should NOT delete /Downloads
-        assert!(dirs.is_empty(), "Single file torrent should not delete root dir");
+        assert!(
+            dirs.is_empty(),
+            "Single file torrent should not delete root dir"
+        );
     }
 
     #[test]
     fn test_delete_standard_folder_torrent() {
         let base = PathBuf::from("/Downloads");
         // Case: "Album Name/01.mp3"
-        let mfi = mock_mfi(vec![
-            "/Downloads/Album/01.mp3",
-            "/Downloads/Album/02.mp3"
-        ]);
+        let mfi = mock_mfi(vec!["/Downloads/Album/01.mp3", "/Downloads/Album/02.mp3"]);
 
         let (_, dirs) = calculate_deletion_lists(&mfi, &base, None);
 
@@ -6510,14 +6515,14 @@ mod deletion_tests {
         let mfi = mock_mfi(vec![
             "/Downloads/Game/readme.txt",
             "/Downloads/Game/Data/config.ini",
-            "/Downloads/Game/Data/Textures/skin.png"
+            "/Downloads/Game/Data/Textures/skin.png",
         ]);
 
         let (_, dirs) = calculate_deletion_lists(&mfi, &base, None);
 
         // Should identify: Game, Game/Data, Game/Data/Textures
         assert_eq!(dirs.len(), 3);
-        
+
         // Verify Sort Order (Deepest First)
         assert_eq!(dirs[0], PathBuf::from("/Downloads/Game/Data/Textures"));
         assert_eq!(dirs[1], PathBuf::from("/Downloads/Game/Data"));
@@ -6527,16 +6532,19 @@ mod deletion_tests {
     #[test]
     fn test_delete_safety_boundary_escape() {
         let base = PathBuf::from("/Downloads");
-        
+
         // Edge Case: File path somehow points outside base (e.g. config error)
         let mfi = mock_mfi(vec!["/System/Critical/boot.ini"]);
-        
+
         let (files, dirs) = calculate_deletion_lists(&mfi, &base, None);
-        
-        // We still delete the file (it belongs to the torrent), 
+
+        // We still delete the file (it belongs to the torrent),
         // but we MUST NOT delete parent folders up to root if they aren't in base.
         assert_eq!(files.len(), 1);
-        assert!(dirs.is_empty(), "Should not identify directories outside base path");
+        assert!(
+            dirs.is_empty(),
+            "Should not identify directories outside base path"
+        );
     }
 
     #[test]
@@ -6549,7 +6557,10 @@ mod deletion_tests {
         let (_, dirs) = calculate_deletion_lists(&mfi, &base, Some(name));
 
         // Should include base path because names match
-        assert!(dirs.contains(&base), "Should delete container if name matches");
+        assert!(
+            dirs.contains(&base),
+            "Should delete container if name matches"
+        );
     }
 
     #[test]
@@ -6562,7 +6573,10 @@ mod deletion_tests {
         let (_, dirs) = calculate_deletion_lists(&mfi, &base, Some(name));
 
         // "Downloads" != "LinuxDistro" -> Do NOT delete base
-        assert!(dirs.is_empty(), "Should NOT delete root folder if names mismatch");
+        assert!(
+            dirs.is_empty(),
+            "Should NOT delete root folder if names mismatch"
+        );
     }
 
     #[test]
@@ -6575,7 +6589,10 @@ mod deletion_tests {
         let (_, dirs) = calculate_deletion_lists(&mfi, &base, Some(name));
 
         // "MyStuff" != "LinuxDistro" -> Safe fallback is to KEEP the folder
-        assert!(dirs.is_empty(), "Should preserve renamed container for safety");
+        assert!(
+            dirs.is_empty(),
+            "Should preserve renamed container for safety"
+        );
     }
 
     #[test]

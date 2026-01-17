@@ -428,6 +428,7 @@ pub struct TorrentMetrics {
     pub torrent_or_magnet: String,
     pub torrent_name: String,
     pub download_path: Option<PathBuf>,
+    pub container_name: Option<String>,
     pub file_priorities: HashMap<usize, FilePriority>,
     pub number_of_successfully_connected_peers: usize,
     pub number_of_pieces_total: u32,
@@ -712,6 +713,7 @@ impl App {
                     torrent_config.validation_status,
                     torrent_config.torrent_control_state,
                     torrent_config.file_priorities,
+                    torrent_config.container_name,
                 )
                 .await;
             } else {
@@ -721,6 +723,7 @@ impl App {
                     torrent_config.validation_status,
                     torrent_config.torrent_control_state,
                     torrent_config.file_priorities.clone(),
+                    torrent_config.container_name,
                 )
                 .await;
             }
@@ -989,6 +992,7 @@ impl App {
                         false,
                         TorrentControlState::Running,
                         HashMap::new(),
+                        None,
                     )
                     .await;
 
@@ -1141,6 +1145,7 @@ impl App {
                                     false,
                                     TorrentControlState::Running,
                                     HashMap::new(),
+                                    None,
                                 )
                                 .await;
                                 self.save_state_to_disk();
@@ -1202,6 +1207,7 @@ impl App {
                                     false,
                                     TorrentControlState::Running,
                                     HashMap::new(),
+                                    None,
                                 )
                                 .await;
                                 self.save_state_to_disk();
@@ -2327,6 +2333,7 @@ impl App {
                     name: torrent_state.torrent_name.clone(),
                     validation_status: final_validation_status,
                     download_path: torrent_state.download_path.clone(),
+                    container_name: torrent_state.container_name.clone(),
                     torrent_control_state: torrent_state.torrent_control_state.clone(),
                     file_priorities: torrent_state.file_priorities.clone(),
                 }
@@ -2513,6 +2520,7 @@ impl App {
         is_validated: bool,
         torrent_control_state: TorrentControlState,
         file_priorities: HashMap<usize, FilePriority>,
+        container_name: Option<String>,
     ) {
         let buffer = match fs::read(&path) {
             Ok(buf) => buf,
@@ -2632,6 +2640,7 @@ impl App {
                 torrent_or_magnet: permanent_torrent_path.to_string_lossy().to_string(),
                 torrent_name: torrent.info.name.clone(),
                 download_path: download_path.clone(),
+                container_name: container_name.clone(),
                 number_of_pieces_total,
                 file_priorities: file_priorities.clone(),
                 ..Default::default()
@@ -2667,6 +2676,7 @@ impl App {
             metrics_tx: torrent_tx_clone,
             torrent_validation_status: is_validated,
             torrent_data_path: download_path,
+            container_name: container_name.clone(),
             manager_command_rx,
             manager_event_tx: manager_event_tx_clone,
             settings: Arc::clone(&Arc::new(self.client_configs.clone())),
@@ -2706,6 +2716,7 @@ impl App {
         is_validated: bool,
         torrent_control_state: TorrentControlState,
         file_priorities: HashMap<usize, FilePriority>,
+        container_name: Option<String>,
     ) {
         tracing::info!(target: "magnet_flow", "Engine: add_magnet_torrent entry. Link: {}", magnet_link); //
         let magnet = match Magnet::new(&magnet_link) {
@@ -2742,6 +2753,7 @@ impl App {
                 torrent_or_magnet: magnet_link.clone(),
                 torrent_name,
                 download_path: download_path.clone(),
+                container_name: container_name.clone(),
                 ..Default::default()
             },
             ..Default::default()
@@ -2770,6 +2782,7 @@ impl App {
             metrics_tx: torrent_tx_clone,
             torrent_validation_status: is_validated,
             torrent_data_path: download_path.clone(),
+            container_name: container_name.clone(),
             manager_command_rx,
             manager_event_tx: manager_event_tx_clone,
             settings: Arc::clone(&Arc::new(self.client_configs.clone())),

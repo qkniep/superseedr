@@ -41,6 +41,7 @@ pub struct TorrentParameters {
     pub metrics_tx: broadcast::Sender<TorrentMetrics>,
     pub torrent_validation_status: bool,
     pub torrent_data_path: Option<PathBuf>,
+    pub container_name: Option<String>,
     pub manager_command_rx: Receiver<ManagerCommand>,
     pub manager_event_tx: Sender<ManagerEvent>,
     pub settings: Arc<Settings>,

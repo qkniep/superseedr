@@ -135,6 +135,7 @@ pub struct TorrentSettings {
     pub name: String,
     pub validation_status: bool,
     pub download_path: Option<PathBuf>,
+    pub container_name: Option<String>,
     pub torrent_control_state: TorrentControlState,
 
     #[serde(with = "string_usize_map")]

@@ -169,6 +169,7 @@ impl TorrentManager {
             incoming_peer_rx,
             metrics_tx,
             torrent_data_path: _,
+            container_name,
             manager_command_rx,
             manager_event_tx,
             settings,
@@ -205,6 +206,7 @@ impl TorrentManager {
             PieceManager::new(),
             trackers,
             torrent_validation_status,
+            container_name,
         );
 
         Self {
@@ -996,10 +998,7 @@ impl TorrentManager {
                 let _ = self.dht_trigger_tx.send(());
             }
 
-            Effect::DeleteFiles {
-                files,
-                directories,
-            } => {
+            Effect::DeleteFiles { files, directories } => {
                 let info_hash = self.state.info_hash.clone();
                 let tx = self.manager_event_tx.clone();
 
@@ -1011,7 +1010,8 @@ impl TorrentManager {
                         if let Err(e) = fs::remove_file(&file_path).await {
                             // If it's already gone, that's fine (success).
                             if e.kind() != std::io::ErrorKind::NotFound {
-                                let error_msg = format!("Failed to delete file {:?}: {}", &file_path, e);
+                                let error_msg =
+                                    format!("Failed to delete file {:?}: {}", &file_path, e);
                                 event!(Level::ERROR, "{}", error_msg);
                                 result = Err(error_msg);
                             }
@@ -1019,8 +1019,8 @@ impl TorrentManager {
                     }
 
                     // 2. Delete Directories (in sorted order: Deepest -> Shallowest)
-                    // We use remove_dir (not remove_dir_all) for safety. 
-                    // It will simply fail (safely) if the directory is not empty 
+                    // We use remove_dir (not remove_dir_all) for safety.
+                    // It will simply fail (safely) if the directory is not empty
                     // (e.g., user added their own files to the folder).
                     for dir_path in directories {
                         if let Err(e) = fs::remove_dir(&dir_path).await {

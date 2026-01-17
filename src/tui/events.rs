@@ -956,10 +956,17 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     ..
                                 } => {
                                     let base_path = state.current_path.clone();
+                                    let container_name_clone = container_name.clone();
                                     let final_path = if *use_container {
-                                        Some(base_path.join(container_name))
+                                        Some(base_path.join(&container_name_clone))
                                     } else {
                                         Some(base_path)
+                                    };
+
+                                    let container_name_to_use = if *use_container {
+                                        Some(container_name_clone)
+                                    } else {
+                                        None
                                     };
 
                                     let mut file_priorities = HashMap::new();
@@ -976,6 +983,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                             false,
                                             TorrentControlState::Running,
                                             file_priorities,
+                                            container_name_to_use.clone(),
                                         )
                                         .await;
                                     } else if !app.app_state.pending_torrent_link.is_empty() {
@@ -986,6 +994,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                             false,
                                             TorrentControlState::Running,
                                             file_priorities,
+                                            container_name_to_use,
                                         )
                                         .await;
                                         app.app_state.pending_torrent_link.clear();
@@ -1265,6 +1274,7 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
             false,
             TorrentControlState::Running,
             HashMap::new(),
+            None,
         )
         .await;
 
@@ -1297,6 +1307,7 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
                     false,
                     TorrentControlState::Running,
                     HashMap::new(),
+                    None,
                 )
                 .await;
             } else {
