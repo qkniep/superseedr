@@ -139,6 +139,7 @@ pub enum BrowserPane {
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum FileBrowserMode {
     #[default]
     Directory, // User must pick a folder (e.g. Download Location)
@@ -373,6 +374,7 @@ pub enum ConfigItem {
 }
 
 #[derive(Default)]
+#[allow(clippy::large_enum_variant)]
 pub enum AppMode {
     Welcome,
     #[default]
