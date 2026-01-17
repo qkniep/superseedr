@@ -2359,12 +2359,10 @@ pub fn draw_file_browser(
         } else {
             centered_rect(90, 80, f.area())
         }
+    } else if f.area().width < 40 {
+        f.area()
     } else {
-        if f.area().width < 40 {
-            f.area()
-        } else {
-            centered_rect(75, 80, f.area())
-        }
+        centered_rect(75, 80, f.area())
     };
 
     let layout = calculate_file_browser_layout(

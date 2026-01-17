@@ -837,12 +837,10 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         } else {
                             centered_rect(90, 80, screen)
                         }
+                    } else if screen.width < 40 {
+                        screen
                     } else {
-                        if screen.width < 40 {
-                            screen
-                        } else {
-                            centered_rect(75, 80, screen)
-                        }
+                        centered_rect(75, 80, screen)
                     };
 
                     // 4. Calculate Layout

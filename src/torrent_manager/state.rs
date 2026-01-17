@@ -2326,18 +2326,23 @@ impl TorrentState {
                 .get(&file_idx)
                 .unwrap_or(&FilePriority::Normal);
 
-            for p_idx in start_piece..=end_piece {
+            for (p_idx, piece) in piece_vec
+                .iter_mut()
+                .enumerate()
+                .take(end_piece + 1)
+                .skip(start_piece)
+            {
                 if p_idx >= num_pieces {
                     break;
                 }
 
                 match priority {
                     FilePriority::High => {
-                        piece_vec[p_idx] = EffectivePiecePriority::High;
+                        *piece = EffectivePiecePriority::High;
                     }
                     FilePriority::Normal | FilePriority::Mixed => {
-                        if piece_vec[p_idx] != EffectivePiecePriority::High {
-                            piece_vec[p_idx] = EffectivePiecePriority::Normal;
+                        if *piece != EffectivePiecePriority::High {
+                            *piece = EffectivePiecePriority::Normal;
                         }
                     }
                     FilePriority::Skip => {
