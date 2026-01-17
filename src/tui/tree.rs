@@ -156,10 +156,12 @@ impl RawNode<crate::app::TorrentPreviewPayload> {
     }
 }
 
+type FilterRule<T> = Rc<dyn Fn(&RawNode<T>) -> bool>;
+
 #[derive(Clone)]
 pub struct TreeFilter<T> {
     pub queries: Vec<String>,
-    pub node_rule: Option<Rc<dyn Fn(&RawNode<T>) -> bool>>,
+    pub node_rule: Option<FilterRule<T>>,
 }
 
 impl<T> Default for TreeFilter<T> {
