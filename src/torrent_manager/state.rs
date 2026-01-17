@@ -6446,6 +6446,84 @@ mod tests {
         // Note: physically_complete is False (0 bytes on disk), so AnnounceCompleted might NOT send depending on logic.
         // But the status MUST be Done.
     }
+
+    #[test]
+    fn test_peer_disconnect_batches_until_threshold() {
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+        
+        // Add 101 peers to ensure we cross the threshold
+        for i in 0..101 {
+            let pid = format!("peer_{}", i);
+            add_peer(&mut state, &pid);
+            
+            let effects = state.update(Action::PeerDisconnected {
+                peer_id: pid.clone(),
+                force: false,
+            });
+
+            if i < 99 {
+                // Should not have processed yet
+                assert!(effects.is_empty() || matches!(effects[0], Effect::DoNothing));
+                assert_eq!(state.pending_disconnects.len(), i + 1);
+            } else if i == 99 {
+                // On the 100th peer, it should flush the first 100
+                assert_eq!(effects.len(), 200); // 100 DisconnectPeer + 100 EmitManagerEvent
+                assert!(state.pending_disconnects.is_empty());
+            }
+        }
+        
+        // The 101st peer should now be sitting alone in the new batch
+        assert_eq!(state.pending_disconnects.len(), 1);
+    }
+
+    #[test]
+    fn test_peer_disconnect_force_flush() {
+        let mut state = create_empty_state();
+        
+        // Add only 5 peers (well below the 100 threshold)
+        for i in 0..5 {
+            let pid = format!("peer_{}", i);
+            add_peer(&mut state, &pid);
+            state.update(Action::PeerDisconnected {
+                peer_id: pid,
+                force: false,
+            });
+        }
+        
+        assert_eq!(state.pending_disconnects.len(), 5);
+
+        // Trigger a forced flush (passing an empty ID as Cleanup would)
+        let effects = state.update(Action::PeerDisconnected {
+            peer_id: String::new(),
+            force: true,
+        });
+
+        // Check that all 5 were processed
+        assert_eq!(effects.len(), 10); // 5 Disconnects + 5 Events
+        assert!(state.pending_disconnects.is_empty());
+        assert_eq!(state.peers.len(), 0);
+    }
+
+    #[test]
+    fn test_cleanup_flushes_stuck_peers_via_batch() {
+        let mut state = create_empty_state();
+        state.now = Instant::now();
+
+        // Add a "stuck" peer (empty peer_id, created 10 seconds ago)
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let mut peer = PeerState::new("127.0.0.1:1234".to_string(), tx, state.now - Duration::from_secs(10));
+        peer.peer_id = Vec::new(); // Empty ID = Stuck
+        state.peers.insert("127.0.0.1:1234".to_string(), peer);
+
+        // Run Cleanup
+        let effects = state.update(Action::Cleanup);
+
+        // Verify the peer was removed via the batching logic called by Cleanup
+        assert!(state.peers.is_empty());
+        assert!(effects.iter().any(|e| matches!(e, Effect::DisconnectPeer { .. })));
+        assert!(effects.iter().any(|e| matches!(e, Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { .. }))));
+    }
 }
 
 #[cfg(test)]
