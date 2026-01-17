@@ -2396,7 +2396,7 @@ fn calculate_deletion_lists(
     }
 
     let mut sorted_dirs: Vec<PathBuf> = dirs_to_delete.into_iter().collect();
-    sorted_dirs.sort_by(|a, b| b.as_os_str().len().cmp(&a.as_os_str().len()));
+    sorted_dirs.sort_by_key(|b| std::cmp::Reverse(b.as_os_str().len()));
 
     (files, sorted_dirs)
 }

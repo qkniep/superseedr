@@ -2708,6 +2708,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_magnet_torrent(
         &mut self,
         torrent_name: String,
