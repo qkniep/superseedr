@@ -12,7 +12,6 @@ use strum::IntoEnumIterator;
 
 use crate::config::SortDirection;
 
-use crate::tui::formatters::centered_rect;
 use crate::tui::layout::calculate_layout;
 use crate::tui::layout::compute_smart_table_layout;
 use crate::tui::layout::get_peer_columns;
@@ -22,6 +21,8 @@ use crate::tui::layout::SmartCol;
 use crate::tui::tree::RawNode;
 use crate::tui::tree::TreeViewState;
 use crate::tui::tree::{TreeAction, TreeFilter, TreeMathHelper};
+use crate::tui::layout::calculate_file_browser_layout;
+use crate::tui::formatters::centered_rect;
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::prelude::Rect;
@@ -775,18 +776,53 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             }
                             app.app_state.ui_needs_redraw = true;
                             // If focused on TorrentPreview, we don't want FileSystem navigation to trigger
-                            // except for confirming the whole thing via SHIFT+C.
+                            // except for confirming the whole thing via SHIFT+Y.
                             if key.code != KeyCode::Char('Y') {
                                 return;
                             }
                         }
                     }
 
-                    // 3. General Browser Navigation Setup
-                    let area =
-                        crate::tui::formatters::centered_rect(75, 80, app.app_state.screen_area);
-                    let max_height = area.height.saturating_sub(2) as usize;
+                    // 1. Determine Preview Status
+                    let has_preview_content = match browser_mode {
+                        FileBrowserMode::DownloadLocSelection { .. } => {
+                            app.app_state.pending_torrent_path.is_some() || !app.app_state.pending_torrent_link.is_empty()
+                        }
+                        FileBrowserMode::File(_) => state
+                            .cursor_path
+                            .as_ref()
+                            .is_some_and(|p| p.extension().is_some_and(|ext| ext == "torrent")),
+                        _ => false,
+                    };
 
+                    // 2. Determine Focused Pane
+                    let default_pane = BrowserPane::FileSystem;
+                    let focused_pane = if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
+                        focused_pane
+                    } else {
+                        &default_pane
+                    };
+
+                    // 3. Determine Area (Matching view.rs logic exactly)
+                    let screen = app.app_state.screen_area;
+                    let area = if has_preview_content {
+                        if screen.width < 60 { screen } else { centered_rect(90, 80, screen) }
+                    } else {
+                        if screen.width < 40 { screen } else { centered_rect(75, 80, screen) }
+                    };
+
+                    // 4. Calculate Layout
+                    let layout = calculate_file_browser_layout(
+                        area,
+                        has_preview_content,
+                        app.app_state.is_searching,
+                        focused_pane,
+                    );
+
+                    // 5. Get EXACT List Height (Height - 2 for Borders)
+                    let list_height = layout.list.height.saturating_sub(2) as usize;
+
+                    // 6. Setup Filter
                     let filter = match browser_mode {
                         FileBrowserMode::Directory
                         | FileBrowserMode::DownloadLocSelection { .. }
@@ -801,7 +837,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         }
                     };
 
-                    // 4. Main Key Match
+                    // 7. Handle Navigation with calculated height
                     match key.code {
                         KeyCode::Char('/') => {
                             app.app_state.is_searching = true;
@@ -813,7 +849,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 data,
                                 TreeAction::Up,
                                 filter,
-                                max_height,
+                                list_height,
                             );
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
@@ -822,7 +858,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 data,
                                 TreeAction::Down,
                                 filter,
-                                max_height,
+                                list_height,
                             );
                         }
                         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
@@ -924,7 +960,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                         .await;
                                         app.app_state.pending_torrent_link.clear();
                                     } else {
-                                        tracing::warn!(target: "superseedr", "SHIFT+C pressed but no pending content was found");
+                                        tracing::warn!(target: "superseedr", "SHIFT+Y pressed but no pending content was found");
                                     }
 
                                     app.app_state.mode = AppMode::Normal;
