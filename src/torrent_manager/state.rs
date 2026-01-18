@@ -1088,6 +1088,8 @@ impl TorrentState {
                 let mut effects = Vec::new();
                 let batch = std::mem::take(&mut self.pending_disconnects);
 
+                self.last_activity = TorrentActivity::ProcessingPeers(self.peers.len());
+
                 for pid in batch {
                     if let Some(removed_peer) = self.peers.remove(&pid) {
                         for piece_index in removed_peer.pending_requests {
@@ -1698,7 +1700,7 @@ impl TorrentState {
             Action::PeerConnectionFailed { peer_addr } => {
                 self.pending_failures.push(peer_addr);
                 if self.pending_failures.len() >= 100 {
-                    let mut effects = Vec::new();
+                    let effects = Vec::new();
                     let batch = std::mem::take(&mut self.pending_failures);
                     for addr in batch {
                         let (count, _) = self
