@@ -1026,11 +1026,15 @@ impl App {
             AppCommand::AddTorrentFromFile(path) => {
                 // Determine if the file is coming from a watch folder (User or System)
                 let parent_dir = path.parent();
-                let is_user_watch = self.client_configs.watch_folder.as_ref()
+                let is_user_watch = self
+                    .client_configs
+                    .watch_folder
+                    .as_ref()
                     .is_some_and(|p| parent_dir == Some(p));
 
                 let system_watch_info = get_watch_path();
-                let is_system_watch = system_watch_info.as_ref()
+                let is_system_watch = system_watch_info
+                    .as_ref()
                     .is_some_and(|(p, _)| parent_dir == Some(p));
 
                 if let Some(download_path) = &self.client_configs.default_download_folder {
@@ -1042,7 +1046,8 @@ impl App {
                         TorrentControlState::Running,
                         HashMap::new(),
                         None,
-                    ).await;
+                    )
+                    .await;
 
                     self.save_state_to_disk();
 
@@ -1055,7 +1060,8 @@ impl App {
                                 let new_path = processed_path.join(file_name);
                                 fs::rename(&path, &new_path).ok()?;
                                 Some(())
-                            })().is_some()
+                            })()
+                            .is_some()
                         } else {
                             false
                         };
@@ -1070,7 +1076,7 @@ impl App {
                     // --- CASE B: Manual Adding (Prompt for Location) ---
                     if let Ok(buffer) = fs::read(&path) {
                         if let Ok(torrent) = from_bytes(&buffer) {
-                            // 1. Rename the file immediately if it's in a watch folder 
+                            // 1. Rename the file immediately if it's in a watch folder
                             // This prevents the watcher from re-triggering while the UI is open.
                             let final_path = if is_user_watch || is_system_watch {
                                 let mut new_path = path.clone();
@@ -1097,21 +1103,27 @@ impl App {
                             };
 
                             let info_hash_hex = hex::encode(&info_hash);
-                            let default_container_name = format!("{} [{}]", torrent.info.name, info_hash_hex);
+                            let default_container_name =
+                                format!("{} [{}]", torrent.info.name, info_hash_hex);
                             let file_list = torrent.file_list();
                             let should_enclose = file_list.len() > 1;
 
                             // 3. Build Preview Tree
-                            let preview_payloads: Vec<(Vec<String>, TorrentPreviewPayload)> = file_list
-                                .into_iter()
-                                .enumerate()
-                                .map(|(idx, (parts, size))| {
-                                    (parts, TorrentPreviewPayload {
-                                        file_index: Some(idx),
-                                        size,
-                                        priority: FilePriority::Normal,
+                            let preview_payloads: Vec<(Vec<String>, TorrentPreviewPayload)> =
+                                file_list
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(idx, (parts, size))| {
+                                        (
+                                            parts,
+                                            TorrentPreviewPayload {
+                                                file_index: Some(idx),
+                                                size,
+                                                priority: FilePriority::Normal,
+                                            },
+                                        )
                                     })
-                                }).collect();
+                                    .collect();
 
                             let preview_tree = RawNode::from_path_list(None, preview_payloads);
                             let mut preview_state = TreeViewState::new();
@@ -1139,10 +1151,12 @@ impl App {
                                 highlight_path: None,
                             });
                         } else {
-                            self.app_state.system_error = Some("Failed to parse torrent file for preview.".to_string());
+                            self.app_state.system_error =
+                                Some("Failed to parse torrent file for preview.".to_string());
                         }
                     } else {
-                        self.app_state.system_error = Some("Failed to read torrent file.".to_string());
+                        self.app_state.system_error =
+                            Some("Failed to read torrent file.".to_string());
                     }
                 }
             }
@@ -1443,7 +1457,7 @@ impl App {
                     if let Some(old_path) = old_settings.watch_folder {
                         let _ = self.watcher.unwatch(&old_path); // Note: Requires making 'watcher' a field in App
                     }
-                    
+
                     if let Some(new_path) = &self.client_configs.watch_folder {
                         if let Err(e) = self.watcher.watch(new_path, RecursiveMode::NonRecursive) {
                             tracing::error!("Failed to watch new folder: {}", e);
@@ -2954,7 +2968,12 @@ impl App {
         // Watch System Folders
         if let Some((watch_path, _)) = get_watch_path() {
             if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
-                tracing_event!(Level::ERROR, "Failed to watch system path {:?}: {}", watch_path, e);
+                tracing_event!(
+                    Level::ERROR,
+                    "Failed to watch system path {:?}: {}",
+                    watch_path,
+                    e
+                );
             }
         }
 
