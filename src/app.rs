@@ -606,6 +606,8 @@ pub struct App {
     pub tui_event_rx: mpsc::Receiver<CrosstermEvent>,
     pub shutdown_tx: broadcast::Sender<()>,
     pub tui_task: Option<tokio::task::JoinHandle<()>>,
+    pub notify_rx: mpsc::Receiver<Result<Event, NotifyError>>,
+    pub watcher: RecommendedWatcher,
 }
 impl App {
     pub async fn new(client_configs: Settings) -> Result<Self, Box<dyn std::error::Error>> {
@@ -693,6 +695,9 @@ impl App {
             ..Default::default()
         };
 
+        let (notify_tx, notify_rx) = mpsc::channel::<Result<Event, NotifyError>>(100);
+        let watcher = Self::create_watcher(&client_configs, notify_tx)?;
+
         let mut app = Self {
             app_state,
             client_configs: client_configs.clone(),
@@ -713,6 +718,8 @@ impl App {
             tui_event_rx,
             shutdown_tx,
             tui_task: None,
+            watcher,
+            notify_rx,
         };
 
         let mut torrents_to_load = app.client_configs.torrents.clone();
@@ -766,9 +773,6 @@ impl App {
 
         self.startup_crossterm_event_listener();
 
-        let (notify_tx, mut notify_rx) = mpsc::channel::<Result<Event, NotifyError>>(100);
-        let _watcher = self.setup_file_watcher(notify_tx)?;
-
         let mut sys = System::new();
 
         let mut stats_interval = time::interval(Duration::from_secs(1));
@@ -804,7 +808,7 @@ impl App {
                     events::handle_event(event, self).await;
                 }
 
-                Some(result) = notify_rx.recv() => {
+                Some(result) = self.notify_rx.recv() => {
                     self.handle_file_event(result).await;
                 }
 
@@ -1020,7 +1024,21 @@ impl App {
     async fn handle_app_command(&mut self, command: AppCommand) {
         match command {
             AppCommand::AddTorrentFromFile(path) => {
+                // Determine if the file is coming from a watch folder (User or System)
+                let parent_dir = path.parent();
+                let is_user_watch = self
+                    .client_configs
+                    .watch_folder
+                    .as_ref()
+                    .is_some_and(|p| parent_dir == Some(p));
+
+                let system_watch_info = get_watch_path();
+                let is_system_watch = system_watch_info
+                    .as_ref()
+                    .is_some_and(|(p, _)| parent_dir == Some(p));
+
                 if let Some(download_path) = &self.client_configs.default_download_folder {
+                    // --- CASE A: Automatic Adding (Default Path Exists) ---
                     self.add_torrent_from_file(
                         path.to_path_buf(),
                         Some(download_path.to_path_buf()),
@@ -1033,60 +1051,47 @@ impl App {
 
                     self.save_state_to_disk();
 
-                    let parent_dir = path.parent();
-
-                    let is_user_watch = self
-                        .client_configs
-                        .watch_folder
-                        .as_ref()
-                        .is_some_and(|p| parent_dir == Some(p));
-
-                    // 1. Get system watch info specifically to access the 'processed' path
-                    let system_watch_info = get_watch_path();
-                    let is_system_watch = system_watch_info
-                        .as_ref()
-                        .is_some_and(|(p, _)| parent_dir == Some(p));
-
+                    // Cleanup: Move to processed or rename to .added
                     if is_user_watch || is_system_watch {
-                        let move_successful =
-                            // 2. Always target the system 'processed_path' for consistency
-                            if let Some((_, processed_path)) = system_watch_info {
-                                (|| {
-                                    fs::create_dir_all(&processed_path).ok()?;
-
-                                    let file_name = path.file_name()?;
-                                    let new_path = processed_path.join(file_name);
-                                    fs::rename(&path, &new_path).ok()?;
-
-                                    Some(())
-                                })()
-                                .is_some()
-                            } else {
-                                false
-                            };
+                        let move_successful = if let Some((_, processed_path)) = system_watch_info {
+                            (|| {
+                                fs::create_dir_all(&processed_path).ok()?;
+                                let file_name = path.file_name()?;
+                                let new_path = processed_path.join(file_name);
+                                fs::rename(&path, &new_path).ok()?;
+                                Some(())
+                            })()
+                            .is_some()
+                        } else {
+                            false
+                        };
 
                         if !move_successful {
-                            tracing_event!(
-                                Level::WARN,
-                                "Could not move torrent file. Defaulting to renaming in place."
-                            );
                             let mut new_path = path.clone();
                             new_path.set_extension("torrent.added");
-                            if let Err(e) = fs::rename(&path, &new_path) {
-                                tracing_event!(
-                                    Level::ERROR,
-                                    "Fallback rename failed for {:?}: {}",
-                                    path,
-                                    e
-                                );
-                            }
+                            let _ = fs::rename(&path, &new_path);
                         }
                     }
                 } else {
-                    // 2. We need to prompt for a location.
-                    // Read the file bytes to parse metadata for the default name.
+                    // --- CASE B: Manual Adding (Prompt for Location) ---
                     if let Ok(buffer) = fs::read(&path) {
                         if let Ok(torrent) = from_bytes(&buffer) {
+                            // 1. Rename the file immediately if it's in a watch folder
+                            // This prevents the watcher from re-triggering while the UI is open.
+                            let final_path = if is_user_watch || is_system_watch {
+                                let mut new_path = path.clone();
+                                new_path.set_extension("torrent.added");
+                                if let Err(e) = fs::rename(&path, &new_path) {
+                                    tracing::error!("Failed to rename watched file: {}", e);
+                                    path.clone()
+                                } else {
+                                    new_path
+                                }
+                            } else {
+                                path.clone()
+                            };
+
+                            // 2. Parse metadata for the UI Preview
                             let info_hash = if torrent.info.meta_version == Some(2) {
                                 let mut hasher = Sha256::new();
                                 hasher.update(&torrent.info_dict_bencode);
@@ -1100,15 +1105,10 @@ impl App {
                             let info_hash_hex = hex::encode(&info_hash);
                             let default_container_name =
                                 format!("{} [{}]", torrent.info.name, info_hash_hex);
+                            let file_list = torrent.file_list();
+                            let should_enclose = file_list.len() > 1;
 
-                            let file_list = torrent.file_list(); // Returns Vec<(Vec<String>, u64)>
-                            let file_count = file_list.len();
-                            let should_enclose = file_count > 1;
-
-                            // --- PHASE 2: Build Preview Tree ---
-
-                            // A. Create Payloads with File Indices
-                            // We enumerate the file list to get the correct index for the torrent engine
+                            // 3. Build Preview Tree
                             let preview_payloads: Vec<(Vec<String>, TorrentPreviewPayload)> =
                                 file_list
                                     .into_iter()
@@ -1117,40 +1117,34 @@ impl App {
                                         (
                                             parts,
                                             TorrentPreviewPayload {
-                                                file_index: Some(idx), // Save index for later priority mapping
+                                                file_index: Some(idx),
                                                 size,
-                                                priority: FilePriority::Normal, // Default priority
+                                                priority: FilePriority::Normal,
                                             },
                                         )
                                     })
                                     .collect();
 
-                            // B. Generate the Tree Structure
-                            // Pass `None` for custom_root so it reflects the actual torrent structure
                             let preview_tree = RawNode::from_path_list(None, preview_payloads);
-
-                            // C. Initialize Tree State
                             let mut preview_state = TreeViewState::new();
-                            // Auto-expand the root node so the user sees content immediately
                             for node in &preview_tree {
                                 node.expand_all(&mut preview_state);
                             }
 
-                            // D. Launch Browser with New Fields
-                            self.app_state.pending_torrent_path = Some(path.clone());
+                            // 4. Update state and switch to File Browser
+                            self.app_state.pending_torrent_path = Some(final_path);
                             let initial_path = self.get_initial_destination_path();
 
                             let _ = self.app_command_tx.try_send(AppCommand::FetchFileTree {
                                 path: initial_path,
                                 browser_mode: FileBrowserMode::DownloadLocSelection {
-                                    torrent_files: vec![], // Legacy field (can optionally remove later)
+                                    torrent_files: vec![],
                                     container_name: default_container_name.clone(),
                                     use_container: should_enclose,
                                     is_editing_name: false,
-                                    // NEW FIELDS:
                                     preview_tree,
                                     preview_state,
-                                    focused_pane: BrowserPane::FileSystem, // Start focus on the left (Save Location)
+                                    focused_pane: BrowserPane::FileSystem,
                                     cursor_pos: 0,
                                     original_name_backup: default_container_name,
                                 },
@@ -1459,6 +1453,20 @@ impl App {
                         .set_rate(new_settings.global_upload_limit_bps as f64);
                 }
 
+                if new_settings.watch_folder != old_settings.watch_folder {
+                    if let Some(old_path) = old_settings.watch_folder {
+                        if let Err(e) = self.watcher.unwatch(&old_path) {
+                            tracing::info!("Failed to unwatch old folder {:?}: {}", old_path, e);
+                        }
+                    }
+
+                    if let Some(new_path) = &self.client_configs.watch_folder {
+                        if let Err(e) = self.watcher.watch(new_path, RecursiveMode::NonRecursive) {
+                            tracing::error!("Failed to watch new folder: {}", e);
+                        }
+                    }
+                }
+
                 // 3. Persist to Disk
                 self.save_state_to_disk();
 
@@ -1681,67 +1689,6 @@ impl App {
             }
         }
     }
-    fn setup_file_watcher(
-        &self,
-        tx: mpsc::Sender<Result<Event, NotifyError>>,
-    ) -> Result<RecommendedWatcher, Box<dyn std::error::Error>> {
-        let mut watcher = RecommendedWatcher::new(
-            move |res: Result<Event, NotifyError>| {
-                if let Err(e) = tx.blocking_send(res) {
-                    tracing_event!(
-                        Level::ERROR,
-                        "Failed to send file event to main loop: {}",
-                        e
-                    );
-                }
-            },
-            Config::default(),
-        )?;
-
-        // Watch User Configured Folder
-        if let Some(path) = &self.client_configs.watch_folder {
-            if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
-                tracing_event!(Level::ERROR, "Failed to watch user path {:?}: {}", path, e);
-            } else {
-                tracing_event!(Level::INFO, "Watching user path: {:?}", path);
-            }
-        }
-
-        // Watch System/Container Folders
-        if let Some((watch_path, _)) = get_watch_path() {
-            if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
-                tracing_event!(
-                    Level::ERROR,
-                    "Failed to watch system path {:?}: {}",
-                    watch_path,
-                    e
-                );
-            } else {
-                tracing_event!(Level::INFO, "Watching system path: {:?}", watch_path);
-            }
-        }
-
-        // Watch Port File Directory
-        let port_file_path = PathBuf::from("/port-data/forwarded_port");
-        if let Some(port_dir) = port_file_path.parent() {
-            if let Err(e) = watcher.watch(port_dir, RecursiveMode::NonRecursive) {
-                tracing_event!(
-                    Level::WARN,
-                    "Failed to watch port file directory {:?}: {}",
-                    port_dir,
-                    e
-                );
-            } else {
-                tracing_event!(
-                    Level::INFO,
-                    "Watching for port file changes in {:?}",
-                    port_dir
-                );
-            }
-        }
-
-        Ok(watcher)
-    }
 
     async fn handle_file_event(&mut self, result: Result<Event, notify::Error>) {
         match result {
@@ -1829,7 +1776,7 @@ impl App {
     }
 
     async fn handle_port_change(&mut self, path: PathBuf) {
-        tracing_event!(Level::INFO, "Processing port file change...");
+        tracing_event!(Level::DEBUG, "Processing port file change...");
         let port_str = match fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
@@ -2996,6 +2943,62 @@ impl App {
         let resp: CratesResponse = client.get(url).send().await?.json().await?;
 
         Ok(resp.krate.max_version)
+    }
+
+    fn create_watcher(
+        settings: &Settings,
+        tx: mpsc::Sender<Result<Event, NotifyError>>,
+    ) -> Result<RecommendedWatcher, Box<dyn std::error::Error>> {
+        let mut watcher = RecommendedWatcher::new(
+            move |res: Result<Event, NotifyError>| {
+                if let Err(e) = tx.blocking_send(res) {
+                    tracing_event!(Level::ERROR, "Failed to send file event: {}", e);
+                }
+            },
+            Config::default(),
+        )?;
+
+        // Watch User Configured Folder
+        if let Some(path) = &settings.watch_folder {
+            if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
+                tracing_event!(Level::ERROR, "Failed to watch user path {:?}: {}", path, e);
+            } else {
+                tracing_event!(Level::INFO, "Watching user path: {:?}", path);
+            }
+        }
+
+        // Watch System Folders
+        if let Some((watch_path, _)) = get_watch_path() {
+            if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
+                tracing_event!(
+                    Level::ERROR,
+                    "Failed to watch system path {:?}: {}",
+                    watch_path,
+                    e
+                );
+            }
+        }
+
+        // Watch Port File Directory
+        let port_file_path = PathBuf::from("/port-data/forwarded_port");
+        if let Some(port_dir) = port_file_path.parent() {
+            if let Err(e) = watcher.watch(port_dir, RecursiveMode::NonRecursive) {
+                tracing_event!(
+                    Level::WARN,
+                    "Failed to watch port file directory {:?}: {}",
+                    port_dir,
+                    e
+                );
+            } else {
+                tracing_event!(
+                    Level::INFO,
+                    "Watching for port file changes in {:?}",
+                    port_dir
+                );
+            }
+        }
+
+        Ok(watcher)
     }
 }
 

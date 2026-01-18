@@ -176,6 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let general_layer = fmt::layer()
                 .with_writer(non_blocking_general)
+                .with_ansi(false)
                 .with_filter(quiet_filter);
 
             tracing_subscriber::registry()

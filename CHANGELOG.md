@@ -1,5 +1,16 @@
 # Changelog
 
+## Release v0.9.32
+### Refactoring
+- Moved file watcher to App struct for dynamic reconfiguration during runtime.
+- Updated GitHub Actions to latest versions (checkout@v6, cache@v5).
+
+### Performance
+- Updated dependencies for improved performance and stability.
+
+### Testing
+- Updated proptest cases for nightly fuzzing.
+
 ## Release v0.9.31
 ### Performance
 - Optimized file allocation by skipping padding and skipped files.
@@ -49,7 +60,7 @@
 - Added unit tests for new TUI navigation logic.
 - Enhanced `Settings` parsing tests with comprehensive coverage.
 
-## Release v0.9.28 
+## Release v0.9.28
 ### Performance
 - Implemented a dynamic request window size in `PeerSession` to improve download throughput.
 - Optimized `TokenBucket` to reduce lock contention for unlimited rates.
