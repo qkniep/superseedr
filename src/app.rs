@@ -2982,7 +2982,20 @@ impl App {
         // Watch Port File Directory
         let port_file_path = PathBuf::from("/port-data/forwarded_port");
         if let Some(port_dir) = port_file_path.parent() {
-            let _ = watcher.watch(port_dir, RecursiveMode::NonRecursive);
+            if let Err(e) = watcher.watch(port_dir, RecursiveMode::NonRecursive) {
+                tracing_event!(
+                    Level::WARN,
+                    "Failed to watch port file directory {:?}: {}",
+                    port_dir,
+                    e
+                );
+            } else {
+                tracing_event!(
+                    Level::INFO,
+                    "Watching for port file changes in {:?}",
+                    port_dir
+                );
+            }
         }
 
         Ok(watcher)
