@@ -1455,7 +1455,9 @@ impl App {
 
                 if new_settings.watch_folder != old_settings.watch_folder {
                     if let Some(old_path) = old_settings.watch_folder {
-                        let _ = self.watcher.unwatch(&old_path); // Note: Requires making 'watcher' a field in App
+                        if let Err(e) = self.watcher.unwatch(&old_path) {
+                            tracing::info!("Failed to unwatch old folder {:?}: {}", old_path, e);
+                        }
                     }
 
                     if let Some(new_path) = &self.client_configs.watch_folder {
