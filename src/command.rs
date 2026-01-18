@@ -45,7 +45,7 @@ pub enum TorrentCommand {
     #[cfg(feature = "pex")]
     SendPexPeers(Vec<String>),
 
-    DhtTorrent(Box<Torrent>, i64),
+    MetadataTorrent(Box<Torrent>, i64),
 
     AnnounceResponse(String, TrackerResponse),
     AnnounceFailed(String, String),

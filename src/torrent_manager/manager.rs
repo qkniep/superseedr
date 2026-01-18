@@ -91,7 +91,6 @@ use tokio_stream::StreamExt;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "dht")]
@@ -109,9 +108,6 @@ const JITTER_MS: u64 = 100;
 
 pub struct TorrentManager {
     state: TorrentState,
-
-    root_download_path: PathBuf,
-    multi_file_info: Option<MultiFileInfo>,
 
     torrent_manager_tx: Sender<TorrentCommand>,
     torrent_manager_rx: Receiver<TorrentCommand>,
@@ -162,29 +158,85 @@ pub struct TorrentManager {
 }
 
 impl TorrentManager {
-    pub fn from_torrent(
+    fn init_base(
         torrent_parameters: TorrentParameters,
-        torrent: Torrent,
-    ) -> Result<Self, String> {
+        info_hash: Vec<u8>,
+        trackers: HashMap<String, TrackerState>,
+        torrent_validation_status: bool,
+    ) -> Self {
         let TorrentParameters {
             dht_handle,
             incoming_peer_rx,
             metrics_tx,
-            torrent_validation_status,
-            download_dir,
+            torrent_data_path: _,
+            container_name,
             manager_command_rx,
             manager_event_tx,
             settings,
             resource_manager,
             global_dl_bucket,
             global_ul_bucket,
+            file_priorities: _,
+            ..
         } = torrent_parameters;
 
-        let bencoded_data = serde_bencode::to_bytes(&torrent)
-            .map_err(|e| format!("Failed to re-encode torrent struct: {}", e))?;
+        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(1000);
+        let (shutdown_tx, _) = broadcast::channel(1);
 
-        let torrent_length = bencoded_data.len();
+        #[cfg(feature = "dht")]
+        let (dht_tx, dht_rx) = mpsc::channel::<Vec<SocketAddrV4>>(10);
+        #[cfg(not(feature = "dht"))]
+        let (dht_tx, dht_rx) = mpsc::channel::<()>(1);
 
+        #[cfg(feature = "dht")]
+        let dht_task_handle = None;
+        #[cfg(not(feature = "dht"))]
+        let dht_task_handle = ();
+
+        #[cfg(feature = "dht")]
+        let (dht_trigger_tx, _) = watch::channel(());
+        #[cfg(not(feature = "dht"))]
+        let dht_trigger_tx = ();
+
+        // Initialize empty state (AwaitingMetadata)
+        let state = TorrentState::new(
+            info_hash,
+            None, // No Torrent yet
+            None, // No Metadata length yet
+            PieceManager::new(),
+            trackers,
+            torrent_validation_status,
+            container_name,
+        );
+
+        Self {
+            state,
+            torrent_manager_tx,
+            torrent_manager_rx,
+            dht_handle,
+            dht_tx,
+            dht_rx,
+            dht_task_handle,
+            shutdown_tx,
+            incoming_peer_rx,
+            metrics_tx,
+            manager_command_rx,
+            manager_event_tx,
+            in_flight_uploads: HashMap::new(),
+            in_flight_writes: HashMap::new(),
+            dht_trigger_tx,
+            settings,
+            resource_manager,
+            global_dl_bucket,
+            global_ul_bucket,
+        }
+    }
+
+    pub fn from_torrent(
+        torrent_parameters: TorrentParameters,
+        torrent: Torrent,
+    ) -> Result<Self, String> {
+        // 1. Extract Trackers
         let mut trackers = HashMap::new();
         if let Some(ref announce) = torrent.announce {
             trackers.insert(
@@ -197,6 +249,7 @@ impl TorrentManager {
             );
         }
 
+        // 2. Calculate Info Hash
         let info_hash = if torrent.info.meta_version == Some(2) {
             if !torrent.info.pieces.is_empty() {
                 // Hybrid Torrent (V1 compatible). Using SHA-1.
@@ -216,81 +269,33 @@ impl TorrentManager {
             hasher.finalize().to_vec()
         };
 
-        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(1000);
-        let (shutdown_tx, _) = broadcast::channel(1);
+        let validation_status = torrent_parameters.torrent_validation_status;
+        let torrent_data_path = torrent_parameters.torrent_data_path.clone();
+        let file_priorities = torrent_parameters.file_priorities.clone();
 
-        #[cfg(feature = "dht")]
-        let (dht_tx, dht_rx) = mpsc::channel::<Vec<SocketAddrV4>>(10);
-        #[cfg(not(feature = "dht"))]
-        let (dht_tx, dht_rx) = mpsc::channel::<()>(1);
+        // 3. Initialize Base Manager (Awaiting Metadata)
+        let mut manager =
+            Self::init_base(torrent_parameters, info_hash, trackers, validation_status);
 
-        #[cfg(feature = "dht")]
-        let dht_task_handle = None;
-        #[cfg(not(feature = "dht"))]
-        let dht_task_handle = ();
+        // 4. Calculate Metadata Length (Required for protocol)
+        let bencoded_data = serde_bencode::to_bytes(&torrent)
+            .map_err(|e| format!("Failed to re-encode torrent struct: {}", e))?;
+        let metadata_length = bencoded_data.len() as i64;
 
-        #[cfg(feature = "dht")]
-        let (dht_trigger_tx, _) = watch::channel(());
-        #[cfg(not(feature = "dht"))]
-        let dht_trigger_tx = ();
+        // 5. Inject Metadata via Action - triggers same flow as magnet link
+        manager.apply_action(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length,
+        });
 
-        let mapping = torrent.calculate_v2_mapping();
-        let num_pieces = torrent.total_piece_count(mapping.piece_count);
+        if let Some(torrent_data_path) = torrent_data_path {
+            manager.apply_action(Action::SetUserTorrentConfig {
+                torrent_data_path,
+                file_priorities,
+            });
+        }
 
-        let mut piece_manager = PieceManager::new();
-        piece_manager.set_initial_fields(num_pieces, torrent_validation_status);
-
-        let multi_file_info = MultiFileInfo::new(
-            &download_dir,
-            &torrent.info.name,
-            if torrent.info.files.is_empty() {
-                None
-            } else {
-                Some(&torrent.info.files)
-            },
-            if torrent.info.files.is_empty() {
-                Some(torrent.info.length as u64)
-            } else {
-                None
-            },
-        )
-        .map_err(|e| format!("Failed to initialize file manager: {}", e))?;
-
-        let mut state = TorrentState::new(
-            info_hash.to_vec(),
-            Some(torrent),
-            Some(torrent_length as i64),
-            piece_manager,
-            trackers,
-            torrent_validation_status,
-        );
-
-        // Assign the populated map to state
-        state.piece_to_roots = mapping.piece_to_roots;
-
-        Ok(Self {
-            state,
-            root_download_path: download_dir,
-            multi_file_info: Some(multi_file_info),
-            torrent_manager_tx,
-            torrent_manager_rx,
-            dht_handle,
-            dht_tx,
-            dht_rx,
-            dht_task_handle,
-            incoming_peer_rx,
-            metrics_tx,
-            shutdown_tx,
-            manager_command_rx,
-            manager_event_tx,
-            in_flight_uploads: HashMap::new(),
-            in_flight_writes: HashMap::new(),
-            dht_trigger_tx,
-            settings,
-            resource_manager,
-            global_dl_bucket,
-            global_ul_bucket,
-        })
+        Ok(manager)
     }
 
     pub fn from_magnet(
@@ -298,38 +303,24 @@ impl TorrentManager {
         magnet: Magnet,
         raw_magnet_str: &str,
     ) -> Result<Self, String> {
-        let TorrentParameters {
-            dht_handle,
-            incoming_peer_rx,
-            metrics_tx,
-            torrent_validation_status,
-            download_dir,
-            manager_command_rx,
-            manager_event_tx,
-            settings,
-            resource_manager,
-            global_dl_bucket,
-            global_ul_bucket,
-        } = torrent_parameters;
-
+        // 1. Parse Info Hash
         let (v1_hash, v2_hash) = crate::app::parse_hybrid_hashes(raw_magnet_str);
 
-        // Pure V1: info_hash = v1, alt = None
-        // Pure V2: info_hash = v2, alt = None
-        // Hybrid:  info_hash = v1, alt = v2 (based on your current preference)
+        // Hybrid: use v1_hash as primary, v2 as alt (or vice versa depending on policy)
         let (info_hash, _v2_info_hash) = match (v1_hash, v2_hash) {
-            (Some(v1), Some(v2)) => (v1, Some(v2)), // Hybrid
-            (Some(v1), None) => (v1, None),         // Pure V1
-            (None, Some(v2)) => (v2, None),         // Pure V2
+            (Some(v1), Some(v2)) => (v1, Some(v2)),
+            (Some(v1), None) => (v1, None),
+            (None, Some(v2)) => (v2, None),
             _ => return Err("No valid hashes found".into()),
         };
 
         event!(
-            Level::INFO,
-            "Active INFO HASH: {:?}",
+            Level::DEBUG,
+            "Active info hash: {:?}",
             hex::encode(&info_hash)
         );
 
+        // 2. Extract and Decode Trackers
         let trackers_set: HashSet<String> = magnet
             .trackers()
             .iter()
@@ -344,6 +335,7 @@ impl TorrentManager {
                 }
             })
             .collect();
+
         let mut trackers = HashMap::new();
         for url in trackers_set {
             trackers.insert(
@@ -356,56 +348,23 @@ impl TorrentManager {
             );
         }
 
-        let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(1000);
-        let (shutdown_tx, _) = broadcast::channel(1);
+        let validation_status = torrent_parameters.torrent_validation_status;
+        let torrent_data_path = torrent_parameters.torrent_data_path.clone();
+        let file_priorities = torrent_parameters.file_priorities.clone();
 
-        #[cfg(feature = "dht")]
-        let (dht_tx, dht_rx) = mpsc::channel::<Vec<SocketAddrV4>>(10);
-        #[cfg(not(feature = "dht"))]
-        let (dht_tx, dht_rx) = mpsc::channel::<()>(1);
+        // 3. Initialize Base Manager
+        // It stays in AwaitingMetadata state until peers provide the info dict
+        let mut manager =
+            Self::init_base(torrent_parameters, info_hash, trackers, validation_status);
 
-        #[cfg(feature = "dht")]
-        let dht_task_handle = None;
-        #[cfg(not(feature = "dht"))]
-        let dht_task_handle = ();
+        if let Some(torrent_data_path) = torrent_data_path {
+            manager.apply_action(Action::SetUserTorrentConfig {
+                torrent_data_path,
+                file_priorities,
+            });
+        }
 
-        #[cfg(feature = "dht")]
-        let (dht_trigger_tx, _) = watch::channel(());
-        #[cfg(not(feature = "dht"))]
-        let dht_trigger_tx = ();
-
-        let state = TorrentState::new(
-            info_hash,
-            None,
-            None,
-            PieceManager::new(),
-            trackers,
-            torrent_validation_status,
-        );
-
-        Ok(Self {
-            state,
-            root_download_path: download_dir,
-            multi_file_info: None,
-            torrent_manager_tx,
-            torrent_manager_rx,
-            dht_handle,
-            dht_tx,
-            dht_rx,
-            dht_task_handle,
-            shutdown_tx,
-            incoming_peer_rx,
-            metrics_tx,
-            manager_command_rx,
-            manager_event_tx,
-            in_flight_uploads: HashMap::new(),
-            in_flight_writes: HashMap::new(),
-            dht_trigger_tx,
-            settings,
-            resource_manager,
-            global_dl_bucket,
-            global_ul_bucket,
-        })
+        Ok(manager)
     }
 
     // Apply actions to update state and get effects resulting from the mutate.
@@ -693,7 +652,7 @@ impl TorrentManager {
                 piece_index,
                 data,
             } => {
-                let multi_file_info = match self.multi_file_info.as_ref() {
+                let multi_file_info = match self.state.multi_file_info.as_ref() {
                     Some(m) => m.clone(),
                     None => {
                         event!(Level::ERROR, "WriteToDisk failed: Storage not ready");
@@ -780,7 +739,7 @@ impl TorrentManager {
                     Err(_) => return,
                 };
 
-                let multi_file_info = match self.multi_file_info.as_ref() {
+                let multi_file_info = match self.state.multi_file_info.as_ref() {
                     Some(m) => m.clone(),
                     None => {
                         event!(Level::ERROR, "WriteToDisk failed: Storage not ready");
@@ -867,40 +826,12 @@ impl TorrentManager {
                 self.connect_to_peer(ip, port);
             }
 
-            Effect::InitializeStorage => {
-                if let Some(torrent) = &self.state.torrent {
-                    let mfi = match MultiFileInfo::new(
-                        &self.root_download_path,
-                        &torrent.info.name,
-                        if torrent.info.files.is_empty() {
-                            None
-                        } else {
-                            Some(&torrent.info.files)
-                        },
-                        if torrent.info.files.is_empty() {
-                            Some(torrent.info.length as u64)
-                        } else {
-                            None
-                        },
-                    ) {
-                        Ok(mfi) => mfi,
-                        Err(e) => {
-                            debug_assert!(false, "Failed to init storage from metadata: {}", e);
-                            event!(Level::ERROR, "Failed to initialize storage from metadata: {}. Aborting storage initialization.", e);
-                            return;
-                        }
-                    };
-
-                    self.multi_file_info = Some(mfi.clone());
-                }
-            }
-
             Effect::StartValidation => {
-                let mfi = match self.multi_file_info.as_ref() {
+                let mfi = match self.state.multi_file_info.as_ref() {
                     Some(m) => m.clone(),
                     None => {
                         debug_assert!(
-                            self.multi_file_info.is_some(),
+                            self.state.multi_file_info.is_some(),
                             "Storage not ready for validation"
                         );
                         event!(
@@ -953,6 +884,7 @@ impl TorrentManager {
 
             Effect::ConnectToPeersFromTrackers => {
                 let torrent_size_left = self
+                    .state
                     .multi_file_info
                     .as_ref()
                     .map_or(0, |mfi| mfi.total_size as usize);
@@ -1000,7 +932,7 @@ impl TorrentManager {
                 let ul = self.state.session_total_uploaded as usize;
                 let dl = self.state.session_total_downloaded as usize;
 
-                let torrent_size_left = if let Some(mfi) = &self.multi_file_info {
+                let torrent_size_left = if let Some(mfi) = &self.state.multi_file_info {
                     let completed = self
                         .state
                         .piece_manager
@@ -1076,41 +1008,38 @@ impl TorrentManager {
                 let _ = self.dht_trigger_tx.send(());
             }
 
-            Effect::DeleteFiles => {
+            Effect::DeleteFiles { files, directories } => {
                 let info_hash = self.state.info_hash.clone();
-                let root_path = self.root_download_path.clone();
-                let multi_file_info = self.multi_file_info.clone();
                 let tx = self.manager_event_tx.clone();
-                let torrent_name = self.state.torrent.as_ref().map(|t| t.info.name.clone());
 
                 tokio::spawn(async move {
                     let mut result = Ok(());
 
-                    if let Some(mfi) = multi_file_info {
-                        for file_info in &mfi.files {
-                            if let Err(e) = fs::remove_file(&file_info.path).await {
-                                if e.kind() != std::io::ErrorKind::NotFound {
-                                    let error_msg = format!(
-                                        "Failed to delete file {:?}: {}",
-                                        &file_info.path, e
-                                    );
-                                    event!(Level::ERROR, "{}", error_msg);
-                                    result = Err(error_msg);
-                                }
+                    // 1. Delete Files
+                    for file_path in files {
+                        if let Err(e) = fs::remove_file(&file_path).await {
+                            // If it's already gone, that's fine (success).
+                            if e.kind() != std::io::ErrorKind::NotFound {
+                                let error_msg =
+                                    format!("Failed to delete file {:?}: {}", &file_path, e);
+                                event!(Level::ERROR, "{}", error_msg);
+                                result = Err(error_msg);
                             }
                         }
+                    }
 
-                        if result.is_ok() && mfi.files.len() > 1 {
-                            if let Some(name) = torrent_name {
-                                let content_dir = root_path.join(name);
-                                event!(Level::INFO, "Cleaning up directory: {:?}", &content_dir);
-                                let _ = fs::remove_dir(&content_dir).await;
+                    // 2. Delete Directories (in sorted order: Deepest -> Shallowest)
+                    // We use remove_dir (not remove_dir_all) for safety.
+                    // It will simply fail (safely) if the directory is not empty
+                    // (e.g., user added their own files to the folder).
+                    for dir_path in directories {
+                        if let Err(e) = fs::remove_dir(&dir_path).await {
+                            if e.kind() != std::io::ErrorKind::NotFound {
+                                event!(Level::INFO, "Skipped dir deletion {:?}: {}", &dir_path, e);
                             }
+                        } else {
+                            event!(Level::INFO, "Cleaned up directory: {:?}", &dir_path);
                         }
-                    } else {
-                        let msg = "Cannot delete files: Metadata missing.".to_string();
-                        event!(Level::WARN, "{}", msg);
-                        result = Err(msg);
                     }
 
                     let _ = tx
@@ -1192,7 +1121,6 @@ impl TorrentManager {
                 let torrent_manager_tx = self.torrent_manager_tx.clone();
                 let (peer_tx, peer_rx) = tokio::sync::mpsc::channel(32);
 
-                // Use the full URL as the peer_id so the worker and manager agree on the ID
                 let peer_id = full_url.clone();
 
                 self.apply_action(Action::RegisterPeer {
@@ -1212,7 +1140,7 @@ impl TorrentManager {
                         torrent.info.files.iter().map(|f| f.length as u64).sum()
                     };
 
-                    event!(Level::INFO, "Starting WebSeed Worker: {}", full_url);
+                    event!(Level::DEBUG, "Starting WebSeed Worker: {}", full_url);
 
                     tokio::spawn(async move {
                         web_seed_worker(
@@ -1261,17 +1189,21 @@ impl TorrentManager {
         _event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
-        tokio::select! {
+        let is_fresh_download = tokio::select! {
             biased;
             _ = shutdown_rx.recv() => return Err(StorageError::Io(std::io::Error::other("Shutdown"))),
             res = create_and_allocate_files(&multi_file_info) => res?,
         };
+        if is_fresh_download {
+            tracing::info!("Storage: Fresh download detected. Skipping validation loop.");
+            let _ = manager_tx.send(TorrentCommand::ValidationProgress(0)).await;
+            return Ok(Vec::new());
+        }
 
         let mut completed_pieces = Vec::new();
         let piece_len = torrent.info.piece_length as u64;
 
         // PATH A: BitTorrent V2 (Aligned File Validation)
-
         if torrent.info.meta_version == Some(2) {
             let v2_roots_list = torrent.get_v2_roots();
             let mut path_to_root: HashMap<String, Vec<u8>> = HashMap::new();
@@ -1456,6 +1388,8 @@ impl TorrentManager {
 
                     if is_valid {
                         completed_pieces.push(piece_index);
+                    } else {
+                        event!(Level::DEBUG, "Hash mismatch for piece {}", piece_index);
                     }
                 } else if skip_hashing {
                     completed_pieces.push(piece_index);
@@ -1821,7 +1755,7 @@ impl TorrentManager {
     }
 
     pub async fn validate_local_file(&mut self) -> Result<(), StorageError> {
-        let mfi = match &self.multi_file_info {
+        let mfi = match &self.state.multi_file_info {
             Some(i) => i.clone(),
             None => return Ok(()),
         };
@@ -1887,6 +1821,10 @@ impl TorrentManager {
             return "Paused".to_string();
         }
 
+        if let TorrentActivity::ProcessingPeers(count) = &self.state.last_activity {
+            return format!("Processing peers ({})", count);
+        }
+
         if self.state.torrent_status == TorrentStatus::AwaitingMetadata {
             return "Retrieving Metadata...".to_string();
         }
@@ -1903,6 +1841,7 @@ impl TorrentManager {
             };
         }
 
+        // 1. Prioritize active Data Transfer
         if dl_speed > 0 {
             return match &self.state.last_activity {
                 TorrentActivity::DownloadingPiece(p) => format!("Receiving piece #{}", p),
@@ -1918,24 +1857,47 @@ impl TorrentManager {
             };
         }
 
-        if !self.state.peers.is_empty() {
-            return "Stalled".to_string();
+        // 2. Handle specific non-transfer activities
+        match &self.state.last_activity {
+            TorrentActivity::RequestingPieces => return "Requesting pieces...".to_string(),
+            TorrentActivity::AnnouncingToTracker => return "Contacting tracker...".to_string(),
+            #[cfg(feature = "dht")]
+            TorrentActivity::SearchingDht => return "Searching DHT for peers...".to_string(),
+            _ => {}
         }
 
-        match &self.state.last_activity {
-            #[cfg(feature = "dht")]
-            TorrentActivity::SearchingDht => "Searching DHT for peers...".to_string(),
-            TorrentActivity::AnnouncingToTracker => "Contacting tracker...".to_string(),
-            _ => "Connecting to peers...".to_string(),
+        // 3. Refined "Stalled" vs "Connecting" Logic
+        let connected_peers = self.state.peers.len();
+        if connected_peers == 0 {
+            return "Connecting to peers...".to_string();
         }
+
+        // If we have peers but no download speed:
+        let is_interested_in_anyone = self.state.peers.values().any(|p| p.am_interested);
+        let need_pieces = !self.state.piece_manager.need_queue.is_empty();
+
+        if need_pieces {
+            if is_interested_in_anyone {
+                // We want data, we have peers, but no one is giving it to us (Choked or Slow)
+                return "Stalled (Waiting for unchoke)".to_string();
+            } else {
+                // We have peers, but none of them have the pieces we need
+                return "Stalled (No peers have required pieces)".to_string();
+            }
+        }
+
+        "Idle".to_string()
     }
 
     fn send_metrics(&mut self, bytes_dl: u64, bytes_ul: u64) {
         if let Some(ref torrent) = self.state.torrent {
-            let multi_file_info = match self.multi_file_info.as_ref() {
+            let multi_file_info = match self.state.multi_file_info.as_ref() {
                 Some(mfi) => mfi,
                 None => {
-                    event!(Level::WARN, "Cannot send metrics: File info not available.");
+                    event!(
+                        Level::DEBUG,
+                        "Cannot send metrics: File info not available."
+                    );
                     return;
                 }
             };
@@ -2050,6 +2012,7 @@ impl TorrentManager {
             let torrent_state = TorrentMetrics {
                 info_hash: info_hash_clone,
                 torrent_name: torrent_name_clone,
+                download_path: self.state.torrent_data_path.clone(),
                 number_of_successfully_connected_peers,
                 number_of_pieces_total,
                 number_of_pieces_completed,
@@ -2063,6 +2026,7 @@ impl TorrentManager {
                 next_announce_in,
                 total_size: total_size_bytes,
                 bytes_written,
+                file_priorities: self.state.file_priorities.clone(),
                 ..Default::default()
             };
             tokio::spawn(async move {
@@ -2192,6 +2156,12 @@ impl TorrentManager {
                             }
 
                         },
+                        ManagerCommand::SetUserTorrentConfig { torrent_data_path, file_priorities } => {
+                            self.apply_action(Action::SetUserTorrentConfig {
+                                torrent_data_path,
+                                file_priorities,
+                            });
+                        }
                         ManagerCommand::SetDataRate(new_rate_ms) => {
                             data_rate_ms = new_rate_ms;
                             tick = tokio::time::interval(Duration::from_millis(data_rate_ms));
@@ -2404,7 +2374,7 @@ impl TorrentManager {
                         TorrentCommand::Unchoke(pid) => self.apply_action(Action::PeerUnchoked { peer_id: pid }),
                         TorrentCommand::PeerInterested(pid) => self.apply_action(Action::PeerInterested { peer_id: pid }),
                         TorrentCommand::Have(pid, idx) => self.apply_action(Action::PeerHavePiece { peer_id: pid, piece_index: idx }),
-                        TorrentCommand::Disconnect(pid) => self.apply_action(Action::PeerDisconnected { peer_id: pid }),
+                        TorrentCommand::Disconnect(pid) => self.apply_action(Action::PeerDisconnected { peer_id: pid, force: false }),
                         TorrentCommand::Block(peer_id, piece_index, block_offset, block_data) => self.apply_action(Action::IncomingBlock { peer_id, piece_index, block_offset, data: block_data }),
                         TorrentCommand::PieceVerified { piece_index, peer_id, verification_result } => {
                             match verification_result {
@@ -2496,49 +2466,54 @@ impl TorrentManager {
                             }
                         },
 
-                            TorrentCommand::DhtTorrent(torrent, metadata_length) => {
-                                #[cfg(all(feature = "dht", feature = "pex"))]
-                                if torrent.info.private == Some(1) {
-                                    break Ok(());
-                                }
+                        TorrentCommand::MetadataTorrent(torrent, metadata_length) => {
+                            #[cfg(all(feature = "dht", feature = "pex"))]
+                            if torrent.info.private == Some(1) {
+                                break Ok(());
+                            }
 
-                                let mut torrent = *torrent;
+                            let mut torrent = *torrent;
 
-                                // 1. Identify if this is a Hybrid, if so, use v1 protocol
-                                let is_hybrid = !torrent.info.pieces.is_empty() && torrent.info.meta_version == Some(2);
-                                if is_hybrid {
-                                    tracing::info!("HYBRID DETECTED: Forcing V1-only treatment for simplicity.");
-                                    // Strip V2 fields so the rest of the app sees a standard V1 torrent
-                                    torrent.info.meta_version = None;
-                                    torrent.info.file_tree = None;
-                                    torrent.piece_layers = None;
-                                }
+                            // 1. Identify if this is a Hybrid, if so, use v1 protocol
+                            let is_hybrid = !torrent.info.pieces.is_empty() && torrent.info.meta_version == Some(2);
+                            if is_hybrid {
+                                tracing::debug!("Hybrid torrent detected, using V1 protocol");
+                                // Strip V2 fields so the rest of the app sees a standard V1 torrent
+                                torrent.info.meta_version = None;
+                                torrent.info.file_tree = None;
+                                torrent.piece_layers = None;
+                            }
 
-                                let calculated_hash = if torrent.info.meta_version == Some(2) {
-                                    use sha2::{Digest, Sha256};
-                                    let mut hasher = Sha256::new();
-                                    hasher.update(&torrent.info_dict_bencode);
-                                    hasher.finalize()[0..20].to_vec()
-                                } else {
-                                    let mut hasher = sha1::Sha1::new();
-                                    hasher.update(&torrent.info_dict_bencode);
-                                    hasher.finalize().to_vec()
-                                };
+                            let calculated_hash = if torrent.info.meta_version == Some(2) {
+                                use sha2::{Digest, Sha256};
+                                let mut hasher = Sha256::new();
+                                hasher.update(&torrent.info_dict_bencode);
+                                hasher.finalize()[0..20].to_vec()
+                            } else {
+                                let mut hasher = sha1::Sha1::new();
+                                hasher.update(&torrent.info_dict_bencode);
+                                hasher.finalize().to_vec()
+                            };
 
-                                if calculated_hash == self.state.info_hash {
-                                    tracing::debug!("METADATA VALIDATED - {}: Proceeding with metadata hydration.", hex::encode(calculated_hash));
-                                    self.apply_action(Action::MetadataReceived {
-                                        torrent: Box::new(torrent),
-                                        metadata_length,
-                                    });
-                                } else {
-                                    tracing::debug!(
-                                        "Metadata Hash Mismatch! Expected: {:?}, Got: {:?}",
-                                        hex::encode(&self.state.info_hash),
-                                        hex::encode(&calculated_hash)
-                                    );
-                                }
-                            },
+                            if calculated_hash == self.state.info_hash {
+                                tracing::debug!("METADATA VALIDATED - {}: Proceeding with metadata hydration.", hex::encode(&calculated_hash));
+                                self.apply_action(Action::MetadataReceived {
+                                    torrent: Box::new(torrent.clone()),
+                                    metadata_length,
+                                });
+                            } else {
+                                tracing::debug!(
+                                    "Metadata Hash Mismatch! Expected: {:?}, Got: {:?}",
+                                    hex::encode(&self.state.info_hash),
+                                    hex::encode(&calculated_hash)
+                                );
+                            }
+
+                            let _ = self.manager_event_tx.try_send(ManagerEvent::MetadataLoaded {
+                                info_hash: calculated_hash,
+                                torrent: Box::new(torrent),
+                            });
+                        },
 
                         TorrentCommand::AnnounceResponse(url, response) => {
                             self.apply_action(Action::TrackerResponse {
@@ -2597,6 +2572,7 @@ mod tests {
     use crate::torrent_manager::{ManagerCommand, TorrentParameters};
     use magnet_url::Magnet;
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::{broadcast, mpsc};
@@ -2652,13 +2628,15 @@ mod tests {
             incoming_peer_rx,
             metrics_tx,
             torrent_validation_status: false,
-            download_dir: PathBuf::from("."),
+            torrent_data_path: Some(PathBuf::from(".")),
+            container_name: None,
             manager_command_rx,
             manager_event_tx,
             settings,
             resource_manager: resource_manager_client,
             global_dl_bucket: dl_bucket,
             global_ul_bucket: ul_bucket,
+            file_priorities: HashMap::new(),
         };
 
         let manager = TorrentManager::from_magnet(params, magnet, magnet_link)
@@ -2815,13 +2793,15 @@ mod resource_tests {
             incoming_peer_rx: _incoming_rx,
             metrics_tx,
             torrent_validation_status: false,
-            download_dir: PathBuf::from("."),
+            torrent_data_path: Some(PathBuf::from(".")),
+            container_name: None,
             manager_command_rx: cmd_rx,
             manager_event_tx: event_tx,
             settings,
             resource_manager: rm_client,
             global_dl_bucket: dl_bucket,
             global_ul_bucket: ul_bucket,
+            file_priorities: HashMap::new(),
         };
 
         let manager = TorrentManager::from_magnet(params, magnet, magnet_link).unwrap();
@@ -2869,14 +2849,7 @@ mod resource_tests {
             .unwrap();
         let duration = start.elapsed();
 
-        // Logic:
-        // - Channel send is instant.
-        // - Loop picks up Block -> dispatches to 'spawn_blocking' -> loops again.
-        // - Loop picks up Shutdown -> exits.
-        // Total time should be extremely fast (< 5ms), regardless of how slow SHA1 is.
-        // If it takes > 20ms, it implies we waited for the hash.
-
-        println!("Event loop processed Block+Shutdown in {:?}", duration);
+        // Verify hashing is non-blocking: Block dispatch spawns work, loop continues
         assert!(
             duration.as_millis() < 20,
             "CPU Test Failed! Manager loop blocked on hashing."
@@ -2885,18 +2858,13 @@ mod resource_tests {
 
     #[tokio::test]
     async fn test_slow_disk_backpressure() {
-        // GOAL: gerify memory behavior when Disk is slower than Network.
-        // WARNING: This test currently exposes that we DO NOT have backpressure (OOM Risk).
+        // Goal: Verify memory behavior when disk is slower than network (OOM risk)
 
         let (manager, torrent_tx, manager_cmd_tx, _shutdown_tx, resource_manager) =
             setup_test_harness();
 
-        // We start the resource manager but we DO NOT grant any write permits yet.
-        // Effectively, the disk speed is 0 MB/s.
+        // Disk speed effectively 0 MB/s - no write permits granted
         tokio::spawn(resource_manager.run());
-
-        // Note: Ideally we'd modify limits here to be 0, but our mock RM starts fresh.
-        // The current manager implementation spawns tasks that WAIT for permits.
 
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
@@ -2931,10 +2899,7 @@ mod resource_tests {
             block_count, input_duration
         );
 
-        // If we ingest 100MB instantly (< 200ms) while the "Disk" is stalled,
-        // it means we are buffering everything in RAM (spawning thousands of tasks).
-        // A robust system would slow down ingestion (backpressure).
-
+        // Warning: Unbounded memory growth if ingestion is instant despite stalled disk
         if input_duration.as_millis() < 200 {
             println!(
                 "⚠️  PERFORMANCE WARNING: Manager accepted 100MB instantly despite stalled disk."
@@ -3038,13 +3003,15 @@ mod resource_tests {
             incoming_peer_rx: incoming_rx,
             metrics_tx,
             torrent_validation_status: false,
-            download_dir: temp_dir.clone(),
+            torrent_data_path: Some(temp_dir.clone()),
+            container_name: None,
             manager_command_rx: cmd_rx,
             manager_event_tx: event_tx,
             settings: settings.clone(),
             resource_manager: rm_client,
             global_dl_bucket: dl_bucket,
             global_ul_bucket: ul_bucket,
+            file_priorities: HashMap::new(),
         };
 
         let mut manager = TorrentManager::from_torrent(params, torrent).unwrap();
@@ -3285,13 +3252,15 @@ mod resource_tests {
             incoming_peer_rx: incoming_rx,
             metrics_tx,
             torrent_validation_status: false,
-            download_dir: temp_dir.clone(),
+            torrent_data_path: Some(temp_dir.clone()),
+            container_name: None,
             manager_command_rx: cmd_rx,
             manager_event_tx: event_tx,
             settings: settings.clone(),
             resource_manager: rm_client,
             global_dl_bucket: dl_bucket,
             global_ul_bucket: ul_bucket,
+            file_priorities: HashMap::new(),
         };
 
         let mut manager = TorrentManager::from_torrent(params, torrent.clone()).unwrap();
@@ -3887,13 +3856,15 @@ mod resource_tests {
             incoming_peer_rx: _incoming_rx,
             metrics_tx,
             torrent_validation_status: false,
-            download_dir: PathBuf::from("."),
+            torrent_data_path: Some(PathBuf::from(".")),
+            container_name: None,
             manager_command_rx: cmd_rx,
             manager_event_tx: event_tx,
             settings,
             resource_manager: rm_client.clone(),
             global_dl_bucket: dl_bucket,
             global_ul_bucket: ul_bucket,
+            file_priorities: HashMap::new(),
         };
 
         let manager = TorrentManager::from_magnet(params, magnet, magnet_link).unwrap();
@@ -3938,7 +3909,7 @@ mod resource_tests {
 
         // 4.Set Download Path BEFORE Metadata
         // This ensures InitializeStorage uses the correct temp_dir
-        manager.root_download_path = temp_dir.clone();
+        manager.state.torrent_data_path = Some(temp_dir.clone());
 
         manager.apply_action(Action::MetadataReceived {
             torrent: Box::new(torrent),
@@ -4052,7 +4023,7 @@ mod resource_tests {
         torrent.info.pieces = Vec::new();
         torrent.info.meta_version = Some(2);
 
-        manager.root_download_path = temp_dir.clone();
+        manager.state.torrent_data_path = Some(temp_dir.clone());
 
         manager.apply_action(Action::MetadataReceived {
             torrent: Box::new(torrent),
@@ -4360,9 +4331,15 @@ mod resource_tests {
         torrent.piece_layers = Some(serde_bencode::value::Value::Dict(layer_map));
 
         manager.state.torrent = Some(torrent.clone());
-        manager.multi_file_info = Some(
-            crate::storage::MultiFileInfo::new(&temp_dir, "v2_tail_file", None, Some(file_len))
-                .unwrap(),
+        manager.state.multi_file_info = Some(
+            crate::storage::MultiFileInfo::new(
+                &temp_dir,
+                "v2_tail_file",
+                None,
+                Some(file_len),
+                &HashMap::new(),
+            )
+            .unwrap(),
         );
 
         manager.state.piece_to_roots.insert(
@@ -4385,7 +4362,7 @@ mod resource_tests {
         );
 
         let result = TorrentManager::perform_validation(
-            manager.multi_file_info.unwrap(),
+            manager.state.multi_file_info.unwrap(),
             torrent,
             rm_client,
             _shutdown_tx.subscribe(),

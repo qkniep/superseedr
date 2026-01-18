@@ -113,26 +113,6 @@ impl Torrent {
         }
     }
 
-    /// Returns the total piece count, prioritizing V1 pieces string but falling back to V2
-    pub fn total_piece_count(&self, v2_count: usize) -> usize {
-        if !self.info.pieces.is_empty() {
-            // V1 / Hybrid: Use the explicit pieces string
-            self.info.pieces.len() / 20
-        } else if v2_count > 0 {
-            // Pure V2: Use the calculated aligned count
-            v2_count
-        } else {
-            // Fallback: Standard length calculation
-            let total_len = self.info.total_length() as u64;
-            let pl = self.info.piece_length as u64;
-            if pl > 0 {
-                total_len.div_ceil(pl) as usize
-            } else {
-                0
-            }
-        }
-    }
-
     pub fn get_v2_hash_layer(
         &self,
         piece_index: u32,
@@ -182,6 +162,20 @@ impl Torrent {
         }
 
         None
+    }
+
+    pub fn file_list(&self) -> Vec<(Vec<String>, u64)> {
+        if !self.info.files.is_empty() {
+            // Multi-file case
+            self.info
+                .files
+                .iter()
+                .map(|f| (f.path.clone(), f.length as u64))
+                .collect()
+        } else {
+            // Single-file V1 case: The torrent name is the file name
+            vec![(vec![self.info.name.clone()], self.info.length as u64)]
+        }
     }
 }
 
@@ -420,7 +414,6 @@ mod tests {
         let mapping = torrent.calculate_v2_mapping();
 
         assert_eq!(mapping.piece_count, 2);
-        assert_eq!(torrent.total_piece_count(mapping.piece_count), 2);
 
         let roots_0 = mapping.piece_to_roots.get(&0).unwrap();
         let roots_1 = mapping.piece_to_roots.get(&1).unwrap();
@@ -436,8 +429,7 @@ mod tests {
         };
 
         torrent.info.pieces = vec![0u8; 200];
-        let v2_count = 5;
-        assert_eq!(torrent.total_piece_count(v2_count), 10);
+        assert_eq!(200 / 20, 10);
     }
 
     #[test]

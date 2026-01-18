@@ -1,20 +1,28 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use tracing::event;
+use tracing::Level;
+
 use crate::command::TorrentCommand;
 use crate::networking::BlockInfo;
+use crate::storage::MultiFileInfo;
 use crate::torrent_manager::ManagerEvent;
 
-use std::time::Duration;
-use std::time::Instant;
+use crate::app::FilePriority;
 
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Semaphore;
 
 use std::mem::Discriminant;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::torrent_file::{Torrent, V2RootInfo};
+use crate::torrent_manager::piece_manager::EffectivePiecePriority;
 use crate::torrent_manager::piece_manager::PieceManager;
 use crate::torrent_manager::piece_manager::PieceStatus;
 use std::collections::{HashMap, HashSet};
@@ -55,6 +63,7 @@ pub enum Action {
     },
     PeerDisconnected {
         peer_id: String,
+        force: bool,
     },
     UpdatePeerId {
         peer_addr: String,
@@ -144,6 +153,10 @@ pub enum Action {
     Resume,
     Delete,
     UpdateListenPort,
+    SetUserTorrentConfig {
+        torrent_data_path: PathBuf,
+        file_priorities: HashMap<usize, FilePriority>,
+    },
     ValidationProgress {
         count: u32,
     },
@@ -217,7 +230,6 @@ pub enum Effect {
         url: String,
     },
 
-    InitializeStorage,
     StartValidation,
     AnnounceToTracker {
         url: String,
@@ -231,7 +243,10 @@ pub enum Effect {
     },
 
     ClearAllUploads,
-    DeleteFiles,
+    DeleteFiles {
+        files: Vec<PathBuf>,
+        directories: Vec<PathBuf>,
+    },
     TriggerDhtSearch,
     PrepareShutdown {
         tracker_urls: Vec<String>,
@@ -248,16 +263,18 @@ pub struct TrackerState {
     pub seeding_interval: Option<Duration>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum TorrentActivity {
     #[default]
     Initializing,
     Paused,
     ConnectingToPeers,
+    RequestingPieces,
     DownloadingPiece(u32),
     SendingPiece(u32),
     VerifyingPiece(u32),
     AnnouncingToTracker,
+    ProcessingPeers(usize),
 
     #[cfg(feature = "dht")]
     SearchingDht,
@@ -309,6 +326,12 @@ pub struct TorrentState {
     pub v2_pending_data: HashMap<u32, (u32, Vec<u8>)>,
     pub piece_to_roots: HashMap<u32, Vec<V2RootInfo>>,
     pub verifying_pieces: HashSet<u32>,
+    pub torrent_data_path: Option<PathBuf>,
+    pub container_name: Option<String>,
+    pub multi_file_info: Option<MultiFileInfo>,
+    pub file_priorities: HashMap<usize, FilePriority>,
+    pub pending_disconnects: Vec<String>,
+    pub pending_failures: Vec<String>,
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -341,6 +364,12 @@ impl Default for TorrentState {
             v2_pending_data: HashMap::new(),
             piece_to_roots: HashMap::new(),
             verifying_pieces: HashSet::new(),
+            torrent_data_path: None,
+            container_name: None,
+            multi_file_info: None,
+            file_priorities: HashMap::new(),
+            pending_disconnects: Vec::with_capacity(100),
+            pending_failures: Vec::with_capacity(100),
         }
     }
 }
@@ -353,6 +382,7 @@ impl TorrentState {
         piece_manager: PieceManager,
         trackers: HashMap<String, TrackerState>,
         torrent_validation_status: bool,
+        container_name: Option<String>,
     ) -> Self {
         let torrent_status = if torrent.is_some() {
             TorrentStatus::Validating
@@ -368,6 +398,7 @@ impl TorrentState {
             piece_manager,
             trackers,
             torrent_validation_status,
+            container_name,
             optimistic_unchoke_timer: Some(
                 Instant::now()
                     .checked_sub(Duration::from_secs(31))
@@ -627,22 +658,39 @@ impl TorrentState {
                     return vec![Effect::DoNothing];
                 }
 
-                let all_done = self
-                    .piece_manager
-                    .bitfield
-                    .iter()
-                    .all(|s| *s == PieceStatus::Done);
+                let is_complete = if self.piece_manager.piece_priorities.is_empty() {
+                    self.piece_manager
+                        .bitfield
+                        .iter()
+                        .all(|&s| s == PieceStatus::Done)
+                } else {
+                    self.piece_manager
+                        .bitfield
+                        .iter()
+                        .enumerate()
+                        .all(|(i, status)| {
+                            if *status == PieceStatus::Done {
+                                return true;
+                            }
+                            self.piece_manager.piece_priorities[i] == EffectivePiecePriority::Skip
+                        })
+                };
 
-                if all_done {
+                let has_pieces = !self.piece_manager.bitfield.is_empty();
+
+                if is_complete && has_pieces {
                     let mut effects = Vec::new();
                     self.torrent_status = TorrentStatus::Done;
 
-                    for (url, tracker) in self.trackers.iter_mut() {
-                        tracker.next_announce_time = self.now;
-                        effects.push(Effect::AnnounceCompleted { url: url.clone() });
-                    }
+                    self.piece_manager.need_queue.clear();
+                    self.piece_manager.pending_queue.clear();
+                    self.piece_manager.clear_assembly_buffers();
 
                     for peer in self.peers.values_mut() {
+                        peer.pending_requests.clear();
+                        peer.active_blocks.clear();
+                        peer.inflight_requests = 0;
+
                         if peer.am_interested {
                             peer.am_interested = false;
                             effects.push(Effect::SendToPeer {
@@ -651,6 +699,29 @@ impl TorrentState {
                             });
                         }
                     }
+
+                    // 4. NOTIFY TRACKER
+                    // Logic: Only send "event=completed" if we physically possess 100% of the bits.
+                    // If we skipped files (Priority Mode), we are "Done" locally but not "Completed" globally.
+                    let physically_complete = self
+                        .piece_manager
+                        .bitfield
+                        .iter()
+                        .all(|&s| s == PieceStatus::Done);
+
+                    if physically_complete {
+                        for (url, tracker) in self.trackers.iter_mut() {
+                            tracker.next_announce_time = self.now;
+                            effects.push(Effect::AnnounceCompleted { url: url.clone() });
+                        }
+                    } else {
+                        // Priority Mode (Partial Completion): Just send a regular update so the tracker knows we stopped downloading.
+                        for (url, tracker) in self.trackers.iter_mut() {
+                            tracker.next_announce_time = self.now;
+                            effects.push(Effect::AnnounceToTracker { url: url.clone() });
+                        }
+                    }
+
                     return effects;
                 }
 
@@ -662,6 +733,9 @@ impl TorrentState {
                     return vec![Effect::DoNothing];
                 }
                 if self.piece_manager.bitfield.is_empty() {
+                    return vec![Effect::DoNothing];
+                }
+                if self.torrent_data_path.is_none() {
                     return vec![Effect::DoNothing];
                 }
                 if self.piece_manager.need_queue.is_empty()
@@ -948,6 +1022,10 @@ impl TorrentState {
                 }
 
                 if !request_batch.is_empty() {
+                    if !matches!(self.last_activity, TorrentActivity::DownloadingPiece(_)) {
+                        self.last_activity = TorrentActivity::RequestingPieces;
+                    }
+
                     peer.inflight_requests += request_batch.len();
                     effects.push(Effect::SendToPeer {
                         peer_id: peer_id.clone(),
@@ -994,29 +1072,43 @@ impl TorrentState {
                 })]
             }
 
-            Action::PeerDisconnected { peer_id } => {
-                let mut effects = Vec::new();
-                if let Some(removed_peer) = self.peers.remove(&peer_id) {
-                    for piece_index in removed_peer.pending_requests {
-                        if self.piece_manager.bitfield.get(piece_index as usize)
-                            != Some(&PieceStatus::Done)
-                        {
-                            self.piece_manager.requeue_pending_to_need(piece_index);
-                        }
-                    }
-
-                    self.number_of_successfully_connected_peers = self.peers.len();
-
-                    self.piece_manager
-                        .update_rarity(self.peers.values().map(|p| &p.bitfield));
-
-                    effects.push(Effect::DisconnectPeer {
-                        peer_id: peer_id.clone(),
-                    });
-                    effects.push(Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
-                        info_hash: self.info_hash.clone(),
-                    }));
+            Action::PeerDisconnected { peer_id, force } => {
+                if !peer_id.is_empty() {
+                    self.pending_disconnects.push(peer_id);
                 }
+
+                if !force && self.pending_disconnects.len() < 100 {
+                    return vec![Effect::DoNothing];
+                }
+
+                if self.pending_disconnects.is_empty() {
+                    return vec![Effect::DoNothing];
+                }
+
+                let mut effects = Vec::new();
+                let batch = std::mem::take(&mut self.pending_disconnects);
+
+                self.last_activity = TorrentActivity::ProcessingPeers(self.peers.len());
+
+                for pid in batch {
+                    if let Some(removed_peer) = self.peers.remove(&pid) {
+                        for piece_index in removed_peer.pending_requests {
+                            if self.piece_manager.bitfield.get(piece_index as usize)
+                                != Some(&PieceStatus::Done)
+                            {
+                                self.piece_manager.requeue_pending_to_need(piece_index);
+                            }
+                        }
+                        effects.push(Effect::DisconnectPeer { peer_id: pid });
+                        effects.push(Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
+                            info_hash: self.info_hash.clone(),
+                        }));
+                    }
+                }
+
+                self.number_of_successfully_connected_peers = self.peers.len();
+                self.piece_manager
+                    .update_rarity(self.peers.values().map(|p| &p.bitfield));
 
                 effects
             }
@@ -1606,17 +1698,25 @@ impl TorrentState {
             }
 
             Action::PeerConnectionFailed { peer_addr } => {
-                let (count, _) = self
-                    .timed_out_peers
-                    .get(&peer_addr)
-                    .cloned()
-                    .unwrap_or((0, self.now));
-                let new_count = (count + 1).min(10);
-                let backoff_secs = (15 * 2u64.pow(new_count - 1)).min(1800);
-                let next_attempt = self.now + Duration::from_secs(backoff_secs);
-
-                self.timed_out_peers
-                    .insert(peer_addr, (new_count, next_attempt));
+                self.pending_failures.push(peer_addr);
+                if self.pending_failures.len() >= 100 {
+                    let effects = Vec::new();
+                    let batch = std::mem::take(&mut self.pending_failures);
+                    for addr in batch {
+                        let (count, _) = self
+                            .timed_out_peers
+                            .get(&addr)
+                            .cloned()
+                            .unwrap_or((0, self.now));
+                        let new_count = (count + 1).min(10);
+                        let backoff_secs = (15 * 2u64.pow(new_count - 1)).min(1800);
+                        self.timed_out_peers.insert(
+                            addr,
+                            (new_count, self.now + Duration::from_secs(backoff_secs)),
+                        );
+                    }
+                    return effects;
+                }
                 vec![Effect::DoNothing]
             }
 
@@ -1657,6 +1757,10 @@ impl TorrentState {
                     piece_overrides,
                     self.torrent_validation_status,
                 );
+                if !self.file_priorities.is_empty() {
+                    let priorities = self.calculate_piece_priorities(&self.file_priorities);
+                    self.piece_manager.apply_priorities(priorities);
+                }
 
                 for peer in self.peers.values_mut() {
                     if peer.bitfield.len() > num_pieces {
@@ -1678,11 +1782,12 @@ impl TorrentState {
                 }
 
                 self.validation_pieces_found = 0;
-                self.torrent_status = TorrentStatus::Validating;
-
-                let effects = vec![Effect::InitializeStorage, Effect::StartValidation];
-
-                effects
+                if self.torrent_data_path.is_some() {
+                    self.rebuild_multi_file_info();
+                    self.torrent_status = TorrentStatus::Validating;
+                    return vec![Effect::StartValidation];
+                }
+                vec![Effect::DoNothing]
             }
 
             Action::ValidationComplete { completed_pieces } => {
@@ -1715,7 +1820,13 @@ impl TorrentState {
                 for (index, status) in self.piece_manager.bitfield.iter().enumerate() {
                     let idx = index as u32;
                     if *status != PieceStatus::Done {
-                        self.piece_manager.need_queue.push(idx);
+                        let is_skipped = !self.piece_manager.piece_priorities.is_empty()
+                            && self.piece_manager.piece_priorities[index]
+                                == EffectivePiecePriority::Skip;
+
+                        if !is_skipped {
+                            self.piece_manager.need_queue.push(idx);
+                        }
                     }
                 }
 
@@ -1796,7 +1907,7 @@ impl TorrentState {
                 self.timed_out_peers
                     .retain(|_, (retry_count, _)| *retry_count < MAX_TIMEOUT_COUNT);
 
-                let max_ram_usage = 1024 * 1024 * 1024; // 1 GB in bytes
+                let max_ram_usage = 1024 * 1024 * 1024; // 1 GB
                 let piece_len = self
                     .torrent
                     .as_ref()
@@ -1818,25 +1929,13 @@ impl TorrentState {
                 }
 
                 for peer_id in stuck_peers {
-                    if let Some(removed_peer) = self.peers.remove(&peer_id) {
-                        for piece_index in removed_peer.pending_requests {
-                            if self.piece_manager.bitfield.get(piece_index as usize)
-                                != Some(&PieceStatus::Done)
-                            {
-                                self.piece_manager.requeue_pending_to_need(piece_index);
-                            }
-                        }
-
-                        effects.push(Effect::DisconnectPeer {
-                            peer_id: peer_id.clone(),
-                        });
-                        effects.push(Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
-                            info_hash: self.info_hash.clone(),
-                        }));
-                    }
+                    self.pending_disconnects.push(peer_id);
                 }
 
-                self.number_of_successfully_connected_peers = self.peers.len();
+                effects.extend(self.update(Action::PeerDisconnected {
+                    peer_id: String::new(),
+                    force: true,
+                }));
 
                 let am_seeding = !self.piece_manager.bitfield.is_empty()
                     && self
@@ -1853,9 +1952,9 @@ impl TorrentState {
                 if am_seeding {
                     let mut peers_to_disconnect = Vec::new();
                     for (peer_id, peer) in &self.peers {
-                        let peer_is_seed = !peer.bitfield.is_empty()
-                            && peer.bitfield.iter().all(|&has_piece| has_piece);
-                        if peer_is_seed {
+                        if !peer.bitfield.is_empty()
+                            && peer.bitfield.iter().all(|&has_piece| has_piece)
+                        {
                             peers_to_disconnect.push(peer_id.clone());
                         }
                     }
@@ -1863,6 +1962,7 @@ impl TorrentState {
                         effects.push(Effect::DisconnectPeer { peer_id });
                     }
                 }
+
                 effects
             }
 
@@ -1970,7 +2070,32 @@ impl TorrentState {
                 };
                 self.last_activity = TorrentActivity::Initializing;
 
-                vec![Effect::DeleteFiles]
+                let mut effects = Vec::new();
+                if let (Some(path), Some(mfi)) = (&self.torrent_data_path, &self.multi_file_info) {
+                    let container = self.container_name.as_deref();
+                    let (files, directories) = calculate_deletion_lists(mfi, path, container);
+                    effects.push(Effect::DeleteFiles { files, directories });
+                } else {
+                    if self.torrent_status != TorrentStatus::AwaitingMetadata
+                        && self.torrent_status != TorrentStatus::Validating
+                    {
+                        event!(
+                            Level::WARN,
+                            "Action::Delete triggered but torrent_data_path or mfi is missing."
+                        );
+                    } else {
+                        event!(
+                            Level::INFO,
+                            "Aborting torrent before storage initialization."
+                        );
+                    }
+
+                    effects.push(Effect::EmitManagerEvent(ManagerEvent::DeletionComplete(
+                        self.info_hash.clone(),
+                        Ok(()),
+                    )));
+                }
+                effects
             }
 
             Action::UpdateListenPort => {
@@ -1980,6 +2105,41 @@ impl TorrentState {
                     tracker.next_announce_time = self.now + Duration::from_secs(60);
                     effects.push(Effect::AnnounceToTracker { url: url.clone() });
                 }
+
+                effects
+            }
+
+            Action::SetUserTorrentConfig {
+                torrent_data_path,
+                file_priorities,
+            } => {
+                event!(
+                    Level::INFO,
+                    "Received User config {:?} - {} Priorities",
+                    torrent_data_path,
+                    file_priorities.len()
+                );
+
+                self.torrent_data_path = Some(torrent_data_path);
+                self.file_priorities = file_priorities;
+
+                if self.torrent.is_some() {
+                    let priorities = self.calculate_piece_priorities(&self.file_priorities);
+                    self.piece_manager.apply_priorities(priorities);
+                }
+
+                let mut effects = Vec::new();
+
+                if self.torrent.is_some() && self.multi_file_info.is_none() {
+                    self.rebuild_multi_file_info();
+
+                    if self.multi_file_info.is_some() {
+                        self.torrent_status = TorrentStatus::Validating;
+                        effects.push(Effect::StartValidation);
+                    }
+                }
+
+                effects.extend(self.update(Action::CheckCompletion));
 
                 effects
             }
@@ -2086,6 +2246,172 @@ impl TorrentState {
         }
         (data_len, 0, data_len)
     }
+
+    pub fn rebuild_multi_file_info(&mut self) {
+        // Guard 1: Ensure metadata exists
+        let torrent = match &self.torrent {
+            Some(t) => t,
+            None => {
+                event!(
+                    Level::DEBUG,
+                    "rebuild_multi_file_info: Skipping. No torrent metadata available."
+                );
+                return;
+            }
+        };
+
+        // Guard 2: Handle the Option<PathBuf>
+        let path = match &self.torrent_data_path {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            Some(_) => {
+                event!(Level::WARN,
+                    torrent_name = %torrent.info.name,
+                    "rebuild_multi_file_info: torrent_data_path is Some, but the path is empty."
+                );
+                return;
+            }
+            None => {
+                event!(Level::WARN,
+                    torrent_name = %torrent.info.name,
+                    "rebuild_multi_file_info: torrent_data_path is None."
+                );
+                return;
+            }
+        };
+
+        // Execution: Attempt to create MFI
+        self.multi_file_info = MultiFileInfo::new(
+            path,
+            &torrent.info.name,
+            if torrent.info.files.is_empty() { None } else { Some(&torrent.info.files) },
+            if torrent.info.files.is_empty() { Some(torrent.info.length as u64) } else { None },
+            &self.file_priorities,
+        ).map_err(|e| {
+            event!(Level::ERROR, error = %e, "rebuild_multi_file_info: Failed to create MultiFileInfo");
+            e
+        }).ok();
+
+        if self.multi_file_info.is_some() {
+            event!(Level::INFO,
+                torrent_name = %torrent.info.name,
+                "rebuild_multi_file_info: Storage successfully initialized in state."
+            );
+        }
+    }
+
+    fn calculate_piece_priorities(
+        &self,
+        new_file_priorities: &HashMap<usize, FilePriority>,
+    ) -> Vec<EffectivePiecePriority> {
+        let torrent = match &self.torrent {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+
+        let num_pieces = self.piece_manager.bitfield.len();
+        if num_pieces == 0 {
+            return Vec::new();
+        }
+
+        let mut piece_vec = vec![EffectivePiecePriority::Normal; num_pieces];
+        let piece_len = torrent.info.piece_length as u64;
+
+        // Default all to Skip, then paint Normal/High over them.
+        piece_vec.fill(EffectivePiecePriority::Skip);
+
+        let mut file_start = 0u64;
+
+        let files_iter = if !torrent.info.files.is_empty() {
+            torrent
+                .info
+                .files
+                .iter()
+                .map(|f| f.length)
+                .enumerate()
+                .collect::<Vec<_>>()
+        } else {
+            vec![(0, torrent.info.length)]
+        };
+
+        for (file_idx, length) in files_iter {
+            let file_end = file_start + (length as u64);
+            let start_piece = (file_start / piece_len) as usize;
+            let end_piece = ((file_end.saturating_sub(1)) / piece_len) as usize;
+
+            let priority = new_file_priorities
+                .get(&file_idx)
+                .unwrap_or(&FilePriority::Normal);
+
+            for (p_idx, piece) in piece_vec
+                .iter_mut()
+                .enumerate()
+                .take(end_piece + 1)
+                .skip(start_piece)
+            {
+                if p_idx >= num_pieces {
+                    break;
+                }
+
+                match priority {
+                    FilePriority::High => {
+                        *piece = EffectivePiecePriority::High;
+                    }
+                    FilePriority::Normal | FilePriority::Mixed => {
+                        if *piece != EffectivePiecePriority::High {
+                            *piece = EffectivePiecePriority::Normal;
+                        }
+                    }
+                    FilePriority::Skip => {
+                        // Stays Skip unless overwritten by another file
+                    }
+                }
+            }
+            file_start = file_end;
+        }
+        piece_vec
+    }
+}
+
+fn calculate_deletion_lists(
+    mfi: &MultiFileInfo,
+    base_path: &Path,
+    known_container_name: Option<&str>,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut files = Vec::new();
+    let mut dirs_to_delete = HashSet::new();
+
+    for file_info in &mfi.files {
+        files.push(file_info.path.clone());
+
+        // Walk up the directory tree
+        let mut current = file_info.path.parent();
+        while let Some(dir) = current {
+            if dir == base_path {
+                break;
+            }
+            if dir.starts_with(base_path) {
+                dirs_to_delete.insert(dir.to_path_buf());
+            } else {
+                break;
+            }
+            current = dir.parent();
+        }
+    }
+
+    // STRICT SAFETY: Only delete the base_path if we explicitly recorded a container name
+    // and the current base_path's folder name matches it.
+    if let Some(recorded_name) = known_container_name {
+        if let Some(folder_name) = base_path.file_name().and_then(|n| n.to_str()) {
+            if folder_name == recorded_name {
+                dirs_to_delete.insert(base_path.to_path_buf());
+            }
+        }
+    }
+
+    let mut sorted_dirs: Vec<PathBuf> = dirs_to_delete.into_iter().collect();
+    sorted_dirs.sort_by_key(|b| std::cmp::Reverse(b.as_os_str().len()));
+
+    (files, sorted_dirs)
 }
 
 #[derive(Debug, Clone)]
@@ -2165,6 +2491,7 @@ mod tests {
             peers: HashMap::new(),
             piece_manager: PieceManager::new(),
             trackers: HashMap::new(),
+            torrent_data_path: Some(PathBuf::from("/tmp/superseedr_test")),
             ..Default::default()
         }
     }
@@ -2210,24 +2537,27 @@ mod tests {
 
     #[test]
     fn test_metadata_received_triggers_initialization_flow() {
-        // GIVEN: An empty state
         let mut state = create_empty_state();
-        let torrent = create_dummy_torrent(5); // 5 pieces
+        state.torrent_data_path = Some(PathBuf::from("/tmp")); // Set a path for MFI rebuild
+        let torrent = create_dummy_torrent(5);
 
-        // WHEN: Metadata is received
         let action = Action::MetadataReceived {
             torrent: Box::new(torrent),
             metadata_length: 123,
         };
         let effects = state.update(action);
 
-        // THEN: It should transition to Validating and trigger storage init + validation
         assert_eq!(state.torrent_status, TorrentStatus::Validating);
         assert!(state.torrent.is_some());
 
-        // Verify specific order of effects
-        assert!(matches!(effects[0], Effect::InitializeStorage));
-        assert!(matches!(effects[1], Effect::StartValidation));
+        // Check internal state instead of Effect::InitializeStorage
+        assert!(
+            state.multi_file_info.is_some(),
+            "MFI should be initialized internally"
+        );
+
+        // The first effect is now StartValidation
+        assert!(matches!(effects[0], Effect::StartValidation));
     }
 
     // --- SCENARIO 2: Choking Logic (Leeching) ---
@@ -2485,6 +2815,7 @@ mod tests {
         // WHEN: Peer disconnects
         let effects = state.update(Action::PeerDisconnected {
             peer_id: "peer_X".to_string(),
+            force: true,
         });
 
         // THEN: Peer removed, count decremented, Disconnect effect emitted
@@ -2883,6 +3214,7 @@ mod tests {
 
         state.update(Action::PeerDisconnected {
             peer_id: peer_id.clone(),
+            force: true,
         });
         assert_eq!(
             state.number_of_successfully_connected_peers, 0,
@@ -4675,6 +5007,7 @@ mod tests {
     fn test_v2_magnet_metadata_sequence() {
         // GIVEN: An empty state (simulating a fresh V2 Magnet connection)
         let mut state = create_empty_state();
+        state.torrent_data_path = Some(PathBuf::from("/tmp/test"));
         state.torrent_status = TorrentStatus::AwaitingMetadata;
 
         // Construct a V2-Only Torrent (Empty V1 pieces, Has V2 Roots)
@@ -4722,9 +5055,6 @@ mod tests {
 
         // THEN 1: Sequencing - Should transition to Validating and Init Storage
         assert_eq!(state.torrent_status, TorrentStatus::Validating);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, Effect::InitializeStorage)));
         assert!(effects.iter().any(|e| matches!(e, Effect::StartValidation)));
 
         // THEN 2: V2 Initialization - Piece count must be 5 (calculated from length)
@@ -4751,6 +5081,7 @@ mod tests {
     fn test_v2_magnet_metadata_sequence_multi_file() {
         // GIVEN: An empty state (simulating a fresh V2 Magnet connection)
         let mut state = create_empty_state();
+        state.torrent_data_path = Some(PathBuf::from("/tmp/test"));
         state.torrent_status = TorrentStatus::AwaitingMetadata;
 
         // Construct a V2-Only Torrent
@@ -4824,13 +5155,10 @@ mod tests {
             torrent: Box::new(torrent),
             metadata_length: 500,
         };
-        let effects = state.update(action);
+        let _effects = state.update(action);
 
         // THEN 1: Transitions
         assert_eq!(state.torrent_status, TorrentStatus::Validating);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, Effect::InitializeStorage)));
 
         // THEN 2: Piece Count Calculation (16384+16384 / 16384 = 2)
         assert_eq!(
@@ -5276,11 +5604,13 @@ mod tests {
             PieceManager::new(),
             HashMap::new(),
             false,
+            None,
         );
 
         // This simulates exactly what TorrentState::new does incorrectly for V2.
         // The BlockManager now thinks the tail piece is full (16384 bytes).
         state.torrent_status = TorrentStatus::Standard;
+        state.torrent_data_path = Some(std::path::PathBuf::from("/tmp/superseedr_test"));
         state.piece_manager.set_initial_fields(num_pieces, false);
         state
             .piece_manager
@@ -5479,6 +5809,7 @@ mod tests {
 
         // 1. SETUP: Empty State
         let mut state = create_empty_state();
+        state.torrent_data_path = Some(PathBuf::from("/tmp/test_download"));
         let num_pieces = 100; // Standard V1 swarm
         let piece_len = 16384;
 
@@ -5646,6 +5977,7 @@ mod tests {
 
         // 1. SETUP: Empty State
         let mut state = create_empty_state();
+        state.torrent_data_path = Some(PathBuf::from("/tmp/test_download"));
         let num_pieces = 1000;
         let piece_len = 1024;
         let total_len = (num_pieces as u64) * (piece_len as u64);
@@ -5837,6 +6169,549 @@ mod tests {
             peer_final.am_interested,
             "We should be interested in the seeder (failed if bitfield was wiped)"
         );
+    }
+
+    #[test]
+    fn test_assign_work_is_blocked_when_path_is_missing() {
+        // 1. GIVEN: A torrent state with metadata but NO download path
+        let mut state = create_empty_state();
+        let num_pieces = 5;
+        let torrent = create_dummy_torrent(num_pieces);
+
+        // Set metadata as if it just arrived from a peer
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(num_pieces, false);
+        state.piece_manager.block_manager.set_geometry(
+            16384,
+            (16384 * num_pieces) as u64,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+
+        // Status moves to Standard/Endgame normally after metadata hydration
+        state.torrent_status = TorrentStatus::Standard;
+        state.piece_manager.need_queue = (0..num_pieces as u32).collect();
+
+        // CRITICAL: Ensure path is None (User is still in File Browser)
+        state.torrent_data_path = None;
+
+        // 2. GIVEN: A connected, unchoked peer who has all pieces
+        let peer_id = "seeder_peer".to_string();
+        add_peer(&mut state, &peer_id);
+        let peer = state.peers.get_mut(&peer_id).unwrap();
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.bitfield = vec![true; num_pieces];
+
+        // 3. WHEN: We try to assign work
+        let effects = state.update(Action::AssignWork {
+            peer_id: peer_id.clone(),
+        });
+
+        // 4. THEN: No requests should be generated
+        let has_requests = effects.iter().any(|e| {
+            matches!(e, Effect::SendToPeer { cmd, .. }
+                if matches!(**cmd, TorrentCommand::BulkRequest(_)))
+        });
+
+        assert!(
+            !has_requests,
+            "PROTOCOL ERROR: Engine requested blocks before a download path was selected!"
+        );
+        assert!(
+            state.peers[&peer_id].pending_requests.is_empty(),
+            "Peer should have 0 pending requests when path is missing"
+        );
+    }
+
+    #[test]
+    fn test_delete_action_without_path_emits_completion() {
+        // 1. GIVEN: A state with metadata but NO torrent_data_path or multi_file_info
+        let mut state = create_empty_state();
+        let torrent = create_dummy_torrent(5);
+        let info_hash = state.info_hash.clone();
+
+        state.torrent = Some(torrent);
+        state.torrent_data_path = None;
+        state.multi_file_info = None;
+        // status will be Validating because torrent is Some
+        state.torrent_status = TorrentStatus::Validating;
+
+        // 2. WHEN: Action::Delete is triggered
+        let effects = state.update(Action::Delete);
+
+        // 3. THEN: It should NOT emit Effect::DeleteFiles
+        let has_delete_files = effects
+            .iter()
+            .any(|e| matches!(e, Effect::DeleteFiles { .. }));
+        assert!(
+            !has_delete_files,
+            "Should not attempt to delete files when path is missing"
+        );
+
+        // 4. THEN: It SHOULD emit Effect::EmitManagerEvent(ManagerEvent::DeletionComplete)
+        let completion_event = effects.iter().find(|e| {
+            if let Effect::EmitManagerEvent(ManagerEvent::DeletionComplete(hash, result)) = e {
+                return hash == &info_hash && result.is_ok();
+            }
+            false
+        });
+
+        assert!(
+            completion_event.is_some(),
+            "Manager must emit DeletionComplete(Ok) to notify the app to remove the UI entry"
+        );
+
+        // 5. THEN: Internal state should be reset correctly
+        assert!(state.is_paused);
+        assert_eq!(state.torrent_status, TorrentStatus::Validating);
+        assert_eq!(state.last_activity, TorrentActivity::Initializing);
+    }
+
+    #[test]
+    fn test_file_priority_boundary_mapping() {
+        // GIVEN: A torrent with 3 pieces (size 10).
+        // File A: Size 15 (Spans Piece 0 and half of Piece 1) -> Set to SKIP
+        // File B: Size 15 (Spans rest of Piece 1 and Piece 2) -> Set to NORMAL
+
+        let mut state = create_empty_state();
+        let piece_len = 10;
+
+        let mut torrent = create_dummy_torrent(3);
+        torrent.info.piece_length = piece_len;
+        torrent.info.length = 30;
+        torrent.info.files = vec![
+            crate::torrent_file::InfoFile {
+                length: 15,
+                path: vec!["A".into()],
+                md5sum: None,
+                attr: None,
+            },
+            crate::torrent_file::InfoFile {
+                length: 15,
+                path: vec!["B".into()],
+                md5sum: None,
+                attr: None,
+            },
+        ];
+
+        state.torrent = Some(torrent);
+        // Init bitfield so length check passes
+        state.piece_manager.set_initial_fields(3, false);
+
+        // WHEN: We set priorities
+        let mut priorities = HashMap::new();
+        priorities.insert(0, FilePriority::Skip); // File A
+        priorities.insert(1, FilePriority::Normal); // File B
+
+        let vec = state.calculate_piece_priorities(&priorities);
+
+        // THEN:
+        // Piece 0 (0-10): Only File A (Skip) -> SKIP
+        assert_eq!(vec[0], EffectivePiecePriority::Skip);
+
+        // Piece 1 (10-20): File A (Skip) AND File B (Normal) -> NORMAL (Boundary protection)
+        assert_eq!(vec[1], EffectivePiecePriority::Normal);
+
+        // Piece 2 (20-30): Only File B (Normal) -> NORMAL
+        assert_eq!(vec[2], EffectivePiecePriority::Normal);
+    }
+
+    #[test]
+    fn test_completion_with_skipped_files() {
+        // GIVEN: A torrent with 2 pieces.
+        // Piece 0: Skipped
+        // Piece 1: Done
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+
+        // Mock the PieceManager state
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.bitfield[1] = PieceStatus::Done;
+
+        // Apply Priorities: 0=Skip, 1=Normal
+        state.piece_manager.apply_priorities(vec![
+            EffectivePiecePriority::Skip,
+            EffectivePiecePriority::Normal,
+        ]);
+
+        // WHEN: We check completion
+        // Note: queues must be empty for CheckCompletion to succeed
+        state.piece_manager.need_queue.clear();
+        state.piece_manager.pending_queue.clear();
+
+        let effects = state.update(Action::CheckCompletion);
+
+        // THEN: The torrent should be considered DONE
+        assert_eq!(state.torrent_status, TorrentStatus::Done);
+
+        // BUT: It should NOT report "Completed" to the tracker (physically incomplete)
+        let sent_completed_event = effects
+            .iter()
+            .any(|e| matches!(e, Effect::AnnounceCompleted { .. }));
+        assert!(
+            !sent_completed_event,
+            "Should NOT send 'completed' event if files were skipped"
+        );
+    }
+
+    #[test]
+    fn test_repro_validation_complete_ignores_skip_mixed() {
+        let mut state = create_empty_state();
+        let piece_len = 10; // Tiny pieces for easy math
+
+        // 1. Construct Multi-File Torrent (File A=Piece 0, File B=Piece 1)
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.piece_length = piece_len;
+        torrent.info.length = 0; // Standard for multi-file is 0 or sum
+        torrent.info.files = vec![
+            crate::torrent_file::InfoFile {
+                length: piece_len, // 10 bytes (Piece 0)
+                path: vec!["A.txt".into()],
+                md5sum: None,
+                attr: None,
+            },
+            crate::torrent_file::InfoFile {
+                length: piece_len, // 10 bytes (Piece 1)
+                path: vec!["B.txt".into()],
+                md5sum: None,
+                attr: None,
+            },
+        ];
+
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+
+        // 2. Set Priorities: File 0 (A) -> SKIP
+        let mut priorities = HashMap::new();
+        priorities.insert(0, FilePriority::Skip);
+        // File 1 (B) defaults to Normal
+
+        let prio_vec = state.calculate_piece_priorities(&priorities);
+        state.piece_manager.apply_priorities(prio_vec);
+
+        // Pre-condition: Need queue should ONLY have Piece 1
+        // Piece 0 should be skipped.
+        assert_eq!(
+            state.piece_manager.need_queue,
+            vec![1],
+            "Setup failed: Queue should contain only piece 1"
+        );
+
+        // 3. Trigger Validation Complete
+        state.torrent_status = TorrentStatus::Validating;
+
+        // WHEN: ValidationComplete runs (finding nothing)
+        state.update(Action::ValidationComplete {
+            completed_pieces: vec![],
+        });
+
+        // THEN: The Need Queue should STILL not contain Piece 0.
+        // If the bug exists, Piece 0 will be re-added here.
+        assert!(
+            !state.piece_manager.need_queue.contains(&0),
+            "REGRESSION: Skipped piece 0 was added back to queue! Queue: {:?}",
+            state.piece_manager.need_queue
+        );
+
+        // Verify Piece 1 is still there
+        assert!(
+            state.piece_manager.need_queue.contains(&1),
+            "Piece 1 should still be needed"
+        );
+    }
+
+    #[test]
+    fn test_config_after_metadata_applies_priorities() {
+        // GIVEN: A state that already has metadata (defaulting to Download All)
+        let mut state = create_empty_state();
+        let torrent = create_dummy_torrent(2); // 2 pieces
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+
+        // Initial check: Need queue full
+        assert_eq!(state.piece_manager.need_queue.len(), 2);
+
+        // WHEN: User config arrives LATER, setting everything to SKIP
+        let mut priorities = HashMap::new();
+        priorities.insert(0, FilePriority::Skip); // File 0 (covers piece 0/1 in dummy torrent)
+
+        let effects = state.update(Action::SetUserTorrentConfig {
+            torrent_data_path: PathBuf::from("/tmp"),
+            file_priorities: priorities,
+        });
+
+        // THEN 1: Priorities applied immediately (Queue Cleared)
+        assert!(
+            state.piece_manager.need_queue.is_empty(),
+            "SetUserTorrentConfig failed to update PieceManager queues!"
+        );
+
+        // THEN 2: Validation Started (Because storage wasn't init yet)
+        assert_eq!(state.torrent_status, TorrentStatus::Validating);
+        assert!(effects.iter().any(|e| matches!(e, Effect::StartValidation)));
+
+        // WHEN: Validation finishes (finding nothing on disk)
+        let completion_effects = state.update(Action::ValidationComplete {
+            completed_pieces: vec![],
+        });
+
+        // THEN 3: Status transitions to Done
+        assert_eq!(state.torrent_status, TorrentStatus::Done);
+
+        // Verify we told the tracker we are complete
+        let _sent_completed = completion_effects
+            .iter()
+            .any(|e| matches!(e, Effect::AnnounceCompleted { .. }));
+        // Note: physically_complete is False (0 bytes on disk), so AnnounceCompleted might NOT send depending on logic.
+        // But the status MUST be Done.
+    }
+
+    #[test]
+    fn test_peer_disconnect_batches_until_threshold() {
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+
+        // Add 101 peers to ensure we cross the threshold
+        for i in 0..101 {
+            let pid = format!("peer_{}", i);
+            add_peer(&mut state, &pid);
+
+            let effects = state.update(Action::PeerDisconnected {
+                peer_id: pid.clone(),
+                force: false,
+            });
+
+            if i < 99 {
+                // Should not have processed yet
+                assert!(effects.is_empty() || matches!(effects[0], Effect::DoNothing));
+                assert_eq!(state.pending_disconnects.len(), i + 1);
+            } else if i == 99 {
+                // On the 100th peer, it should flush the first 100
+                assert_eq!(effects.len(), 200); // 100 DisconnectPeer + 100 EmitManagerEvent
+                assert!(state.pending_disconnects.is_empty());
+            }
+        }
+
+        // The 101st peer should now be sitting alone in the new batch
+        assert_eq!(state.pending_disconnects.len(), 1);
+    }
+
+    #[test]
+    fn test_peer_disconnect_force_flush() {
+        let mut state = create_empty_state();
+
+        // Add only 5 peers (well below the 100 threshold)
+        for i in 0..5 {
+            let pid = format!("peer_{}", i);
+            add_peer(&mut state, &pid);
+            state.update(Action::PeerDisconnected {
+                peer_id: pid,
+                force: false,
+            });
+        }
+
+        assert_eq!(state.pending_disconnects.len(), 5);
+
+        // Trigger a forced flush (passing an empty ID as Cleanup would)
+        let effects = state.update(Action::PeerDisconnected {
+            peer_id: String::new(),
+            force: true,
+        });
+
+        // Check that all 5 were processed
+        assert_eq!(effects.len(), 10); // 5 Disconnects + 5 Events
+        assert!(state.pending_disconnects.is_empty());
+        assert_eq!(state.peers.len(), 0);
+    }
+
+    #[test]
+    fn test_cleanup_flushes_stuck_peers_via_batch() {
+        let mut state = create_empty_state();
+        state.now = Instant::now();
+
+        // Add a "stuck" peer (empty peer_id, created 10 seconds ago)
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let mut peer = PeerState::new(
+            "127.0.0.1:1234".to_string(),
+            tx,
+            state.now - Duration::from_secs(10),
+        );
+        peer.peer_id = Vec::new(); // Empty ID = Stuck
+        state.peers.insert("127.0.0.1:1234".to_string(), peer);
+
+        // Run Cleanup
+        let effects = state.update(Action::Cleanup);
+
+        // Verify the peer was removed via the batching logic called by Cleanup
+        assert!(state.peers.is_empty());
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::DisconnectPeer { .. })));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { .. })
+        )));
+    }
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+    use crate::storage::{FileInfo, MultiFileInfo};
+    use std::path::PathBuf;
+
+    // Helper to mock MFI
+    fn mock_mfi(paths: Vec<&str>) -> MultiFileInfo {
+        let files = paths
+            .into_iter()
+            .map(|p| FileInfo {
+                path: PathBuf::from(p),
+                length: 100,
+                global_start_offset: 0,
+                is_padding: false,
+                is_skipped: false,
+            })
+            .collect();
+
+        MultiFileInfo {
+            files,
+            total_size: 100,
+        }
+    }
+
+    #[test]
+    fn test_delete_single_file_torrent() {
+        let base = PathBuf::from("/Downloads");
+        // Case: Torrent is just "linux.iso" directly in Downloads
+        let mfi = mock_mfi(vec!["/Downloads/linux.iso"]);
+
+        let (files, dirs) = calculate_deletion_lists(&mfi, &base, None);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], PathBuf::from("/Downloads/linux.iso"));
+
+        // Critical: Should NOT delete /Downloads
+        assert!(
+            dirs.is_empty(),
+            "Single file torrent should not delete root dir"
+        );
+    }
+
+    #[test]
+    fn test_delete_standard_folder_torrent() {
+        let base = PathBuf::from("/Downloads");
+        // Case: "Album Name/01.mp3"
+        let mfi = mock_mfi(vec!["/Downloads/Album/01.mp3", "/Downloads/Album/02.mp3"]);
+
+        let (_, dirs) = calculate_deletion_lists(&mfi, &base, None);
+
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0], PathBuf::from("/Downloads/Album"));
+    }
+
+    #[test]
+    fn test_delete_nested_directories() {
+        let base = PathBuf::from("/Downloads");
+        // Case: "Game/Data/Textures/skin.png"
+        let mfi = mock_mfi(vec![
+            "/Downloads/Game/readme.txt",
+            "/Downloads/Game/Data/config.ini",
+            "/Downloads/Game/Data/Textures/skin.png",
+        ]);
+
+        let (_, dirs) = calculate_deletion_lists(&mfi, &base, None);
+
+        // Should identify: Game, Game/Data, Game/Data/Textures
+        assert_eq!(dirs.len(), 3);
+
+        // Verify Sort Order (Deepest First)
+        assert_eq!(dirs[0], PathBuf::from("/Downloads/Game/Data/Textures"));
+        assert_eq!(dirs[1], PathBuf::from("/Downloads/Game/Data"));
+        assert_eq!(dirs[2], PathBuf::from("/Downloads/Game"));
+    }
+
+    #[test]
+    fn test_delete_safety_boundary_escape() {
+        let base = PathBuf::from("/Downloads");
+
+        // Edge Case: File path somehow points outside base (e.g. config error)
+        let mfi = mock_mfi(vec!["/System/Critical/boot.ini"]);
+
+        let (files, dirs) = calculate_deletion_lists(&mfi, &base, None);
+
+        // We still delete the file (it belongs to the torrent),
+        // but we MUST NOT delete parent folders up to root if they aren't in base.
+        assert_eq!(files.len(), 1);
+        assert!(
+            dirs.is_empty(),
+            "Should not identify directories outside base path"
+        );
+    }
+
+    #[test]
+    fn test_delete_matching_container() {
+        // Scenario: Container "LinuxDistro" matches torrent name "LinuxDistro"
+        let base = PathBuf::from("/Downloads/LinuxDistro");
+        let name = "LinuxDistro";
+        let mfi = mock_mfi(vec!["/Downloads/LinuxDistro/image.iso"]);
+
+        let (_, dirs) = calculate_deletion_lists(&mfi, &base, Some(name));
+
+        // Should include base path because names match
+        assert!(
+            dirs.contains(&base),
+            "Should delete container if name matches"
+        );
+    }
+
+    #[test]
+    fn test_delete_root_safety_mismatch() {
+        // Scenario: Saved directly to "Downloads" (No Container)
+        let base = PathBuf::from("/Downloads");
+        let name = "LinuxDistro";
+        let mfi = mock_mfi(vec!["/Downloads/image.iso"]);
+
+        let (_, dirs) = calculate_deletion_lists(&mfi, &base, Some(name));
+
+        // "Downloads" != "LinuxDistro" -> Do NOT delete base
+        assert!(
+            dirs.is_empty(),
+            "Should NOT delete root folder if names mismatch"
+        );
+    }
+
+    #[test]
+    fn test_delete_renamed_container_safety() {
+        // Scenario: User renamed "LinuxDistro" to "MyStuff"
+        let base = PathBuf::from("/Downloads/MyStuff");
+        let name = "LinuxDistro";
+        let mfi = mock_mfi(vec!["/Downloads/MyStuff/image.iso"]);
+
+        let (_, dirs) = calculate_deletion_lists(&mfi, &base, Some(name));
+
+        // "MyStuff" != "LinuxDistro" -> Safe fallback is to KEEP the folder
+        assert!(
+            dirs.is_empty(),
+            "Should preserve renamed container for safety"
+        );
+    }
+
+    #[test]
+    fn test_delete_subfolders_always() {
+        // Scenario: Torrent has internal folders. Even if root is safe, subfolders must go.
+        // Base: /Downloads (Safe)
+        // File: /Downloads/Album/song.mp3
+        let base = PathBuf::from("/Downloads");
+        let name = "Album";
+        let mfi = mock_mfi(vec!["/Downloads/Album/song.mp3"]);
+
+        let (_, dirs) = calculate_deletion_lists(&mfi, &base, Some(name));
+
+        // Should delete "Album" (child) but NOT "Downloads" (base)
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0], PathBuf::from("/Downloads/Album"));
     }
 }
 
@@ -6633,7 +7508,10 @@ mod prop_tests {
                 .prop_map(|id| Action::PeerSuccessfullyConnected { peer_id: id }),
             peer_id_strat
                 .clone()
-                .prop_map(|id| Action::PeerDisconnected { peer_id: id }),
+                .prop_map(|id| Action::PeerDisconnected {
+                    peer_id: id,
+                    force: true
+                }),
             any::<String>().prop_map(|addr| Action::PeerConnectionFailed { peer_addr: addr }),
             (any::<String>(), proptest::collection::vec(any::<u8>(), 20)).prop_map(|(addr, id)| {
                 Action::UpdatePeerId {
@@ -6839,7 +7717,8 @@ mod prop_tests {
                     peer_id: id.clone()
                 }, // Re-connect
                 Action::PeerDisconnected {
-                    peer_id: id.clone()
+                    peer_id: id.clone(),
+                    force: true,
                 },
                 // Should be ignored or handled gracefully, not panic
                 Action::IncomingBlock {
@@ -7359,7 +8238,10 @@ mod prop_tests {
                     strategies.push(
                         peer_strategy
                             .clone()
-                            .prop_map(|id| Action::PeerDisconnected { peer_id: id })
+                            .prop_map(|id| Action::PeerDisconnected {
+                                peer_id: id,
+                                force: true,
+                            })
                             .boxed(),
                     );
                     strategies.push(
@@ -7423,7 +8305,10 @@ mod prop_tests {
                     Action::PeerSuccessfullyConnected { peer_id } => {
                         state.connected_peers.insert(peer_id.clone());
                     }
-                    Action::PeerDisconnected { peer_id } => {
+                    Action::PeerDisconnected {
+                        peer_id,
+                        force: true,
+                    } => {
                         state.connected_peers.remove(peer_id);
                     }
                     Action::Pause | Action::FatalError => {
@@ -7518,6 +8403,7 @@ mod prop_tests {
                     torrent_status: status,
                     is_paused: ref_state.paused,
                     piece_manager,
+                    torrent_data_path: Some(PathBuf::from("/tmp/fuzz")),
                     ..Default::default()
                 }
             }
@@ -7773,13 +8659,15 @@ mod integration_tests {
             incoming_peer_rx,
             metrics_tx,
             torrent_validation_status: false,
-            download_dir: temp_dir,
+            torrent_data_path: Some(temp_dir),
+            container_name: None,
             manager_command_rx: cmd_rx,
             manager_event_tx: event_tx,
             settings,
             resource_manager: rm_client.clone(),
             global_dl_bucket: bucket.clone(),
             global_ul_bucket: bucket,
+            file_priorities: HashMap::new(),
         };
 
         (

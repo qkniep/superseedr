@@ -9,8 +9,13 @@ pub mod state;
 
 use crate::Settings;
 
+use std::collections::HashMap;
+
 use crate::token_bucket::TokenBucket;
 
+use crate::torrent_file::Torrent;
+
+use crate::app::FilePriority;
 use crate::app::TorrentMetrics;
 
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -35,13 +40,15 @@ pub struct TorrentParameters {
     pub incoming_peer_rx: Receiver<(TcpStream, Vec<u8>)>,
     pub metrics_tx: broadcast::Sender<TorrentMetrics>,
     pub torrent_validation_status: bool,
-    pub download_dir: PathBuf,
+    pub torrent_data_path: Option<PathBuf>,
+    pub container_name: Option<String>,
     pub manager_command_rx: Receiver<ManagerCommand>,
     pub manager_event_tx: Sender<ManagerEvent>,
     pub settings: Arc<Settings>,
     pub resource_manager: ResourceManagerClient,
     pub global_dl_bucket: Arc<TokenBucket>,
     pub global_ul_bucket: Arc<TokenBucket>,
+    pub file_priorities: HashMap<usize, FilePriority>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +91,10 @@ pub enum ManagerEvent {
     BlockSent {
         info_hash: Vec<u8>,
     },
+    MetadataLoaded {
+        info_hash: Vec<u8>,
+        torrent: Box<Torrent>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +105,10 @@ pub enum ManagerCommand {
     DeleteFile,
     SetDataRate(u64),
     UpdateListenPort(u16),
+    SetUserTorrentConfig {
+        torrent_data_path: PathBuf,
+        file_priorities: HashMap<usize, FilePriority>,
+    },
 
     #[cfg(feature = "dht")]
     UpdateDhtHandle(AsyncDht),

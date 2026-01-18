@@ -4,4 +4,5 @@
 pub mod events;
 pub mod formatters;
 pub mod layout;
+pub mod tree;
 pub mod view;

@@ -1,5 +1,22 @@
 # Changelog
 
+## Release v0.9.31
+### Performance
+- Optimized file allocation by skipping padding and skipped files.
+- Added fast-path detection for fresh downloads vs partial resumes.
+
+### Refactoring
+- Introduced file priority system (Normal, High, Skip) for per-file download control.
+- Implemented tree-based file browser with preview for download location selection.
+- Added settings backup system with timestamped archives.
+- Changed download path from required to optional, deferring selection until metadata loads.
+- Renamed `DhtTorrent` to `MetadataTorrent` for clarity.
+- Refactored `download_dir` to `torrent_data_path` across torrent management.
+
+### Testing
+- Added tree navigation tests for the new file browser.
+- Added storage tests for skipped file handling.
+
 ## Release v0.9.30
 ### Performance
 - Optimized BitTorrent v2 verification with small-file root lookup bypassing.

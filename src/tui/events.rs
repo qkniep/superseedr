@@ -1,26 +1,33 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::app::AppCommand;
 use crate::app::AppState;
+use crate::app::FileBrowserMode;
 use crate::app::{App, AppMode, ConfigItem, SelectedHeader, TorrentControlState};
+use crate::app::{BrowserPane, TorrentPreviewPayload};
 use crate::torrent_manager::ManagerCommand;
 
 use strum::IntoEnumIterator;
 
 use crate::config::SortDirection;
 
+use crate::tui::formatters::centered_rect;
+use crate::tui::layout::calculate_file_browser_layout;
 use crate::tui::layout::calculate_layout;
 use crate::tui::layout::compute_smart_table_layout;
 use crate::tui::layout::get_peer_columns;
 use crate::tui::layout::get_torrent_columns;
 use crate::tui::layout::LayoutContext;
 use crate::tui::layout::SmartCol;
+use crate::tui::tree::RawNode;
+use crate::tui::tree::TreeViewState;
+use crate::tui::tree::{TreeAction, TreeFilter, TreeMathHelper};
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::prelude::Rect;
-use ratatui::style::{Color, Style};
-use ratatui_explorer::{FileExplorer, Theme};
 
+use std::collections::HashMap;
 use std::path::Path;
 use tracing::{event as tracing_event, Level};
 
@@ -28,6 +35,15 @@ use directories::UserDirs;
 
 #[cfg(windows)]
 use clipboard::{ClipboardContext, ClipboardProvider};
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+static GLOBAL_ESC_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy)]
+enum PriorityAction {
+    Cycle,
+}
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     if let CrosstermEvent::Resize(w, h) = &event {
@@ -37,7 +53,29 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     }
 
     if let CrosstermEvent::Key(key) = event {
-        if app.app_state.is_searching && key.kind == KeyEventKind::Press {
+        if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
+            let last = GLOBAL_ESC_TIMESTAMP.load(Ordering::Relaxed);
+
+            // If the last Esc was less than 200ms ago, ignore this one
+            if now.saturating_sub(last) < 200 {
+                return;
+            }
+
+            // Otherwise, update the timestamp and let the event proceed
+            GLOBAL_ESC_TIMESTAMP.store(now, Ordering::Relaxed);
+        }
+    }
+
+    if let CrosstermEvent::Key(key) = event {
+        if matches!(app.app_state.mode, AppMode::Normal)
+            && app.app_state.is_searching
+            && key.kind == KeyEventKind::Press
+        {
             match key.code {
                 KeyCode::Esc => {
                     app.app_state.is_searching = false;
@@ -68,7 +106,10 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         {
             let mut help_key_handled = false;
             // On Windows, we only get Press, so we just toggle
-            if key.code == KeyCode::Char('m') && key.kind == KeyEventKind::Press {
+            if key.code == KeyCode::Char('m')
+                && key.kind == KeyEventKind::Press
+                && matches!(app.app_state.mode, AppMode::Normal)
+            {
                 app.app_state.show_help = !app.app_state.show_help;
                 help_key_handled = true;
             }
@@ -89,12 +130,17 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
             let mut help_key_handled = false;
             if app.app_state.show_help {
                 if key.code == KeyCode::Esc
-                    || (key.code == KeyCode::Char('m') && key.kind == KeyEventKind::Release)
+                    || (key.code == KeyCode::Char('m')
+                        && key.kind == KeyEventKind::Release
+                        && matches!(app.app_state.mode, AppMode::Normal))
                 {
                     app.app_state.show_help = false;
                     help_key_handled = true;
                 }
-            } else if key.code == KeyCode::Char('m') && key.kind == KeyEventKind::Press {
+            } else if key.code == KeyCode::Char('m')
+                && key.kind == KeyEventKind::Press
+                && matches!(app.app_state.mode, AppMode::Normal)
+            {
                 app.app_state.show_help = true;
                 help_key_handled = true;
             }
@@ -200,35 +246,12 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             }
                         }
                         KeyCode::Char('a') => {
-                            let theme = Theme::default()
-                                .add_default_title()
-                                .with_item_style(Style::default().fg(Color::DarkGray))
-                                .with_dir_style(Style::default());
-
-                            match FileExplorer::with_theme(theme) {
-                                Ok(mut file_explorer) => {
-                                    // Try to find the user's Download folder first
-                                    let initial_path = UserDirs::new()
-                                        .and_then(|ud| ud.download_dir().map(|p| p.to_path_buf()))
-                                        .or_else(|| {
-                                            UserDirs::new().map(|ud| ud.home_dir().to_path_buf())
-                                        });
-
-                                    if let Some(path) = initial_path {
-                                        let _ = file_explorer.set_cwd(path);
-                                    }
-                                    app.app_state.mode = AppMode::AddTorrentPicker(file_explorer);
-                                }
-                                Err(e) => {
-                                    tracing_event!(
-                                        Level::ERROR,
-                                        "Failed to create FileExplorer: {}",
-                                        e
-                                    );
-                                    app.app_state.system_error =
-                                        Some(format!("Error opening file picker: {}", e));
-                                }
-                            }
+                            let initial_path = app.get_initial_source_path();
+                            let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                path: initial_path,
+                                browser_mode: FileBrowserMode::File(vec![".torrent".to_string()]),
+                                highlight_path: None,
+                            });
                         }
                         KeyCode::Char('d') => {
                             if let Some(info_hash) = app
@@ -413,7 +436,9 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => {
-                            app.client_configs = *settings_edit.clone();
+                            let _ = app
+                                .app_command_tx
+                                .try_send(AppCommand::UpdateConfig(*settings_edit.clone()));
                             app.app_state.mode = AppMode::Normal;
                         }
                         KeyCode::Enter => {
@@ -425,21 +450,37 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     *editing = Some((selected_item, String::new()));
                                 }
                                 ConfigItem::DefaultDownloadFolder | ConfigItem::WatchFolder => {
-                                    let theme = Theme::default().add_default_title();
-                                    match FileExplorer::with_theme(theme) {
-                                        Ok(file_explorer) => {
-                                            app.app_state.mode = AppMode::ConfigPathPicker {
-                                                settings_edit: settings_edit.clone(),
-                                                for_item: selected_item,
-                                                file_explorer,
-                                            };
+                                    let initial_path =
+                                        if selected_item == ConfigItem::WatchFolder {
+                                            settings_edit.watch_folder.clone()
+                                        } else {
+                                            settings_edit.default_download_folder.clone()
                                         }
-                                        Err(e) => tracing_event!(
-                                            Level::ERROR,
-                                            "Failed to create FileExplorer for config: {}",
-                                            e
-                                        ),
-                                    }
+                                        .unwrap_or_else(
+                                            || {
+                                                UserDirs::new()
+                                                    .and_then(|ud| {
+                                                        ud.download_dir().map(|p| p.to_path_buf())
+                                                    })
+                                                    .unwrap_or_else(|| {
+                                                        std::path::PathBuf::from(".")
+                                                    })
+                                            },
+                                        );
+
+                                    // Send command to switch mode, PASSING the current state
+                                    let _ =
+                                        app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                            path: initial_path,
+                                            // Carry the state into the browser
+                                            browser_mode: FileBrowserMode::ConfigPathSelection {
+                                                target_item: selected_item,
+                                                current_settings: settings_edit.clone(), // Clone the edits so far
+                                                selected_index: *selected_index,
+                                                items: items.clone(),
+                                            },
+                                            highlight_path: None,
+                                        });
                                 }
                             }
                         }
@@ -535,145 +576,508 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 }
             }
         }
-        AppMode::ConfigPathPicker {
-            settings_edit,
-            for_item,
-            file_explorer,
+
+        AppMode::FileBrowser {
+            state,
+            data,
+            browser_mode,
         } => {
             if let CrosstermEvent::Key(key) = event {
-                let config_items = ConfigItem::iter().collect::<Vec<_>>();
-                let return_to_config = |settings_edit, for_item| -> AppMode {
-                    let selected_index = config_items
-                        .iter()
-                        .position(|&item| item == for_item)
-                        .unwrap_or(0);
-                    AppMode::Config {
-                        settings_edit,
-                        selected_index,
-                        items: config_items,
-                        editing: None,
-                    }
-                };
-                match key.code {
-                    KeyCode::Tab => {
-                        let path = file_explorer.current().path().clone();
-                        let dir_path = if path.is_dir() {
-                            path
-                        } else {
-                            path.parent().unwrap_or(&path).to_path_buf()
-                        };
-                        match for_item {
-                            ConfigItem::DefaultDownloadFolder => {
-                                settings_edit.default_download_folder = Some(dir_path)
+                if key.kind == KeyEventKind::Press {
+                    // 1. Search Interceptor
+                    if app.app_state.is_searching {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.app_state.is_searching = false;
+                                app.app_state.search_query.clear();
                             }
-                            ConfigItem::WatchFolder => settings_edit.watch_folder = Some(dir_path),
+                            KeyCode::Enter => {
+                                app.app_state.is_searching = false;
+                            }
+                            KeyCode::Backspace => {
+                                app.app_state.search_query.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                app.app_state.search_query.push(c);
+                            }
                             _ => {}
                         }
-                        app.app_state.mode = return_to_config(settings_edit.clone(), *for_item);
+                        app.app_state.ui_needs_redraw = true;
+                        return; // INTERCEPTED
                     }
-                    KeyCode::Esc => {
-                        app.app_state.mode = return_to_config(settings_edit.clone(), *for_item)
+
+                    // 2. Mode-Specific Guard (Download Selection)
+                    if let FileBrowserMode::DownloadLocSelection {
+                        container_name,
+                        use_container,
+                        is_editing_name,
+                        focused_pane,
+                        preview_tree,
+                        preview_state,
+                        cursor_pos,
+                        original_name_backup,
+                        ..
+                    } = browser_mode
+                    {
+                        // Input Guard for Renaming the Container
+                        if *is_editing_name {
+                            match key.code {
+                                KeyCode::Enter => {
+                                    *is_editing_name = false;
+                                }
+                                KeyCode::Esc => {
+                                    *container_name = original_name_backup.clone();
+                                    *is_editing_name = false;
+                                    *cursor_pos = container_name.len();
+                                }
+                                KeyCode::Left => {
+                                    *cursor_pos = cursor_pos.saturating_sub(1);
+                                }
+                                KeyCode::Right => {
+                                    if *cursor_pos < container_name.len() {
+                                        *cursor_pos += 1;
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    if *cursor_pos > 0 {
+                                        container_name.remove(*cursor_pos - 1);
+                                        *cursor_pos -= 1;
+                                    }
+                                }
+                                KeyCode::Delete => {
+                                    if *cursor_pos < container_name.len() {
+                                        container_name.remove(*cursor_pos);
+                                    }
+                                }
+                                KeyCode::Char(c) => {
+                                    container_name.insert(*cursor_pos, c);
+                                    *cursor_pos += 1;
+                                }
+                                _ => {}
+                            }
+                            app.app_state.ui_needs_redraw = true;
+                            return; // INTERCEPTED
+                        }
+
+                        // Global Actions (within Download Selection)
+                        match key.code {
+                            KeyCode::Esc => {
+                                if !app.app_state.pending_torrent_link.is_empty() {
+                                    if let (Some(info_hash), _) = crate::app::parse_hybrid_hashes(
+                                        &app.app_state.pending_torrent_link,
+                                    ) {
+                                        // 1. Grab reference to channel
+                                        if let Some(manager_tx) =
+                                            app.torrent_manager_command_txs.get(&info_hash)
+                                        {
+                                            let tx = manager_tx.clone();
+                                            // 2. Send Kill Command asynchronously
+                                            tokio::spawn(async move {
+                                                if let Err(e) =
+                                                    tx.send(ManagerCommand::DeleteFile).await
+                                                {
+                                                    tracing::error!("Failed to send DeleteFile to cancelled manager: {}", e);
+                                                }
+                                            });
+                                        }
+
+                                        // 3. Remove from UI immediately (Manager will kill itself upon receipt of DeleteFile)
+                                        app.torrent_manager_command_txs.remove(&info_hash);
+                                        app.app_state.torrents.remove(&info_hash);
+                                        app.app_state
+                                            .torrent_list_order
+                                            .retain(|h| h != &info_hash);
+                                    }
+                                }
+
+                                app.app_state.mode = AppMode::Normal;
+                                app.app_state.pending_torrent_path = None;
+                                app.app_state.pending_torrent_link.clear();
+                                app.app_state.ui_needs_redraw = true;
+                                return;
+                            }
+                            KeyCode::Char('x') => {
+                                *use_container = !*use_container;
+                                app.app_state.ui_needs_redraw = true;
+                                return;
+                            }
+                            KeyCode::Char('r') if *use_container => {
+                                *is_editing_name = true;
+                                *original_name_backup = container_name.clone();
+                                *cursor_pos = container_name.len();
+                                *focused_pane = BrowserPane::TorrentPreview;
+                                app.app_state.ui_needs_redraw = true;
+                                return;
+                            }
+                            KeyCode::Tab => {
+                                *focused_pane = match focused_pane {
+                                    BrowserPane::FileSystem => BrowserPane::TorrentPreview,
+                                    BrowserPane::TorrentPreview => BrowserPane::FileSystem,
+                                };
+                                app.app_state.ui_needs_redraw = true;
+                                return;
+                            }
+                            _ => {}
+                        }
+
+                        // Pane-Specific Navigation (Intercepting tree keys if focused on preview)
+                        if let BrowserPane::TorrentPreview = focused_pane {
+                            // 1. Re-calculate area logic from view.rs
+                            let screen = app.app_state.screen_area;
+                            let area = if screen.width < 60 {
+                                screen
+                            } else {
+                                centered_rect(90, 80, screen)
+                            };
+
+                            // 2. Run the layout calculator
+                            let layout = calculate_file_browser_layout(
+                                area,
+                                true, // DownloadLocSelection always has preview content
+                                app.app_state.is_searching,
+                                focused_pane,
+                            );
+
+                            if let Some(preview_rect) = layout.preview {
+                                // 3. Calculate inner list height
+                                let inner_height = preview_rect.height.saturating_sub(2); // Remove borders
+                                                                                          // If using container, we have 2 header rows. Else 1.
+                                let header_rows = if *use_container { 2 } else { 1 };
+                                let list_height = inner_height.saturating_sub(header_rows) as usize;
+
+                                let filter = TreeFilter::default();
+
+                                match key.code {
+                                    KeyCode::Up | KeyCode::Char('k') => {
+                                        TreeMathHelper::apply_action(
+                                            preview_state,
+                                            preview_tree,
+                                            TreeAction::Up,
+                                            filter,
+                                            list_height,
+                                        );
+                                    }
+                                    KeyCode::Down | KeyCode::Char('j') => {
+                                        TreeMathHelper::apply_action(
+                                            preview_state,
+                                            preview_tree,
+                                            TreeAction::Down,
+                                            filter,
+                                            list_height,
+                                        );
+                                    }
+                                    KeyCode::Left | KeyCode::Char('h') => {
+                                        TreeMathHelper::apply_action(
+                                            preview_state,
+                                            preview_tree,
+                                            TreeAction::Left,
+                                            filter,
+                                            list_height,
+                                        );
+                                    }
+                                    KeyCode::Right | KeyCode::Char('l') => {
+                                        TreeMathHelper::apply_action(
+                                            preview_state,
+                                            preview_tree,
+                                            TreeAction::Right,
+                                            filter,
+                                            list_height,
+                                        );
+                                    }
+                                    KeyCode::Char(' ') => {
+                                        if let Some(t) = &preview_state.cursor_path {
+                                            apply_priority_action(
+                                                preview_tree,
+                                                t,
+                                                PriorityAction::Cycle,
+                                            );
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            app.app_state.ui_needs_redraw = true;
+                            // If focused on TorrentPreview, we don't want FileSystem navigation to trigger
+                            // except for confirming the whole thing via SHIFT+Y.
+                            if key.code != KeyCode::Char('Y') {
+                                return;
+                            }
+                        }
                     }
-                    _ => if file_explorer.handle(&event).is_err() {},
-                }
-            }
-        }
-        AppMode::DownloadPathPicker(file_explorer) => {
-            if let CrosstermEvent::Key(key) = event {
-                match key.code {
-                    KeyCode::Tab => {
-                        let mut download_path = file_explorer.current().path().clone();
-                        if !download_path.is_dir() {
-                            if let Some(parent) = download_path.parent() {
-                                download_path = parent.to_path_buf();
+
+                    // 1. Determine Preview Status
+                    let has_preview_content = match browser_mode {
+                        FileBrowserMode::DownloadLocSelection { .. } => {
+                            app.app_state.pending_torrent_path.is_some()
+                                || !app.app_state.pending_torrent_link.is_empty()
+                        }
+                        FileBrowserMode::File(_) => state
+                            .cursor_path
+                            .as_ref()
+                            .is_some_and(|p| p.extension().is_some_and(|ext| ext == "torrent")),
+                        _ => false,
+                    };
+
+                    // 2. Determine Focused Pane
+                    let default_pane = BrowserPane::FileSystem;
+                    let focused_pane =
+                        if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } =
+                            browser_mode
+                        {
+                            focused_pane
+                        } else {
+                            &default_pane
+                        };
+
+                    // 3. Determine Area (Matching view.rs logic exactly)
+                    let screen = app.app_state.screen_area;
+                    let area = if has_preview_content {
+                        if screen.width < 60 {
+                            screen
+                        } else {
+                            centered_rect(90, 80, screen)
+                        }
+                    } else if screen.width < 40 {
+                        screen
+                    } else {
+                        centered_rect(75, 80, screen)
+                    };
+
+                    // 4. Calculate Layout
+                    let layout = calculate_file_browser_layout(
+                        area,
+                        has_preview_content,
+                        app.app_state.is_searching,
+                        focused_pane,
+                    );
+
+                    // 5. Get EXACT List Height (Height - 2 for Borders)
+                    let list_height = layout.list.height.saturating_sub(2) as usize;
+
+                    let filter = match browser_mode {
+                        FileBrowserMode::Directory
+                        | FileBrowserMode::DownloadLocSelection { .. }
+                        | FileBrowserMode::ConfigPathSelection { .. } => {
+                            TreeFilter::from_text(&app.app_state.search_query)
+                        }
+                        FileBrowserMode::File(extensions) => {
+                            let exts = extensions.clone();
+                            TreeFilter::new(&app.app_state.search_query, move |node| {
+                                node.is_dir || exts.iter().any(|ext| node.name.ends_with(ext))
+                            })
+                        }
+                    };
+
+                    match key.code {
+                        KeyCode::Char('/') => {
+                            app.app_state.is_searching = true;
+                            app.app_state.search_query.clear();
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            TreeMathHelper::apply_action(
+                                state,
+                                data,
+                                TreeAction::Up,
+                                filter,
+                                list_height,
+                            );
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            TreeMathHelper::apply_action(
+                                state,
+                                data,
+                                TreeAction::Down,
+                                filter,
+                                list_height,
+                            );
+                        }
+                        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                            if let Some(path) = state.cursor_path.clone() {
+                                if path.is_dir() {
+                                    let _ =
+                                        app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                            path,
+                                            browser_mode: browser_mode.clone(),
+                                            highlight_path: None,
+                                        });
+                                }
+                            }
+                        }
+                        KeyCode::Backspace
+                        | KeyCode::Left
+                        | KeyCode::Char('h')
+                        | KeyCode::Char('u') => {
+                            let child_to_highlight = state.current_path.clone();
+                            if let Some(parent) = state.current_path.parent() {
+                                let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                    path: parent.to_path_buf(),
+                                    browser_mode: browser_mode.clone(),
+                                    highlight_path: Some(child_to_highlight),
+                                });
                             }
                         }
 
-                        if let Some(pending_path) = app.app_state.pending_torrent_path.take() {
-                            if pending_path.extension().is_some_and(|e| e == "torrent") {
-                                app.add_torrent_from_file(
-                                    pending_path,
-                                    download_path,
-                                    false,
-                                    TorrentControlState::Running,
-                                )
-                                .await;
-                            } else {
-                                // This handles the case where the path was from a .path or .magnet file
-                                if let Ok(content) = std::fs::read_to_string(&pending_path) {
-                                    if content.starts_with("magnet:") {
+                        // --- THE CRITICAL CONFIRMATION ACTION ---
+                        KeyCode::Char('Y') => {
+                            match browser_mode {
+                                FileBrowserMode::ConfigPathSelection {
+                                    target_item,
+                                    current_settings,
+                                    selected_index,
+                                    items,
+                                } => {
+                                    tracing::info!(target: "superseedr", "Confirming Config Path Selection");
+                                    let mut new_settings = current_settings.clone();
+                                    let selected_path = state.current_path.clone();
+
+                                    match target_item {
+                                        ConfigItem::DefaultDownloadFolder => {
+                                            new_settings.default_download_folder =
+                                                Some(selected_path)
+                                        }
+                                        ConfigItem::WatchFolder => {
+                                            new_settings.watch_folder = Some(selected_path)
+                                        }
+                                        _ => {}
+                                    }
+
+                                    app.app_state.mode = AppMode::Config {
+                                        settings_edit: new_settings,
+                                        selected_index: *selected_index,
+                                        items: items.clone(),
+                                        editing: None,
+                                    };
+                                }
+
+                                FileBrowserMode::DownloadLocSelection {
+                                    container_name,
+                                    use_container,
+                                    preview_tree,
+                                    ..
+                                } => {
+                                    let base_path = state.current_path.clone();
+                                    let container_name_clone = container_name.clone();
+                                    let final_path = if *use_container {
+                                        Some(base_path.join(&container_name_clone))
+                                    } else {
+                                        Some(base_path)
+                                    };
+
+                                    let container_name_to_use = if *use_container {
+                                        Some(container_name_clone)
+                                    } else {
+                                        None
+                                    };
+
+                                    let mut file_priorities = HashMap::new();
+                                    for node in preview_tree {
+                                        node.collect_priorities(&mut file_priorities);
+                                    }
+
+                                    if let Some(pending_path) =
+                                        app.app_state.pending_torrent_path.take()
+                                    {
+                                        app.add_torrent_from_file(
+                                            pending_path,
+                                            final_path,
+                                            false,
+                                            TorrentControlState::Running,
+                                            file_priorities,
+                                            container_name_to_use.clone(),
+                                        )
+                                        .await;
+                                    } else if !app.app_state.pending_torrent_link.is_empty() {
                                         app.add_magnet_torrent(
                                             "Fetching name...".to_string(),
-                                            content.trim().to_string(),
-                                            download_path,
+                                            app.app_state.pending_torrent_link.clone(),
+                                            final_path,
                                             false,
                                             TorrentControlState::Running,
+                                            file_priorities,
+                                            container_name_to_use,
                                         )
                                         .await;
+                                        app.app_state.pending_torrent_link.clear();
                                     } else {
-                                        app.add_torrent_from_file(
-                                            std::path::PathBuf::from(content.trim()),
-                                            download_path,
-                                            false,
-                                            TorrentControlState::Running,
-                                        )
-                                        .await;
+                                        tracing::warn!(target: "superseedr", "SHIFT+Y pressed but no pending content was found");
+                                    }
+
+                                    app.app_state.mode = AppMode::Normal;
+                                }
+
+                                FileBrowserMode::File(extensions) => {
+                                    if let Some(path) = state.cursor_path.clone() {
+                                        let name =
+                                            path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                        if extensions.iter().any(|ext| name.ends_with(ext)) {
+                                            if name.ends_with(".torrent") {
+                                                let _ = app
+                                                    .app_command_tx
+                                                    .send(AppCommand::AddTorrentFromFile(path))
+                                                    .await;
+                                            }
+                                            app.app_state.mode = AppMode::Normal;
+                                        }
+                                    }
+                                }
+
+                                _ => {
+                                    app.app_state.mode = AppMode::Normal;
+                                }
+                            }
+                            app.app_state.ui_needs_redraw = true;
+                        }
+
+                        KeyCode::Esc => {
+                            if let FileBrowserMode::ConfigPathSelection {
+                                current_settings,
+                                selected_index,
+                                items,
+                                ..
+                            } = browser_mode
+                            {
+                                app.app_state.mode = AppMode::Config {
+                                    settings_edit: current_settings.clone(),
+                                    selected_index: *selected_index,
+                                    items: items.clone(),
+                                    editing: None,
+                                };
+                                app.app_state.ui_needs_redraw = true;
+                                return;
+                            }
+
+                            if let FileBrowserMode::DownloadLocSelection { .. } = browser_mode {
+                                if !app.app_state.pending_torrent_link.is_empty() {
+                                    // 1. Calculate the hash to find the entry
+                                    if let (Some(info_hash), _) = crate::app::parse_hybrid_hashes(
+                                        &app.app_state.pending_torrent_link,
+                                    ) {
+                                        // 2. Shut down the manager
+                                        if let Some(manager_tx) =
+                                            app.torrent_manager_command_txs.remove(&info_hash)
+                                        {
+                                            let _ = manager_tx.try_send(ManagerCommand::DeleteFile);
+                                        }
+                                        // 3. Remove from UI state
+                                        app.app_state.torrents.remove(&info_hash);
+                                        app.app_state
+                                            .torrent_list_order
+                                            .retain(|h| h != &info_hash);
                                     }
                                 }
                             }
-                        } else if !app.app_state.pending_torrent_link.is_empty() {
-                            app.add_magnet_torrent(
-                                "Fetching name...".to_string(),
-                                app.app_state.pending_torrent_link.clone(),
-                                download_path,
-                                false,
-                                TorrentControlState::Running,
-                            )
-                            .await;
-                            app.app_state.pending_torrent_link.clear();
-                        }
 
-                        app.app_state.mode = AppMode::Normal;
-                        app.app_state.system_error = None;
-                    }
-                    KeyCode::Esc => {
-                        app.app_state.mode = AppMode::Normal;
-                        app.app_state.system_error = None;
-                        app.app_state.pending_torrent_path = None;
-                        app.app_state.pending_torrent_link.clear();
-                    }
-                    _ => {
-                        if let Err(e) = file_explorer.handle(&event) {
-                            tracing_event!(Level::ERROR, "File explorer error: {}", e);
-                        }
-                    }
-                }
-            }
-        }
-        AppMode::AddTorrentPicker(file_explorer) => {
-            if let CrosstermEvent::Key(key) = event {
-                match key.code {
-                    KeyCode::Tab | KeyCode::Enter => {
-                        let path = file_explorer.current().path().clone();
-                        if path.is_file() {
-                            let _ = app
-                                .app_command_tx
-                                .send(crate::app::AppCommand::AddTorrentFromFile(path))
-                                .await;
                             app.app_state.mode = AppMode::Normal;
+                            app.app_state.pending_torrent_path = None;
+                            app.app_state.pending_torrent_link.clear();
+                            app.app_state.ui_needs_redraw = true;
                         }
-                    }
-                    KeyCode::Esc => {
-                        app.app_state.mode = AppMode::Normal;
-                    }
-                    _ => {
-                        if let Err(e) = file_explorer.handle(&event) {
-                            tracing_event!(Level::ERROR, "File explorer error: {}", e);
-                        }
+                        _ => {}
                     }
                 }
             }
         }
+
         AppMode::DeleteConfirm {
             info_hash,
             with_files,
@@ -705,6 +1109,32 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         }
     }
     app.app_state.ui_needs_redraw = true;
+}
+
+fn apply_priority_action(
+    nodes: &mut [RawNode<TorrentPreviewPayload>],
+    target_path: &Path,
+    action: PriorityAction,
+) -> bool {
+    for node in nodes {
+        // CHANGED: We explicitly pass a mutable reference (&mut |...|)
+        let found = node.find_and_act(target_path, &mut |target_node| {
+            // 1. Determine the new priority
+            let new_priority = match action {
+                PriorityAction::Cycle => target_node.payload.priority.next(),
+            };
+
+            // 2. Apply this priority to the target node AND all its children
+            target_node.apply_recursive(&|n| {
+                n.payload.priority = new_priority;
+            });
+        });
+
+        if found {
+            return true;
+        }
+    }
+    false
 }
 
 fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
@@ -832,67 +1262,58 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
 }
 
 async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
+    let pasted_text = pasted_text.trim();
+
     if pasted_text.starts_with("magnet:") {
-        // If a default download folder is configured, use it directly.
-        if let Some(download_path) = app.client_configs.default_download_folder.clone() {
-            app.add_magnet_torrent(
-                "Fetching name...".to_string(),
-                pasted_text.to_string(),
-                download_path,
-                false,
-                TorrentControlState::Running,
-            )
-            .await;
-        } else {
+        let download_path = app.client_configs.default_download_folder.clone();
+
+        app.add_magnet_torrent(
+            "Fetching name...".to_string(),
+            pasted_text.to_string(),
+            download_path.clone(),
+            false,
+            TorrentControlState::Running,
+            HashMap::new(),
+            None,
+        )
+        .await;
+
+        if download_path.is_none() {
             app.app_state.pending_torrent_link = pasted_text.to_string();
-            let theme = Theme::default()
-                .add_default_title()
-                .with_item_style(Style::default().fg(Color::DarkGray))
-                .with_dir_style(Style::default());
-            match FileExplorer::with_theme(theme) {
-                Ok(mut file_explorer) => {
-                    // Since no default path is set, try to find the most common path to start the picker in
-                    let initial_path = app
-                        .find_most_common_download_path()
-                        .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()));
-                    if let Some(common_path) = initial_path {
-                        file_explorer.set_cwd(common_path).ok();
-                    }
-                    app.app_state.mode = AppMode::DownloadPathPicker(file_explorer);
-                }
-                Err(e) => {
-                    tracing_event!(Level::ERROR, "Failed to create FileExplorer: {}", e);
-                }
-            }
+            let initial_path = app.get_initial_destination_path();
+            let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                path: initial_path,
+                browser_mode: FileBrowserMode::DownloadLocSelection {
+                    torrent_files: vec![],
+                    container_name: "Magnet Download".to_string(),
+                    use_container: true,
+                    is_editing_name: false,
+                    focused_pane: BrowserPane::FileSystem,
+                    preview_tree: Vec::new(),
+                    preview_state: TreeViewState::default(),
+                    cursor_pos: 0,
+                    original_name_backup: "Magnet Download".to_string(),
+                },
+                highlight_path: None,
+            });
         }
     } else {
-        let path = Path::new(pasted_text.trim());
+        let path = Path::new(pasted_text);
         if path.is_file() && path.extension().is_some_and(|ext| ext == "torrent") {
             if let Some(download_path) = app.client_configs.default_download_folder.clone() {
                 app.add_torrent_from_file(
                     path.to_path_buf(),
-                    download_path,
+                    Some(download_path),
                     false,
                     TorrentControlState::Running,
+                    HashMap::new(),
+                    None,
                 )
                 .await;
             } else {
-                // Show the download path picker.
-                app.app_state.pending_torrent_path = Some(path.to_path_buf());
-                match FileExplorer::new() {
-                    Ok(mut file_explorer) => {
-                        let initial_path = app
-                            .find_most_common_download_path()
-                            .or_else(|| UserDirs::new().map(|ud| ud.home_dir().to_path_buf()));
-                        if let Some(common_path) = initial_path {
-                            file_explorer.set_cwd(common_path).ok();
-                        }
-                        app.app_state.mode = AppMode::DownloadPathPicker(file_explorer);
-                    }
-                    Err(e) => {
-                        tracing_event!(Level::ERROR, "Failed to create FileExplorer: {}", e);
-                    }
-                }
+                let _ = app
+                    .app_command_tx
+                    .try_send(AppCommand::AddTorrentFromFile(path.to_path_buf()));
             }
         } else {
             tracing_event!(

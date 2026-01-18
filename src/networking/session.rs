@@ -704,7 +704,7 @@ impl PeerSession {
                             ) {
                                 Ok(torrent) => {
                                     let _ = self.torrent_manager_tx.try_send(
-                                        TorrentCommand::DhtTorrent(
+                                        TorrentCommand::MetadataTorrent(
                                             Box::new(torrent),
                                             torrent_metadata_len,
                                         ),
