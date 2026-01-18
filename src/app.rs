@@ -1776,7 +1776,7 @@ impl App {
     }
 
     async fn handle_port_change(&mut self, path: PathBuf) {
-        tracing_event!(Level::INFO, "Processing port file change...");
+        tracing_event!(Level::DEBUG, "Processing port file change...");
         let port_str = match fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
