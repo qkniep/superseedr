@@ -1237,7 +1237,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
             .constraints([
                 Constraint::Length(0),  // Hidden
                 Constraint::Min(0),     // Maximize center
-                Constraint::Length(18), // Keep Status
+                Constraint::Length(21), // Keep Status
             ])
             .split(footer_chunk)
     };
@@ -1251,69 +1251,76 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
         let _current_dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
         let _current_ul_speed = *app_state.avg_upload_history.last().unwrap_or(&0);
 
-        // Prepare the update notification span
-        let mut update_span = Vec::new();
-        if let Some(new_version) = &app_state.update_available {
-            update_span.push(Span::styled(" | ", Style::default().fg(theme::SURFACE2)));
-            update_span.push(Span::styled(
-                format!("Update Available: v{}!", new_version),
-                Style::default().fg(theme::YELLOW).bold(),
-            ));
-        }
-
-        #[cfg(all(feature = "dht", feature = "pex"))]
-        let client_display_line = {
-            let mut spans = vec![
+        let client_display_line = if let Some(new_version) = &app_state.update_available {
+            // REPLACE branding with update message and crossed-out old version
+            Line::from(vec![
                 Span::styled(
-                    "super",
-                    speed_to_style(_current_dl_speed).add_modifier(Modifier::BOLD),
+                    "UPDATE AVAILABLE: ",
+                    Style::default().fg(theme::YELLOW).bold(),
                 ),
                 Span::styled(
-                    "seedr",
-                    speed_to_style(_current_ul_speed).add_modifier(Modifier::BOLD),
+                    format!("v{}", APP_VERSION),
+                    Style::default()
+                        .fg(theme::SURFACE2)
+                        .add_modifier(Modifier::CROSSED_OUT),
                 ),
                 Span::styled(
-                    format!(" v{}", APP_VERSION),
-                    Style::default().fg(theme::SUBTEXT1),
+                    format!(" v{}", new_version),
+                    Style::default().fg(theme::YELLOW).bold(),
                 ),
                 Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
                 Span::styled(
                     app_state.data_rate.to_string(),
-                    Style::default().fg(theme::YELLOW).bold(),
-                ),
-            ];
-            spans.extend(update_span); // Add the update notice if it exists
-            Line::from(spans)
-        };
-
-        #[cfg(not(all(feature = "dht", feature = "pex")))]
-        let client_display_line = {
-            let mut spans = vec![
-                Span::styled("super", Style::default().fg(theme::SURFACE2))
-                    .add_modifier(Modifier::CROSSED_OUT),
-                Span::styled("seedr", Style::default().fg(theme::SURFACE2))
-                    .add_modifier(Modifier::CROSSED_OUT),
-                Span::styled(
-                    " [PRIVATE]",
-                    Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" v{}", APP_VERSION),
                     Style::default().fg(theme::SUBTEXT1),
                 ),
-                Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-                Span::styled(
-                    app_state.data_rate.to_string(),
-                    Style::default().fg(theme::YELLOW).bold(),
-                ),
-            ];
-            spans.extend(update_span); // Add the update notice if it exists
-            Line::from(spans)
+            ])
+        } else {
+            // Standard branding logic (Existing implementation)
+            #[cfg(all(feature = "dht", feature = "pex"))]
+            {
+                Line::from(vec![
+                    Span::styled(
+                        "super",
+                        speed_to_style(_current_dl_speed).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "seedr",
+                        speed_to_style(_current_ul_speed).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" v{}", APP_VERSION),
+                        Style::default().fg(theme::SUBTEXT1),
+                    ),
+                    Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+                    Span::styled(
+                        app_state.data_rate.to_string(),
+                        Style::default().fg(theme::YELLOW).bold(),
+                    ),
+                ])
+            }
+            #[cfg(not(all(feature = "dht", feature = "pex")))]
+            {
+                Line::from(vec![
+                    Span::styled("superseedr", Style::default().fg(theme::SURFACE2))
+                        .add_modifier(Modifier::CROSSED_OUT),
+                    Span::styled(
+                        " [PRIVATE]",
+                        Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" v{}", APP_VERSION),
+                        Style::default().fg(theme::SUBTEXT1),
+                    ),
+                    Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+                    Span::styled(
+                        app_state.data_rate.to_string(),
+                        Style::default().fg(theme::YELLOW).bold(),
+                    ),
+                ])
+            }
         };
 
-        let client_id_paragraph = Paragraph::new(client_display_line)
-            .style(Style::default().fg(theme::SUBTEXT1))
-            .alignment(Alignment::Left);
+        let client_id_paragraph = Paragraph::new(client_display_line).alignment(Alignment::Left);
         f.render_widget(client_id_paragraph, client_id_chunk);
     }
 
