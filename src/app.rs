@@ -93,6 +93,17 @@ const MINUTES_HISTORY_MAX: usize = 48 * 60; // 48 hours of per-minute data
 const FILE_HANDLE_MINIMUM: usize = 64;
 const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
 
+#[derive(serde::Deserialize)]
+struct CratesResponse {
+    #[serde(rename = "crate")]
+    krate: CrateInfo,
+}
+
+#[derive(serde::Deserialize)]
+struct CrateInfo {
+    max_version: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FilePriority {
     #[default]
@@ -362,6 +373,7 @@ pub enum AppCommand {
         highlight_path: Option<PathBuf>,
     },
     UpdateConfig(Settings),
+    UpdateVersionAvailable(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, EnumIter)]
@@ -480,6 +492,7 @@ pub struct TorrentDisplayState {
 
 #[derive(Default)]
 pub struct AppState {
+    pub update_available: Option<String>,
     pub should_quit: bool,
     pub shutdown_progress: f64,
     pub system_warning: Option<String>,
@@ -761,6 +774,7 @@ impl App {
         let mut stats_interval = time::interval(Duration::from_secs(1));
         let mut tuning_interval = time::interval(Duration::from_secs(90));
         let mut draw_interval = time::interval(Duration::from_millis(17));
+        let mut version_interval = time::interval(Duration::from_secs(24 * 60 * 60));
 
         self.save_state_to_disk();
 
@@ -787,9 +801,6 @@ impl App {
 
                 Some(event) = self.tui_event_rx.recv() => {
                     self.clamp_selected_indices();
-
-
-
                     events::handle_event(event, self).await;
                 }
 
@@ -813,6 +824,30 @@ impl App {
                         })?;
                         self.app_state.ui_needs_redraw = false;
                     }
+                }
+                _ = version_interval.tick() => {
+                    let current_version = env!("CARGO_PKG_VERSION");
+                    let tx = self.app_command_tx.clone();
+                    let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            latest_result = App::fetch_latest_version() => {
+                                if let Ok(latest) = latest_result {
+                                    if latest != current_version {
+                                        tracing::info!("New version found! Current: {} - Latest: {}", current_version, latest.clone());
+                                        let _ = tx.send(AppCommand::UpdateVersionAvailable(latest)).await;
+                                    }
+                                    else {
+                                        tracing::info!("Current version is latest! Current: {} - Latest: {}", current_version, latest);
+                                    }
+                                }
+                            }
+                            _ = shutdown_rx.recv() => {
+                                tracing::debug!("Version check aborted due to shutdown");
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -1429,6 +1464,10 @@ impl App {
 
                 // 4. Force Redraw
                 self.app_state.ui_needs_redraw = true;
+            }
+
+            AppCommand::UpdateVersionAvailable(latest_version) => {
+                self.app_state.update_available = Some(latest_version);
             }
         }
     }
@@ -2946,6 +2985,17 @@ impl App {
                 );
             }
         }
+    }
+
+    async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let client = reqwest::Client::builder()
+            .user_agent("superseedr (https://github.com/Jagalite/superseedr)")
+            .build()?;
+
+        let url = "https://crates.io/api/v1/crates/superseedr";
+        let resp: CratesResponse = client.get(url).send().await?.json().await?;
+
+        Ok(resp.krate.max_version)
     }
 }
 

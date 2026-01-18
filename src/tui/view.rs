@@ -1226,7 +1226,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(30), // Fixed space for Branding
+                Constraint::Min(30),    // Fixed space for Branding
                 Constraint::Min(0),     // Center takes all remaining space
                 Constraint::Length(21), // Fixed space for Port Status
             ])
@@ -1251,47 +1251,65 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
         let _current_dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
         let _current_ul_speed = *app_state.avg_upload_history.last().unwrap_or(&0);
 
-        #[cfg(all(feature = "dht", feature = "pex"))]
-        let client_display_line = Line::from(vec![
-            Span::styled(
-                "super",
-                speed_to_style(_current_dl_speed).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "seedr",
-                speed_to_style(_current_ul_speed).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" v{}", APP_VERSION),
-                Style::default().fg(theme::SUBTEXT1),
-            ),
-            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-            Span::styled(
-                app_state.data_rate.to_string(),
+        // Prepare the update notification span
+        let mut update_span = Vec::new();
+        if let Some(new_version) = &app_state.update_available {
+            update_span.push(Span::styled(" | ", Style::default().fg(theme::SURFACE2)));
+            update_span.push(Span::styled(
+                format!("Update Available: v{}!", new_version),
                 Style::default().fg(theme::YELLOW).bold(),
-            ),
-        ]);
+            ));
+        }
+
+        #[cfg(all(feature = "dht", feature = "pex"))]
+        let client_display_line = {
+            let mut spans = vec![
+                Span::styled(
+                    "super",
+                    speed_to_style(_current_dl_speed).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "seedr",
+                    speed_to_style(_current_ul_speed).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" v{}", APP_VERSION),
+                    Style::default().fg(theme::SUBTEXT1),
+                ),
+                Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+                Span::styled(
+                    app_state.data_rate.to_string(),
+                    Style::default().fg(theme::YELLOW).bold(),
+                ),
+            ];
+            spans.extend(update_span); // Add the update notice if it exists
+            Line::from(spans)
+        };
 
         #[cfg(not(all(feature = "dht", feature = "pex")))]
-        let client_display_line = Line::from(vec![
-            Span::styled("super", Style::default().fg(theme::SURFACE2))
-                .add_modifier(Modifier::CROSSED_OUT),
-            Span::styled("seedr", Style::default().fg(theme::SURFACE2))
-                .add_modifier(Modifier::CROSSED_OUT),
-            Span::styled(
-                " [PRIVATE]",
-                Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" v{}", APP_VERSION),
-                Style::default().fg(theme::SUBTEXT1),
-            ),
-            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-            Span::styled(
-                app_state.data_rate.to_string(),
-                Style::default().fg(theme::YELLOW).bold(),
-            ),
-        ]);
+        let client_display_line = {
+            let mut spans = vec![
+                Span::styled("super", Style::default().fg(theme::SURFACE2))
+                    .add_modifier(Modifier::CROSSED_OUT),
+                Span::styled("seedr", Style::default().fg(theme::SURFACE2))
+                    .add_modifier(Modifier::CROSSED_OUT),
+                Span::styled(
+                    " [PRIVATE]",
+                    Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" v{}", APP_VERSION),
+                    Style::default().fg(theme::SUBTEXT1),
+                ),
+                Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+                Span::styled(
+                    app_state.data_rate.to_string(),
+                    Style::default().fg(theme::YELLOW).bold(),
+                ),
+            ];
+            spans.extend(update_span); // Add the update notice if it exists
+            Line::from(spans)
+        };
 
         let client_id_paragraph = Paragraph::new(client_display_line)
             .style(Style::default().fg(theme::SUBTEXT1))
