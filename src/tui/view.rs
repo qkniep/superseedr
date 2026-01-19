@@ -3020,6 +3020,8 @@ fn draw_torrent_preview_panel(
 fn draw_welcome_screen(f: &mut Frame) {
     let area = f.area();
 
+    draw_background_dust(f, area);
+
     // --- 1. SETUP CONTENT ---
     // Helper to calculate dimensions
     let get_dims = |text: &str| -> (u16, u16) {
@@ -3990,6 +3992,84 @@ fn get_animated_style(x: usize, y: usize) -> Style {
         // Low energy: Base Color + Dim (Background Flow)
         Style::default().fg(base_color).add_modifier(Modifier::DIM)
     }
+}
+
+// Updated: 3-Layer Parallax "Data Field" Background
+fn draw_background_dust(f: &mut Frame, area: Rect) {
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+
+    let width = area.width as usize;
+    let height = area.height as usize;
+    
+    // We render the whole buffer into lines
+    let mut lines = Vec::with_capacity(height);
+
+    // --- CONFIGURATION ---
+    // Movement: Positive X = Right, Positive Y = Up (we subtract Y to move up)
+    let move_angle_x = 0.8; 
+    let move_angle_y = 0.4; 
+
+    for y in 0..height {
+        let mut spans = Vec::with_capacity(width);
+        for x in 0..width {
+            
+            // --- LAYER 3: FOREGROUND (Fast, Bright, Rare) ---
+            // Simulates close "data packets" flying by
+            let speed_3 = 12.0; 
+            let pos_x_3 = x as f64 - (time * speed_3 * move_angle_x);
+            let pos_y_3 = y as f64 + (time * speed_3 * move_angle_y);
+            
+            // High threshold for sparsity
+            let noise_3 = (pos_x_3 * 0.73 + pos_y_3 * 0.19).sin() * (pos_y_3 * 1.3).cos();
+            if noise_3 > 0.985 {
+                spans.push(Span::styled(
+                    "+", // Distinctive shape
+                    Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD)
+                ));
+                continue; // Pixel filled, skip to next x
+            }
+
+            // --- LAYER 2: MIDGROUND (Medium, Blue, Common) ---
+            // The bulk of the "network traffic"
+            let speed_2 = 4.0;
+            let pos_x_2 = x as f64 - (time * speed_2 * move_angle_x);
+            let pos_y_2 = y as f64 + (time * speed_2 * move_angle_y);
+            
+            let noise_2 = (pos_x_2 * 0.3 + pos_y_2 * 0.8).sin() * (pos_x_2 * 0.4).cos();
+            if noise_2 > 0.95 {
+                spans.push(Span::styled(
+                    "·",
+                    Style::default().fg(theme::BLUE) // Standard Dim Blue
+                ));
+                continue;
+            }
+
+            // --- LAYER 1: BACKGROUND (Slow, Dim, Dense) ---
+            // Creates the sense of a deep void/starfield far away
+            let speed_1 = 1.5;
+            let pos_x_1 = x as f64 - (time * speed_1 * move_angle_x);
+            let pos_y_1 = y as f64 + (time * speed_1 * move_angle_y);
+            
+            let noise_1 = (pos_x_1 * 0.15 + pos_y_1 * 0.15).sin();
+            if noise_1 > 0.96 {
+                spans.push(Span::styled(
+                    ".",
+                    Style::default().fg(theme::SURFACE2).add_modifier(Modifier::DIM)
+                ));
+                continue;
+            }
+
+            // Empty space
+            spans.push(Span::raw(" "));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let p = Paragraph::new(lines);
+    f.render_widget(p, area);
 }
 
 #[cfg(test)]
