@@ -1367,7 +1367,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
         spans.extend(vec![
             Span::styled("Arrows", Style::default().fg(theme::BLUE)),
             Span::raw(" nav | "),
-            Span::styled("[q]", Style::default().fg(theme::RED)),
+            Span::styled("[Q]", Style::default().fg(theme::RED)),
             Span::raw("uit | "),
         ]);
     }
@@ -3074,7 +3074,7 @@ fn draw_welcome_screen(f: &mut Frame) {
             Span::styled(" [c] ", Style::default().fg(theme::MAUVE)),
             Span::styled("Config", Style::default().fg(theme::SUBTEXT1)),
             Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-            Span::styled(" [q] ", Style::default().fg(theme::RED)), // Added Quit command
+            Span::styled(" [Q] ", Style::default().fg(theme::RED)), // Added Quit command
             Span::styled("Quit", Style::default().fg(theme::SUBTEXT1)),
             Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
             Span::styled(" [Esc] ", Style::default().fg(theme::RED)),
@@ -3263,7 +3263,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
                     Cell::from("Zoom out (decrease font size)"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("q", Style::default().fg(theme::RED))),
+                    Cell::from(Span::styled("Q", Style::default().fg(theme::RED))),
                     Cell::from("Quit the application"),
                 ]),
                 Row::new(vec![
@@ -3649,7 +3649,7 @@ fn draw_config_screen(
             Span::raw(" to edit. "),
             Span::styled("[r]", Style::default().fg(theme::YELLOW)),
             Span::raw("eset to default. "),
-            Span::styled("[Esc]|[q]", Style::default().fg(theme::GREEN)),
+            Span::styled("[Esc]|[Q]", Style::default().fg(theme::GREEN)),
             Span::raw(" to Save & Exit, "),
         ])
     };

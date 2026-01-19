@@ -179,7 +179,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             app.app_state.mode = AppMode::PowerSaving;
                             return;
                         }
-                        KeyCode::Char('q') => {
+                        KeyCode::Char('Q') => {
                             app.app_state.should_quit = true;
                         }
                         KeyCode::Char('c') => {
@@ -435,7 +435,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
             } else if let CrosstermEvent::Key(key) = event {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => {
+                        KeyCode::Esc | KeyCode::Char('Q') => {
                             let _ = app
                                 .app_command_tx
                                 .try_send(AppCommand::UpdateConfig(*settings_edit.clone()));
@@ -917,7 +917,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             }
                         }
 
-                        // --- THE CRITICAL CONFIRMATION ACTION ---
                         KeyCode::Char('Y') => {
                             match browser_mode {
                                 FileBrowserMode::ConfigPathSelection {
@@ -1022,10 +1021,10 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 }
 
                                 _ => {
-                                    app.app_state.mode = AppMode::Normal;
                                 }
                             }
-                            app.app_state.ui_needs_redraw = true;
+                            app.app_state.is_searching = false;
+                            app.app_state.search_query.clear();
                         }
 
                         KeyCode::Esc => {
@@ -1067,6 +1066,8 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 }
                             }
 
+                            app.app_state.is_searching = false;
+                            app.app_state.search_query.clear();
                             app.app_state.mode = AppMode::Normal;
                             app.app_state.pending_torrent_path = None;
                             app.app_state.pending_torrent_link.clear();
