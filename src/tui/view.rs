@@ -4018,7 +4018,7 @@ fn draw_background_dust(f: &mut Frame, area: Rect) {
             
             // --- LAYER 3: FOREGROUND (Fast, Bright, Rare) ---
             // Simulates close "data packets" flying by
-            let speed_3 = 12.0; 
+            let speed_3 = 4.0; 
             let pos_x_3 = x as f64 - (time * speed_3 * move_angle_x);
             let pos_y_3 = y as f64 + (time * speed_3 * move_angle_y);
             
