@@ -822,10 +822,15 @@ impl App {
                 }
 
                 _ = draw_interval.tick() => {
-                    if self.app_state.ui_needs_redraw {
+                    // Force a redraw if we are on the Welcome screen so the animation plays at 60 FPS
+                    let force_animation = matches!(self.app_state.mode, AppMode::Welcome);
+
+                    if self.app_state.ui_needs_redraw || force_animation {
                         terminal.draw(|f| {
                             draw(f, &self.app_state, &self.client_configs);
                         })?;
+                        
+                        // Only clear the flag if it was set, but we draw regardless if force_animation is true
                         self.app_state.ui_needs_redraw = false;
                     }
                 }
