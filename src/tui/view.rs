@@ -35,6 +35,37 @@ static APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SECONDS_HISTORY_MAX: usize = 3600;
 pub const MINUTES_HISTORY_MAX: usize = 48 * 60;
 
+// 1. Define the ASCII Art Constants
+const LOGO_LARGE: &str = r#"
+                                                             __          
+                                                            /\ \         
+  ____  __  __  _____      __   _ __   ____     __     __   \_\ \  _ __  
+ /',__\/\ \/\ \/\ '__`\  /'__`\/\`'__\/',__\  /'__`\ /'__`\ /'_` \/\`'__\
+/\__, `\ \ \_\ \ \ \L\ \/\  __/\ \ \//\__, `\/\  __//\  __//\ \L\ \ \ \/ 
+\/\____/\ \____/\ \ ,__/\ \____\\ \_\\/\____/\ \____\ \____\ \___,_\ \_\ 
+ \/___/  \/___/  \ \ \/  \/____/ \/_/ \/___/  \/____/\/____/\/__,_ /\/_/ 
+                  \ \_\                                                  
+                   \/_/                                                  
+"#;
+
+const LOGO_MEDIUM: &str = r#"
+                        __          
+                       /\ \         
+  ____     __     __   \_\ \  _ __  
+ /',__\  /'__`\ /'__`\ /'_` \/\`'__\
+/\__, `\/\  __//\  __//\ \L\ \ \ \/ 
+\/\____/\ \____\ \____\ \___,_\ \_\ 
+ \/___/  \/____/\/____/\/__,_ /\/_/ 
+"#;
+
+const LOGO_SMALL: &str = r#"
+  ____    ____  
+ /',__\  /',__\ 
+/\__, `\/\__, `\
+\/\____/\/\____/
+ \/___/  \/___/ 
+"#;
+
 pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     let area = f.area();
 
@@ -2986,12 +3017,34 @@ fn draw_torrent_preview_panel(
 }
 
 fn draw_welcome_screen(f: &mut Frame) {
+    let area = f.area();
+    
+    // --- 1. PREPARE CONTENT ---
+
+    let is_narrow = area.width < 90;
+    let get_width = |text: &str| -> u16 {
+        text.lines()
+            .map(|l| l.len())
+            .max()
+            .unwrap_or(0) as u16
+    };
+
+    let w_large = get_width(LOGO_LARGE);
+    let w_medium = get_width(LOGO_MEDIUM);
+    let margin = 6; 
+    let logo_text = if area.width >= (w_large + margin) {
+        LOGO_LARGE
+    } else if area.width >= (w_medium + margin) {
+        LOGO_MEDIUM
+    } else {
+        LOGO_SMALL
+    };
+
+    let logo_height = logo_text.lines().count() as u16;
+    let logo_width = get_width(logo_text);
+
+    // Determine Text Content
     let text = vec![
-        Line::from(Span::styled(
-            "A BitTorrent Client in your Terminal",
-            Style::default().add_modifier(Modifier::ITALIC),
-        )),
-        Line::from(""),
         Line::from(Span::styled(
             "How to Get Started:",
             Style::default().fg(theme::YELLOW).bold(),
@@ -3028,7 +3081,6 @@ fn draw_welcome_screen(f: &mut Frame) {
             Span::styled("CLI", Style::default().fg(theme::SKY).bold()),
             Span::raw(" from another terminal:"),
         ]),
-        // Sub-bullet 1: CLI Magnet
         Line::from(vec![
             Span::raw("      - magnet: "),
             Span::styled(
@@ -3036,7 +3088,6 @@ fn draw_welcome_screen(f: &mut Frame) {
                 Style::default().fg(theme::SURFACE2),
             ),
         ]),
-        // Sub-bullet 2: CLI Torrent File
         Line::from(vec![
             Span::raw("      - file:   "),
             Span::styled(
@@ -3074,7 +3125,7 @@ fn draw_welcome_screen(f: &mut Frame) {
             Span::styled(" [c] ", Style::default().fg(theme::MAUVE)),
             Span::styled("Config", Style::default().fg(theme::SUBTEXT1)),
             Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-            Span::styled(" [Q] ", Style::default().fg(theme::RED)), // Added Quit command
+            Span::styled(" [Q] ", Style::default().fg(theme::RED)),
             Span::styled("Quit", Style::default().fg(theme::SUBTEXT1)),
             Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
             Span::styled(" [Esc] ", Style::default().fg(theme::RED)),
@@ -3082,54 +3133,90 @@ fn draw_welcome_screen(f: &mut Frame) {
         ]),
     ];
 
-    // ... (rest of the centering and rendering logic remains the same)
+    // --- 2. CALCULATE SIZES ---
+
     let text_height = text.len() as u16;
     let text_width = text.iter().map(|line| line.width()).max().unwrap_or(0) as u16;
+
+    // The box needs to be wide enough for text, but also consider the logo width 
+    // to ensure visual balance (though the logo is outside).
+    let content_width = text_width.max(logo_width.min(text_width + 10)); // Ensure box isn't too narrow relative to logo
+    
     let horizontal_padding: u16 = 4;
     let vertical_padding: u16 = 2;
-    let box_width = (text_width + horizontal_padding + 2).min(f.area().width);
-    let box_height = (text_height + vertical_padding + 2).min(f.area().height);
+    
+    let box_width = (content_width + horizontal_padding + 2).min(area.width);
+    let box_height = (text_height + vertical_padding + 2).min(area.height);
 
+    // Total height of the "Assembly" (Logo + Gap + Box)
+    let gap_height = 1;
+    let total_assembly_height = logo_height + gap_height + box_height;
+
+
+    // --- 3. BUILD LAYOUT ---
+
+    // Vertically center the entire assembly
     let vertical_chunks = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(box_height),
-        Constraint::Min(0),
+        Constraint::Min(0),                   // Top Margin
+        Constraint::Length(logo_height),      // Logo
+        Constraint::Length(gap_height),       // Gap
+        Constraint::Length(box_height),       // Box
+        Constraint::Min(0),                   // Bottom Margin
     ])
-    .split(f.area());
-    let area = Layout::horizontal([
+    .split(area);
+
+    let logo_area_row = vertical_chunks[1];
+    let box_area_row = vertical_chunks[3];
+
+    // Horizontally center the Logo
+    let logo_layout = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(logo_width),
+        Constraint::Min(0),
+    ]).split(logo_area_row);
+    
+    // Horizontally center the Box
+    let box_layout = Layout::horizontal([
         Constraint::Min(0),
         Constraint::Length(box_width),
         Constraint::Min(0),
-    ])
-    .split(vertical_chunks[1])[1];
+    ]).split(box_area_row);
 
-    f.render_widget(Clear, area);
+    let final_logo_area = logo_layout[1];
+    let final_box_area = box_layout[1];
+
+    
+    // --- 4. RENDER ---
+
+    // A. Render Logo (No Clear, just text on top of background)
+    let logo_paragraph = Paragraph::new(logo_text)
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(theme::MAUVE).bold());
+    f.render_widget(logo_paragraph, final_logo_area);
+
+    // B. Render Box (Clear background so text is readable)
+    f.render_widget(Clear, final_box_area);
+    
     let block = Block::default()
-        .title(Span::styled(
-            " Welcome to superseedr! ",
-            Style::default().fg(theme::MAUVE).bold(),
-        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::SURFACE2));
-    let inner_area = block.inner(area);
-    f.render_widget(block, area);
+    
+    let inner_box_area = block.inner(final_box_area);
+    f.render_widget(block, final_box_area);
 
-    let vertical_chunks_inner = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(text_height),
-        Constraint::Min(0),
-    ])
-    .split(inner_area);
-    let horizontal_chunks_inner = Layout::horizontal([
+    // C. Render Text inside Box
+    // Center the text block horizontally inside the box area 
+    let text_padding_chunks = Layout::horizontal([
         Constraint::Min(0),
         Constraint::Length(text_width),
         Constraint::Min(0),
-    ])
-    .split(vertical_chunks_inner[1]);
-    let paragraph = Paragraph::new(text)
+    ]).split(inner_box_area);
+
+    let text_paragraph = Paragraph::new(text)
         .style(Style::default().fg(theme::TEXT))
-        .alignment(Alignment::Left);
-    f.render_widget(paragraph, horizontal_chunks_inner[1]);
+        .alignment(Alignment::Left); // Keep bullets aligned left
+
+    f.render_widget(text_paragraph, text_padding_chunks[1]);
 }
 
 fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
