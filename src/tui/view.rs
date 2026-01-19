@@ -1253,37 +1253,58 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
 fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_chunk: Rect) {
     let show_branding = footer_chunk.width >= 80;
 
-    let footer_layout = if show_branding {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Min(30),    // Fixed space for Branding
-                Constraint::Min(0),     // Center takes all remaining space
-                Constraint::Length(21), // Fixed space for Port Status
-            ])
-            .split(footer_chunk)
-    } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(0),  // Hidden
-                Constraint::Min(0),     // Maximize center
-                Constraint::Length(21), // Keep Status
-            ])
-            .split(footer_chunk)
+    // 1. DETERMINE CONTENT WIDTHS
+    // Calculate how much space the Left Side (Branding/Update) actually needs.
+    let is_update = app_state.update_available.is_some();
+    let left_content_width = if is_update { 
+        45 // "UPDATE AVAILABLE: v0.9.32 -> v0.9.33 | 1 FPS"
+    } else { 
+        28 // "superseedr v0.9.32 | 1 FPS"
     };
+
+    // 2. CALCULATE SYMMETRY
+    // To keep the middle commands centered on the *screen*, the Left and Right columns
+    // must have the same width. The Right column content is small (21 chars), 
+    // but we pad it to match the Left.
+    let (left_constraint, right_constraint) = if show_branding {
+        // Check if we have enough room to be symmetric without crushing the middle commands.
+        // We want at least ~40 chars for the middle commands.
+        let required_width_for_symmetry = (left_content_width * 2) + 40;
+        
+        if footer_chunk.width >= required_width_for_symmetry {
+            // Case A: Wide Screen -> Force Perfect Symmetry
+            // We give the Right side the same width as the Left, so the Middle is perfectly centered.
+            (Constraint::Length(left_content_width), Constraint::Length(left_content_width))
+        } else {
+            // Case B: Narrow Screen -> Prioritize Content Fitting
+            // If space is tight, we give the Right side only what it needs (21).
+            // The middle won't be perfectly screen-centered, but it won't be crushed.
+            (Constraint::Length(left_content_width), Constraint::Length(21))
+        }
+    } else {
+        // Case C: Mobile/Tiny Screen -> Hide Left completely
+        (Constraint::Length(0), Constraint::Length(21))
+    };
+
+    let footer_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            left_constraint,    // Left (Branding)
+            Constraint::Min(0), // Middle (Commands)
+            right_constraint,   // Right (Status)
+        ])
+        .split(footer_chunk);
 
     let client_id_chunk = footer_layout[0];
     let commands_chunk = footer_layout[1];
     let status_chunk = footer_layout[2];
 
-    // --- LEFT: Branding ---
+    // --- LEFT: Branding / Update ---
     if show_branding {
         let _current_dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
         let _current_ul_speed = *app_state.avg_upload_history.last().unwrap_or(&0);
 
         let client_display_line = if let Some(new_version) = &app_state.update_available {
-            // REPLACE branding with update message and crossed-out old version
             Line::from(vec![
                 Span::styled(
                     "UPDATE AVAILABLE: ",
@@ -1295,9 +1316,10 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
                         .fg(theme::SURFACE2)
                         .add_modifier(Modifier::CROSSED_OUT),
                 ),
+                Span::styled(" \u{2192} ", Style::default().fg(theme::SURFACE2)), // Arrow ->
                 Span::styled(
-                    format!(" v{}", new_version),
-                    Style::default().fg(theme::YELLOW).bold(),
+                    format!("v{}", new_version),
+                    Style::default().fg(theme::GREEN).bold(),
                 ),
                 Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
                 Span::styled(
@@ -1306,7 +1328,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
                 ),
             ])
         } else {
-            // Standard branding logic (Existing implementation)
+            // Standard branding logic
             #[cfg(all(feature = "dht", feature = "pex"))]
             {
                 Line::from(vec![
@@ -1417,7 +1439,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     }
 
     let footer_paragraph = Paragraph::new(Line::from(spans))
-        .alignment(Alignment::Center) // Center whatever commands fit
+        .alignment(Alignment::Center) 
         .style(Style::default().fg(theme::SUBTEXT1));
     f.render_widget(footer_paragraph, commands_chunk);
 
@@ -3016,7 +3038,6 @@ fn draw_torrent_preview_panel(
     }
 }
 
-
 fn draw_welcome_screen(f: &mut Frame) {
     let area = f.area();
 
@@ -3030,11 +3051,11 @@ fn draw_welcome_screen(f: &mut Frame) {
         (w, h)
     };
 
-    // Calculate dimensions
+    // Calculate dimensions for ASCII art
     let (w_large, h_large) = get_dims(LOGO_LARGE);
     let (w_medium, h_medium) = get_dims(LOGO_MEDIUM);
-    // w_small is small enough we can assume it fits if the others don't
 
+    // Define the Main Body Text (Bulleted list)
     let text_lines = vec![
         Line::from(Span::styled("How to Get Started:", Style::default().fg(theme::YELLOW).bold())),
         Line::from(""),
@@ -3093,37 +3114,39 @@ fn draw_welcome_screen(f: &mut Frame) {
                 Style::default().fg(theme::BLUE).underlined(),
             ),
         ]),
-        Line::from(""),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" [m] ", Style::default().fg(theme::TEAL)),
-            Span::styled("Manual/Help", Style::default().fg(theme::SUBTEXT1)),
-            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-            Span::styled(" [c] ", Style::default().fg(theme::MAUVE)),
-            Span::styled("Config", Style::default().fg(theme::SUBTEXT1)),
-            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-            Span::styled(" [Q] ", Style::default().fg(theme::RED)),
-            Span::styled("Quit", Style::default().fg(theme::SUBTEXT1)),
-            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-            Span::styled(" [Esc] ", Style::default().fg(theme::RED)),
-            Span::styled("Dismiss", Style::default().fg(theme::SUBTEXT1)),
-        ]),
     ];
 
+    // Define the Footer Text (Keybinds) separately
+    let footer_line = Line::from(vec![
+        Span::styled(" [m] ", Style::default().fg(theme::TEAL)),
+        Span::styled("Manual/Help", Style::default().fg(theme::SUBTEXT1)),
+        Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+        Span::styled(" [c] ", Style::default().fg(theme::MAUVE)),
+        Span::styled("Config", Style::default().fg(theme::SUBTEXT1)),
+        Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+        Span::styled(" [Q] ", Style::default().fg(theme::RED)),
+        Span::styled("Quit", Style::default().fg(theme::SUBTEXT1)),
+        Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+        Span::styled(" [Esc] ", Style::default().fg(theme::RED)),
+        Span::styled("Dismiss", Style::default().fg(theme::SUBTEXT1)),
+    ]);
+
+    // Calculate Dimensions
     let text_content_height = text_lines.len() as u16;
     let text_content_width = text_lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
+    let footer_width = footer_line.width() as u16;
 
     // Box dimensions
-    let box_vertical_padding = 2;
+    let box_vertical_gap = 1; // Gap between text and footer
     let box_horizontal_padding = 4;
-    let box_height_needed = text_content_height + box_vertical_padding + 2; 
+    // Exact height needed: Text + Gap + Footer(1) + Borders(2)
+    let box_height_needed = text_content_height + box_vertical_gap + 1 + 2; 
 
     // --- 2. DYNAMIC LOGO SELECTION ---
-    let gap_height = 1;
+    let gap_height = 1; // Gap between Logo and Box
     let available_height_for_logo = area.height.saturating_sub(box_height_needed + gap_height + 2);
     let margin_x = 6;
     
-    // Logic: Fit the largest logo that fits both Width AND Height constraints
     let logo_text = if area.width >= (w_large + margin_x) && available_height_for_logo >= h_large {
         LOGO_LARGE
     } else if area.width >= (w_medium + margin_x) && available_height_for_logo >= h_medium {
@@ -3135,7 +3158,8 @@ fn draw_welcome_screen(f: &mut Frame) {
     let (logo_w, logo_h) = get_dims(logo_text);
 
     // --- 3. FINAL LAYOUT CALCULATION ---
-    let content_width_max = text_content_width.max(logo_w.min(text_content_width + 10));
+    // The box needs to be wide enough for the widest element (Body OR Footer)
+    let content_width_max = text_content_width.max(footer_width).max(logo_w.min(text_content_width + 10));
     let box_width = (content_width_max + box_horizontal_padding + 2).min(area.width);
     let box_height = box_height_needed.min(area.height);
 
@@ -3169,12 +3193,10 @@ fn draw_welcome_screen(f: &mut Frame) {
         .lines()
         .enumerate()
         .map(|(y, line_str)| {
-            // Split line into characters to style them individually
             let spans: Vec<Span> = line_str
                 .chars()
                 .enumerate()
                 .map(|(x, c)| {
-                    // Pass X and Y to get the diagonal gradient
                     let style = get_animated_style(x, y); 
                     Span::styled(c.to_string(), style)
                 })
@@ -3184,7 +3206,7 @@ fn draw_welcome_screen(f: &mut Frame) {
         .collect();
 
     let logo_paragraph = Paragraph::new(animated_lines)
-        .alignment(Alignment::Left); // Keep Left alignment for ASCII shape
+        .alignment(Alignment::Left);
         
     f.render_widget(logo_paragraph, final_logo_area);
 
@@ -3196,15 +3218,32 @@ fn draw_welcome_screen(f: &mut Frame) {
     let inner_box = block.inner(final_box_area);
     f.render_widget(block, final_box_area);
 
+    // Split Box Internally: Body (Top) vs Footer (Bottom)
+    let box_internal_chunks = Layout::vertical([
+        Constraint::Length(text_content_height), // Exact height for body
+        Constraint::Min(0),                      // Flexible gap
+        Constraint::Length(1),                   // Exact height for footer
+    ]).split(inner_box);
+
+    // 1. Render Body Text
+    // We constrain width to `text_content_width` so the bullet points 
+    // feel centered as a block, but are Left aligned within that block.
     let text_padding_layout = Layout::horizontal([
         Constraint::Min(0), Constraint::Length(text_content_width), Constraint::Min(0)
-    ]).split(inner_box);
+    ]).split(box_internal_chunks[0]);
 
     let text_paragraph = Paragraph::new(text_lines)
         .style(Style::default().fg(theme::TEXT))
         .alignment(Alignment::Left);
 
     f.render_widget(text_paragraph, text_padding_layout[1]);
+
+    // 2. Render Footer
+    // We let the footer use the full width of the box, but Center align the text.
+    let footer_paragraph = Paragraph::new(footer_line)
+        .alignment(Alignment::Center);
+
+    f.render_widget(footer_paragraph, box_internal_chunks[2]);
 }
 
 fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
@@ -3338,7 +3377,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
                     Cell::from("Zoom out (decrease font size)"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("Q", Style::default().fg(theme::RED))),
+                    Cell::from(Span::styled("Q (shift+q)", Style::default().fg(theme::RED))),
                     Cell::from("Quit the application"),
                 ]),
                 Row::new(vec![
