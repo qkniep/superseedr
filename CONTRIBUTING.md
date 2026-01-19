@@ -191,6 +191,19 @@ All PRs must pass automated checks:
 - ✅ Code formatting check (`cargo fmt`)
 - ✅ Model-based fuzzing (runs nightly)
 
+#### CI/CD Security Note
+
+**For external contributors:**
+- GitHub Actions workflows require maintainer approval to run on PRs from forks
+- This is a security measure to protect repository secrets (see npm shai hulud incident)
+- Your PR will be reviewed before CI runs
+- Once approved, automated checks will execute
+
+**What this means for you:**
+- Don't be alarmed if CI doesn't run immediately on your PR
+- Maintainers will review and approve workflow execution
+- You can still run `cargo test`, `cargo clippy`, and `cargo fmt` locally before submitting
+
 Check the Actions tab on your PR to see CI results. Fix any failures before requesting review.
 
 ### Branch Naming Conventions
@@ -203,12 +216,57 @@ Create descriptive branch names following these patterns:
 - Refactoring: `refactor/simplify-peer-manager`
 - Performance: `perf/optimize-piece-selection`
 
+### Contributing to Roadmap Items
+
+The [[ROADMAP.md]](ROADMAP.md) outlines the project's planned features and future direction. Contributors are encouraged to:
+
+- **Review upcoming features:** Check the roadmap to see what features are planned but not yet started
+- **Start discussions:** If you're interested in working on a roadmap item, open a discussion to explore implementation ideas
+- **Propose new items:** Have an idea not on the roadmap? Create an issue to propose it for consideration
+- **Prioritize aligned work:** Roadmap-aligned contributions are more likely to be reviewed and merged quickly
+
+Roadmap items are tagged in GitHub issues. Look for labels like `roadmap:v1.0`, `roadmap:v1.5`, or `roadmap:future` to find work that fits your interests and skill set.
+
+### Claiming Work on Issues
+
+To avoid duplicate effort and ensure coordination:
+
+1. **Before starting work on an issue:**
+   - Comment on the issue expressing your interest in working on it
+   - Wait for maintainer acknowledgment/assignment before starting significant work
+   - If the issue is already assigned to someone else, check if they're still working on it
+
+2. **Discuss your approach:**
+   - For non-trivial changes, outline your proposed implementation approach in the issue
+   - Wait for maintainer feedback on technical feasibility, alignment with roadmap, and project vision
+   - Discuss release timing considerations if relevant
+
+3. **Assignment process:**
+   - Maintainers will assign the issue to you once your approach is approved
+   - If you're assigned but can no longer work on it, please comment to let maintainers know
+
+**Important:** We do not accept unsolicited PRs without prior discussion. All code contributions must:
+- Have an associated GitHub issue
+- Include documented discussion of the approach
+- Receive maintainer approval before implementation begins
+- Consider technical feasibility, roadmap alignment, and project architecture
+
+This ensures changes align with project goals and prevents wasted effort on work that may not be accepted.
+
 ### Contribution Workflow
 
-1. **Discuss your changes first:** Before writing extensive code, please open an issue to discuss your proposed changes, especially regarding:
-   - **Importance/Priority:** Why is this change important now?
-   - **Protocol/Architecture Compliance:** How does it fit into the existing design and protocols?
-   - **Security Implications:** Are there any security considerations or impacts?
+1. **Find or create an issue and get approval:**
+   - Search for an existing issue related to your proposed change
+   - If none exists, create a new issue describing the problem/feature
+   - **Comment on the issue** stating you'd like to work on it
+   - **Wait for maintainer response** before starting work
+   - Discuss your proposed approach, including:
+     * **Technical feasibility:** Can this be implemented without breaking existing functionality?
+     * **Roadmap alignment:** Does this fit the project's direction and priorities?
+     * **Project vision:** Is this change consistent with superseedr's goals?
+     * **Implementation details:** What's your planned approach?
+     * **Release timing:** Are there version/timing considerations?
+   - **Get assigned to the issue** by a maintainer before beginning implementation
 
 2. **Fork the repository** (if you haven't already)
 
