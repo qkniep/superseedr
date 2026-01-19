@@ -3016,39 +3016,25 @@ fn draw_torrent_preview_panel(
     }
 }
 
+
 fn draw_welcome_screen(f: &mut Frame) {
     let area = f.area();
-    
-    // --- 1. PREPARE CONTENT ---
 
-    let is_narrow = area.width < 90;
-    let get_width = |text: &str| -> u16 {
-        text.lines()
-            .map(|l| l.len())
-            .max()
-            .unwrap_or(0) as u16
+    // --- 1. SETUP CONTENT ---
+    // Helper to calculate dimensions
+    let get_dims = |text: &str| -> (u16, u16) {
+        let h = text.lines().count() as u16;
+        let w = text.lines().map(|l| l.len()).max().unwrap_or(0) as u16;
+        (w, h)
     };
 
-    let w_large = get_width(LOGO_LARGE);
-    let w_medium = get_width(LOGO_MEDIUM);
-    let margin = 6; 
-    let logo_text = if area.width >= (w_large + margin) {
-        LOGO_LARGE
-    } else if area.width >= (w_medium + margin) {
-        LOGO_MEDIUM
-    } else {
-        LOGO_SMALL
-    };
+    // Calculate dimensions
+    let (w_large, h_large) = get_dims(LOGO_LARGE);
+    let (w_medium, h_medium) = get_dims(LOGO_MEDIUM);
+    // w_small is small enough we can assume it fits if the others don't
 
-    let logo_height = logo_text.lines().count() as u16;
-    let logo_width = get_width(logo_text);
-
-    // Determine Text Content
-    let text = vec![
-        Line::from(Span::styled(
-            "How to Get Started:",
-            Style::default().fg(theme::YELLOW).bold(),
-        )),
+    let text_lines = vec![
+        Line::from(Span::styled("How to Get Started:", Style::default().fg(theme::YELLOW).bold())),
         Line::from(""),
         Line::from(vec![
             Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
@@ -3062,9 +3048,7 @@ fn draw_welcome_screen(f: &mut Frame) {
             Span::raw("      - "),
             Span::styled(
                 "e.g. \"magnet:?xt=urn:btih:...\"",
-                Style::default()
-                    .fg(theme::SURFACE2)
-                    .add_modifier(Modifier::ITALIC),
+                Style::default().fg(theme::SURFACE2).add_modifier(Modifier::ITALIC),
             ),
         ]),
         Line::from(vec![
@@ -3083,17 +3067,11 @@ fn draw_welcome_screen(f: &mut Frame) {
         ]),
         Line::from(vec![
             Span::raw("      - magnet: "),
-            Span::styled(
-                "superseedr add \"magnet:?xt=urn:btih:...\"",
-                Style::default().fg(theme::SURFACE2),
-            ),
+            Span::styled("superseedr add \"magnet:?xt=urn:btih:...\"", Style::default().fg(theme::SURFACE2)),
         ]),
         Line::from(vec![
             Span::raw("      - file:   "),
-            Span::styled(
-                "superseedr add \"/path/to/my.torrent\"",
-                Style::default().fg(theme::SURFACE2),
-            ),
+            Span::styled("superseedr add \"/path/to/my.torrent\"", Style::default().fg(theme::SURFACE2)),
         ]),
         Line::from(vec![
             Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
@@ -3103,10 +3081,7 @@ fn draw_welcome_screen(f: &mut Frame) {
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled(
-                "Browser Support: ",
-                Style::default().fg(theme::YELLOW).bold(),
-            ),
+            Span::styled("Browser Support: ", Style::default().fg(theme::YELLOW).bold()),
             Span::raw("To open magnet links directly from your browser,"),
         ]),
         Line::from(vec![
@@ -3133,90 +3108,101 @@ fn draw_welcome_screen(f: &mut Frame) {
         ]),
     ];
 
-    // --- 2. CALCULATE SIZES ---
+    let text_content_height = text_lines.len() as u16;
+    let text_content_width = text_lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
 
-    let text_height = text.len() as u16;
-    let text_width = text.iter().map(|line| line.width()).max().unwrap_or(0) as u16;
+    // Box dimensions
+    let box_vertical_padding = 2;
+    let box_horizontal_padding = 4;
+    let box_height_needed = text_content_height + box_vertical_padding + 2; 
 
-    // The box needs to be wide enough for text, but also consider the logo width 
-    // to ensure visual balance (though the logo is outside).
-    let content_width = text_width.max(logo_width.min(text_width + 10)); // Ensure box isn't too narrow relative to logo
-    
-    let horizontal_padding: u16 = 4;
-    let vertical_padding: u16 = 2;
-    
-    let box_width = (content_width + horizontal_padding + 2).min(area.width);
-    let box_height = (text_height + vertical_padding + 2).min(area.height);
-
-    // Total height of the "Assembly" (Logo + Gap + Box)
+    // --- 2. DYNAMIC LOGO SELECTION ---
     let gap_height = 1;
-    let total_assembly_height = logo_height + gap_height + box_height;
-
-
-    // --- 3. BUILD LAYOUT ---
-
-    // Vertically center the entire assembly
-    let vertical_chunks = Layout::vertical([
-        Constraint::Min(0),                   // Top Margin
-        Constraint::Length(logo_height),      // Logo
-        Constraint::Length(gap_height),       // Gap
-        Constraint::Length(box_height),       // Box
-        Constraint::Min(0),                   // Bottom Margin
-    ])
-    .split(area);
-
-    let logo_area_row = vertical_chunks[1];
-    let box_area_row = vertical_chunks[3];
-
-    // Horizontally center the Logo
-    let logo_layout = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(logo_width),
-        Constraint::Min(0),
-    ]).split(logo_area_row);
+    let available_height_for_logo = area.height.saturating_sub(box_height_needed + gap_height + 2);
+    let margin_x = 6;
     
-    // Horizontally center the Box
+    // Logic: Fit the largest logo that fits both Width AND Height constraints
+    let logo_text = if area.width >= (w_large + margin_x) && available_height_for_logo >= h_large {
+        LOGO_LARGE
+    } else if area.width >= (w_medium + margin_x) && available_height_for_logo >= h_medium {
+        LOGO_MEDIUM
+    } else {
+        LOGO_SMALL
+    };
+
+    let (logo_w, logo_h) = get_dims(logo_text);
+
+    // --- 3. FINAL LAYOUT CALCULATION ---
+    let content_width_max = text_content_width.max(logo_w.min(text_content_width + 10));
+    let box_width = (content_width_max + box_horizontal_padding + 2).min(area.width);
+    let box_height = box_height_needed.min(area.height);
+
+    let vertical_chunks = Layout::vertical([
+        Constraint::Min(0),                
+        Constraint::Length(logo_h),        
+        Constraint::Length(gap_height),    
+        Constraint::Length(box_height),    
+        Constraint::Min(0),                
+    ]).split(area);
+
+    let logo_area = vertical_chunks[1];
+    let box_area = vertical_chunks[3];
+
+    // Horizontal centering
+    let logo_layout = Layout::horizontal([
+        Constraint::Min(0), Constraint::Length(logo_w), Constraint::Min(0)
+    ]).split(logo_area);
+
     let box_layout = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(box_width),
-        Constraint::Min(0),
-    ]).split(box_area_row);
+        Constraint::Min(0), Constraint::Length(box_width), Constraint::Min(0)
+    ]).split(box_area);
 
     let final_logo_area = logo_layout[1];
     let final_box_area = box_layout[1];
 
-    
     // --- 4. RENDER ---
 
-    // A. Render Logo (No Clear, just text on top of background)
-    let logo_paragraph = Paragraph::new(logo_text)
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(theme::MAUVE).bold());
+    // A. Render Gradient Logo
+    let animated_lines: Vec<Line> = logo_text
+        .lines()
+        .enumerate()
+        .map(|(y, line_str)| {
+            // Split line into characters to style them individually
+            let spans: Vec<Span> = line_str
+                .chars()
+                .enumerate()
+                .map(|(x, c)| {
+                    // Pass X and Y to get the diagonal gradient
+                    let style = get_animated_style(x, y); 
+                    Span::styled(c.to_string(), style)
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect();
+
+    let logo_paragraph = Paragraph::new(animated_lines)
+        .alignment(Alignment::Left); // Keep Left alignment for ASCII shape
+        
     f.render_widget(logo_paragraph, final_logo_area);
 
-    // B. Render Box (Clear background so text is readable)
+    // B. Render Content Box
     f.render_widget(Clear, final_box_area);
-    
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::SURFACE2));
-    
-    let inner_box_area = block.inner(final_box_area);
+    let inner_box = block.inner(final_box_area);
     f.render_widget(block, final_box_area);
 
-    // C. Render Text inside Box
-    // Center the text block horizontally inside the box area 
-    let text_padding_chunks = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(text_width),
-        Constraint::Min(0),
-    ]).split(inner_box_area);
+    let text_padding_layout = Layout::horizontal([
+        Constraint::Min(0), Constraint::Length(text_content_width), Constraint::Min(0)
+    ]).split(inner_box);
 
-    let text_paragraph = Paragraph::new(text)
+    let text_paragraph = Paragraph::new(text_lines)
         .style(Style::default().fg(theme::TEXT))
-        .alignment(Alignment::Left); // Keep bullets aligned left
+        .alignment(Alignment::Left);
 
-    f.render_widget(text_paragraph, text_padding_chunks[1]);
+    f.render_widget(text_paragraph, text_padding_layout[1]);
 }
 
 fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
@@ -3958,6 +3944,52 @@ fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
     };
 
     (current_level, ratio.clamp(0.0, 1.0))
+}
+
+// Keep your existing blend_colors function
+fn blend_colors(c1: (u8, u8, u8), c2: (u8, u8, u8), ratio: f64) -> Color {
+    let r = (c1.0 as f64 * (1.0 - ratio) + c2.0 as f64 * ratio) as u8;
+    let g = (c1.1 as f64 * (1.0 - ratio) + c2.1 as f64 * ratio) as u8;
+    let b = (c1.2 as f64 * (1.0 - ratio) + c2.2 as f64 * ratio) as u8;
+    Color::Rgb(r, g, b)
+}
+
+fn get_animated_style(x: usize, y: usize) -> Style {
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+
+    // 1. Diagonal Flow Logic (Same physics, new feel)
+    let speed = 3.0;
+    let freq_x = 0.1; 
+    let freq_y = 0.2; 
+    let phase = (x as f64 * freq_x) + (y as f64 * freq_y) - (time * speed);
+    let ratio = (phase.sin() + 1.0) / 2.0;
+
+    // 2. Block Stream Colors
+    // Blue (Inflow) -> Green (Outflow)
+    let color_blue = (137, 180, 250); // Matches theme::BLUE
+    let color_green = (166, 227, 161); // Matches theme::GREEN
+    
+    // Blend between the two stream colors
+    let base_color = blend_colors(color_blue, color_green, ratio);
+
+    // 3. "Sparkle" Effect (The Block Stream Texture)
+    // We generate a pseudo-random value based on position + time
+    // This makes individual characters flicker like the block stream particles
+    let seed = (x as f64 * 13.0 + y as f64 * 29.0 + time * 15.0).sin();
+    
+    if seed > 0.85 {
+        // High energy sparkle: White/Bright + Bold (Active Data)
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+    } else if seed > 0.5 {
+        // Medium energy: Base Color + Bold
+        Style::default().fg(base_color).add_modifier(Modifier::BOLD)
+    } else {
+        // Low energy: Base Color + Dim (Background Flow)
+        Style::default().fg(base_color).add_modifier(Modifier::DIM)
+    }
 }
 
 #[cfg(test)]
