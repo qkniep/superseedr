@@ -1346,7 +1346,7 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
 
     // Use placeholder style for legend if count is 0 / no torrent
     let legend_style_fn = |count: u64, color: Color| {
-        if selected_torrent.is_some() {
+        if selected_torrent.is_some() && count > 0 {
             Style::default().fg(color)
         } else {
             Style::default().fg(theme::SURFACE1) // Greyed out
