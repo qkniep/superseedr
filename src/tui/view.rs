@@ -262,7 +262,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                                     let name = if app_state.anonymize_torrent_names {
                                         format!("Torrent {}", i + 1)
                                     } else {
-                                        state.torrent_name.clone()
+                                        sanitize_text(&state.torrent_name)
                                     };
                                     let mut c = Cell::from(name);
                                     if is_selected {
@@ -326,7 +326,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                         .as_ref()
                         .map(|p| p.to_string_lossy())
                         .unwrap_or_else(|| std::borrow::Cow::Borrowed("Unknown path"));
-                    &path_cow
+                    &sanitize_text(&path_cow)
                 };
 
                 let avail_width = area.width.saturating_sub(10) as usize;
@@ -1164,7 +1164,8 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                                         Cell::from(display.to_string())
                                     }
                                     PeerColumnId::Client => {
-                                        Cell::from(parse_peer_id(&peer.peer_id))
+                                        let raw_client = parse_peer_id(&peer.peer_id);
+                                        Cell::from(sanitize_text(&raw_client))
                                     }
                                     PeerColumnId::Action => Cell::from(peer.last_action.clone()),
                                     PeerColumnId::Progress => {
@@ -2123,12 +2124,12 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
             .split(inner_area);
 
             // 1. Torrent Identity
-            let name = &torrent_to_delete.latest_state.torrent_name;
+            let name = sanitize_text(&torrent_to_delete.latest_state.torrent_name);
             let path = torrent_to_delete
                 .latest_state
                 .download_path
                 .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
+                .map(|p| sanitize_text(&p.to_string_lossy()))
                 .unwrap_or_else(|| "Unknown Path".to_string());
 
             f.render_widget(

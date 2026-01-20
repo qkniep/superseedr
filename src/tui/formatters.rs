@@ -442,3 +442,9 @@ pub fn format_limit_delta(current: usize, last: usize) -> Span<'static> {
     };
     Span::styled(format!(" ({}{})", sign, delta.abs()), style)
 }
+
+pub fn sanitize_text(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
