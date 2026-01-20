@@ -829,7 +829,7 @@ impl App {
                         terminal.draw(|f| {
                             draw(f, &self.app_state, &self.client_configs);
                         })?;
-                        
+
                         // Only clear the flag if it was set, but we draw regardless if force_animation is true
                         self.app_state.ui_needs_redraw = false;
                     }

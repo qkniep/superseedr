@@ -249,7 +249,6 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                                         {
                                             100.0
                                         } else {
-                                            // Use effective_total to show progress relative to what is wanted
                                             ((completed as f64 / effective_total as f64) * 100.0)
                                                 .min(100.0)
                                         }
@@ -316,7 +315,6 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         {
             if let Some(torrent) = app_state.torrents.get(info_hash) {
                 let path_cow;
-
                 let text_to_show = if app_state.anonymize_torrent_names {
                     "/path/to/torrent/file"
                 } else {
@@ -344,8 +342,29 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Line::from(title_spans));
+    
+    let inner_area = block.inner(area);
     let table = Table::new(rows, constraints).header(header).block(block);
     f.render_stateful_widget(table, area, &mut table_state);
+
+    // [UPDATED] Show placeholder text if list is empty
+    if app_state.torrent_list_order.is_empty() {
+        let empty_msg = vec![
+            Line::from(Span::styled(
+                "No Torrents",
+                Style::default().fg(theme::SURFACE2).add_modifier(Modifier::BOLD)
+            )),
+            Line::from(Span::styled(
+                "Press [a] to add a file or [v] to paste a magnet link",
+                Style::default().fg(theme::SURFACE2)
+            )),
+        ];
+        
+        let center_y = inner_area.y + (inner_area.height / 2).saturating_sub(1);
+        let text_area = Rect::new(inner_area.x, center_y, inner_area.width, 2);
+        
+        f.render_widget(Paragraph::new(empty_msg).alignment(Alignment::Center), text_area);
+    }
 }
 
 fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
@@ -842,156 +861,225 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
 }
 
 fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: Rect) {
-    if let Some(info_hash) = app_state
+    let details_block = Block::default()
+        .title(Span::styled("Details", Style::default().fg(theme::MAUVE)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::SURFACE2));
+    let details_inner_chunk = details_block.inner(details_text_chunk);
+    f.render_widget(details_block, details_text_chunk);
+
+    let detail_rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(details_inner_chunk);
+
+    // [UPDATED] Check for selected torrent, otherwise use placeholders
+    let selected_torrent = app_state
         .torrent_list_order
         .get(app_state.selected_torrent_index)
-    {
-        if let Some(torrent) = app_state.torrents.get(info_hash) {
-            let state = &torrent.latest_state;
+        .and_then(|h| app_state.torrents.get(h));
 
-            let details_block = Block::default()
-                .title(Span::styled("Details", Style::default().fg(theme::MAUVE)))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::SURFACE2));
-            let details_inner_chunk = details_block.inner(details_text_chunk);
-            f.render_widget(details_block, details_text_chunk);
+    if let Some(torrent) = selected_torrent {
+        let state = &torrent.latest_state;
 
-            let detail_rows = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(details_inner_chunk);
+        let progress_chunks = Layout::horizontal([Constraint::Length(11), Constraint::Min(0)])
+            .split(detail_rows[0]);
 
-            let progress_chunks = Layout::horizontal([Constraint::Length(11), Constraint::Min(0)])
-                .split(detail_rows[0]);
+        f.render_widget(Paragraph::new("Progress: "), progress_chunks[0]);
 
-            f.render_widget(Paragraph::new("Progress: "), progress_chunks[0]);
-
-            let (progress_ratio, progress_label_text) = if state.number_of_pieces_total > 0 {
-                if state.torrent_control_state != TorrentControlState::Running
-                    || state.activity_message.contains("Seeding")
-                    || state.activity_message.contains("Finished")
-                {
-                    (1.0, "100.0%".to_string())
-                } else {
-                    let ratio = state.number_of_pieces_completed as f64
-                        / state.number_of_pieces_total as f64;
-                    (ratio, format!("{:.1}%", ratio * 100.0))
-                }
+        let (progress_ratio, progress_label_text) = if state.number_of_pieces_total > 0 {
+            if state.torrent_control_state != TorrentControlState::Running
+                || state.activity_message.contains("Seeding")
+                || state.activity_message.contains("Finished")
+            {
+                (1.0, "100.0%".to_string())
             } else {
-                (0.0, "0.0%".to_string())
-            };
-            let custom_line_set = symbols::line::Set {
-                horizontal: "⣿",
-                ..symbols::line::THICK
-            };
-            let line_gauge = LineGauge::default()
-                .ratio(progress_ratio)
-                .label(progress_label_text)
-                .line_set(custom_line_set)
-                .filled_style(Style::default().fg(theme::GREEN));
-            f.render_widget(line_gauge, progress_chunks[1]);
+                let ratio = state.number_of_pieces_completed as f64
+                    / state.number_of_pieces_total as f64;
+                (ratio, format!("{:.1}%", ratio * 100.0))
+            }
+        } else {
+            (0.0, "0.0%".to_string())
+        };
+        let custom_line_set = symbols::line::Set {
+            horizontal: "⣿",
+            ..symbols::line::THICK
+        };
+        let line_gauge = LineGauge::default()
+            .ratio(progress_ratio)
+            .label(progress_label_text)
+            .line_set(custom_line_set)
+            .filled_style(Style::default().fg(theme::GREEN));
+        f.render_widget(line_gauge, progress_chunks[1]);
 
-            let status_text = if state.activity_message.is_empty() {
-                "Waiting..."
-            } else {
-                state.activity_message.as_str()
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("Status:   ", Style::default().fg(theme::TEXT)),
-                    Span::raw(status_text),
-                ])),
-                detail_rows[1],
-            );
+        let status_text = if state.activity_message.is_empty() {
+            "Waiting..."
+        } else {
+            state.activity_message.as_str()
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Status:   ", Style::default().fg(theme::TEXT)),
+                Span::raw(status_text),
+            ])),
+            detail_rows[1],
+        );
 
-            let total_pieces = state.number_of_pieces_total as usize;
-            let (seeds, leeches) = state
-                .peers
-                .iter()
-                .filter(|p| p.last_action != "Connecting...")
-                .fold((0, 0), |(s, l), peer| {
-                    if total_pieces > 0 {
-                        let pieces_have = peer
-                            .bitfield
-                            .iter()
-                            .take(total_pieces)
-                            .filter(|&&b| b)
-                            .count();
-                        if pieces_have == total_pieces {
-                            (s + 1, l)
-                        } else {
-                            (s, l + 1)
-                        }
+        let total_pieces = state.number_of_pieces_total as usize;
+        let (seeds, leeches) = state
+            .peers
+            .iter()
+            .filter(|p| p.last_action != "Connecting...")
+            .fold((0, 0), |(s, l), peer| {
+                if total_pieces > 0 {
+                    let pieces_have = peer
+                        .bitfield
+                        .iter()
+                        .take(total_pieces)
+                        .filter(|&&b| b)
+                        .count();
+                    if pieces_have == total_pieces {
+                        (s + 1, l)
                     } else {
                         (s, l + 1)
                     }
-                });
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("Peers:    ", Style::default().fg(theme::TEXT)),
-                    Span::raw(format!(
-                        "{} (",
-                        state.number_of_successfully_connected_peers
-                    )),
-                    Span::styled(format!("{}", seeds), Style::default().fg(theme::GREEN)),
-                    Span::raw(" / "),
-                    Span::styled(format!("{}", leeches), Style::default().fg(theme::RED)),
-                    Span::raw(")"),
-                ])),
-                detail_rows[2],
-            );
-
-            let written_size_spans =
-                if state.number_of_pieces_completed < state.number_of_pieces_total {
-                    vec![
-                        Span::styled("Written:  ", Style::default().fg(theme::TEXT)),
-                        Span::raw(format_bytes(state.bytes_written)),
-                        Span::raw(format!(" / {}", format_bytes(state.total_size))),
-                    ]
                 } else {
-                    vec![
-                        Span::styled("Size:     ", Style::default().fg(theme::TEXT)),
-                        Span::raw(format_bytes(state.total_size)),
-                    ]
-                };
-            f.render_widget(
-                Paragraph::new(Line::from(written_size_spans)),
-                detail_rows[3],
-            );
+                    (s, l + 1)
+                }
+            });
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Peers:    ", Style::default().fg(theme::TEXT)),
+                Span::raw(format!(
+                    "{} (",
+                    state.number_of_successfully_connected_peers
+                )),
+                Span::styled(format!("{}", seeds), Style::default().fg(theme::GREEN)),
+                Span::raw(" / "),
+                Span::styled(format!("{}", leeches), Style::default().fg(theme::RED)),
+                Span::raw(")"),
+            ])),
+            detail_rows[2],
+        );
 
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("Pieces:   ", Style::default().fg(theme::TEXT)),
-                    Span::raw(format!(
-                        "{}/{}",
-                        state.number_of_pieces_completed, state.number_of_pieces_total
-                    )),
-                ])),
-                detail_rows[4],
-            );
+        let written_size_spans =
+            if state.number_of_pieces_completed < state.number_of_pieces_total {
+                vec![
+                    Span::styled("Written:  ", Style::default().fg(theme::TEXT)),
+                    Span::raw(format_bytes(state.bytes_written)),
+                    Span::raw(format!(" / {}", format_bytes(state.total_size))),
+                ]
+            } else {
+                vec![
+                    Span::styled("Size:     ", Style::default().fg(theme::TEXT)),
+                    Span::raw(format_bytes(state.total_size)),
+                ]
+            };
+        f.render_widget(
+            Paragraph::new(Line::from(written_size_spans)),
+            detail_rows[3],
+        );
 
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("ETA:      ", Style::default().fg(theme::TEXT)),
-                    Span::raw(format_duration(state.eta)),
-                ])),
-                detail_rows[5],
-            );
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Pieces:   ", Style::default().fg(theme::TEXT)),
+                Span::raw(format!(
+                    "{}/{}",
+                    state.number_of_pieces_completed, state.number_of_pieces_total
+                )),
+            ])),
+            detail_rows[4],
+        );
 
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("Announce: ", Style::default().fg(theme::TEXT)),
-                    Span::raw(format_countdown(state.next_announce_in)),
-                ])),
-                detail_rows[6],
-            );
-        }
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("ETA:      ", Style::default().fg(theme::TEXT)),
+                Span::raw(format_duration(state.eta)),
+            ])),
+            detail_rows[5],
+        );
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Announce: ", Style::default().fg(theme::TEXT)),
+                Span::raw(format_countdown(state.next_announce_in)),
+            ])),
+            detail_rows[6],
+        );
+    } else {
+        // [UPDATED] Render Placeholder Values
+        let placeholder_style = Style::default().fg(theme::OVERLAY0);
+        let label_style = Style::default().fg(theme::SURFACE2);
+
+        // Row 0: Progress
+        let progress_chunks = Layout::horizontal([Constraint::Length(11), Constraint::Min(0)])
+            .split(detail_rows[0]);
+        f.render_widget(Paragraph::new("Progress: ").style(label_style), progress_chunks[0]);
+        let line_gauge = LineGauge::default()
+            .ratio(0.0)
+            .label(" --.--%")
+            .style(placeholder_style);
+        f.render_widget(line_gauge, progress_chunks[1]);
+
+        // Row 1: Status
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Status:   ", label_style),
+                Span::styled("No Selection", placeholder_style),
+            ])),
+            detail_rows[1],
+        );
+
+        // Row 2: Peers
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Peers:    ", label_style),
+                Span::styled("- (- / -)", placeholder_style),
+            ])),
+            detail_rows[2],
+        );
+
+        // Row 3: Size
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Size:     ", label_style),
+                Span::styled("- / -", placeholder_style),
+            ])),
+            detail_rows[3],
+        );
+
+        // Row 4: Pieces
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Pieces:   ", label_style),
+                Span::styled("- / -", placeholder_style),
+            ])),
+            detail_rows[4],
+        );
+
+        // Row 5: ETA
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("ETA:      ", label_style),
+                Span::styled("--:--:--", placeholder_style),
+            ])),
+            detail_rows[5],
+        );
+
+        // Row 6: Announce
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Announce: ", label_style),
+                Span::styled("--s", placeholder_style),
+            ])),
+            detail_rows[6],
+        );
     }
 }
 
@@ -1157,7 +1245,7 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                                     .into(),
                                     PeerColumnId::Address => {
                                         let display = if app_state.anonymize_torrent_names {
-                                            "xxx.xxx..."
+                                            "xxx.xxx.xxx"
                                         } else {
                                             &peer.address
                                         };
@@ -1487,57 +1575,57 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let color_border = theme::SURFACE2;
     let color_axis = theme::OVERLAY0;
 
-    let y_discovered = 2.0;
-    let y_connected = 3.0;
-    let y_disconnected = 1.0;
-
-    let small_marker = Marker::Block;
-    let medium_marker = Marker::Block;
-    let large_marker = Marker::Block;
-
-    let Some(torrent) = selected_torrent else {
-        let block = Block::default()
-            .title(Span::styled(
-                "Peer Stream",
-                Style::default().fg(color_title),
-            ))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(color_border));
-        f.render_widget(block, area);
-        return;
+    // [UPDATED] Removed the early return. 
+    // Now we initialize empty slices if no torrent is selected
+    // to render the chart grid/axes as a placeholder.
+    
+    let default_slice: Vec<u64> = Vec::new(); // Empty reference
+    
+    let (disc_slice, conn_slice, disconn_slice) = if let Some(torrent) = selected_torrent {
+        let width = area.width.saturating_sub(2).max(1) as usize;
+        let dh = &torrent.peer_discovery_history;
+        let ch = &torrent.peer_connection_history;
+        let dch = &torrent.peer_disconnect_history;
+        
+        (
+            &dh[dh.len().saturating_sub(width)..],
+            &ch[ch.len().saturating_sub(width)..],
+            &dch[dch.len().saturating_sub(width)..]
+        )
+    } else {
+        (&default_slice[..], &default_slice[..], &default_slice[..])
     };
-
-    let width = area.width.saturating_sub(2).max(1) as usize;
-
-    let disc_history = &torrent.peer_discovery_history;
-    let conn_history = &torrent.peer_connection_history;
-    let disconn_history = &torrent.peer_disconnect_history;
-
-    let disc_slice = &disc_history[disc_history.len().saturating_sub(width)..];
-    let conn_slice = &conn_history[conn_history.len().saturating_sub(width)..];
-    let disconn_slice = &disconn_history[disconn_history.len().saturating_sub(width)..];
 
     let discovered_count: u64 = disc_slice.iter().sum();
     let connected_count: u64 = conn_slice.iter().sum();
     let disconnected_count: u64 = disconn_slice.iter().sum();
 
+    // Use placeholder style for legend if count is 0 / no torrent
+    let legend_style_fn = |count: u64, color: Color| {
+        if selected_torrent.is_some() {
+            Style::default().fg(color)
+        } else {
+            Style::default().fg(theme::SURFACE1) // Greyed out
+        }
+    };
+
     let legend_line = Line::from(vec![
-        Span::styled("Connected:", Style::default().fg(color_connected)),
+        Span::styled("Connected:", legend_style_fn(connected_count, color_connected)),
         Span::styled(
             connected_count.to_string(),
-            Style::default().fg(color_connected),
+            legend_style_fn(connected_count, color_connected),
         ),
         Span::raw(" "),
-        Span::styled("Discovered:", Style::default().fg(color_discovered)),
+        Span::styled("Discovered:", legend_style_fn(discovered_count, color_discovered)),
         Span::styled(
             discovered_count.to_string(),
-            Style::default().fg(color_discovered),
+            legend_style_fn(discovered_count, color_discovered),
         ),
         Span::raw(" "),
-        Span::styled("Disconnected:", Style::default().fg(color_disconnected)),
+        Span::styled("Disconnected:", legend_style_fn(disconnected_count, color_disconnected)),
         Span::styled(
             disconnected_count.to_string(),
-            Style::default().fg(color_disconnected),
+            legend_style_fn(disconnected_count, color_disconnected),
         ),
         Span::raw(" "),
     ]);
@@ -1546,134 +1634,66 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let max_conn = conn_slice.iter().max().copied().unwrap_or(1).max(1) as f64;
     let max_disconn = disconn_slice.iter().max().copied().unwrap_or(1).max(1) as f64;
 
+    // ... [Calculations for markers stay the same, they handle empty iterators gracefully] ...
+
+    let y_discovered = 2.0;
+    let y_connected = 3.0;
+    let y_disconnected = 1.0;
+
+    let small_marker = Marker::Block;
+    let medium_marker = Marker::Block;
+    let large_marker = Marker::Block;
+
     let mut disc_data_light = Vec::new();
     let mut disc_data_medium = Vec::new();
     let mut disc_data_dark = Vec::new();
-
+    // ... (Repeat for conn/disconn - code matches existing) ...
     let mut conn_data_light = Vec::new();
     let mut conn_data_medium = Vec::new();
     let mut conn_data_dark = Vec::new();
-
     let mut disconn_data_light = Vec::new();
     let mut disconn_data_medium = Vec::new();
     let mut disconn_data_dark = Vec::new();
 
     for (i, &v) in disc_slice.iter().enumerate() {
-        if v == 0 {
-            continue;
-        }
-        let norm_val = v as f64 / max_disc;
-        let y_val = y_discovered;
-        if norm_val < 0.33 {
-            disc_data_light.push((i as f64, y_val));
-        } else if norm_val < 0.66 {
-            disc_data_medium.push((i as f64, y_val));
-        } else {
-            disc_data_dark.push((i as f64, y_val));
-        }
+         if v == 0 { continue; }
+         let norm_val = v as f64 / max_disc;
+         let y_val = y_discovered;
+         if norm_val < 0.33 { disc_data_light.push((i as f64, y_val)); }
+         else if norm_val < 0.66 { disc_data_medium.push((i as f64, y_val)); }
+         else { disc_data_dark.push((i as f64, y_val)); }
     }
-
     for (i, &v) in conn_slice.iter().enumerate() {
-        if v == 0 {
-            continue;
-        }
-        let norm_val = v as f64 / max_conn;
-        let y_val = y_connected;
-        if norm_val < 0.33 {
-            conn_data_light.push((i as f64, y_val));
-        } else if norm_val < 0.66 {
-            conn_data_medium.push((i as f64, y_val));
-        } else {
-            conn_data_dark.push((i as f64, y_val));
-        }
+         if v == 0 { continue; }
+         let norm_val = v as f64 / max_conn;
+         let y_val = y_connected;
+         if norm_val < 0.33 { conn_data_light.push((i as f64, y_val)); }
+         else if norm_val < 0.66 { conn_data_medium.push((i as f64, y_val)); }
+         else { conn_data_dark.push((i as f64, y_val)); }
     }
-
     for (i, &v) in disconn_slice.iter().enumerate() {
-        if v == 0 {
-            continue;
-        }
-        let norm_val = v as f64 / max_disconn;
-        let y_val = y_disconnected;
-        if norm_val < 0.33 {
-            disconn_data_light.push((i as f64, y_val));
-        } else if norm_val < 0.66 {
-            disconn_data_medium.push((i as f64, y_val));
-        } else {
-            disconn_data_dark.push((i as f64, y_val));
-        }
+         if v == 0 { continue; }
+         let norm_val = v as f64 / max_disconn;
+         let y_val = y_disconnected;
+         if norm_val < 0.33 { disconn_data_light.push((i as f64, y_val)); }
+         else if norm_val < 0.66 { disconn_data_medium.push((i as f64, y_val)); }
+         else { disconn_data_dark.push((i as f64, y_val)); }
     }
 
     let datasets = vec![
-        Dataset::default()
-            .data(&disc_data_light)
-            .marker(small_marker)
-            .graph_type(GraphType::Scatter)
-            .style(
-                Style::default()
-                    .fg(color_discovered)
-                    .add_modifier(Modifier::DIM),
-            ),
-        Dataset::default()
-            .data(&disc_data_medium)
-            .marker(medium_marker)
-            .graph_type(GraphType::Scatter)
-            .style(Style::default().fg(color_discovered)),
-        Dataset::default()
-            .data(&disc_data_dark)
-            .marker(large_marker)
-            .graph_type(GraphType::Scatter)
-            .style(
-                Style::default()
-                    .fg(color_discovered)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        Dataset::default()
-            .data(&conn_data_light)
-            .marker(small_marker)
-            .graph_type(GraphType::Scatter)
-            .style(
-                Style::default()
-                    .fg(color_connected)
-                    .add_modifier(Modifier::DIM),
-            ),
-        Dataset::default()
-            .data(&conn_data_medium)
-            .marker(medium_marker)
-            .graph_type(GraphType::Scatter)
-            .style(Style::default().fg(color_connected)),
-        Dataset::default()
-            .data(&conn_data_dark)
-            .marker(large_marker)
-            .graph_type(GraphType::Scatter)
-            .style(
-                Style::default()
-                    .fg(color_connected)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        Dataset::default()
-            .data(&disconn_data_light)
-            .marker(small_marker)
-            .graph_type(GraphType::Scatter)
-            .style(
-                Style::default()
-                    .fg(color_disconnected)
-                    .add_modifier(Modifier::DIM),
-            ),
-        Dataset::default()
-            .data(&disconn_data_medium)
-            .marker(medium_marker)
-            .graph_type(GraphType::Scatter)
-            .style(Style::default().fg(color_disconnected)),
-        Dataset::default()
-            .data(&disconn_data_dark)
-            .marker(large_marker)
-            .graph_type(GraphType::Scatter)
-            .style(
-                Style::default()
-                    .fg(color_disconnected)
-                    .add_modifier(Modifier::BOLD),
-            ),
+        Dataset::default().data(&disc_data_light).marker(small_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_discovered).add_modifier(Modifier::DIM)),
+        Dataset::default().data(&disc_data_medium).marker(medium_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_discovered)),
+        Dataset::default().data(&disc_data_dark).marker(large_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_discovered).add_modifier(Modifier::BOLD)),
+        Dataset::default().data(&conn_data_light).marker(small_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_connected).add_modifier(Modifier::DIM)),
+        Dataset::default().data(&conn_data_medium).marker(medium_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_connected)),
+        Dataset::default().data(&conn_data_dark).marker(large_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_connected).add_modifier(Modifier::BOLD)),
+        Dataset::default().data(&disconn_data_light).marker(small_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_disconnected).add_modifier(Modifier::DIM)),
+        Dataset::default().data(&disconn_data_medium).marker(medium_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_disconnected)),
+        Dataset::default().data(&disconn_data_dark).marker(large_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_disconnected).add_modifier(Modifier::BOLD)),
     ];
+    
+    // Bounds: X axis 0..width. If width=0 (empty), use 1.0 to avoid crash/ugly render
+    let x_bound = disc_slice.len().max(1).saturating_sub(1) as f64;
 
     let discovery_chart = Chart::new(datasets)
         .block(
@@ -1692,7 +1712,7 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
         .x_axis(
             Axis::default()
                 .style(Style::default().fg(color_axis))
-                .bounds([0.0, disc_slice.len().saturating_sub(1) as f64]),
+                .bounds([0.0, x_bound]),
         )
         .y_axis(Axis::default().bounds([0.5, 3.5]));
 

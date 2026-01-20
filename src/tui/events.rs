@@ -1020,8 +1020,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     }
                                 }
 
-                                _ => {
-                                }
+                                _ => {}
                             }
                             app.app_state.is_searching = false;
                             app.app_state.search_query.clear();
