@@ -3041,21 +3041,20 @@ fn draw_torrent_preview_panel(
 fn draw_welcome_screen(f: &mut Frame) {
     let area = f.area();
 
+    // 1. Draw the Background first (The stars/lines)
     draw_background_dust(f, area);
 
-    // --- 1. SETUP CONTENT ---
-    // Helper to calculate dimensions
+    // --- SETUP CONTENT ---
     let get_dims = |text: &str| -> (u16, u16) {
         let h = text.lines().count() as u16;
         let w = text.lines().map(|l| l.len()).max().unwrap_or(0) as u16;
         (w, h)
     };
 
-    // Calculate dimensions for ASCII art
     let (w_large, h_large) = get_dims(LOGO_LARGE);
     let (w_medium, h_medium) = get_dims(LOGO_MEDIUM);
 
-    // Define the Main Body Text (Bulleted list)
+    // Define the Main Body Text
     let text_lines = vec![
         Line::from(Span::styled("How to Get Started:", Style::default().fg(theme::YELLOW).bold())),
         Line::from(""),
@@ -3116,7 +3115,6 @@ fn draw_welcome_screen(f: &mut Frame) {
         ]),
     ];
 
-    // Define the Footer Text (Keybinds) separately
     let footer_line = Line::from(vec![
         Span::styled(" [m] ", Style::default().fg(theme::TEAL)),
         Span::styled("Manual/Help", Style::default().fg(theme::SUBTEXT1)),
@@ -3131,19 +3129,16 @@ fn draw_welcome_screen(f: &mut Frame) {
         Span::styled("Dismiss", Style::default().fg(theme::SUBTEXT1)),
     ]);
 
-    // Calculate Dimensions
     let text_content_height = text_lines.len() as u16;
     let text_content_width = text_lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
     let footer_width = footer_line.width() as u16;
 
-    // Box dimensions
-    let box_vertical_gap = 1; // Gap between text and footer
+    let box_vertical_gap = 1; 
     let box_horizontal_padding = 4;
-    // Exact height needed: Text + Gap + Footer(1) + Borders(2)
     let box_height_needed = text_content_height + box_vertical_gap + 1 + 2; 
 
-    // --- 2. DYNAMIC LOGO SELECTION ---
-    let gap_height = 1; // Gap between Logo and Box
+    // --- DYNAMIC LOGO SELECTION ---
+    let gap_height = 1; 
     let available_height_for_logo = area.height.saturating_sub(box_height_needed + gap_height + 2);
     let margin_x = 6;
     
@@ -3157,8 +3152,7 @@ fn draw_welcome_screen(f: &mut Frame) {
 
     let (logo_w, logo_h) = get_dims(logo_text);
 
-    // --- 3. FINAL LAYOUT CALCULATION ---
-    // The box needs to be wide enough for the widest element (Body OR Footer)
+    // --- LAYOUT CALCULATION ---
     let content_width_max = text_content_width.max(footer_width).max(logo_w.min(text_content_width + 10));
     let box_width = (content_width_max + box_horizontal_padding + 2).min(area.width);
     let box_height = box_height_needed.min(area.height);
@@ -3174,7 +3168,6 @@ fn draw_welcome_screen(f: &mut Frame) {
     let logo_area = vertical_chunks[1];
     let box_area = vertical_chunks[3];
 
-    // Horizontal centering
     let logo_layout = Layout::horizontal([
         Constraint::Min(0), Constraint::Length(logo_w), Constraint::Min(0)
     ]).split(logo_area);
@@ -3186,48 +3179,48 @@ fn draw_welcome_screen(f: &mut Frame) {
     let final_logo_area = logo_layout[1];
     let final_box_area = box_layout[1];
 
-    // --- 4. RENDER ---
+    // --- RENDER ---
 
-    // A. Render Gradient Logo
-    let animated_lines: Vec<Line> = logo_text
-        .lines()
-        .enumerate()
-        .map(|(y, line_str)| {
-            let spans: Vec<Span> = line_str
-                .chars()
-                .enumerate()
-                .map(|(x, c)| {
-                    let style = get_animated_style(x, y); 
-                    Span::styled(c.to_string(), style)
-                })
-                .collect();
-            Line::from(spans)
-        })
-        .collect();
-
-    let logo_paragraph = Paragraph::new(animated_lines)
-        .alignment(Alignment::Left);
+    // A. Render Transparent Gradient Logo
+    // We cannot use `Paragraph` because it overwrites the background with spaces.
+    // Instead, we manually calculate positions and write only non-space characters
+    // to the buffer.
+    let buf = f.buffer_mut();
+    for (y_local, line) in logo_text.lines().enumerate() {
+        if y_local >= final_logo_area.height as usize { break; }
         
-    f.render_widget(logo_paragraph, final_logo_area);
+        let y_global = final_logo_area.y + y_local as u16;
+        
+        for (x_local, c) in line.chars().enumerate() {
+            if x_local >= final_logo_area.width as usize { break; }
+            
+            // Skip spaces to allow background to show through
+            if c == ' ' { continue; }
 
-    // B. Render Content Box
+            let x_global = final_logo_area.x + x_local as u16;
+            let style = get_animated_style(x_local, y_local);
+            
+            // Write directly to buffer
+            buf.set_string(x_global, y_global, c.to_string(), style);
+        }
+    }
+
+    // B. Render Content Box (Opaque)
+    // We clear the box area first because we WANT this to obscure the background stars
     f.render_widget(Clear, final_box_area);
+    
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::SURFACE2));
     let inner_box = block.inner(final_box_area);
     f.render_widget(block, final_box_area);
 
-    // Split Box Internally: Body (Top) vs Footer (Bottom)
     let box_internal_chunks = Layout::vertical([
-        Constraint::Length(text_content_height), // Exact height for body
-        Constraint::Min(0),                      // Flexible gap
-        Constraint::Length(1),                   // Exact height for footer
+        Constraint::Length(text_content_height), 
+        Constraint::Min(0),                      
+        Constraint::Length(1),                   
     ]).split(inner_box);
 
-    // 1. Render Body Text
-    // We constrain width to `text_content_width` so the bullet points 
-    // feel centered as a block, but are Left aligned within that block.
     let text_padding_layout = Layout::horizontal([
         Constraint::Min(0), Constraint::Length(text_content_width), Constraint::Min(0)
     ]).split(box_internal_chunks[0]);
@@ -3238,8 +3231,6 @@ fn draw_welcome_screen(f: &mut Frame) {
 
     f.render_widget(text_paragraph, text_padding_layout[1]);
 
-    // 2. Render Footer
-    // We let the footer use the full width of the box, but Center align the text.
     let footer_paragraph = Paragraph::new(footer_line)
         .alignment(Alignment::Center);
 
