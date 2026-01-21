@@ -1,10 +1,14 @@
-![Logo](https://github.com/Jagalite/superseedr-assets/blob/main/superseedr_logo.gif)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Jagalite/superseedr-assets/main/superseedr_logo_transparent.gif">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Jagalite/superseedr-assets/main/superseedr_logo.gif">
+  <img alt="Superseedr Logo" src="https://raw.githubusercontent.com/Jagalite/superseedr-assets/main/superseedr_logo.gif">
+</picture>
 
-# Superseedr - A Rust BitTorrent Client in your Terminal
+# A Pure Rust BitTorrent Client in your Terminal
 
 [![Rust](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml) [![Nightly Fuzzing](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml) ![Verification](https://img.shields.io/badge/Logic_Verification-Model--Based_Fuzzing-blueviolet?style=flat-square)
 
-![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr) [![crates.io](https://img.shields.io/crates/v/superseedr)](https://crates.io/crates/superseedr) [![crates.io](https://img.shields.io/crates/d/superseedr)](https://crates.io/crates/superseedr) [![docs.rs](https://docs.rs/superseedr/badge.svg)](https://docs.rs/superseedr) ![License](https://img.shields.io/github/license/Jagalite/superseedr) [![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/) <a title="This tool is Tool of The Week on Terminal Trove, The $HOME of all things in the terminal" href="https://terminaltrove.com/"><img src="https://cdn.terminaltrove.com/media/badges/tool_of_the_week/png/terminal_trove_tool_of_the_week_gold_transparent.png" alt="Terminal Trove Tool of The Week" /></a>
+![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr) [![crates.io](https://img.shields.io/crates/v/superseedr)](https://crates.io/crates/superseedr) [![crates.io](https://img.shields.io/crates/d/superseedr)](https://crates.io/crates/superseedr) [![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/) <a title="This tool is Tool of The Week on Terminal Trove, The $HOME of all things in the terminal" href="https://terminaltrove.com/"><img src="https://cdn.terminaltrove.com/media/badges/tool_of_the_week/png/terminal_trove_tool_of_the_week_gold_transparent.png" alt="Terminal Trove Tool of The Week" /></a>
 
 Superseedr is a modern Rust BitTorrent client featuring a high-performance terminal UI, real-time swarm observability, secure VPN-aware Docker setups, and zero manual network configuration. It is fast, privacy-oriented, and built for both desktop users and homelab/server workflows.
 
