@@ -5,7 +5,7 @@ use ratatui::symbols::Marker;
 use ratatui::{prelude::*, symbols, widgets::*};
 
 use crate::tui::formatters::*;
-use crate::tui::layout::calculate_file_browser_layout; // Import the new function
+use crate::tui::layout::calculate_file_browser_layout;
 use crate::tui::layout::{get_torrent_columns, ColumnId};
 use crate::tui::tree;
 use crate::tui::tree::{TreeFilter, TreeMathHelper};
@@ -34,6 +34,36 @@ static APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const SECONDS_HISTORY_MAX: usize = 3600;
 pub const MINUTES_HISTORY_MAX: usize = 48 * 60;
+
+const LOGO_LARGE: &str = r#"
+                                                             __          
+                                                            /\ \         
+  ____  __  __  _____      __   _ __   ____     __     __   \_\ \  _ __  
+ /',__\/\ \/\ \/\ '__`\  /'__`\/\`'__\/',__\  /'__`\ /'__`\ /'_` \/\`'__\
+/\__, `\ \ \_\ \ \ \L\ \/\  __/\ \ \//\__, `\/\  __//\  __//\ \L\ \ \ \/ 
+\/\____/\ \____/\ \ ,__/\ \____\\ \_\\/\____/\ \____\ \____\ \___,_\ \_\ 
+ \/___/  \/___/  \ \ \/  \/____/ \/_/ \/___/  \/____/\/____/\/__,_ /\/_/ 
+                  \ \_\                                                  
+                   \/_/                                                  
+"#;
+
+const LOGO_MEDIUM: &str = r#"
+                        __          
+                       /\ \         
+  ____     __     __   \_\ \  _ __  
+ /',__\  /'__`\ /'__`\ /'_` \/\`'__\
+/\__, `\/\  __//\  __//\ \L\ \ \ \/ 
+\/\____/\ \____\ \____\ \___,_\ \_\ 
+ \/___/  \/____/\/____/\/__,_ /\/_/ 
+"#;
+
+const LOGO_SMALL: &str = r#"
+  ____    ____  
+ /',__\  /',__\ 
+/\__, `\/\__, `\
+\/\____/\/\____/
+ \/___/  \/___/ 
+"#;
 
 pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     let area = f.area();
@@ -218,7 +248,6 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                                         {
                                             100.0
                                         } else {
-                                            // Use effective_total to show progress relative to what is wanted
                                             ((completed as f64 / effective_total as f64) * 100.0)
                                                 .min(100.0)
                                         }
@@ -231,7 +260,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                                     let name = if app_state.anonymize_torrent_names {
                                         format!("Torrent {}", i + 1)
                                     } else {
-                                        state.torrent_name.clone()
+                                        sanitize_text(&state.torrent_name)
                                     };
                                     let mut c = Cell::from(name);
                                     if is_selected {
@@ -285,7 +314,6 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         {
             if let Some(torrent) = app_state.torrents.get(info_hash) {
                 let path_cow;
-
                 let text_to_show = if app_state.anonymize_torrent_names {
                     "/path/to/torrent/file"
                 } else {
@@ -295,7 +323,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                         .as_ref()
                         .map(|p| p.to_string_lossy())
                         .unwrap_or_else(|| std::borrow::Cow::Borrowed("Unknown path"));
-                    &path_cow
+                    &sanitize_text(&path_cow)
                 };
 
                 let avail_width = area.width.saturating_sub(10) as usize;
@@ -313,8 +341,33 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Line::from(title_spans));
+
+    let inner_area = block.inner(area);
     let table = Table::new(rows, constraints).header(header).block(block);
     f.render_stateful_widget(table, area, &mut table_state);
+
+    if app_state.torrent_list_order.is_empty() {
+        let empty_msg = vec![
+            Line::from(Span::styled(
+                "No Torrents",
+                Style::default()
+                    .fg(theme::SURFACE2)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "Press [a] to add a file or [v] to paste a magnet link",
+                Style::default().fg(theme::SURFACE2),
+            )),
+        ];
+
+        let center_y = inner_area.y + (inner_area.height / 2).saturating_sub(1);
+        let text_area = Rect::new(inner_area.x, center_y, inner_area.width, 2);
+
+        f.render_widget(
+            Paragraph::new(empty_msg).alignment(Alignment::Center),
+            text_area,
+        );
+    }
 }
 
 fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
@@ -615,7 +668,6 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
             Span::styled("Run Time: ", Style::default().fg(theme::TEAL)),
             Span::raw(format_time(app_state.run_time)),
         ]),
-        // --- UPDATED: Torrents Line with Size ---
         Line::from(vec![
             Span::styled("Torrents: ", Style::default().fg(theme::PEACH)),
             Span::raw(format!(
@@ -811,448 +863,290 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
 }
 
 fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: Rect) {
-    if let Some(info_hash) = app_state
+    let details_block = Block::default()
+        .title(Span::styled("Details", Style::default().fg(theme::MAUVE)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::SURFACE2));
+    let details_inner_chunk = details_block.inner(details_text_chunk);
+    f.render_widget(details_block, details_text_chunk);
+
+    let detail_rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(details_inner_chunk);
+
+    let selected_torrent = app_state
         .torrent_list_order
         .get(app_state.selected_torrent_index)
-    {
-        if let Some(torrent) = app_state.torrents.get(info_hash) {
-            let state = &torrent.latest_state;
+        .and_then(|h| app_state.torrents.get(h));
 
-            let details_block = Block::default()
-                .title(Span::styled("Details", Style::default().fg(theme::MAUVE)))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::SURFACE2));
-            let details_inner_chunk = details_block.inner(details_text_chunk);
-            f.render_widget(details_block, details_text_chunk);
+    if let Some(torrent) = selected_torrent {
+        let state = &torrent.latest_state;
 
-            let detail_rows = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(details_inner_chunk);
+        let progress_chunks =
+            Layout::horizontal([Constraint::Length(11), Constraint::Min(0)]).split(detail_rows[0]);
 
-            let progress_chunks = Layout::horizontal([Constraint::Length(11), Constraint::Min(0)])
-                .split(detail_rows[0]);
+        f.render_widget(Paragraph::new("Progress: "), progress_chunks[0]);
 
-            f.render_widget(Paragraph::new("Progress: "), progress_chunks[0]);
-
-            let (progress_ratio, progress_label_text) = if state.number_of_pieces_total > 0 {
-                if state.torrent_control_state != TorrentControlState::Running
-                    || state.activity_message.contains("Seeding")
-                    || state.activity_message.contains("Finished")
-                {
-                    (1.0, "100.0%".to_string())
-                } else {
-                    let ratio = state.number_of_pieces_completed as f64
-                        / state.number_of_pieces_total as f64;
-                    (ratio, format!("{:.1}%", ratio * 100.0))
-                }
+        let (progress_ratio, progress_label_text) = if state.number_of_pieces_total > 0 {
+            if state.torrent_control_state != TorrentControlState::Running
+                || state.activity_message.contains("Seeding")
+                || state.activity_message.contains("Finished")
+            {
+                (1.0, "100.0%".to_string())
             } else {
-                (0.0, "0.0%".to_string())
-            };
-            let custom_line_set = symbols::line::Set {
-                horizontal: "⣿",
-                ..symbols::line::THICK
-            };
-            let line_gauge = LineGauge::default()
-                .ratio(progress_ratio)
-                .label(progress_label_text)
-                .line_set(custom_line_set)
-                .filled_style(Style::default().fg(theme::GREEN));
-            f.render_widget(line_gauge, progress_chunks[1]);
+                let ratio =
+                    state.number_of_pieces_completed as f64 / state.number_of_pieces_total as f64;
+                (ratio, format!("{:.1}%", ratio * 100.0))
+            }
+        } else {
+            (0.0, "0.0%".to_string())
+        };
+        let custom_line_set = symbols::line::Set {
+            horizontal: "⣿",
+            ..symbols::line::THICK
+        };
+        let line_gauge = LineGauge::default()
+            .ratio(progress_ratio)
+            .label(progress_label_text)
+            .line_set(custom_line_set)
+            .filled_style(Style::default().fg(theme::GREEN));
+        f.render_widget(line_gauge, progress_chunks[1]);
 
-            let status_text = if state.activity_message.is_empty() {
-                "Waiting..."
-            } else {
-                state.activity_message.as_str()
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("Status:   ", Style::default().fg(theme::TEXT)),
-                    Span::raw(status_text),
-                ])),
-                detail_rows[1],
-            );
+        let status_text = if state.activity_message.is_empty() {
+            "Waiting..."
+        } else {
+            state.activity_message.as_str()
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Status:   ", Style::default().fg(theme::TEXT)),
+                Span::raw(status_text),
+            ])),
+            detail_rows[1],
+        );
 
-            let total_pieces = state.number_of_pieces_total as usize;
-            let (seeds, leeches) = state
-                .peers
-                .iter()
-                .filter(|p| p.last_action != "Connecting...")
-                .fold((0, 0), |(s, l), peer| {
-                    if total_pieces > 0 {
-                        let pieces_have = peer
-                            .bitfield
-                            .iter()
-                            .take(total_pieces)
-                            .filter(|&&b| b)
-                            .count();
-                        if pieces_have == total_pieces {
-                            (s + 1, l)
-                        } else {
-                            (s, l + 1)
-                        }
+        let total_pieces = state.number_of_pieces_total as usize;
+        let (seeds, leeches) = state
+            .peers
+            .iter()
+            .filter(|p| p.last_action != "Connecting...")
+            .fold((0, 0), |(s, l), peer| {
+                if total_pieces > 0 {
+                    let pieces_have = peer
+                        .bitfield
+                        .iter()
+                        .take(total_pieces)
+                        .filter(|&&b| b)
+                        .count();
+                    if pieces_have == total_pieces {
+                        (s + 1, l)
                     } else {
                         (s, l + 1)
                     }
-                });
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("Peers:    ", Style::default().fg(theme::TEXT)),
-                    Span::raw(format!(
-                        "{} (",
-                        state.number_of_successfully_connected_peers
-                    )),
-                    Span::styled(format!("{}", seeds), Style::default().fg(theme::GREEN)),
-                    Span::raw(" / "),
-                    Span::styled(format!("{}", leeches), Style::default().fg(theme::RED)),
-                    Span::raw(")"),
-                ])),
-                detail_rows[2],
-            );
-
-            let written_size_spans =
-                if state.number_of_pieces_completed < state.number_of_pieces_total {
-                    vec![
-                        Span::styled("Written:  ", Style::default().fg(theme::TEXT)),
-                        Span::raw(format_bytes(state.bytes_written)),
-                        Span::raw(format!(" / {}", format_bytes(state.total_size))),
-                    ]
                 } else {
-                    vec![
-                        Span::styled("Size:     ", Style::default().fg(theme::TEXT)),
-                        Span::raw(format_bytes(state.total_size)),
-                    ]
-                };
-            f.render_widget(
-                Paragraph::new(Line::from(written_size_spans)),
-                detail_rows[3],
-            );
-
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("Pieces:   ", Style::default().fg(theme::TEXT)),
-                    Span::raw(format!(
-                        "{}/{}",
-                        state.number_of_pieces_completed, state.number_of_pieces_total
-                    )),
-                ])),
-                detail_rows[4],
-            );
-
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("ETA:      ", Style::default().fg(theme::TEXT)),
-                    Span::raw(format_duration(state.eta)),
-                ])),
-                detail_rows[5],
-            );
-
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("Announce: ", Style::default().fg(theme::TEXT)),
-                    Span::raw(format_countdown(state.next_announce_in)),
-                ])),
-                detail_rows[6],
-            );
-        }
-    }
-}
-
-fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
-    if peers_chunk.height < 2 || peers_chunk.width < 2 {
-        return;
-    }
-
-    if let Some(info_hash) = app_state
-        .torrent_list_order
-        .get(app_state.selected_torrent_index)
-    {
-        if let Some(torrent) = app_state.torrents.get(info_hash) {
-            let state = &torrent.latest_state;
-
-            if peers_chunk.height > 0 {
-                let has_established_peers =
-                    state.peers.iter().any(|p| p.last_action != "Connecting...");
-
-                let mut peers_to_display: Vec<PeerInfo> = if has_established_peers {
-                    state
-                        .peers
-                        .iter()
-                        .filter(|p| p.last_action != "Connecting...")
-                        .cloned()
-                        .collect()
-                } else {
-                    state.peers.clone()
-                };
-
-                let (sort_by, sort_direction) = app_state.peer_sort;
-                peers_to_display.sort_by(|a, b| {
-                    use crate::config::PeerSortColumn::*;
-                    let ordering = match sort_by {
-                        Flags => a.peer_choking.cmp(&b.peer_choking),
-                        Completed => {
-                            let total = state.number_of_pieces_total as usize;
-                            if total == 0 {
-                                std::cmp::Ordering::Equal
-                            } else {
-                                let a_c = a.bitfield.iter().take(total).filter(|&&h| h).count();
-                                let b_c = b.bitfield.iter().take(total).filter(|&&h| h).count();
-                                a_c.cmp(&b_c)
-                            }
-                        }
-                        Address => a.address.cmp(&b.address),
-                        Client => a.peer_id.cmp(&b.peer_id),
-                        Action => a.last_action.cmp(&b.last_action),
-                        DL => a.download_speed_bps.cmp(&b.download_speed_bps),
-                        UL => a.upload_speed_bps.cmp(&b.upload_speed_bps),
-                    };
-                    if sort_direction == SortDirection::Ascending {
-                        ordering
-                    } else {
-                        ordering.reverse()
-                    }
-                });
-
-                let all_peer_cols = get_peer_columns();
-                let smart_cols: Vec<SmartCol> = all_peer_cols
-                    .iter()
-                    .map(|c| SmartCol {
-                        min_width: c.min_width,
-                        priority: c.priority,
-                        constraint: c.default_constraint,
-                    })
-                    .collect();
-
-                let (constraints, visible_indices) =
-                    compute_smart_table_layout(&smart_cols, peers_chunk.width, 1);
-
-                let peer_border_style =
-                    if matches!(app_state.selected_header, SelectedHeader::Peer(_)) {
-                        Style::default().fg(theme::MAUVE)
-                    } else {
-                        Style::default().fg(theme::SURFACE2)
-                    };
-
-                if peers_to_display.is_empty() {
-                    draw_swarm_heatmap(f, &state.peers, state.number_of_pieces_total, peers_chunk);
-                } else {
-                    let header_cells: Vec<Cell> = visible_indices
-                        .iter()
-                        .enumerate()
-                        .map(|(visual_idx, &real_idx)| {
-                            let def = &all_peer_cols[real_idx];
-
-                            let is_selected =
-                                app_state.selected_header == SelectedHeader::Peer(visual_idx);
-                            let is_sorting = def.sort_enum == Some(sort_by);
-
-                            let mut style = Style::default().fg(theme::YELLOW);
-                            if is_sorting {
-                                style = style.fg(theme::MAUVE);
-                            }
-
-                            let mut text = def.header.to_string();
-                            if is_sorting {
-                                text.push_str(if sort_direction == SortDirection::Ascending {
-                                    " ▲"
-                                } else {
-                                    " ▼"
-                                });
-                            }
-
-                            let mut span = Span::styled(text, style);
-                            if is_selected {
-                                span = span.underlined().bold();
-                            }
-                            Cell::from(Line::from(vec![span]))
-                        })
-                        .collect();
-
-                    let peer_header = Row::new(header_cells).height(1);
-
-                    let peer_rows = peers_to_display.iter().map(|peer| {
-                        let row_color =
-                            if peer.download_speed_bps == 0 && peer.upload_speed_bps == 0 {
-                                theme::SURFACE1
-                            } else {
-                                ip_to_color(&peer.address)
-                            };
-
-                        let cells: Vec<Cell> = visible_indices
-                            .iter()
-                            .map(|&real_idx| {
-                                let def = &all_peer_cols[real_idx];
-                                match def.id {
-                                    PeerColumnId::Flags => Line::from(vec![
-                                        Span::styled(
-                                            "■",
-                                            Style::default().fg(if peer.am_interested {
-                                                theme::SAPPHIRE
-                                            } else {
-                                                theme::SURFACE1
-                                            }),
-                                        ),
-                                        Span::styled(
-                                            "■",
-                                            Style::default().fg(if peer.peer_choking {
-                                                theme::MAROON
-                                            } else {
-                                                theme::SURFACE1
-                                            }),
-                                        ),
-                                        Span::styled(
-                                            "■",
-                                            Style::default().fg(if peer.peer_interested {
-                                                theme::TEAL
-                                            } else {
-                                                theme::SURFACE1
-                                            }),
-                                        ),
-                                        Span::styled(
-                                            "■",
-                                            Style::default().fg(if peer.am_choking {
-                                                theme::PEACH
-                                            } else {
-                                                theme::SURFACE1
-                                            }),
-                                        ),
-                                    ])
-                                    .into(),
-                                    PeerColumnId::Address => {
-                                        let display = if app_state.anonymize_torrent_names {
-                                            "xxx.xxx..."
-                                        } else {
-                                            &peer.address
-                                        };
-                                        Cell::from(display.to_string())
-                                    }
-                                    PeerColumnId::Client => {
-                                        Cell::from(parse_peer_id(&peer.peer_id))
-                                    }
-                                    PeerColumnId::Action => Cell::from(peer.last_action.clone()),
-                                    PeerColumnId::Progress => {
-                                        let total = state.number_of_pieces_total as usize;
-                                        let pct = if total > 0 {
-                                            let c = peer
-                                                .bitfield
-                                                .iter()
-                                                .take(total)
-                                                .filter(|&&b| b)
-                                                .count();
-                                            (c as f64 / total as f64) * 100.0
-                                        } else {
-                                            0.0
-                                        };
-                                        Cell::from(format!("{:.0}%", pct))
-                                    }
-                                    PeerColumnId::DownSpeed => {
-                                        if peers_chunk.width > 120 {
-                                            Cell::from(format!(
-                                                "{} ({})",
-                                                format_speed(peer.download_speed_bps),
-                                                format_bytes(peer.total_downloaded)
-                                            ))
-                                        } else {
-                                            Cell::from(format_speed(peer.download_speed_bps))
-                                        }
-                                    }
-                                    PeerColumnId::UpSpeed => {
-                                        if peers_chunk.width > 120 {
-                                            Cell::from(format!(
-                                                "{} ({})",
-                                                format_speed(peer.upload_speed_bps),
-                                                format_bytes(peer.total_uploaded)
-                                            ))
-                                        } else {
-                                            Cell::from(format_speed(peer.upload_speed_bps))
-                                        }
-                                    }
-                                }
-                            })
-                            .collect();
-                        Row::new(cells).style(Style::default().fg(row_color))
-                    });
-
-                    let peers_table = Table::new(peer_rows, constraints)
-                        .header(peer_header)
-                        .block(Block::default());
-
-                    let table_rows_needed: u16 = 1 + peers_to_display.len() as u16;
-                    let peer_block_height_needed: u16 = table_rows_needed + 1;
-                    let remaining_height =
-                        peers_chunk.height.saturating_sub(peer_block_height_needed);
-                    const MIN_HEATMAP_HEIGHT: u16 = 4;
-
-                    let peers_block = Block::default()
-                        .padding(Padding::new(1, 1, 0, 0))
-                        .border_style(peer_border_style);
-
-                    if remaining_height >= MIN_HEATMAP_HEIGHT {
-                        let layout_chunks = Layout::vertical([
-                            Constraint::Length(peer_block_height_needed),
-                            Constraint::Min(0),
-                        ])
-                        .split(peers_chunk);
-                        let inner_peers_area = peers_block.inner(layout_chunks[0]);
-                        f.render_widget(peers_block, layout_chunks[0]);
-                        f.render_widget(peers_table, inner_peers_area);
-                        draw_swarm_heatmap(
-                            f,
-                            &state.peers,
-                            state.number_of_pieces_total,
-                            layout_chunks[1],
-                        );
-                    } else {
-                        let inner_peers_area = peers_block.inner(peers_chunk);
-                        f.render_widget(peers_block, peers_chunk);
-                        f.render_widget(peers_table, inner_peers_area);
-                    }
+                    (s, l + 1)
                 }
-            }
-        }
+            });
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Peers:    ", Style::default().fg(theme::TEXT)),
+                Span::raw(format!(
+                    "{} (",
+                    state.number_of_successfully_connected_peers
+                )),
+                Span::styled(format!("{}", seeds), Style::default().fg(theme::GREEN)),
+                Span::raw(" / "),
+                Span::styled(format!("{}", leeches), Style::default().fg(theme::RED)),
+                Span::raw(")"),
+            ])),
+            detail_rows[2],
+        );
+
+        let written_size_spans = if state.number_of_pieces_completed < state.number_of_pieces_total
+        {
+            vec![
+                Span::styled("Written:  ", Style::default().fg(theme::TEXT)),
+                Span::raw(format_bytes(state.bytes_written)),
+                Span::raw(format!(" / {}", format_bytes(state.total_size))),
+            ]
+        } else {
+            vec![
+                Span::styled("Size:     ", Style::default().fg(theme::TEXT)),
+                Span::raw(format_bytes(state.total_size)),
+            ]
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(written_size_spans)),
+            detail_rows[3],
+        );
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Pieces:   ", Style::default().fg(theme::TEXT)),
+                Span::raw(format!(
+                    "{}/{}",
+                    state.number_of_pieces_completed, state.number_of_pieces_total
+                )),
+            ])),
+            detail_rows[4],
+        );
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("ETA:      ", Style::default().fg(theme::TEXT)),
+                Span::raw(format_duration(state.eta)),
+            ])),
+            detail_rows[5],
+        );
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Announce: ", Style::default().fg(theme::TEXT)),
+                Span::raw(format_countdown(state.next_announce_in)),
+            ])),
+            detail_rows[6],
+        );
+    } else {
+        let placeholder_style = Style::default().fg(theme::OVERLAY0);
+        let label_style = Style::default().fg(theme::SURFACE2);
+
+        // Row 0: Progress
+        let progress_chunks =
+            Layout::horizontal([Constraint::Length(11), Constraint::Min(0)]).split(detail_rows[0]);
+        f.render_widget(
+            Paragraph::new("Progress: ").style(label_style),
+            progress_chunks[0],
+        );
+        let line_gauge = LineGauge::default()
+            .ratio(0.0)
+            .label(" --.--%")
+            .style(placeholder_style);
+        f.render_widget(line_gauge, progress_chunks[1]);
+
+        // Row 1: Status
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Status:   ", label_style),
+                Span::styled("No Selection", placeholder_style),
+            ])),
+            detail_rows[1],
+        );
+
+        // Row 2: Peers
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Peers:    ", label_style),
+                Span::styled("- (- / -)", placeholder_style),
+            ])),
+            detail_rows[2],
+        );
+
+        // Row 3: Size
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Size:     ", label_style),
+                Span::styled("- / -", placeholder_style),
+            ])),
+            detail_rows[3],
+        );
+
+        // Row 4: Pieces
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Pieces:   ", label_style),
+                Span::styled("- / -", placeholder_style),
+            ])),
+            detail_rows[4],
+        );
+
+        // Row 5: ETA
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("ETA:      ", label_style),
+                Span::styled("--:--:--", placeholder_style),
+            ])),
+            detail_rows[5],
+        );
+
+        // Row 6: Announce
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Announce: ", label_style),
+                Span::styled("--s", placeholder_style),
+            ])),
+            detail_rows[6],
+        );
     }
 }
 
 fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_chunk: Rect) {
     let show_branding = footer_chunk.width >= 80;
 
-    let footer_layout = if show_branding {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Min(30),    // Fixed space for Branding
-                Constraint::Min(0),     // Center takes all remaining space
-                Constraint::Length(21), // Fixed space for Port Status
-            ])
-            .split(footer_chunk)
+    // 1. DETERMINE CONTENT WIDTHS
+    // Calculate how much space the Left Side (Branding/Update) actually needs.
+    let is_update = app_state.update_available.is_some();
+    let left_content_width = if is_update {
+        48 // "UPDATE AVAILABLE: v0.9.32 -> v0.9.33 | 1 FPS"
     } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(0),  // Hidden
-                Constraint::Min(0),     // Maximize center
-                Constraint::Length(21), // Keep Status
-            ])
-            .split(footer_chunk)
+        28 // "superseedr v0.9.32 | 1 FPS"
     };
+
+    // 2. CALCULATE SYMMETRY
+    // To keep the middle commands centered on the *screen*, the Left and Right columns
+    // must have the same width. The Right column content is small (21 chars),
+    // but we pad it to match the Left.
+    let (left_constraint, right_constraint) = if show_branding {
+        // Check if we have enough room to be symmetric without crushing the middle commands.
+        // We want at least ~40 chars for the middle commands.
+        let required_width_for_symmetry = (left_content_width * 2) + 40;
+
+        if footer_chunk.width >= required_width_for_symmetry {
+            // Case A: Wide Screen -> Force Perfect Symmetry
+            // We give the Right side the same width as the Left, so the Middle is perfectly centered.
+            (
+                Constraint::Length(left_content_width),
+                Constraint::Length(left_content_width),
+            )
+        } else {
+            // Case B: Narrow Screen -> Prioritize Content Fitting
+            // If space is tight, we give the Right side only what it needs (21).
+            // The middle won't be perfectly screen-centered, but it won't be crushed.
+            (
+                Constraint::Length(left_content_width),
+                Constraint::Length(21),
+            )
+        }
+    } else {
+        // Case C: Mobile/Tiny Screen -> Hide Left completely
+        (Constraint::Length(0), Constraint::Length(21))
+    };
+
+    let footer_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            left_constraint,    // Left (Branding)
+            Constraint::Min(0), // Middle (Commands)
+            right_constraint,   // Right (Status)
+        ])
+        .split(footer_chunk);
 
     let client_id_chunk = footer_layout[0];
     let commands_chunk = footer_layout[1];
     let status_chunk = footer_layout[2];
 
-    // --- LEFT: Branding ---
+    // --- LEFT: Branding / Update ---
     if show_branding {
         let _current_dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
         let _current_ul_speed = *app_state.avg_upload_history.last().unwrap_or(&0);
 
         let client_display_line = if let Some(new_version) = &app_state.update_available {
-            // REPLACE branding with update message and crossed-out old version
             Line::from(vec![
                 Span::styled(
                     "UPDATE AVAILABLE: ",
@@ -1264,9 +1158,10 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
                         .fg(theme::SURFACE2)
                         .add_modifier(Modifier::CROSSED_OUT),
                 ),
+                Span::styled(" \u{2192} ", Style::default().fg(theme::SURFACE2)), // Arrow ->
                 Span::styled(
-                    format!(" v{}", new_version),
-                    Style::default().fg(theme::YELLOW).bold(),
+                    format!("v{}", new_version),
+                    Style::default().fg(theme::GREEN).bold(),
                 ),
                 Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
                 Span::styled(
@@ -1275,7 +1170,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
                 ),
             ])
         } else {
-            // Standard branding logic (Existing implementation)
+            // Standard branding logic
             #[cfg(all(feature = "dht", feature = "pex"))]
             {
                 Line::from(vec![
@@ -1367,7 +1262,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
         spans.extend(vec![
             Span::styled("Arrows", Style::default().fg(theme::BLUE)),
             Span::raw(" nav | "),
-            Span::styled("[q]", Style::default().fg(theme::RED)),
+            Span::styled("[Q]", Style::default().fg(theme::RED)),
             Span::raw("uit | "),
         ]);
     }
@@ -1386,7 +1281,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     }
 
     let footer_paragraph = Paragraph::new(Line::from(spans))
-        .alignment(Alignment::Center) // Center whatever commands fit
+        .alignment(Alignment::Center)
         .style(Style::default().fg(theme::SUBTEXT1));
     f.render_widget(footer_paragraph, commands_chunk);
 
@@ -1433,57 +1328,62 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let color_border = theme::SURFACE2;
     let color_axis = theme::OVERLAY0;
 
-    let y_discovered = 2.0;
-    let y_connected = 3.0;
-    let y_disconnected = 1.0;
+    let default_slice: Vec<u64> = Vec::new(); // Empty reference
 
-    let small_marker = Marker::Block;
-    let medium_marker = Marker::Block;
-    let large_marker = Marker::Block;
+    let (disc_slice, conn_slice, disconn_slice) = if let Some(torrent) = selected_torrent {
+        let width = area.width.saturating_sub(2).max(1) as usize;
+        let dh = &torrent.peer_discovery_history;
+        let ch = &torrent.peer_connection_history;
+        let dch = &torrent.peer_disconnect_history;
 
-    let Some(torrent) = selected_torrent else {
-        let block = Block::default()
-            .title(Span::styled(
-                "Peer Stream",
-                Style::default().fg(color_title),
-            ))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(color_border));
-        f.render_widget(block, area);
-        return;
+        (
+            &dh[dh.len().saturating_sub(width)..],
+            &ch[ch.len().saturating_sub(width)..],
+            &dch[dch.len().saturating_sub(width)..],
+        )
+    } else {
+        (&default_slice[..], &default_slice[..], &default_slice[..])
     };
-
-    let width = area.width.saturating_sub(2).max(1) as usize;
-
-    let disc_history = &torrent.peer_discovery_history;
-    let conn_history = &torrent.peer_connection_history;
-    let disconn_history = &torrent.peer_disconnect_history;
-
-    let disc_slice = &disc_history[disc_history.len().saturating_sub(width)..];
-    let conn_slice = &conn_history[conn_history.len().saturating_sub(width)..];
-    let disconn_slice = &disconn_history[disconn_history.len().saturating_sub(width)..];
 
     let discovered_count: u64 = disc_slice.iter().sum();
     let connected_count: u64 = conn_slice.iter().sum();
     let disconnected_count: u64 = disconn_slice.iter().sum();
 
+    // Use placeholder style for legend if count is 0 / no torrent
+    let legend_style_fn = |count: u64, color: Color| {
+        if selected_torrent.is_some() && count > 0 {
+            Style::default().fg(color)
+        } else {
+            Style::default().fg(theme::SURFACE1) // Greyed out
+        }
+    };
+
     let legend_line = Line::from(vec![
-        Span::styled("Connected:", Style::default().fg(color_connected)),
+        Span::styled(
+            "Connected:",
+            legend_style_fn(connected_count, color_connected),
+        ),
         Span::styled(
             connected_count.to_string(),
-            Style::default().fg(color_connected),
+            legend_style_fn(connected_count, color_connected),
         ),
         Span::raw(" "),
-        Span::styled("Discovered:", Style::default().fg(color_discovered)),
+        Span::styled(
+            "Discovered:",
+            legend_style_fn(discovered_count, color_discovered),
+        ),
         Span::styled(
             discovered_count.to_string(),
-            Style::default().fg(color_discovered),
+            legend_style_fn(discovered_count, color_discovered),
         ),
         Span::raw(" "),
-        Span::styled("Disconnected:", Style::default().fg(color_disconnected)),
+        Span::styled(
+            "Disconnected:",
+            legend_style_fn(disconnected_count, color_disconnected),
+        ),
         Span::styled(
             disconnected_count.to_string(),
-            Style::default().fg(color_disconnected),
+            legend_style_fn(disconnected_count, color_disconnected),
         ),
         Span::raw(" "),
     ]);
@@ -1492,14 +1392,23 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let max_conn = conn_slice.iter().max().copied().unwrap_or(1).max(1) as f64;
     let max_disconn = disconn_slice.iter().max().copied().unwrap_or(1).max(1) as f64;
 
+    // ... [Calculations for markers stay the same, they handle empty iterators gracefully] ...
+
+    let y_discovered = 2.0;
+    let y_connected = 3.0;
+    let y_disconnected = 1.0;
+
+    let small_marker = Marker::Block;
+    let medium_marker = Marker::Block;
+    let large_marker = Marker::Block;
+
     let mut disc_data_light = Vec::new();
     let mut disc_data_medium = Vec::new();
     let mut disc_data_dark = Vec::new();
-
+    // ... (Repeat for conn/disconn - code matches existing) ...
     let mut conn_data_light = Vec::new();
     let mut conn_data_medium = Vec::new();
     let mut conn_data_dark = Vec::new();
-
     let mut disconn_data_light = Vec::new();
     let mut disconn_data_medium = Vec::new();
     let mut disconn_data_dark = Vec::new();
@@ -1518,7 +1427,6 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
             disc_data_dark.push((i as f64, y_val));
         }
     }
-
     for (i, &v) in conn_slice.iter().enumerate() {
         if v == 0 {
             continue;
@@ -1533,7 +1441,6 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
             conn_data_dark.push((i as f64, y_val));
         }
     }
-
     for (i, &v) in disconn_slice.iter().enumerate() {
         if v == 0 {
             continue;
@@ -1621,6 +1528,9 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
             ),
     ];
 
+    // Bounds: X axis 0..width. If width=0 (empty), use 1.0 to avoid crash/ugly render
+    let x_bound = disc_slice.len().max(1).saturating_sub(1) as f64;
+
     let discovery_chart = Chart::new(datasets)
         .block(
             Block::default()
@@ -1638,7 +1548,7 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
         .x_axis(
             Axis::default()
                 .style(Style::default().fg(color_axis))
-                .bounds([0.0, disc_slice.len().saturating_sub(1) as f64]),
+                .bounds([0.0, x_bound]),
         )
         .y_axis(Axis::default().bounds([0.5, 3.5]));
 
@@ -2070,12 +1980,12 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
             .split(inner_area);
 
             // 1. Torrent Identity
-            let name = &torrent_to_delete.latest_state.torrent_name;
+            let name = sanitize_text(&torrent_to_delete.latest_state.torrent_name);
             let path = torrent_to_delete
                 .latest_state
                 .download_path
                 .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
+                .map(|p| sanitize_text(&p.to_string_lossy()))
                 .unwrap_or_else(|| "Unknown Path".to_string());
 
             f.render_widget(
@@ -2986,12 +2896,23 @@ fn draw_torrent_preview_panel(
 }
 
 fn draw_welcome_screen(f: &mut Frame) {
-    let text = vec![
-        Line::from(Span::styled(
-            "A BitTorrent Client in your Terminal",
-            Style::default().add_modifier(Modifier::ITALIC),
-        )),
-        Line::from(""),
+    let area = f.area();
+
+    // 1. Draw the Background first (The stars/lines)
+    draw_background_dust(f, area);
+
+    // --- SETUP CONTENT ---
+    let get_dims = |text: &str| -> (u16, u16) {
+        let h = text.lines().count() as u16;
+        let w = text.lines().map(|l| l.len()).max().unwrap_or(0) as u16;
+        (w, h)
+    };
+
+    let (w_large, h_large) = get_dims(LOGO_LARGE);
+    let (w_medium, h_medium) = get_dims(LOGO_MEDIUM);
+
+    // Define the Main Body Text
+    let text_lines = vec![
         Line::from(Span::styled(
             "How to Get Started:",
             Style::default().fg(theme::YELLOW).bold(),
@@ -3028,7 +2949,6 @@ fn draw_welcome_screen(f: &mut Frame) {
             Span::styled("CLI", Style::default().fg(theme::SKY).bold()),
             Span::raw(" from another terminal:"),
         ]),
-        // Sub-bullet 1: CLI Magnet
         Line::from(vec![
             Span::raw("      - magnet: "),
             Span::styled(
@@ -3036,7 +2956,6 @@ fn draw_welcome_screen(f: &mut Frame) {
                 Style::default().fg(theme::SURFACE2),
             ),
         ]),
-        // Sub-bullet 2: CLI Torrent File
         Line::from(vec![
             Span::raw("      - file:   "),
             Span::styled(
@@ -3065,71 +2984,148 @@ fn draw_welcome_screen(f: &mut Frame) {
                 Style::default().fg(theme::BLUE).underlined(),
             ),
         ]),
-        Line::from(""),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" [m] ", Style::default().fg(theme::TEAL)),
-            Span::styled("Manual/Help", Style::default().fg(theme::SUBTEXT1)),
-            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-            Span::styled(" [c] ", Style::default().fg(theme::MAUVE)),
-            Span::styled("Config", Style::default().fg(theme::SUBTEXT1)),
-            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-            Span::styled(" [q] ", Style::default().fg(theme::RED)), // Added Quit command
-            Span::styled("Quit", Style::default().fg(theme::SUBTEXT1)),
-            Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-            Span::styled(" [Esc] ", Style::default().fg(theme::RED)),
-            Span::styled("Dismiss", Style::default().fg(theme::SUBTEXT1)),
-        ]),
     ];
 
-    // ... (rest of the centering and rendering logic remains the same)
-    let text_height = text.len() as u16;
-    let text_width = text.iter().map(|line| line.width()).max().unwrap_or(0) as u16;
-    let horizontal_padding: u16 = 4;
-    let vertical_padding: u16 = 2;
-    let box_width = (text_width + horizontal_padding + 2).min(f.area().width);
-    let box_height = (text_height + vertical_padding + 2).min(f.area().height);
+    let footer_line = Line::from(vec![
+        Span::styled(" [m] ", Style::default().fg(theme::TEAL)),
+        Span::styled("Manual/Help", Style::default().fg(theme::SUBTEXT1)),
+        Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+        Span::styled(" [c] ", Style::default().fg(theme::MAUVE)),
+        Span::styled("Config", Style::default().fg(theme::SUBTEXT1)),
+        Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+        Span::styled(" [Q] ", Style::default().fg(theme::RED)),
+        Span::styled("Quit", Style::default().fg(theme::SUBTEXT1)),
+        Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+        Span::styled(" [Esc] ", Style::default().fg(theme::RED)),
+        Span::styled("Dismiss", Style::default().fg(theme::SUBTEXT1)),
+    ]);
+
+    let text_content_height = text_lines.len() as u16;
+    let text_content_width = text_lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
+    let footer_width = footer_line.width() as u16;
+
+    let box_vertical_gap = 1;
+    let box_horizontal_padding = 4;
+    let box_height_needed = text_content_height + box_vertical_gap + 1 + 2;
+
+    // --- DYNAMIC LOGO SELECTION ---
+    let gap_height = 1;
+    let available_height_for_logo = area
+        .height
+        .saturating_sub(box_height_needed + gap_height + 2);
+    let margin_x = 6;
+
+    let logo_text = if area.width >= (w_large + margin_x) && available_height_for_logo >= h_large {
+        LOGO_LARGE
+    } else if area.width >= (w_medium + margin_x) && available_height_for_logo >= h_medium {
+        LOGO_MEDIUM
+    } else {
+        LOGO_SMALL
+    };
+
+    let (logo_w, logo_h) = get_dims(logo_text);
+
+    // --- LAYOUT CALCULATION ---
+    let content_width_max = text_content_width
+        .max(footer_width)
+        .max(logo_w.min(text_content_width + 10));
+    let box_width = (content_width_max + box_horizontal_padding + 2).min(area.width);
+    let box_height = box_height_needed.min(area.height);
 
     let vertical_chunks = Layout::vertical([
         Constraint::Min(0),
+        Constraint::Length(logo_h),
+        Constraint::Length(gap_height),
         Constraint::Length(box_height),
         Constraint::Min(0),
     ])
-    .split(f.area());
-    let area = Layout::horizontal([
+    .split(area);
+
+    let logo_area = vertical_chunks[1];
+    let box_area = vertical_chunks[3];
+
+    let logo_layout = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(logo_w),
+        Constraint::Min(0),
+    ])
+    .split(logo_area);
+
+    let box_layout = Layout::horizontal([
         Constraint::Min(0),
         Constraint::Length(box_width),
         Constraint::Min(0),
     ])
-    .split(vertical_chunks[1])[1];
+    .split(box_area);
 
-    f.render_widget(Clear, area);
+    let final_logo_area = logo_layout[1];
+    let final_box_area = box_layout[1];
+
+    // --- RENDER ---
+
+    // A. Render Transparent Gradient Logo
+    // We cannot use `Paragraph` because it overwrites the background with spaces.
+    // Instead, we manually calculate positions and write only non-space characters
+    // to the buffer.
+    let buf = f.buffer_mut();
+    for (y_local, line) in logo_text.lines().enumerate() {
+        if y_local >= final_logo_area.height as usize {
+            break;
+        }
+
+        let y_global = final_logo_area.y + y_local as u16;
+
+        for (x_local, c) in line.chars().enumerate() {
+            if x_local >= final_logo_area.width as usize {
+                break;
+            }
+
+            // Skip spaces to allow background to show through
+            if c == ' ' {
+                continue;
+            }
+
+            let x_global = final_logo_area.x + x_local as u16;
+            let style = get_animated_style(x_local, y_local);
+
+            // Write directly to buffer
+            buf.set_string(x_global, y_global, c.to_string(), style);
+        }
+    }
+
+    // B. Render Content Box (Opaque)
+    // We clear the box area first because we WANT this to obscure the background stars
+    f.render_widget(Clear, final_box_area);
+
     let block = Block::default()
-        .title(Span::styled(
-            " Welcome to superseedr! ",
-            Style::default().fg(theme::MAUVE).bold(),
-        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::SURFACE2));
-    let inner_area = block.inner(area);
-    f.render_widget(block, area);
+    let inner_box = block.inner(final_box_area);
+    f.render_widget(block, final_box_area);
 
-    let vertical_chunks_inner = Layout::vertical([
+    let box_internal_chunks = Layout::vertical([
+        Constraint::Length(text_content_height),
         Constraint::Min(0),
-        Constraint::Length(text_height),
+        Constraint::Length(1),
+    ])
+    .split(inner_box);
+
+    let text_padding_layout = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(text_content_width),
         Constraint::Min(0),
     ])
-    .split(inner_area);
-    let horizontal_chunks_inner = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(text_width),
-        Constraint::Min(0),
-    ])
-    .split(vertical_chunks_inner[1]);
-    let paragraph = Paragraph::new(text)
+    .split(box_internal_chunks[0]);
+
+    let text_paragraph = Paragraph::new(text_lines)
         .style(Style::default().fg(theme::TEXT))
         .alignment(Alignment::Left);
-    f.render_widget(paragraph, horizontal_chunks_inner[1]);
+
+    f.render_widget(text_paragraph, text_padding_layout[1]);
+
+    let footer_paragraph = Paragraph::new(footer_line).alignment(Alignment::Center);
+
+    f.render_widget(footer_paragraph, box_internal_chunks[2]);
 }
 
 fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
@@ -3263,7 +3259,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
                     Cell::from("Zoom out (decrease font size)"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("q", Style::default().fg(theme::RED))),
+                    Cell::from(Span::styled("Q (shift+q)", Style::default().fg(theme::RED))),
                     Cell::from("Quit the application"),
                 ]),
                 Row::new(vec![
@@ -3649,7 +3645,7 @@ fn draw_config_screen(
             Span::raw(" to edit. "),
             Span::styled("[r]", Style::default().fg(theme::YELLOW)),
             Span::raw("eset to default. "),
-            Span::styled("[Esc]|[q]", Style::default().fg(theme::GREEN)),
+            Span::styled("[Esc]|[Q]", Style::default().fg(theme::GREEN)),
             Span::raw(" to Save & Exit, "),
         ])
     };
@@ -3658,6 +3654,265 @@ fn draw_config_screen(
         .alignment(Alignment::Center)
         .style(Style::default().fg(theme::SUBTEXT1));
     f.render_widget(footer_paragraph, footer_area);
+}
+
+fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
+    if peers_chunk.height < 2 || peers_chunk.width < 2 {
+        return;
+    }
+
+    if let Some(info_hash) = app_state
+        .torrent_list_order
+        .get(app_state.selected_torrent_index)
+    {
+        if let Some(torrent) = app_state.torrents.get(info_hash) {
+            let state = &torrent.latest_state;
+
+            if peers_chunk.height > 0 {
+                let has_established_peers =
+                    state.peers.iter().any(|p| p.last_action != "Connecting...");
+
+                let mut peers_to_display: Vec<PeerInfo> = if has_established_peers {
+                    state
+                        .peers
+                        .iter()
+                        .filter(|p| p.last_action != "Connecting...")
+                        .cloned()
+                        .collect()
+                } else {
+                    state.peers.clone()
+                };
+
+                let (sort_by, sort_direction) = app_state.peer_sort;
+                peers_to_display.sort_by(|a, b| {
+                    use crate::config::PeerSortColumn::*;
+                    let ordering = match sort_by {
+                        Flags => a.peer_choking.cmp(&b.peer_choking),
+                        Completed => {
+                            let total = state.number_of_pieces_total as usize;
+                            if total == 0 {
+                                std::cmp::Ordering::Equal
+                            } else {
+                                let a_c = a.bitfield.iter().take(total).filter(|&&h| h).count();
+                                let b_c = b.bitfield.iter().take(total).filter(|&&h| h).count();
+                                a_c.cmp(&b_c)
+                            }
+                        }
+                        Address => a.address.cmp(&b.address),
+                        Client => a.peer_id.cmp(&b.peer_id),
+                        Action => a.last_action.cmp(&b.last_action),
+                        DL => a.download_speed_bps.cmp(&b.download_speed_bps),
+                        UL => a.upload_speed_bps.cmp(&b.upload_speed_bps),
+                    };
+                    if sort_direction == SortDirection::Ascending {
+                        ordering
+                    } else {
+                        ordering.reverse()
+                    }
+                });
+
+                let all_peer_cols = get_peer_columns();
+                let smart_cols: Vec<SmartCol> = all_peer_cols
+                    .iter()
+                    .map(|c| SmartCol {
+                        min_width: c.min_width,
+                        priority: c.priority,
+                        constraint: c.default_constraint,
+                    })
+                    .collect();
+
+                let (constraints, visible_indices) =
+                    compute_smart_table_layout(&smart_cols, peers_chunk.width, 1);
+
+                let peer_border_style =
+                    if matches!(app_state.selected_header, SelectedHeader::Peer(_)) {
+                        Style::default().fg(theme::MAUVE)
+                    } else {
+                        Style::default().fg(theme::SURFACE2)
+                    };
+
+                if peers_to_display.is_empty() {
+                    draw_swarm_heatmap(f, &state.peers, state.number_of_pieces_total, peers_chunk);
+                } else {
+                    let header_cells: Vec<Cell> = visible_indices
+                        .iter()
+                        .enumerate()
+                        .map(|(visual_idx, &real_idx)| {
+                            let def = &all_peer_cols[real_idx];
+
+                            let is_selected =
+                                app_state.selected_header == SelectedHeader::Peer(visual_idx);
+                            let is_sorting = def.sort_enum == Some(sort_by);
+
+                            let mut style = Style::default().fg(theme::YELLOW);
+                            if is_sorting {
+                                style = style.fg(theme::MAUVE);
+                            }
+
+                            let mut text = def.header.to_string();
+                            if is_sorting {
+                                text.push_str(if sort_direction == SortDirection::Ascending {
+                                    " ▲"
+                                } else {
+                                    " ▼"
+                                });
+                            }
+
+                            let mut span = Span::styled(text, style);
+                            if is_selected {
+                                span = span.underlined().bold();
+                            }
+                            Cell::from(Line::from(vec![span]))
+                        })
+                        .collect();
+
+                    let peer_header = Row::new(header_cells).height(1);
+
+                    let peer_rows = peers_to_display.iter().map(|peer| {
+                        let row_color =
+                            if peer.download_speed_bps == 0 && peer.upload_speed_bps == 0 {
+                                theme::SURFACE1
+                            } else {
+                                ip_to_color(&peer.address)
+                            };
+
+                        let cells: Vec<Cell> = visible_indices
+                            .iter()
+                            .map(|&real_idx| {
+                                let def = &all_peer_cols[real_idx];
+                                match def.id {
+                                    PeerColumnId::Flags => Line::from(vec![
+                                        Span::styled(
+                                            "■",
+                                            Style::default().fg(if peer.am_interested {
+                                                theme::SAPPHIRE
+                                            } else {
+                                                theme::SURFACE1
+                                            }),
+                                        ),
+                                        Span::styled(
+                                            "■",
+                                            Style::default().fg(if peer.peer_choking {
+                                                theme::MAROON
+                                            } else {
+                                                theme::SURFACE1
+                                            }),
+                                        ),
+                                        Span::styled(
+                                            "■",
+                                            Style::default().fg(if peer.peer_interested {
+                                                theme::TEAL
+                                            } else {
+                                                theme::SURFACE1
+                                            }),
+                                        ),
+                                        Span::styled(
+                                            "■",
+                                            Style::default().fg(if peer.am_choking {
+                                                theme::PEACH
+                                            } else {
+                                                theme::SURFACE1
+                                            }),
+                                        ),
+                                    ])
+                                    .into(),
+                                    PeerColumnId::Address => {
+                                        let display = if app_state.anonymize_torrent_names {
+                                            "xxx.xxx.xxx"
+                                        } else {
+                                            &peer.address
+                                        };
+                                        Cell::from(display.to_string())
+                                    }
+                                    PeerColumnId::Client => {
+                                        let raw_client = parse_peer_id(&peer.peer_id);
+                                        Cell::from(sanitize_text(&raw_client))
+                                    }
+                                    PeerColumnId::Action => Cell::from(peer.last_action.clone()),
+                                    PeerColumnId::Progress => {
+                                        let total = state.number_of_pieces_total as usize;
+                                        let pct = if total > 0 {
+                                            let c = peer
+                                                .bitfield
+                                                .iter()
+                                                .take(total)
+                                                .filter(|&&b| b)
+                                                .count();
+                                            (c as f64 / total as f64) * 100.0
+                                        } else {
+                                            0.0
+                                        };
+                                        Cell::from(format!("{:.0}%", pct))
+                                    }
+                                    PeerColumnId::DownSpeed => {
+                                        if peers_chunk.width > 120 {
+                                            Cell::from(format!(
+                                                "{} ({})",
+                                                format_speed(peer.download_speed_bps),
+                                                format_bytes(peer.total_downloaded)
+                                            ))
+                                        } else {
+                                            Cell::from(format_speed(peer.download_speed_bps))
+                                        }
+                                    }
+                                    PeerColumnId::UpSpeed => {
+                                        if peers_chunk.width > 120 {
+                                            Cell::from(format!(
+                                                "{} ({})",
+                                                format_speed(peer.upload_speed_bps),
+                                                format_bytes(peer.total_uploaded)
+                                            ))
+                                        } else {
+                                            Cell::from(format_speed(peer.upload_speed_bps))
+                                        }
+                                    }
+                                }
+                            })
+                            .collect();
+                        Row::new(cells).style(Style::default().fg(row_color))
+                    });
+
+                    let peers_table = Table::new(peer_rows, constraints)
+                        .header(peer_header)
+                        .block(Block::default());
+
+                    let table_rows_needed: u16 = 1 + peers_to_display.len() as u16;
+                    let peer_block_height_needed: u16 = table_rows_needed + 1;
+                    let remaining_height =
+                        peers_chunk.height.saturating_sub(peer_block_height_needed);
+                    const MIN_HEATMAP_HEIGHT: u16 = 4;
+
+                    let peers_block = Block::default()
+                        .padding(Padding::new(1, 1, 0, 0))
+                        .border_style(peer_border_style);
+
+                    if remaining_height >= MIN_HEATMAP_HEIGHT {
+                        let layout_chunks = Layout::vertical([
+                            Constraint::Length(peer_block_height_needed),
+                            Constraint::Min(0),
+                        ])
+                        .split(peers_chunk);
+                        let inner_peers_area = peers_block.inner(layout_chunks[0]);
+                        f.render_widget(peers_block, layout_chunks[0]);
+                        f.render_widget(peers_table, inner_peers_area);
+                        draw_swarm_heatmap(
+                            f,
+                            &state.peers,
+                            state.number_of_pieces_total,
+                            layout_chunks[1],
+                        );
+                    } else {
+                        let inner_peers_area = peers_block.inner(peers_chunk);
+                        f.render_widget(peers_block, peers_chunk);
+                        f.render_widget(peers_table, inner_peers_area);
+                    }
+                }
+            }
+        }
+    } else {
+        // [UPDATED] No torrent selected: draw a placeholder heatmap
+        draw_swarm_heatmap(f, &[], 0, peers_chunk);
+    }
 }
 
 fn draw_swarm_heatmap(f: &mut Frame, peers: &[PeerInfo], total_pieces: u32, area: Rect) {
@@ -3744,16 +3999,22 @@ fn draw_swarm_heatmap(f: &mut Frame, peers: &[PeerInfo], total_pieces: u32, area
     f.render_widget(block, area);
 
     if total_pieces_usize == 0 {
-        let center_text = Paragraph::new("Waiting for metadata...")
-            .style(Style::default().fg(theme::SUBTEXT1))
-            .alignment(Alignment::Center);
-        let vertical_chunks = Layout::vertical([
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .split(inner_area);
-        f.render_widget(center_text, vertical_chunks[1]);
+        // [UPDATED] Render a fake greyed-out heatmap grid
+        let available_width = inner_area.width as usize;
+        let available_height = inner_area.height as usize;
+        let mut lines = Vec::with_capacity(available_height);
+
+        // Fill with light shades in a dim color to represent empty slots
+        for _ in 0..available_height {
+            let row_str = shade_light.repeat(available_width);
+            lines.push(Line::from(Span::styled(
+                row_str,
+                Style::default().fg(theme::SURFACE1),
+            )));
+        }
+
+        let heatmap = Paragraph::new(lines);
+        f.render_widget(heatmap, inner_area);
         return;
     }
 
@@ -3871,6 +4132,135 @@ fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
     };
 
     (current_level, ratio.clamp(0.0, 1.0))
+}
+
+// Keep your existing blend_colors function
+fn blend_colors(c1: (u8, u8, u8), c2: (u8, u8, u8), ratio: f64) -> Color {
+    let r = (c1.0 as f64 * (1.0 - ratio) + c2.0 as f64 * ratio) as u8;
+    let g = (c1.1 as f64 * (1.0 - ratio) + c2.1 as f64 * ratio) as u8;
+    let b = (c1.2 as f64 * (1.0 - ratio) + c2.2 as f64 * ratio) as u8;
+    Color::Rgb(r, g, b)
+}
+
+fn get_animated_style(x: usize, y: usize) -> Style {
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+
+    // 1. Diagonal Flow Logic (Same physics, new feel)
+    let speed = 3.0;
+    let freq_x = 0.1;
+    let freq_y = 0.2;
+    let phase = (x as f64 * freq_x) + (y as f64 * freq_y) - (time * speed);
+    let ratio = (phase.sin() + 1.0) / 2.0;
+
+    // 2. Block Stream Colors
+    // Blue (Inflow) -> Green (Outflow)
+    let color_blue = (137, 180, 250); // Matches theme::BLUE
+    let color_green = (166, 227, 161); // Matches theme::GREEN
+
+    // Blend between the two stream colors
+    let base_color = blend_colors(color_blue, color_green, ratio);
+
+    // 3. "Sparkle" Effect (The Block Stream Texture)
+    // We generate a pseudo-random value based on position + time
+    // This makes individual characters flicker like the block stream particles
+    let seed = (x as f64 * 13.0 + y as f64 * 29.0 + time * 15.0).sin();
+
+    if seed > 0.85 {
+        // High energy sparkle: White/Bright + Bold (Active Data)
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else if seed > 0.5 {
+        // Medium energy: Base Color + Bold
+        Style::default().fg(base_color).add_modifier(Modifier::BOLD)
+    } else {
+        // Low energy: Base Color + Dim (Background Flow)
+        Style::default().fg(base_color).add_modifier(Modifier::DIM)
+    }
+}
+
+// Updated: 3-Layer Parallax "Data Field" Background
+fn draw_background_dust(f: &mut Frame, area: Rect) {
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+
+    let width = area.width as usize;
+    let height = area.height as usize;
+
+    // We render the whole buffer into lines
+    let mut lines = Vec::with_capacity(height);
+
+    // --- CONFIGURATION ---
+    // Movement: Positive X = Right, Positive Y = Up (we subtract Y to move up)
+    let move_angle_x = 0.8;
+    let move_angle_y = 0.4;
+
+    for y in 0..height {
+        let mut spans = Vec::with_capacity(width);
+        for x in 0..width {
+            // --- LAYER 3: FOREGROUND (Fast, Bright, Rare) ---
+            // Simulates close "data packets" flying by
+            let speed_3 = 4.0;
+            let pos_x_3 = x as f64 - (time * speed_3 * move_angle_x);
+            let pos_y_3 = y as f64 + (time * speed_3 * move_angle_y);
+
+            // High threshold for sparsity
+            let noise_3 = (pos_x_3 * 0.73 + pos_y_3 * 0.19).sin() * (pos_y_3 * 1.3).cos();
+            if noise_3 > 0.985 {
+                spans.push(Span::styled(
+                    "+", // Distinctive shape
+                    Style::default()
+                        .fg(theme::GREEN)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                continue; // Pixel filled, skip to next x
+            }
+
+            // --- LAYER 2: MIDGROUND (Medium, Blue, Common) ---
+            // The bulk of the "network traffic"
+            let speed_2 = 4.0;
+            let pos_x_2 = x as f64 - (time * speed_2 * move_angle_x);
+            let pos_y_2 = y as f64 + (time * speed_2 * move_angle_y);
+
+            let noise_2 = (pos_x_2 * 0.3 + pos_y_2 * 0.8).sin() * (pos_x_2 * 0.4).cos();
+            if noise_2 > 0.95 {
+                spans.push(Span::styled(
+                    "·",
+                    Style::default().fg(theme::BLUE), // Standard Dim Blue
+                ));
+                continue;
+            }
+
+            // --- LAYER 1: BACKGROUND (Slow, Dim, Dense) ---
+            // Creates the sense of a deep void/starfield far away
+            let speed_1 = 1.5;
+            let pos_x_1 = x as f64 - (time * speed_1 * move_angle_x);
+            let pos_y_1 = y as f64 + (time * speed_1 * move_angle_y);
+
+            let noise_1 = (pos_x_1 * 0.15 + pos_y_1 * 0.15).sin();
+            if noise_1 > 0.96 {
+                spans.push(Span::styled(
+                    ".",
+                    Style::default()
+                        .fg(theme::SURFACE2)
+                        .add_modifier(Modifier::DIM),
+                ));
+                continue;
+            }
+
+            // Empty space
+            spans.push(Span::raw(" "));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let p = Paragraph::new(lines);
+    f.render_widget(p, area);
 }
 
 #[cfg(test)]
