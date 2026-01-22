@@ -5,7 +5,7 @@ use ratatui::symbols::Marker;
 use ratatui::{prelude::*, symbols, widgets::*};
 
 use crate::tui::formatters::*;
-use crate::tui::layout::calculate_file_browser_layout; // Import the new function
+use crate::tui::layout::calculate_file_browser_layout;
 use crate::tui::layout::{get_torrent_columns, ColumnId};
 use crate::tui::tree;
 use crate::tui::tree::{TreeFilter, TreeMathHelper};
@@ -35,7 +35,6 @@ static APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SECONDS_HISTORY_MAX: usize = 3600;
 pub const MINUTES_HISTORY_MAX: usize = 48 * 60;
 
-// 1. Define the ASCII Art Constants
 const LOGO_LARGE: &str = r#"
                                                              __          
                                                             /\ \         
@@ -347,7 +346,6 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
     let table = Table::new(rows, constraints).header(header).block(block);
     f.render_stateful_widget(table, area, &mut table_state);
 
-    // [UPDATED] Show placeholder text if list is empty
     if app_state.torrent_list_order.is_empty() {
         let empty_msg = vec![
             Line::from(Span::styled(
@@ -670,7 +668,6 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
             Span::styled("Run Time: ", Style::default().fg(theme::TEAL)),
             Span::raw(format_time(app_state.run_time)),
         ]),
-        // --- UPDATED: Torrents Line with Size ---
         Line::from(vec![
             Span::styled("Torrents: ", Style::default().fg(theme::PEACH)),
             Span::raw(format!(
@@ -884,7 +881,6 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
     ])
     .split(details_inner_chunk);
 
-    // [UPDATED] Check for selected torrent, otherwise use placeholders
     let selected_torrent = app_state
         .torrent_list_order
         .get(app_state.selected_torrent_index)
@@ -1018,7 +1014,6 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
             detail_rows[6],
         );
     } else {
-        // [UPDATED] Render Placeholder Values
         let placeholder_style = Style::default().fg(theme::OVERLAY0);
         let label_style = Style::default().fg(theme::SURFACE2);
 
@@ -1098,7 +1093,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     // Calculate how much space the Left Side (Branding/Update) actually needs.
     let is_update = app_state.update_available.is_some();
     let left_content_width = if is_update {
-        45 // "UPDATE AVAILABLE: v0.9.32 -> v0.9.33 | 1 FPS"
+        48 // "UPDATE AVAILABLE: v0.9.32 -> v0.9.33 | 1 FPS"
     } else {
         28 // "superseedr v0.9.32 | 1 FPS"
     };
@@ -1332,10 +1327,6 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let color_title = theme::SUBTEXT0;
     let color_border = theme::SURFACE2;
     let color_axis = theme::OVERLAY0;
-
-    // [UPDATED] Removed the early return.
-    // Now we initialize empty slices if no torrent is selected
-    // to render the chart grid/axes as a placeholder.
 
     let default_slice: Vec<u64> = Vec::new(); // Empty reference
 
