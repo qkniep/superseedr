@@ -4,35 +4,30 @@
   <img alt="Superseedr Logo" src="https://raw.githubusercontent.com/Jagalite/superseedr-assets/main/superseedr_logo.gif">
 </picture>
 
-# A Pure Rust BitTorrent Client in your Terminal
+# A BitTorrent Client in your Terminal
 
-[![Rust](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml) [![Nightly Fuzzing](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml) ![Verification](https://img.shields.io/badge/Logic_Verification-Model--Based_Fuzzing-blueviolet?style=flat-square)
+[![Rust](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml) [![Nightly Fuzzing](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml)
 
-![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr) [![crates.io](https://img.shields.io/crates/v/superseedr)](https://crates.io/crates/superseedr) [![crates.io](https://img.shields.io/crates/d/superseedr)](https://crates.io/crates/superseedr) [![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/) <a title="This tool is Tool of The Week on Terminal Trove, The $HOME of all things in the terminal" href="https://terminaltrove.com/"><img src="https://cdn.terminaltrove.com/media/badges/tool_of_the_week/png/terminal_trove_tool_of_the_week_gold_transparent.png" alt="Terminal Trove Tool of The Week" /></a>
+![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr) [![crates.io](https://img.shields.io/crates/d/superseedr)](https://crates.io/crates/superseedr) [![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/) <a title="This tool is Tool of The Week on Terminal Trove, The $HOME of all things in the terminal" href="https://terminaltrove.com/"><img src="https://cdn.terminaltrove.com/media/badges/tool_of_the_week/png/terminal_trove_tool_of_the_week_gold_transparent.png" alt="Terminal Trove Tool of The Week" /></a>
 
 Superseedr is a modern Rust BitTorrent client featuring a high-performance terminal UI, real-time swarm observability, secure VPN-aware Docker setups, and zero manual network configuration. It is fast, privacy-oriented, and built for both desktop users and homelab/server workflows.
 
 ![Feature Demo](https://github.com/Jagalite/superseedr-assets/blob/main/superseedr_landing.webp)
 
-### 🎯 Why Superseedr?
+## 🚀 Features at a Glance
 
-Superseedr brings BitTorrent into the modern terminal environment, focusing on speed, visibility, and reliability.
+| **Experience** | **Networking** | **Engineering** |
+| :--- | :--- | :--- |
+| 🎨 **60 FPS TUI**<br>Fluid, animated interface with heatmaps. | 🐳 **Docker + VPN**<br>Gluetun integration out of the box. | 🧬 **BitTorrent v2**<br>Hybrid swarms & Merkle tree verification. |
+| 📊 **Deep Analytics**<br>Real-time bandwidth graphs & peer metrics. | ⚓ **Auto-Bind**<br>Dynamic port reloading without restarts. | 🧠 **Self-Tuning**<br>Adaptive limits control for max speed and I/O Stability. |
+| 🧲 **Magnet Links**<br>Native OS-level handler support. | 👻 **Private Mode**<br>Optional builds disabling DHT/PEX. | ✅ **Verified Core**<br>Pure Rust, fuzz-tested for correctness. |
 
-* **Deep Swarm Analytics:** Moves beyond simple progress bars by providing high performance real-time heatmaps, peer metrics, and network graphs for complete swarm observability.
-* **Modern Rust Engine:** Leverages Rust and Model-Based Testing to ensure memory safety, high performance, and unparalleled reliability.
-* **Seamless Networking:** Designed for resilient connectivity, featuring automatic listener reloading for dynamic VPN ports to maintain uptime without manual intervention.
+### Terminal Torrenting With Superseedr
 
-## 🚀 Features
-- 🎨 Animated, high-performance TUI (1–60 FPS)
-- 🧲 OS-level magnet link support
-- 📊 Real-time network graphs and swarm analytics
-- 🔐 Official Docker + VPN setup with automatic port forwarding
-- 🔄 Dynamic inbound port reloading without restarting the client
-- ✅ Unparalleled Reliability & Correctness through Model-Based Testing
-- 🛡️ Private Tracker Builds without PEX and DHT
-- ⚡ Rust-based engine for performance and safety
-- 💾 Persistent state with crash recovery
-- 🧵 Peer-level metrics and availability heatmaps
+* **Pushing TUI Boundaries:** Experience a fluid, 60 FPS interface that feels like a native GUI, featuring smooth animations and high-density visualizations rarely seen in terminal apps.
+* **See What's Happening:** Diagnose slow downloads instantly with deep swarm analytics, heatmaps, and live bandwidth graphs.
+* **Set It and Forget It:** Automatic port forwarding and dynamic listener reloading in Docker ensure your connection stays alive, even if your VPN resets.
+* **Crash-Proof Design:** Leverages Rust's memory safety guarantees to run indefinitely on low-resource servers without leaks or instability.
 
 ## Installation
 
@@ -62,15 +57,22 @@ superseedr
 | `↑` `↓` `←` `→` | Navigate |
 | `c` | Configure Settings |
 
-> [!TIP]
-> Press `m` inside the app to see the full list of shortcuts, legends, and features.
-
 > [!TIP]  
 > Add torrents by clicking magnet links in your browser or opening .torrent files.
-> Copying and pasting (crtl + v) magnet links or paths to torrent files will also work.
+> Copying and pasting (ctrl + v) magnet links or paths to torrent files will also work.
 
-> [!NOTE]  
-> For optimal performance, consider increasing file descriptor limits: `ulimit -n 65536`
+## Troubleshooting
+
+**Connection or Disk issues?**
+- Check your firewall allows outbound connections
+- Increase file descriptor limit: `ulimit -n 65536`
+- For VPN users: Verify Gluetun is running and connected
+
+**Slow downloads?**
+- Enable port forwarding in your VPN settings
+- Check the swarm health in the TUI's analytics view
+
+**More help:** See the [FAQ](FAQ.md) or [open an issue](https://github.com/Jagalite/superseedr/issues)
 
 ## More Info
 - 🤝[Contributing](CONTRIBUTING.md): How you can contribute to the project (technical and non-technical).
@@ -79,7 +81,7 @@ superseedr
 - 🗺️[Roadmap](ROADMAP.md): Discover upcoming features and future plans for Superseedr.
 - 🧑‍🤝‍🧑[Code of Conduct](CODE_OF_CONDUCT.md): Understand the community standards and expectations.
 
-## ⚡ Docker Quick Start (Advanced)
+## 🐳 Docker Quick Start (Intermediate)
 ```bash
 # Docker (No VPN):
 # Uses internal container storage. Data persists until the container is removed.
@@ -91,7 +93,7 @@ docker compose up -d && docker compose attach superseedr
 
 ```
 
-## Running with Docker (Advanced)
+## Running with Docker
 
 Superseedr offers a fully secured Docker setup using Gluetun. All BitTorrent traffic is routed through a VPN tunnel with dynamic port forwarding and zero manual network configuration.
 
@@ -162,7 +164,6 @@ Superseedr can detect Gluetun’s updated port and reload the listener **live**,
 ```bash
 docker compose up -d && docker compose attach superseedr
 ```
-> [!TIP]
 > To detach from the TUI without stopping the container, use the Docker key sequence: `Ctrl+P` followed by `Ctrl+Q`.
 > **Optional:** press `[z]` first to enter power-saving mode.
 
@@ -177,8 +178,79 @@ This runs the client directly, exposing its port to your host. It's simpler but 
 ```bash
 docker compose -f docker-compose.standalone.yml up -d && docker compose attach superseedr
 ```
-> [!TIP]
 > To detach from the TUI without stopping the container, use the Docker key sequence: `Ctrl+P` followed by `Ctrl+Q`.
 > **Optional:** press `[z]` first to enter power-saving mode.
+
+</details>
+
+## 🧠 Advanced: Architecture & Engineering
+
+Superseedr is built on a **Reactive Actor** architecture verified by model-based fuzzing, ensuring stability under chaos. It features a **Self-Tuning Resource Allocator** that adapts to your hardware in real-time and a hybrid **BitTorrent v2** engine, all powered by asynchronous **Tokio** streams for maximum throughput.
+
+<details>
+<summary><strong>Click to expand technical internals</strong></summary>
+
+This section is designed for developers, contributors, and AI agents seeking to understand the internal design decisions that drive Superseedr's performance.
+
+### ⚡ Async Networking Core
+Superseedr is built on the **Tokio** runtime, leveraging asynchronous I/O for maximum concurrency.
+* **Full-Duplex Streams:** Every peer connection is split into independent **Reader** and **Writer** tasks (`tokio::io::split`). This allows the client to saturate download and upload bandwidth simultaneously without thread blocking or lock contention, ensuring the UI remains responsive even with thousands of active connections.
+* **Actor-Based Session Management:** Each peer operates as an isolated Actor. Communication between the network socket and the core logic happens exclusively via `mpsc` channels, meaning a slow or misbehaving peer cannot block the main event loop or affect other connections.
+* **Hot-Swappable Listeners:** The application runs an async file watcher (`notify`) on the VPN configuration volume. When **Gluetun** rotates the forwarded port, Superseedr detects the file change and instantly rebinds the TCP listener to the new port without dropping the swarm state or restarting the process.
+
+### 🔒 Security & Privacy Engineering
+* **VPN Isolation (Kill-Switch):** In the Docker Compose setup, Superseedr's network stack is fully routed through **Gluetun**. This guarantees that 100% of BitTorrent traffic traverses the VPN tunnel. If the tunnel drops, connectivity is cut immediately, preventing any IP leakage over the host connection.
+* **Binary-Level Private Mode:** Private tracker compliance is enforced at compile time, not just runtime. By building with `--no-default-features`, the DHT and Peer Exchange (PEX) modules are completely excluded from the binary, guaranteeing zero leakage of private swarms.
+
+### 🏗️ Reactive Actor Model & Verification
+The application logic abandons traditional mutex-heavy threading in favor of a **Functional Reactive** architecture.
+* **Deterministic State Machine:** The `TorrentManager` operates as a Finite State Machine (FSM). External events (Network I/O, Timer Ticks) are transmuted into `Action` enums, processed purely in memory, and result in a list of `Effects`.
+* **Chaos Engineering:** We validate this core logic using **Model-Based Fuzzing** (via Proptest). Our test suite injects deterministic faults to verify correctness under hostile conditions:
+* **Network Chaos:** Simulates **Packet Loss** (dropped actions), **High Latency** (reordered actions), and **Duplication** (ghost packets).
+* **Malicious Peers:** Fuzzers act as "Bad Actors" that send protocol violations, infinite byte-streams, and out-of-bounds requests to ensure the engine punishes them without crashing.
+
+### 🤖 Self-Tuning Resource Allocator
+Instead of static `ulimit` values, Superseedr runs a **Stochastic Hill Climbing** optimizer in the background.
+* **The Loop:** Every 90 seconds, it randomly reallocates internal permits between competing resources—**Peer Sockets**, **Disk Read Slots**, and **Disk Write Slots**—to find the local maximum for performance.
+* **Universal Optimization:** This algorithm dynamically discovers the optimal configuration for *any* combination of hardware (SSD vs HDD) and network environment (Home Fiber vs Datacenter), automatically scaling concurrency to match capacity.
+
+### 🧮 Statistical Engine
+Superseedr calculates granular metrics in real-time to drive optimization and observability:
+* **IOPS & Latency:** Tracks instantaneous Input/Output Operations Per Second and uses an Exponential Moving Average (EMA) to calculate precise Read/Write latency (ms). This helps distinguish between bandwidth limits and disk saturation.
+* **Disk Thrash Score:** Measures physical disk head movement using `Sum(|Offset - PrevOffset|) / Ops`. This detects random I/O bottlenecks that raw speed metrics miss.
+* **Seek Cost per Byte (SCPB):** Calculates the "expense" of I/O relative to throughput (`TotalSeekDistance / TotalBytes`), serving as the primary penalty factor for the self-tuner.
+
+### ♟️ Protocol Algorithms
+Superseedr implements optimized versions of the core BitTorrent exchange strategies:
+* **Selective & Priority Downloading:** Support for file-level priority (Skip, Normal, High). The engine maps file boundaries to pieces, prioritizing high-value data while ensuring shared boundary pieces are handled correctly to prevent corruption.
+* **Rarest-First Piece Selection:** The client continuously tracks piece availability across the swarm, prioritizing rare pieces to prevent "swarm starvation" and ensure redundant availability.
+* **Tit-for-Tat Choking:** The choking algorithm uses a robust Tit-for-Tat strategy (reciprocation), rewarding peers who provide the highest bandwidth while optimistically unchoking new peers to discover better connections.
+
+### 🔬 Unique Visualizations & UX
+Superseedr includes specialized TUI components (`src/tui/view.rs`) to visualize data usually hidden by other clients:
+* **Integrated File Explorer:** A custom, navigable filesystem browser that provides instant previewing of `.torrent` file contents and internal directory structures before the download begins.
+* **Block Particle Stream:** A vertical "Matrix-style" flow visualizing individual 16KB data blocks entering (Blue) or leaving (Green).
+* **Peer Lifecycle Scatterplot:** Tracks the exact moment peers are Discovered, Connected, and Disconnected to visually diagnose swarm "churn."
+* **Backpressure Markers:** The network graph overlays red "Backpressure Events" whenever the self-tuner detects a system limit (e.g., file descriptors), proving the engine is actively managing load.
+
+### 🧬 Hybrid BitTorrent v2 (BEP 52)
+Superseedr implements the full **Merkle Tree** verification stack required for BitTorrent v2.
+* **Block-Level Validation:** Incoming data is hashed and verified at the 16KiB block level using Merkle Proofs, allowing for the immediate rejection of corrupt data before it is written to disk.
+* **Hybrid Swarms:** The client handles `VerifyPieceV2` effects to simultaneously handshake with legacy v1 peers (SHA-1) and modern v2 peers (SHA-256).
+
+### 🛡️ Backpressure & Flow Control
+* **Persistent Retries with Backoff:** Critical I/O operations (like disk writes) are protected by an exponential backoff retry mechanism (jittered), ensuring transient system locks or busy disks don't crash the download session.
+* **Adaptive Pipelining:** The `PeerSession` uses a dynamic sliding window (AIMD-like algorithm) that expands or shrinks the request queue based on the peer's real-time response rate (`blocks_received_interval`), maximizing link saturation.
+* **Token Buckets:** Global bandwidth is shaped via a hierarchical Token Bucket algorithm that enforces rate limits without blocking async executors.
+
+### 📜 Key Standards Compliance
+Superseedr implements the following BitTorrent Enhancement Proposals (BEPs):
+* **BEP 3:** The BitTorrent Protocol Specification
+* **BEP 5:** DHT Protocol (Mainline)
+* **BEP 9:** Extension for Peers to Send Metadata Files (Magnet Links)
+* **BEP 10:** Extension Protocol
+* **BEP 11:** Peer Exchange (PEX)
+* **BEP 19:** WebSeed - HTTP/FTP Seeding
+* **BEP 52:** The BitTorrent Protocol v2
 
 </details>
