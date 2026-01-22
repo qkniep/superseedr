@@ -342,7 +342,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Line::from(title_spans));
-    
+
     let inner_area = block.inner(area);
     let table = Table::new(rows, constraints).header(header).block(block);
     f.render_stateful_widget(table, area, &mut table_state);
@@ -352,18 +352,23 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         let empty_msg = vec![
             Line::from(Span::styled(
                 "No Torrents",
-                Style::default().fg(theme::SURFACE2).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme::SURFACE2)
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
                 "Press [a] to add a file or [v] to paste a magnet link",
-                Style::default().fg(theme::SURFACE2)
+                Style::default().fg(theme::SURFACE2),
             )),
         ];
-        
+
         let center_y = inner_area.y + (inner_area.height / 2).saturating_sub(1);
         let text_area = Rect::new(inner_area.x, center_y, inner_area.width, 2);
-        
-        f.render_widget(Paragraph::new(empty_msg).alignment(Alignment::Center), text_area);
+
+        f.render_widget(
+            Paragraph::new(empty_msg).alignment(Alignment::Center),
+            text_area,
+        );
     }
 }
 
@@ -888,8 +893,8 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
     if let Some(torrent) = selected_torrent {
         let state = &torrent.latest_state;
 
-        let progress_chunks = Layout::horizontal([Constraint::Length(11), Constraint::Min(0)])
-            .split(detail_rows[0]);
+        let progress_chunks =
+            Layout::horizontal([Constraint::Length(11), Constraint::Min(0)]).split(detail_rows[0]);
 
         f.render_widget(Paragraph::new("Progress: "), progress_chunks[0]);
 
@@ -900,8 +905,8 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
             {
                 (1.0, "100.0%".to_string())
             } else {
-                let ratio = state.number_of_pieces_completed as f64
-                    / state.number_of_pieces_total as f64;
+                let ratio =
+                    state.number_of_pieces_completed as f64 / state.number_of_pieces_total as f64;
                 (ratio, format!("{:.1}%", ratio * 100.0))
             }
         } else {
@@ -968,19 +973,19 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
             detail_rows[2],
         );
 
-        let written_size_spans =
-            if state.number_of_pieces_completed < state.number_of_pieces_total {
-                vec![
-                    Span::styled("Written:  ", Style::default().fg(theme::TEXT)),
-                    Span::raw(format_bytes(state.bytes_written)),
-                    Span::raw(format!(" / {}", format_bytes(state.total_size))),
-                ]
-            } else {
-                vec![
-                    Span::styled("Size:     ", Style::default().fg(theme::TEXT)),
-                    Span::raw(format_bytes(state.total_size)),
-                ]
-            };
+        let written_size_spans = if state.number_of_pieces_completed < state.number_of_pieces_total
+        {
+            vec![
+                Span::styled("Written:  ", Style::default().fg(theme::TEXT)),
+                Span::raw(format_bytes(state.bytes_written)),
+                Span::raw(format!(" / {}", format_bytes(state.total_size))),
+            ]
+        } else {
+            vec![
+                Span::styled("Size:     ", Style::default().fg(theme::TEXT)),
+                Span::raw(format_bytes(state.total_size)),
+            ]
+        };
         f.render_widget(
             Paragraph::new(Line::from(written_size_spans)),
             detail_rows[3],
@@ -1018,9 +1023,12 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
         let label_style = Style::default().fg(theme::SURFACE2);
 
         // Row 0: Progress
-        let progress_chunks = Layout::horizontal([Constraint::Length(11), Constraint::Min(0)])
-            .split(detail_rows[0]);
-        f.render_widget(Paragraph::new("Progress: ").style(label_style), progress_chunks[0]);
+        let progress_chunks =
+            Layout::horizontal([Constraint::Length(11), Constraint::Min(0)]).split(detail_rows[0]);
+        f.render_widget(
+            Paragraph::new("Progress: ").style(label_style),
+            progress_chunks[0],
+        );
         let line_gauge = LineGauge::default()
             .ratio(0.0)
             .label(" --.--%")
@@ -1089,30 +1097,36 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     // 1. DETERMINE CONTENT WIDTHS
     // Calculate how much space the Left Side (Branding/Update) actually needs.
     let is_update = app_state.update_available.is_some();
-    let left_content_width = if is_update { 
+    let left_content_width = if is_update {
         45 // "UPDATE AVAILABLE: v0.9.32 -> v0.9.33 | 1 FPS"
-    } else { 
+    } else {
         28 // "superseedr v0.9.32 | 1 FPS"
     };
 
     // 2. CALCULATE SYMMETRY
     // To keep the middle commands centered on the *screen*, the Left and Right columns
-    // must have the same width. The Right column content is small (21 chars), 
+    // must have the same width. The Right column content is small (21 chars),
     // but we pad it to match the Left.
     let (left_constraint, right_constraint) = if show_branding {
         // Check if we have enough room to be symmetric without crushing the middle commands.
         // We want at least ~40 chars for the middle commands.
         let required_width_for_symmetry = (left_content_width * 2) + 40;
-        
+
         if footer_chunk.width >= required_width_for_symmetry {
             // Case A: Wide Screen -> Force Perfect Symmetry
             // We give the Right side the same width as the Left, so the Middle is perfectly centered.
-            (Constraint::Length(left_content_width), Constraint::Length(left_content_width))
+            (
+                Constraint::Length(left_content_width),
+                Constraint::Length(left_content_width),
+            )
         } else {
             // Case B: Narrow Screen -> Prioritize Content Fitting
             // If space is tight, we give the Right side only what it needs (21).
             // The middle won't be perfectly screen-centered, but it won't be crushed.
-            (Constraint::Length(left_content_width), Constraint::Length(21))
+            (
+                Constraint::Length(left_content_width),
+                Constraint::Length(21),
+            )
         }
     } else {
         // Case C: Mobile/Tiny Screen -> Hide Left completely
@@ -1272,7 +1286,7 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     }
 
     let footer_paragraph = Paragraph::new(Line::from(spans))
-        .alignment(Alignment::Center) 
+        .alignment(Alignment::Center)
         .style(Style::default().fg(theme::SUBTEXT1));
     f.render_widget(footer_paragraph, commands_chunk);
 
@@ -1319,22 +1333,22 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let color_border = theme::SURFACE2;
     let color_axis = theme::OVERLAY0;
 
-    // [UPDATED] Removed the early return. 
+    // [UPDATED] Removed the early return.
     // Now we initialize empty slices if no torrent is selected
     // to render the chart grid/axes as a placeholder.
-    
+
     let default_slice: Vec<u64> = Vec::new(); // Empty reference
-    
+
     let (disc_slice, conn_slice, disconn_slice) = if let Some(torrent) = selected_torrent {
         let width = area.width.saturating_sub(2).max(1) as usize;
         let dh = &torrent.peer_discovery_history;
         let ch = &torrent.peer_connection_history;
         let dch = &torrent.peer_disconnect_history;
-        
+
         (
             &dh[dh.len().saturating_sub(width)..],
             &ch[ch.len().saturating_sub(width)..],
-            &dch[dch.len().saturating_sub(width)..]
+            &dch[dch.len().saturating_sub(width)..],
         )
     } else {
         (&default_slice[..], &default_slice[..], &default_slice[..])
@@ -1354,19 +1368,28 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     };
 
     let legend_line = Line::from(vec![
-        Span::styled("Connected:", legend_style_fn(connected_count, color_connected)),
+        Span::styled(
+            "Connected:",
+            legend_style_fn(connected_count, color_connected),
+        ),
         Span::styled(
             connected_count.to_string(),
             legend_style_fn(connected_count, color_connected),
         ),
         Span::raw(" "),
-        Span::styled("Discovered:", legend_style_fn(discovered_count, color_discovered)),
+        Span::styled(
+            "Discovered:",
+            legend_style_fn(discovered_count, color_discovered),
+        ),
         Span::styled(
             discovered_count.to_string(),
             legend_style_fn(discovered_count, color_discovered),
         ),
         Span::raw(" "),
-        Span::styled("Disconnected:", legend_style_fn(disconnected_count, color_disconnected)),
+        Span::styled(
+            "Disconnected:",
+            legend_style_fn(disconnected_count, color_disconnected),
+        ),
         Span::styled(
             disconnected_count.to_string(),
             legend_style_fn(disconnected_count, color_disconnected),
@@ -1400,42 +1423,120 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let mut disconn_data_dark = Vec::new();
 
     for (i, &v) in disc_slice.iter().enumerate() {
-         if v == 0 { continue; }
-         let norm_val = v as f64 / max_disc;
-         let y_val = y_discovered;
-         if norm_val < 0.33 { disc_data_light.push((i as f64, y_val)); }
-         else if norm_val < 0.66 { disc_data_medium.push((i as f64, y_val)); }
-         else { disc_data_dark.push((i as f64, y_val)); }
+        if v == 0 {
+            continue;
+        }
+        let norm_val = v as f64 / max_disc;
+        let y_val = y_discovered;
+        if norm_val < 0.33 {
+            disc_data_light.push((i as f64, y_val));
+        } else if norm_val < 0.66 {
+            disc_data_medium.push((i as f64, y_val));
+        } else {
+            disc_data_dark.push((i as f64, y_val));
+        }
     }
     for (i, &v) in conn_slice.iter().enumerate() {
-         if v == 0 { continue; }
-         let norm_val = v as f64 / max_conn;
-         let y_val = y_connected;
-         if norm_val < 0.33 { conn_data_light.push((i as f64, y_val)); }
-         else if norm_val < 0.66 { conn_data_medium.push((i as f64, y_val)); }
-         else { conn_data_dark.push((i as f64, y_val)); }
+        if v == 0 {
+            continue;
+        }
+        let norm_val = v as f64 / max_conn;
+        let y_val = y_connected;
+        if norm_val < 0.33 {
+            conn_data_light.push((i as f64, y_val));
+        } else if norm_val < 0.66 {
+            conn_data_medium.push((i as f64, y_val));
+        } else {
+            conn_data_dark.push((i as f64, y_val));
+        }
     }
     for (i, &v) in disconn_slice.iter().enumerate() {
-         if v == 0 { continue; }
-         let norm_val = v as f64 / max_disconn;
-         let y_val = y_disconnected;
-         if norm_val < 0.33 { disconn_data_light.push((i as f64, y_val)); }
-         else if norm_val < 0.66 { disconn_data_medium.push((i as f64, y_val)); }
-         else { disconn_data_dark.push((i as f64, y_val)); }
+        if v == 0 {
+            continue;
+        }
+        let norm_val = v as f64 / max_disconn;
+        let y_val = y_disconnected;
+        if norm_val < 0.33 {
+            disconn_data_light.push((i as f64, y_val));
+        } else if norm_val < 0.66 {
+            disconn_data_medium.push((i as f64, y_val));
+        } else {
+            disconn_data_dark.push((i as f64, y_val));
+        }
     }
 
     let datasets = vec![
-        Dataset::default().data(&disc_data_light).marker(small_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_discovered).add_modifier(Modifier::DIM)),
-        Dataset::default().data(&disc_data_medium).marker(medium_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_discovered)),
-        Dataset::default().data(&disc_data_dark).marker(large_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_discovered).add_modifier(Modifier::BOLD)),
-        Dataset::default().data(&conn_data_light).marker(small_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_connected).add_modifier(Modifier::DIM)),
-        Dataset::default().data(&conn_data_medium).marker(medium_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_connected)),
-        Dataset::default().data(&conn_data_dark).marker(large_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_connected).add_modifier(Modifier::BOLD)),
-        Dataset::default().data(&disconn_data_light).marker(small_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_disconnected).add_modifier(Modifier::DIM)),
-        Dataset::default().data(&disconn_data_medium).marker(medium_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_disconnected)),
-        Dataset::default().data(&disconn_data_dark).marker(large_marker).graph_type(GraphType::Scatter).style(Style::default().fg(color_disconnected).add_modifier(Modifier::BOLD)),
+        Dataset::default()
+            .data(&disc_data_light)
+            .marker(small_marker)
+            .graph_type(GraphType::Scatter)
+            .style(
+                Style::default()
+                    .fg(color_discovered)
+                    .add_modifier(Modifier::DIM),
+            ),
+        Dataset::default()
+            .data(&disc_data_medium)
+            .marker(medium_marker)
+            .graph_type(GraphType::Scatter)
+            .style(Style::default().fg(color_discovered)),
+        Dataset::default()
+            .data(&disc_data_dark)
+            .marker(large_marker)
+            .graph_type(GraphType::Scatter)
+            .style(
+                Style::default()
+                    .fg(color_discovered)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        Dataset::default()
+            .data(&conn_data_light)
+            .marker(small_marker)
+            .graph_type(GraphType::Scatter)
+            .style(
+                Style::default()
+                    .fg(color_connected)
+                    .add_modifier(Modifier::DIM),
+            ),
+        Dataset::default()
+            .data(&conn_data_medium)
+            .marker(medium_marker)
+            .graph_type(GraphType::Scatter)
+            .style(Style::default().fg(color_connected)),
+        Dataset::default()
+            .data(&conn_data_dark)
+            .marker(large_marker)
+            .graph_type(GraphType::Scatter)
+            .style(
+                Style::default()
+                    .fg(color_connected)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        Dataset::default()
+            .data(&disconn_data_light)
+            .marker(small_marker)
+            .graph_type(GraphType::Scatter)
+            .style(
+                Style::default()
+                    .fg(color_disconnected)
+                    .add_modifier(Modifier::DIM),
+            ),
+        Dataset::default()
+            .data(&disconn_data_medium)
+            .marker(medium_marker)
+            .graph_type(GraphType::Scatter)
+            .style(Style::default().fg(color_disconnected)),
+        Dataset::default()
+            .data(&disconn_data_dark)
+            .marker(large_marker)
+            .graph_type(GraphType::Scatter)
+            .style(
+                Style::default()
+                    .fg(color_disconnected)
+                    .add_modifier(Modifier::BOLD),
+            ),
     ];
-    
+
     // Bounds: X axis 0..width. If width=0 (empty), use 1.0 to avoid crash/ugly render
     let x_bound = disc_slice.len().max(1).saturating_sub(1) as f64;
 
@@ -2821,7 +2922,10 @@ fn draw_welcome_screen(f: &mut Frame) {
 
     // Define the Main Body Text
     let text_lines = vec![
-        Line::from(Span::styled("How to Get Started:", Style::default().fg(theme::YELLOW).bold())),
+        Line::from(Span::styled(
+            "How to Get Started:",
+            Style::default().fg(theme::YELLOW).bold(),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
@@ -2835,7 +2939,9 @@ fn draw_welcome_screen(f: &mut Frame) {
             Span::raw("      - "),
             Span::styled(
                 "e.g. \"magnet:?xt=urn:btih:...\"",
-                Style::default().fg(theme::SURFACE2).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(theme::SURFACE2)
+                    .add_modifier(Modifier::ITALIC),
             ),
         ]),
         Line::from(vec![
@@ -2854,11 +2960,17 @@ fn draw_welcome_screen(f: &mut Frame) {
         ]),
         Line::from(vec![
             Span::raw("      - magnet: "),
-            Span::styled("superseedr add \"magnet:?xt=urn:btih:...\"", Style::default().fg(theme::SURFACE2)),
+            Span::styled(
+                "superseedr add \"magnet:?xt=urn:btih:...\"",
+                Style::default().fg(theme::SURFACE2),
+            ),
         ]),
         Line::from(vec![
             Span::raw("      - file:   "),
-            Span::styled("superseedr add \"/path/to/my.torrent\"", Style::default().fg(theme::SURFACE2)),
+            Span::styled(
+                "superseedr add \"/path/to/my.torrent\"",
+                Style::default().fg(theme::SURFACE2),
+            ),
         ]),
         Line::from(vec![
             Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
@@ -2868,7 +2980,10 @@ fn draw_welcome_screen(f: &mut Frame) {
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Browser Support: ", Style::default().fg(theme::YELLOW).bold()),
+            Span::styled(
+                "Browser Support: ",
+                Style::default().fg(theme::YELLOW).bold(),
+            ),
             Span::raw("To open magnet links directly from your browser,"),
         ]),
         Line::from(vec![
@@ -2898,15 +3013,17 @@ fn draw_welcome_screen(f: &mut Frame) {
     let text_content_width = text_lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
     let footer_width = footer_line.width() as u16;
 
-    let box_vertical_gap = 1; 
+    let box_vertical_gap = 1;
     let box_horizontal_padding = 4;
-    let box_height_needed = text_content_height + box_vertical_gap + 1 + 2; 
+    let box_height_needed = text_content_height + box_vertical_gap + 1 + 2;
 
     // --- DYNAMIC LOGO SELECTION ---
-    let gap_height = 1; 
-    let available_height_for_logo = area.height.saturating_sub(box_height_needed + gap_height + 2);
+    let gap_height = 1;
+    let available_height_for_logo = area
+        .height
+        .saturating_sub(box_height_needed + gap_height + 2);
     let margin_x = 6;
-    
+
     let logo_text = if area.width >= (w_large + margin_x) && available_height_for_logo >= h_large {
         LOGO_LARGE
     } else if area.width >= (w_medium + margin_x) && available_height_for_logo >= h_medium {
@@ -2918,28 +3035,37 @@ fn draw_welcome_screen(f: &mut Frame) {
     let (logo_w, logo_h) = get_dims(logo_text);
 
     // --- LAYOUT CALCULATION ---
-    let content_width_max = text_content_width.max(footer_width).max(logo_w.min(text_content_width + 10));
+    let content_width_max = text_content_width
+        .max(footer_width)
+        .max(logo_w.min(text_content_width + 10));
     let box_width = (content_width_max + box_horizontal_padding + 2).min(area.width);
     let box_height = box_height_needed.min(area.height);
 
     let vertical_chunks = Layout::vertical([
-        Constraint::Min(0),                
-        Constraint::Length(logo_h),        
-        Constraint::Length(gap_height),    
-        Constraint::Length(box_height),    
-        Constraint::Min(0),                
-    ]).split(area);
+        Constraint::Min(0),
+        Constraint::Length(logo_h),
+        Constraint::Length(gap_height),
+        Constraint::Length(box_height),
+        Constraint::Min(0),
+    ])
+    .split(area);
 
     let logo_area = vertical_chunks[1];
     let box_area = vertical_chunks[3];
 
     let logo_layout = Layout::horizontal([
-        Constraint::Min(0), Constraint::Length(logo_w), Constraint::Min(0)
-    ]).split(logo_area);
+        Constraint::Min(0),
+        Constraint::Length(logo_w),
+        Constraint::Min(0),
+    ])
+    .split(logo_area);
 
     let box_layout = Layout::horizontal([
-        Constraint::Min(0), Constraint::Length(box_width), Constraint::Min(0)
-    ]).split(box_area);
+        Constraint::Min(0),
+        Constraint::Length(box_width),
+        Constraint::Min(0),
+    ])
+    .split(box_area);
 
     let final_logo_area = logo_layout[1];
     let final_box_area = box_layout[1];
@@ -2952,19 +3078,25 @@ fn draw_welcome_screen(f: &mut Frame) {
     // to the buffer.
     let buf = f.buffer_mut();
     for (y_local, line) in logo_text.lines().enumerate() {
-        if y_local >= final_logo_area.height as usize { break; }
-        
+        if y_local >= final_logo_area.height as usize {
+            break;
+        }
+
         let y_global = final_logo_area.y + y_local as u16;
-        
+
         for (x_local, c) in line.chars().enumerate() {
-            if x_local >= final_logo_area.width as usize { break; }
-            
+            if x_local >= final_logo_area.width as usize {
+                break;
+            }
+
             // Skip spaces to allow background to show through
-            if c == ' ' { continue; }
+            if c == ' ' {
+                continue;
+            }
 
             let x_global = final_logo_area.x + x_local as u16;
             let style = get_animated_style(x_local, y_local);
-            
+
             // Write directly to buffer
             buf.set_string(x_global, y_global, c.to_string(), style);
         }
@@ -2973,7 +3105,7 @@ fn draw_welcome_screen(f: &mut Frame) {
     // B. Render Content Box (Opaque)
     // We clear the box area first because we WANT this to obscure the background stars
     f.render_widget(Clear, final_box_area);
-    
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::SURFACE2));
@@ -2981,14 +3113,18 @@ fn draw_welcome_screen(f: &mut Frame) {
     f.render_widget(block, final_box_area);
 
     let box_internal_chunks = Layout::vertical([
-        Constraint::Length(text_content_height), 
-        Constraint::Min(0),                      
-        Constraint::Length(1),                   
-    ]).split(inner_box);
+        Constraint::Length(text_content_height),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner_box);
 
     let text_padding_layout = Layout::horizontal([
-        Constraint::Min(0), Constraint::Length(text_content_width), Constraint::Min(0)
-    ]).split(box_internal_chunks[0]);
+        Constraint::Min(0),
+        Constraint::Length(text_content_width),
+        Constraint::Min(0),
+    ])
+    .split(box_internal_chunks[0]);
 
     let text_paragraph = Paragraph::new(text_lines)
         .style(Style::default().fg(theme::TEXT))
@@ -2996,8 +3132,7 @@ fn draw_welcome_screen(f: &mut Frame) {
 
     f.render_widget(text_paragraph, text_padding_layout[1]);
 
-    let footer_paragraph = Paragraph::new(footer_line)
-        .alignment(Alignment::Center);
+    let footer_paragraph = Paragraph::new(footer_line).alignment(Alignment::Center);
 
     f.render_widget(footer_paragraph, box_internal_chunks[2]);
 }
@@ -3789,7 +3924,6 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
     }
 }
 
-
 fn draw_swarm_heatmap(f: &mut Frame, peers: &[PeerInfo], total_pieces: u32, area: Rect) {
     let color_status_low = Style::default().fg(theme::RED).add_modifier(Modifier::DIM);
     let color_status_medium = Style::default()
@@ -4025,8 +4159,8 @@ fn get_animated_style(x: usize, y: usize) -> Style {
 
     // 1. Diagonal Flow Logic (Same physics, new feel)
     let speed = 3.0;
-    let freq_x = 0.1; 
-    let freq_y = 0.2; 
+    let freq_x = 0.1;
+    let freq_y = 0.2;
     let phase = (x as f64 * freq_x) + (y as f64 * freq_y) - (time * speed);
     let ratio = (phase.sin() + 1.0) / 2.0;
 
@@ -4034,7 +4168,7 @@ fn get_animated_style(x: usize, y: usize) -> Style {
     // Blue (Inflow) -> Green (Outflow)
     let color_blue = (137, 180, 250); // Matches theme::BLUE
     let color_green = (166, 227, 161); // Matches theme::GREEN
-    
+
     // Blend between the two stream colors
     let base_color = blend_colors(color_blue, color_green, ratio);
 
@@ -4042,10 +4176,12 @@ fn get_animated_style(x: usize, y: usize) -> Style {
     // We generate a pseudo-random value based on position + time
     // This makes individual characters flicker like the block stream particles
     let seed = (x as f64 * 13.0 + y as f64 * 29.0 + time * 15.0).sin();
-    
+
     if seed > 0.85 {
         // High energy sparkle: White/Bright + Bold (Active Data)
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
     } else if seed > 0.5 {
         // Medium energy: Base Color + Bold
         Style::default().fg(base_color).add_modifier(Modifier::BOLD)
@@ -4064,31 +4200,32 @@ fn draw_background_dust(f: &mut Frame, area: Rect) {
 
     let width = area.width as usize;
     let height = area.height as usize;
-    
+
     // We render the whole buffer into lines
     let mut lines = Vec::with_capacity(height);
 
     // --- CONFIGURATION ---
     // Movement: Positive X = Right, Positive Y = Up (we subtract Y to move up)
-    let move_angle_x = 0.8; 
-    let move_angle_y = 0.4; 
+    let move_angle_x = 0.8;
+    let move_angle_y = 0.4;
 
     for y in 0..height {
         let mut spans = Vec::with_capacity(width);
         for x in 0..width {
-            
             // --- LAYER 3: FOREGROUND (Fast, Bright, Rare) ---
             // Simulates close "data packets" flying by
-            let speed_3 = 4.0; 
+            let speed_3 = 4.0;
             let pos_x_3 = x as f64 - (time * speed_3 * move_angle_x);
             let pos_y_3 = y as f64 + (time * speed_3 * move_angle_y);
-            
+
             // High threshold for sparsity
             let noise_3 = (pos_x_3 * 0.73 + pos_y_3 * 0.19).sin() * (pos_y_3 * 1.3).cos();
             if noise_3 > 0.985 {
                 spans.push(Span::styled(
                     "+", // Distinctive shape
-                    Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme::GREEN)
+                        .add_modifier(Modifier::BOLD),
                 ));
                 continue; // Pixel filled, skip to next x
             }
@@ -4098,12 +4235,12 @@ fn draw_background_dust(f: &mut Frame, area: Rect) {
             let speed_2 = 4.0;
             let pos_x_2 = x as f64 - (time * speed_2 * move_angle_x);
             let pos_y_2 = y as f64 + (time * speed_2 * move_angle_y);
-            
+
             let noise_2 = (pos_x_2 * 0.3 + pos_y_2 * 0.8).sin() * (pos_x_2 * 0.4).cos();
             if noise_2 > 0.95 {
                 spans.push(Span::styled(
                     "·",
-                    Style::default().fg(theme::BLUE) // Standard Dim Blue
+                    Style::default().fg(theme::BLUE), // Standard Dim Blue
                 ));
                 continue;
             }
@@ -4113,12 +4250,14 @@ fn draw_background_dust(f: &mut Frame, area: Rect) {
             let speed_1 = 1.5;
             let pos_x_1 = x as f64 - (time * speed_1 * move_angle_x);
             let pos_y_1 = y as f64 + (time * speed_1 * move_angle_y);
-            
+
             let noise_1 = (pos_x_1 * 0.15 + pos_y_1 * 0.15).sin();
             if noise_1 > 0.96 {
                 spans.push(Span::styled(
                     ".",
-                    Style::default().fg(theme::SURFACE2).add_modifier(Modifier::DIM)
+                    Style::default()
+                        .fg(theme::SURFACE2)
+                        .add_modifier(Modifier::DIM),
                 ));
                 continue;
             }
