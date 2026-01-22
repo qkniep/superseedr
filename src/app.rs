@@ -777,7 +777,6 @@ impl App {
 
         let mut stats_interval = time::interval(Duration::from_secs(1));
         let mut tuning_interval = time::interval(Duration::from_secs(90));
-        let mut draw_interval = time::interval(Duration::from_millis(17));
         let mut version_interval = time::interval(Duration::from_secs(24 * 60 * 60));
 
         self.save_state_to_disk();
