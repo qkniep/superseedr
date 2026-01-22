@@ -1,5 +1,15 @@
 # Changelog
 
+## Release v0.9.33
+### Performance
+- Implemented dynamic framerate control based on app mode (60 FPS for Welcome screen, 1 FPS for Power Saving mode, user-defined otherwise)
+
+### Refactoring
+- Changed quit key binding from lowercase 'q' to uppercase 'Q' to prevent accidental quits
+- Added text sanitization for torrent names and paths to handle control characters gracefully
+
+### Testing
+
 ## Release v0.9.32
 ### Refactoring
 - Moved file watcher to App struct for dynamic reconfiguration during runtime.
