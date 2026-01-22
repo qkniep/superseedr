@@ -782,7 +782,14 @@ impl App {
 
         self.save_state_to_disk();
 
+        let mut next_draw_time = Instant::now();
         while !self.app_state.should_quit {
+            let current_target_framerate = match self.app_state.mode {
+                AppMode::Welcome => Duration::from_millis(16), // Force 60 FPS for animation
+                AppMode::PowerSaving => Duration::from_secs(1), // Force 1 FPS for Zen mode
+                _ => Duration::from_millis(self.app_state.data_rate.as_ms()), // User-defined FPS
+            };
+
             tokio::select! {
                 _ = signal::ctrl_c() => {
                     self.app_state.should_quit = true;
@@ -793,10 +800,12 @@ impl App {
                 }
                 Some(event) = self.manager_event_rx.recv() => {
                     self.handle_manager_event(event);
+                    self.app_state.ui_needs_redraw = true;
                 }
 
                 result = self.torrent_rx.recv() => {
                     self.update_torrent_state(result);
+                    self.app_state.ui_needs_redraw = true;
                 }
 
                 Some(command) = self.app_command_rx.recv() => {
@@ -806,6 +815,7 @@ impl App {
                 Some(event) = self.tui_event_rx.recv() => {
                     self.clamp_selected_indices();
                     events::handle_event(event, self).await;
+                    next_draw_time = Instant::now();
                 }
 
                 Some(result) = self.notify_rx.recv() => {
@@ -821,16 +831,15 @@ impl App {
                     self.tuning_resource_limits().await;
                 }
 
-                _ = draw_interval.tick() => {
-                    // Force a redraw if we are on the Welcome screen so the animation plays at 60 FPS
+                _ = time::sleep_until(next_draw_time.into()) => {
+                    next_draw_time = Instant::now() + current_target_framerate;
+
                     let force_animation = matches!(self.app_state.mode, AppMode::Welcome);
 
                     if self.app_state.ui_needs_redraw || force_animation {
                         terminal.draw(|f| {
                             draw(f, &self.app_state, &self.client_configs);
                         })?;
-
-                        // Only clear the flag if it was set, but we draw regardless if force_animation is true
                         self.app_state.ui_needs_redraw = false;
                     }
                 }
