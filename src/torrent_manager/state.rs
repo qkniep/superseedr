@@ -156,6 +156,7 @@ pub enum Action {
     SetUserTorrentConfig {
         torrent_data_path: PathBuf,
         file_priorities: HashMap<usize, FilePriority>,
+        container_name: Option<String>,
     },
     ValidationProgress {
         count: u32,
@@ -2112,6 +2113,7 @@ impl TorrentState {
             Action::SetUserTorrentConfig {
                 torrent_data_path,
                 file_priorities,
+                container_name,
             } => {
                 event!(
                     Level::INFO,
@@ -2122,6 +2124,7 @@ impl TorrentState {
 
                 self.torrent_data_path = Some(torrent_data_path);
                 self.file_priorities = file_priorities;
+                self.container_name = container_name;
 
                 if self.torrent.is_some() {
                     let priorities = self.calculate_piece_priorities(&self.file_priorities);
@@ -2279,9 +2282,26 @@ impl TorrentState {
             }
         };
 
-        // Execution: Attempt to create MFI
+        let effective_path = match &self.container_name {
+            // Case A: User specified a folder
+            Some(name) if !name.is_empty() => path.join(name),
+            
+            // Case B: User explicitly said "No Folder" (Empty String)
+            Some(_) => path.clone(),
+
+            // Case C: Auto/Default (None) -> Intelligent Behavior
+            None => {
+                let is_multi_file = !torrent.info.files.is_empty();
+                // Standard BitTorrent behavior: Multi-file torrents get a folder by default
+                if is_multi_file {
+                    path.join(&torrent.info.name)
+                } else {
+                    path.clone()
+                }
+            }
+        };
         self.multi_file_info = MultiFileInfo::new(
-            path,
+            &effective_path,
             &torrent.info.name,
             if torrent.info.files.is_empty() { None } else { Some(&torrent.info.files) },
             if torrent.info.files.is_empty() { Some(torrent.info.length as u64) } else { None },

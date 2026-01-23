@@ -1699,6 +1699,29 @@ impl App {
                     self.app_state.ui_needs_redraw = true;
                     tracing::info!(target: "superseedr", "Magnet preview tree hydrated (first arrival)");
                 }
+
+
+                if let Some(state) = self.app_state.torrents.get_mut(&info_hash) {
+                    if state.latest_state.download_path.is_some() 
+                        && state.latest_state.container_name.is_none() 
+                        && torrent.file_list().len() > 1 
+                    {
+                        let info_hash_hex = hex::encode(&info_hash);
+                        let name_suffix = format!("{} [{}]", torrent.info.name, info_hash_hex);
+                        
+                        // 1. Update UI so user sees the folder name
+                        state.latest_state.container_name = Some(name_suffix.clone());
+
+                        // 2. Update Manager so storage uses the folder
+                        if let Some(tx) = self.torrent_manager_command_txs.get(&info_hash) {
+                            let _ = tx.try_send(ManagerCommand::SetUserTorrentConfig {
+                                torrent_data_path: state.latest_state.download_path.clone().unwrap(),
+                                file_priorities: state.latest_state.file_priorities.clone(),
+                                container_name: Some(name_suffix), 
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -2668,13 +2691,21 @@ impl App {
         #[cfg(not(feature = "dht"))]
         let dht_clone = ();
 
+        let file_list = torrent.file_list();
+        let effective_container_name = if container_name.is_none() && file_list.len() > 1 {
+            let info_hash_hex = hex::encode(&info_hash);
+            Some(format!("{} [{}]", torrent.info.name, info_hash_hex))
+        } else {
+            container_name
+        };
+
         let torrent_params = TorrentParameters {
             dht_handle: dht_clone,
             incoming_peer_rx,
             metrics_tx: torrent_tx_clone,
             torrent_validation_status: is_validated,
             torrent_data_path: download_path,
-            container_name: container_name.clone(),
+            container_name: effective_container_name.clone(),
             manager_command_rx,
             manager_event_tx: manager_event_tx_clone,
             settings: Arc::clone(&Arc::new(self.client_configs.clone())),
@@ -2738,6 +2769,7 @@ impl App {
                     let _ = manager_tx.try_send(ManagerCommand::SetUserTorrentConfig {
                         torrent_data_path: path,
                         file_priorities: file_priorities.clone(),
+                        container_name,
                     });
                 }
             }

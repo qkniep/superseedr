@@ -108,6 +108,7 @@ pub enum ManagerCommand {
     SetUserTorrentConfig {
         torrent_data_path: PathBuf,
         file_priorities: HashMap<usize, FilePriority>,
+        container_name: Option<String>,
     },
 
     #[cfg(feature = "dht")]
