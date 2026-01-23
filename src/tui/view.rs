@@ -152,8 +152,27 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         table_state.select(Some(app_state.selected_torrent_index));
     }
 
+    let has_dl_activity = app_state
+        .torrents
+        .values()
+        .any(|t| t.smoothed_download_speed_bps > 0);
+    let has_ul_activity = app_state
+        .torrents
+        .values()
+        .any(|t| t.smoothed_upload_speed_bps > 0);
+
     let all_cols = get_torrent_columns();
-    let smart_cols: Vec<SmartCol> = all_cols
+
+    let active_cols: Vec<_> = all_cols
+        .iter()
+        .filter(|c| match c.id {
+            ColumnId::DownSpeed => has_dl_activity,
+            ColumnId::UpSpeed => has_ul_activity,
+            _ => true,
+        })
+        .collect();
+
+    let smart_cols: Vec<SmartCol> = active_cols
         .iter()
         .map(|c| SmartCol {
             min_width: c.min_width,
@@ -169,7 +188,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         .iter()
         .enumerate()
         .map(|(visual_idx, &real_idx)| {
-            let def = &all_cols[real_idx];
+            let def = &active_cols[real_idx];
             let is_selected = app_state.selected_header == SelectedHeader::Torrent(visual_idx);
             let is_sorting = def.sort_enum == Some(sort_col);
 
@@ -224,7 +243,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                     let cells: Vec<Cell> = visible_indices
                         .iter()
                         .map(|&real_idx| {
-                            let def = &all_cols[real_idx];
+                            let def = &active_cols[real_idx];
                             match def.id {
                                 ColumnId::Status => {
                                     let total = state.number_of_pieces_total;
