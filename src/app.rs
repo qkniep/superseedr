@@ -1700,24 +1700,27 @@ impl App {
                     tracing::info!(target: "superseedr", "Magnet preview tree hydrated (first arrival)");
                 }
 
-
                 if let Some(state) = self.app_state.torrents.get_mut(&info_hash) {
-                    if state.latest_state.download_path.is_some() 
-                        && state.latest_state.container_name.is_none() 
-                        && torrent.file_list().len() > 1 
+                    if state.latest_state.download_path.is_some()
+                        && state.latest_state.container_name.is_none()
+                        && torrent.file_list().len() > 1
                     {
                         let info_hash_hex = hex::encode(&info_hash);
                         let name_suffix = format!("{} [{}]", torrent.info.name, info_hash_hex);
-                        
+
                         // 1. Update UI so user sees the folder name
                         state.latest_state.container_name = Some(name_suffix.clone());
 
                         // 2. Update Manager so storage uses the folder
                         if let Some(tx) = self.torrent_manager_command_txs.get(&info_hash) {
                             let _ = tx.try_send(ManagerCommand::SetUserTorrentConfig {
-                                torrent_data_path: state.latest_state.download_path.clone().unwrap(),
+                                torrent_data_path: state
+                                    .latest_state
+                                    .download_path
+                                    .clone()
+                                    .unwrap(),
                                 file_priorities: state.latest_state.file_priorities.clone(),
-                                container_name: Some(name_suffix), 
+                                container_name: Some(name_suffix),
                             });
                         }
                     }

@@ -2285,7 +2285,7 @@ impl TorrentState {
         let effective_path = match &self.container_name {
             // Case A: User specified a folder
             Some(name) if !name.is_empty() => path.join(name),
-            
+
             // Case B: User explicitly said "No Folder" (Empty String)
             Some(_) => path.clone(),
 
