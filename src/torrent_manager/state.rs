@@ -6460,6 +6460,7 @@ mod tests {
         let effects = state.update(Action::SetUserTorrentConfig {
             torrent_data_path: PathBuf::from("/tmp"),
             file_priorities: priorities,
+            container_name: None,
         });
 
         // THEN 1: Priorities applied immediately (Queue Cleared)
@@ -6573,6 +6574,47 @@ mod tests {
             e,
             Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { .. })
         )));
+    }
+
+    #[test]
+    fn test_container_logic_explicit_no_folder() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+
+        // Setup: Make it a Multi-File Torrent
+        torrent.info.name = "MyTorrent".to_string();
+        torrent.info.files = vec![
+            crate::torrent_file::InfoFile {
+                length: 100,
+                path: vec!["file_a.txt".to_string()],
+                md5sum: None,
+                attr: None,
+            },
+            crate::torrent_file::InfoFile {
+                length: 100,
+                path: vec!["file_b.txt".to_string()],
+                md5sum: None,
+                attr: None,
+            },
+        ];
+
+        state.torrent = Some(torrent);
+        state.torrent_data_path = Some(PathBuf::from("/tmp/downloads"));
+
+        // ACTION: User explicitly selected "No Folder" (Empty String)
+        state.container_name = Some("".to_string());
+
+        state.rebuild_multi_file_info();
+
+        // ASSERTION: Paths should be relative to root, not /tmp/downloads/MyTorrent/
+        let mfi = state.multi_file_info.as_ref().expect("MFI should be built");
+
+        // Expected: /tmp/downloads/file_a.txt
+        let expected_path = PathBuf::from("/tmp/downloads/file_a.txt");
+        assert_eq!(
+            mfi.files[0].path, expected_path,
+            "Should flatten multi-file torrent when container_name is empty"
+        );
     }
 }
 
