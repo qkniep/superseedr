@@ -2294,7 +2294,10 @@ impl TorrentState {
                 let is_multi_file = !torrent.info.files.is_empty();
                 // Standard BitTorrent behavior: Multi-file torrents get a folder by default
                 if is_multi_file {
-                    path.join(&torrent.info.name)
+                    let info_hash_hex = hex::encode(&self.info_hash);
+                    let unique_name = format!("{} [{}]", torrent.info.name, info_hash_hex);
+                    self.container_name = Some(unique_name.clone());
+                    path.join(unique_name)
                 } else {
                     path.clone()
                 }

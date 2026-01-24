@@ -1,6 +1,16 @@
 # Changelog
 
-## Release v0.9.33
+## Release v0.9.34
+### Performance
+- Dynamically hide download/upload speed columns when no activity detected
+
+### Refactoring
+- Added `container_name` field to torrent configuration for explicit folder control
+- Implemented intelligent container naming: auto-generates folders with info_hash suffix for multi-file torrents
+- Added support for explicit "no folder" option to flatten multi-file torrents to single directory
+
+### Testing
+- Added unit test for container logic with explicit empty folder selection
 ### Performance
 - Implemented dynamic framerate control based on app mode (60 FPS for Welcome screen, 1 FPS for Power Saving mode, user-defined otherwise)
 
