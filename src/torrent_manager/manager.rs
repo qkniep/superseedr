@@ -2017,6 +2017,7 @@ impl TorrentManager {
                 info_hash: info_hash_clone,
                 torrent_name: torrent_name_clone,
                 download_path: self.state.torrent_data_path.clone(),
+                container_name: self.state.container_name.clone(),
                 number_of_successfully_connected_peers,
                 number_of_pieces_total,
                 number_of_pieces_completed,

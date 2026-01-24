@@ -2292,7 +2292,7 @@ impl TorrentState {
             // Case C: Auto/Default (None) -> Intelligent Behavior
             None => {
                 let is_multi_file = !torrent.info.files.is_empty();
-                // Standard BitTorrent behavior: Multi-file torrents get a folder by default
+                // BitTorrent standard: multi-file torrents use folders
                 if is_multi_file {
                     let info_hash_hex = hex::encode(&self.info_hash);
                     let unique_name = format!("{} [{}]", torrent.info.name, info_hash_hex);

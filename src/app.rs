@@ -2167,6 +2167,7 @@ impl App {
                 if !message.torrent_name.is_empty() {
                     display_state.latest_state.torrent_name = message.torrent_name;
                 }
+                display_state.latest_state.container_name = message.container_name;
                 display_state.latest_state.total_size = message.total_size;
                 display_state.latest_state.bytes_written = message.bytes_written;
 
@@ -2668,21 +2669,13 @@ impl App {
         #[cfg(not(feature = "dht"))]
         let dht_clone = ();
 
-        let file_list = torrent.file_list();
-        let effective_container_name = if container_name.is_none() && file_list.len() > 1 {
-            let info_hash_hex = hex::encode(&info_hash);
-            Some(format!("{} [{}]", torrent.info.name, info_hash_hex))
-        } else {
-            container_name
-        };
-
         let torrent_params = TorrentParameters {
             dht_handle: dht_clone,
             incoming_peer_rx,
             metrics_tx: torrent_tx_clone,
             torrent_validation_status: is_validated,
             torrent_data_path: download_path,
-            container_name: effective_container_name.clone(),
+            container_name: container_name.clone(),
             manager_command_rx,
             manager_event_tx: manager_event_tx_clone,
             settings: Arc::clone(&Arc::new(self.client_configs.clone())),
