@@ -272,6 +272,7 @@ impl TorrentManager {
         let validation_status = torrent_parameters.torrent_validation_status;
         let torrent_data_path = torrent_parameters.torrent_data_path.clone();
         let file_priorities = torrent_parameters.file_priorities.clone();
+        let container_name = torrent_parameters.container_name.clone();
 
         // 3. Initialize Base Manager (Awaiting Metadata)
         let mut manager =
@@ -292,6 +293,7 @@ impl TorrentManager {
             manager.apply_action(Action::SetUserTorrentConfig {
                 torrent_data_path,
                 file_priorities,
+                container_name,
             });
         }
 
@@ -351,6 +353,7 @@ impl TorrentManager {
         let validation_status = torrent_parameters.torrent_validation_status;
         let torrent_data_path = torrent_parameters.torrent_data_path.clone();
         let file_priorities = torrent_parameters.file_priorities.clone();
+        let container_name = torrent_parameters.container_name.clone();
 
         // 3. Initialize Base Manager
         // It stays in AwaitingMetadata state until peers provide the info dict
@@ -361,6 +364,7 @@ impl TorrentManager {
             manager.apply_action(Action::SetUserTorrentConfig {
                 torrent_data_path,
                 file_priorities,
+                container_name,
             });
         }
 
@@ -2013,6 +2017,7 @@ impl TorrentManager {
                 info_hash: info_hash_clone,
                 torrent_name: torrent_name_clone,
                 download_path: self.state.torrent_data_path.clone(),
+                container_name: self.state.container_name.clone(),
                 number_of_successfully_connected_peers,
                 number_of_pieces_total,
                 number_of_pieces_completed,
@@ -2156,10 +2161,11 @@ impl TorrentManager {
                             }
 
                         },
-                        ManagerCommand::SetUserTorrentConfig { torrent_data_path, file_priorities } => {
+                        ManagerCommand::SetUserTorrentConfig { torrent_data_path, file_priorities, container_name } => {
                             self.apply_action(Action::SetUserTorrentConfig {
                                 torrent_data_path,
                                 file_priorities,
+                                container_name,
                             });
                         }
                         ManagerCommand::SetDataRate(new_rate_ms) => {

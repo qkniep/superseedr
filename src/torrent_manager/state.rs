@@ -156,6 +156,7 @@ pub enum Action {
     SetUserTorrentConfig {
         torrent_data_path: PathBuf,
         file_priorities: HashMap<usize, FilePriority>,
+        container_name: Option<String>,
     },
     ValidationProgress {
         count: u32,
@@ -2112,6 +2113,7 @@ impl TorrentState {
             Action::SetUserTorrentConfig {
                 torrent_data_path,
                 file_priorities,
+                container_name,
             } => {
                 event!(
                     Level::INFO,
@@ -2122,6 +2124,7 @@ impl TorrentState {
 
                 self.torrent_data_path = Some(torrent_data_path);
                 self.file_priorities = file_priorities;
+                self.container_name = container_name;
 
                 if self.torrent.is_some() {
                     let priorities = self.calculate_piece_priorities(&self.file_priorities);
@@ -2279,9 +2282,29 @@ impl TorrentState {
             }
         };
 
-        // Execution: Attempt to create MFI
+        let effective_path = match &self.container_name {
+            // Case A: User specified a folder
+            Some(name) if !name.is_empty() => path.join(name),
+
+            // Case B: User explicitly said "No Folder" (Empty String)
+            Some(_) => path.clone(),
+
+            // Case C: Auto/Default (None) -> Intelligent Behavior
+            None => {
+                let is_multi_file = !torrent.info.files.is_empty();
+                // BitTorrent standard: multi-file torrents use folders
+                if is_multi_file {
+                    let info_hash_hex = hex::encode(&self.info_hash);
+                    let unique_name = format!("{} [{}]", torrent.info.name, info_hash_hex);
+                    self.container_name = Some(unique_name.clone());
+                    path.join(unique_name)
+                } else {
+                    path.clone()
+                }
+            }
+        };
         self.multi_file_info = MultiFileInfo::new(
-            path,
+            &effective_path,
             &torrent.info.name,
             if torrent.info.files.is_empty() { None } else { Some(&torrent.info.files) },
             if torrent.info.files.is_empty() { Some(torrent.info.length as u64) } else { None },
@@ -6440,6 +6463,7 @@ mod tests {
         let effects = state.update(Action::SetUserTorrentConfig {
             torrent_data_path: PathBuf::from("/tmp"),
             file_priorities: priorities,
+            container_name: None,
         });
 
         // THEN 1: Priorities applied immediately (Queue Cleared)
@@ -6553,6 +6577,47 @@ mod tests {
             e,
             Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { .. })
         )));
+    }
+
+    #[test]
+    fn test_container_logic_explicit_no_folder() {
+        let mut state = create_empty_state();
+        let mut torrent = create_dummy_torrent(2);
+
+        // Setup: Make it a Multi-File Torrent
+        torrent.info.name = "MyTorrent".to_string();
+        torrent.info.files = vec![
+            crate::torrent_file::InfoFile {
+                length: 100,
+                path: vec!["file_a.txt".to_string()],
+                md5sum: None,
+                attr: None,
+            },
+            crate::torrent_file::InfoFile {
+                length: 100,
+                path: vec!["file_b.txt".to_string()],
+                md5sum: None,
+                attr: None,
+            },
+        ];
+
+        state.torrent = Some(torrent);
+        state.torrent_data_path = Some(PathBuf::from("/tmp/downloads"));
+
+        // ACTION: User explicitly selected "No Folder" (Empty String)
+        state.container_name = Some("".to_string());
+
+        state.rebuild_multi_file_info();
+
+        // ASSERTION: Paths should be relative to root, not /tmp/downloads/MyTorrent/
+        let mfi = state.multi_file_info.as_ref().expect("MFI should be built");
+
+        // Expected: /tmp/downloads/file_a.txt
+        let expected_path = PathBuf::from("/tmp/downloads/file_a.txt");
+        assert_eq!(
+            mfi.files[0].path, expected_path,
+            "Should flatten multi-file torrent when container_name is empty"
+        );
     }
 }
 

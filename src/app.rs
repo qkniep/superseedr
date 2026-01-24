@@ -2167,6 +2167,7 @@ impl App {
                 if !message.torrent_name.is_empty() {
                     display_state.latest_state.torrent_name = message.torrent_name;
                 }
+                display_state.latest_state.container_name = message.container_name;
                 display_state.latest_state.total_size = message.total_size;
                 display_state.latest_state.bytes_written = message.bytes_written;
 
@@ -2717,7 +2718,7 @@ impl App {
         file_priorities: HashMap<usize, FilePriority>,
         container_name: Option<String>,
     ) {
-        tracing::info!(target: "magnet_flow", "Engine: add_magnet_torrent entry. Link: {}", magnet_link); //
+        tracing::info!(target: "magnet_flow", "Engine: add_magnet_torrent entry. Link: {}", magnet_link);
         let magnet = match Magnet::new(&magnet_link) {
             Ok(m) => m,
             Err(e) => {
@@ -2738,6 +2739,7 @@ impl App {
                     let _ = manager_tx.try_send(ManagerCommand::SetUserTorrentConfig {
                         torrent_data_path: path,
                         file_priorities: file_priorities.clone(),
+                        container_name,
                     });
                 }
             }

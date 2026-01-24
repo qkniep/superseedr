@@ -955,17 +955,10 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     ..
                                 } => {
                                     let base_path = state.current_path.clone();
-                                    let container_name_clone = container_name.clone();
-                                    let final_path = if *use_container {
-                                        Some(base_path.join(&container_name_clone))
-                                    } else {
-                                        Some(base_path)
-                                    };
-
                                     let container_name_to_use = if *use_container {
-                                        Some(container_name_clone)
+                                        Some(container_name.clone())
                                     } else {
-                                        None
+                                        Some(String::new())
                                     };
 
                                     let mut file_priorities = HashMap::new();
@@ -978,7 +971,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     {
                                         app.add_torrent_from_file(
                                             pending_path,
-                                            final_path,
+                                            Some(base_path),
                                             false,
                                             TorrentControlState::Running,
                                             file_priorities,
@@ -989,7 +982,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                         app.add_magnet_torrent(
                                             "Fetching name...".to_string(),
                                             app.app_state.pending_torrent_link.clone(),
-                                            final_path,
+                                            Some(base_path),
                                             false,
                                             TorrentControlState::Running,
                                             file_priorities,
