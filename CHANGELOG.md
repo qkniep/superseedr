@@ -1,5 +1,15 @@
 # Changelog
 
+## Release v0.9.35
+### Performance
+
+### Refactoring
+- Implemented periodic application state dumping to JSON for external monitoring.
+- Migrated logging to use a daily rolling file appender with 31-day retention.
+- Updated file browser defaults to disable container usage for magnet links.
+
+### Testing
+
 ## Release v0.9.34
 ### Performance
 - Dynamically hide download/upload speed columns when no activity detected

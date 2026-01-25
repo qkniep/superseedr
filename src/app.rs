@@ -56,7 +56,6 @@ use sha2::Sha256;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::time::Duration;
 
 use notify::{Config, Error as NotifyError, Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -430,7 +429,6 @@ pub struct AppOutputState {
     pub settings: Settings,
 }
 
-
 #[derive(Debug, Clone, Default)]
 pub struct PeerInfo {
     pub address: String,
@@ -800,9 +798,9 @@ impl App {
         let mut version_interval = time::interval(Duration::from_secs(24 * 60 * 60));
 
         let output_status_interval = self.client_configs.output_status_interval;
-        let mut status_dump_timer = tokio::time::interval(
-            std::time::Duration::from_secs(output_status_interval.max(1))
-        );
+        let mut status_dump_timer = tokio::time::interval(std::time::Duration::from_secs(
+            output_status_interval.max(1),
+        ));
 
         self.save_state_to_disk();
         self.dump_status_to_file();
@@ -3048,7 +3046,9 @@ impl App {
 
     pub fn generate_output_state(&self) -> AppOutputState {
         let s = &self.app_state;
-        let torrent_metrics = s.torrents.iter()
+        let torrent_metrics = s
+            .torrents
+            .iter()
             .map(|(k, v)| (k.clone(), v.latest_state.clone()))
             .collect();
 
@@ -3066,13 +3066,15 @@ impl App {
     pub fn dump_status_to_file(&self) {
         let base_path = crate::config::get_app_paths()
             .map(|(_, data_dir)| data_dir)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            });
 
         let file_path = base_path.join("status_files").join("app_state.json");
 
         let output_data = self.generate_output_state();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
-        
+
         tokio::spawn(async move {
             tokio::select! {
                 _ = shutdown_rx.recv() => {
@@ -3348,9 +3350,13 @@ pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8
     (v1, v2)
 }
 
-
-fn serialize_torrents_hex<S>(map: &HashMap<Vec<u8>, TorrentMetrics>, s: S) -> Result<S::Ok, S::Error>
-where S: serde::Serializer {
+fn serialize_torrents_hex<S>(
+    map: &HashMap<Vec<u8>, TorrentMetrics>,
+    s: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
     use serde::ser::SerializeMap;
     let mut map_ser = s.serialize_map(Some(map.len()))?;
     for (k, v) in map {
