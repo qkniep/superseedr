@@ -30,7 +30,8 @@ use std::path::PathBuf;
 use crate::config::load_settings;
 use crate::config::Settings;
 
-use tracing_appender::rolling;
+use tracing_appender::rolling::RollingFileAppender;
+use tracing_appender::rolling::Rotation;
 
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::env;
@@ -166,7 +167,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|(_, data_dir)| data_dir)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let log_dir = base_data_dir.join("logs");
-    let general_log = rolling::never(&log_dir, "app.log");
+    let general_log = RollingFileAppender::builder()
+        .rotation(Rotation::DAILY) // Sets rotation frequency
+        .max_log_files(31)            // Automatically deletes files so only 4 remain
+        .filename_prefix("app")      // Log files will look like "app.2026-01-25"
+        .filename_suffix("log")
+        .build(&log_dir)
+        .expect("Failed to initialize rolling file appender");
     let (non_blocking_general, _guard_general) = tracing_appender::non_blocking(general_log);
     let _subscriber_result = {
         if fs::create_dir_all(&log_dir).is_ok() {

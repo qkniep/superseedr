@@ -56,6 +56,7 @@ use sha2::Sha256;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::time::Duration;
 
 use notify::{Config, Error as NotifyError, Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -417,6 +418,18 @@ pub enum TorrentControlState {
     Deleting,
 }
 
+#[derive(Serialize)]
+pub struct AppOutputState {
+    pub run_time: u64,
+    pub cpu_usage: f32,
+    pub ram_usage_percent: f32,
+    pub total_download_bps: u64,
+    pub total_upload_bps: u64,
+    #[serde(serialize_with = "serialize_torrents_hex")]
+    pub torrents: HashMap<Vec<u8>, TorrentMetrics>,
+}
+
+
 #[derive(Debug, Clone, Default)]
 pub struct PeerInfo {
     pub address: String,
@@ -433,7 +446,7 @@ pub struct PeerInfo {
     pub last_action: String,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct TorrentMetrics {
     pub torrent_control_state: TorrentControlState,
     pub info_hash: Vec<u8>,
@@ -450,14 +463,20 @@ pub struct TorrentMetrics {
     pub bytes_downloaded_this_tick: u64,
     pub bytes_uploaded_this_tick: u64,
     pub eta: Duration,
+
+    #[serde(skip)]
     pub peers: Vec<PeerInfo>,
     pub activity_message: String,
     pub next_announce_in: Duration,
     pub total_size: u64,
     pub bytes_written: u64,
 
+    #[serde(skip)]
     pub blocks_in_history: Vec<u64>,
+
+    #[serde(skip)]
     pub blocks_out_history: Vec<u64>,
+
     pub blocks_in_this_tick: u64,
     pub blocks_out_this_tick: u64,
 }
@@ -779,6 +798,11 @@ impl App {
         let mut tuning_interval = time::interval(Duration::from_secs(90));
         let mut version_interval = time::interval(Duration::from_secs(24 * 60 * 60));
 
+        let output_status_interval = self.client_configs.output_status_interval;
+        let mut status_dump_timer = tokio::time::interval(
+            std::time::Duration::from_secs(output_status_interval.max(1))
+        );
+
         self.save_state_to_disk();
 
         let mut next_draw_time = Instant::now();
@@ -828,6 +852,10 @@ impl App {
 
                 _ = tuning_interval.tick() => {
                     self.tuning_resource_limits().await;
+                }
+
+                _ = status_dump_timer.tick(), if output_status_interval > 0 => {
+                    self.dump_status_to_file();
                 }
 
                 _ = time::sleep_until(next_draw_time.into()) => {
@@ -3015,6 +3043,51 @@ impl App {
 
         Ok(watcher)
     }
+
+    pub fn generate_output_state(&self) -> AppOutputState {
+        let s = &self.app_state;
+        let torrent_metrics = s.torrents.iter()
+            .map(|(k, v)| (k.clone(), v.latest_state.clone()))
+            .collect();
+
+        AppOutputState {
+            run_time: s.run_time,
+            cpu_usage: s.cpu_usage,
+            ram_usage_percent: s.ram_usage_percent,
+            total_download_bps: s.avg_download_history.last().copied().unwrap_or(0),
+            total_upload_bps: s.avg_upload_history.last().copied().unwrap_or(0),
+            torrents: torrent_metrics,
+        }
+    }
+
+    pub fn dump_status_to_file(&self) {
+        let base_path = crate::config::get_app_paths()
+            .map(|(_, data_dir)| data_dir)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+
+        let file_path = base_path.join("status_files").join("app_state.json");
+
+        let output_data = self.generate_output_state();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    tracing::debug!("Status dump aborted due to application shutdown");
+                }
+                result = tokio::task::spawn_blocking(move || {
+                    // Ensure the directory exists inside the base data path
+                    let _ = std::fs::create_dir_all(file_path.parent().unwrap());
+                    serde_json::to_string_pretty(&output_data)
+                        .map(|json| std::fs::write(file_path, json))
+                }) => {
+                    if let Ok(Err(e)) = result {
+                        tracing::error!("Failed to write status dump: {:?}", e);
+                    }
+                }
+            }
+        });
+    }
 }
 
 fn calculate_thrash_score(history_log: &VecDeque<DiskIoOperation>) -> u64 {
@@ -3271,4 +3344,15 @@ pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8
         .and_then(|h| decode_info_hash(h).ok());
 
     (v1, v2)
+}
+
+
+fn serialize_torrents_hex<S>(map: &HashMap<Vec<u8>, TorrentMetrics>, s: S) -> Result<S::Ok, S::Error>
+where S: serde::Serializer {
+    use serde::ser::SerializeMap;
+    let mut map_ser = s.serialize_map(Some(map.len()))?;
+    for (k, v) in map {
+        map_ser.serialize_entry(&hex::encode(k), v)?;
+    }
+    map_ser.end()
 }

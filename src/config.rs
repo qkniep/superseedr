@@ -90,6 +90,7 @@ pub struct Settings {
     // Timings
     pub tracker_fallback_interval_secs: u64,
     pub client_leeching_fallback_interval_secs: u64,
+    pub output_status_interval: u64,
 }
 
 impl Default for Settings {
@@ -124,6 +125,7 @@ impl Default for Settings {
             peer_upload_in_flight_limit: 4,
             tracker_fallback_interval_secs: 1800,
             client_leeching_fallback_interval_secs: 60,
+            output_status_interval: 5,
         }
     }
 }
