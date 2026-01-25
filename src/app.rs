@@ -427,6 +427,7 @@ pub struct AppOutputState {
     pub total_upload_bps: u64,
     #[serde(serialize_with = "serialize_torrents_hex")]
     pub torrents: HashMap<Vec<u8>, TorrentMetrics>,
+    pub settings: Settings,
 }
 
 
@@ -804,6 +805,7 @@ impl App {
         );
 
         self.save_state_to_disk();
+        self.dump_status_to_file();
 
         let mut next_draw_time = Instant::now();
         while !self.app_state.should_quit {
@@ -3057,6 +3059,7 @@ impl App {
             total_download_bps: s.avg_download_history.last().copied().unwrap_or(0),
             total_upload_bps: s.avg_upload_history.last().copied().unwrap_or(0),
             torrents: torrent_metrics,
+            settings: self.client_configs.clone(),
         }
     }
 

@@ -125,7 +125,7 @@ impl Default for Settings {
             peer_upload_in_flight_limit: 4,
             tracker_fallback_interval_secs: 1800,
             client_leeching_fallback_interval_secs: 60,
-            output_status_interval: 5,
+            output_status_interval: 0,
         }
     }
 }
