@@ -135,3 +135,77 @@ pub fn path_to_command(path: &Path) -> Option<AppCommand> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use crate::app::AppCommand;
+
+    // Helper to create a dummy file for testing (since path_to_command checks is_file())
+    fn with_dummy_file<F>(name: &str, test_fn: F)
+    where
+        F: FnOnce(&Path),
+    {
+        let dir = std::env::temp_dir().join(format!("watcher_test_{}", rand::random::<u32>()));
+        fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join(name);
+        File::create(&file_path).unwrap();
+
+        test_fn(&file_path);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_path_to_command_extensions() {
+        with_dummy_file("ubuntu.torrent", |path| {
+            let cmd = path_to_command(path);
+            assert!(matches!(cmd, Some(AppCommand::AddTorrentFromFile(_))));
+        });
+
+        with_dummy_file("meta.magnet", |path| {
+            let cmd = path_to_command(path);
+            assert!(matches!(cmd, Some(AppCommand::AddMagnetFromFile(_))));
+        });
+
+        with_dummy_file("job.path", |path| {
+            let cmd = path_to_command(path);
+            assert!(matches!(cmd, Some(AppCommand::AddTorrentFromPathFile(_))));
+        });
+    }
+
+    #[test]
+    fn test_path_to_command_special_files() {
+        // Test regression fix: forwarded_port (no extension)
+        with_dummy_file("forwarded_port", |path| {
+            let cmd = path_to_command(path);
+            assert!(matches!(cmd, Some(AppCommand::PortFileChanged(_))));
+        });
+
+        // Test shutdown command
+        with_dummy_file("shutdown.cmd", |path| {
+            let cmd = path_to_command(path);
+            assert!(matches!(cmd, Some(AppCommand::ClientShutdown(_))));
+        });
+    }
+
+    #[test]
+    fn test_path_to_command_ignored() {
+        // .tmp files should be ignored
+        with_dummy_file("file.torrent.tmp", |path| {
+            assert!(path_to_command(path).is_none());
+        });
+
+        // Random extensions should be ignored
+        with_dummy_file("image.png", |path| {
+            assert!(path_to_command(path).is_none());
+        });
+
+        // Directories should be ignored
+        let dir = std::env::temp_dir().join("test_dir_ignore");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(path_to_command(&dir).is_none());
+        let _ = fs::remove_dir(dir);
+    }
+}
