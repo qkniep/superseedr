@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::app::AppCommand;
+use crate::config::{get_watch_path, Settings};
 use notify::{Config, Error as NotifyError, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tracing::{event as tracing_event, Level};
-use crate::config::{Settings, get_watch_path};
-use crate::app::AppCommand;
 
 pub fn create_watcher(
     settings: &Settings,
@@ -22,7 +22,6 @@ pub fn create_watcher(
         Config::default(),
     )?;
 
-    // Watch User Configured Folder
     if let Some(path) = &settings.watch_folder {
         if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
             tracing_event!(Level::ERROR, "Failed to watch user path {:?}: {}", path, e);
@@ -31,7 +30,6 @@ pub fn create_watcher(
         }
     }
 
-    // Watch System Folders
     if let Some((watch_path, _)) = get_watch_path() {
         if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
             tracing_event!(
@@ -43,7 +41,6 @@ pub fn create_watcher(
         }
     }
 
-    // Watch Port File Directory
     let port_file_path = PathBuf::from("/port-data/forwarded_port");
     if let Some(port_dir) = port_file_path.parent() {
         if let Err(e) = watcher.watch(port_dir, RecursiveMode::NonRecursive) {
@@ -114,7 +111,10 @@ pub fn path_to_command(path: &Path) -> Option<AppCommand> {
         return None;
     }
 
-    if path.file_name().is_some_and(|name| name == "forwarded_port") {
+    if path
+        .file_name()
+        .is_some_and(|name| name == "forwarded_port")
+    {
         return Some(AppCommand::PortFileChanged(path.to_path_buf()));
     }
 
@@ -126,7 +126,10 @@ pub fn path_to_command(path: &Path) -> Option<AppCommand> {
         "cmd" if path.file_name().is_some_and(|name| name == "shutdown.cmd") => {
             Some(AppCommand::ClientShutdown(path.to_path_buf()))
         }
-        _ if path.file_name().is_some_and(|name| name == "forwarded_port") => {
+        _ if path
+            .file_name()
+            .is_some_and(|name| name == "forwarded_port") =>
+        {
             Some(AppCommand::PortFileChanged(path.to_path_buf()))
         }
         _ => None,

@@ -1740,10 +1740,9 @@ impl App {
                         .recently_processed_files
                         .insert(path.clone(), now);
 
-                    // Use externalized logic for mapping path/event to command
+                    // Use externalized logic for mapping path/event to command.
                     // Note: event_to_commands could be used, but since we are already looping and debouncing,
-                    // we can just use the path-to-command logic if we expose it or just use event_to_commands
-                    // as a batch.
+                    // we can just use the path-to-command logic if we expose it or just use event_to_commands as a batch.
                     if let Some(cmd) = watcher::path_to_command(&path) {
                         let _ = self.app_command_tx.send(cmd).await;
                     }
@@ -2866,8 +2865,6 @@ impl App {
         Ok(resp.krate.max_version)
     }
 
-    // create_watcher moved to watcher.rs
-
     pub fn generate_output_state(&self) -> AppOutputState {
         let s = &self.app_state;
         let torrent_metrics = s
@@ -3148,4 +3145,4 @@ pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8
     (v1, v2)
 }
 
-// serialize_torrents_hex moved to integrations::status
+
