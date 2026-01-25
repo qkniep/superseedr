@@ -4,8 +4,8 @@
 mod app;
 mod command;
 mod config;
-mod integrations;
 mod errors;
+mod integrations;
 mod networking;
 mod resource_manager;
 mod storage;

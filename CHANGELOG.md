@@ -1,5 +1,21 @@
 # Changelog
 
+## Release v0.9.35
+### Performance
+- Added periodic application state dump to JSON for external monitoring/integrations.
+- Configured rolling file appender for logs with daily rotation and 31-day retention.
+
+### Refactoring
+- Modularized integration logic into a new `src/integrations/` directory.
+- Decoupled CLI argument parsing and input processing into `src/integrations/cli.rs`.
+- Externalized file system watching and folder scanning logic into `src/integrations/watcher.rs`.
+- Centralized application status serialization and export in `src/integrations/status.rs`.
+- Simplified `App` struct by delegating file event handling and watch folder scanning to the integrations module.
+
+### Testing
+- Added unit tests for CLI input processing, including magnet link and path file handling.
+- Added unit tests for file watcher logic and command mapping.
+- Added serialization tests for the new JSON status dump feature.
 
 ## Release v0.9.34
 ### Performance

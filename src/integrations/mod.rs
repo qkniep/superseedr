@@ -2,5 +2,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 pub mod cli;
-pub mod watcher;
 pub mod status;
+pub mod watcher;

@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::app::TorrentMetrics;
+use crate::config::Settings;
 use serde::Serialize;
 use std::collections::HashMap;
-use crate::config::Settings;
-use crate::app::TorrentMetrics;
 
 #[derive(Serialize)]
 pub struct AppOutputState {
@@ -73,10 +73,10 @@ mod tests {
     #[test]
     fn test_serialize_torrents_hex_keys() {
         let mut torrents = HashMap::new();
-        
+
         // Create a fake info hash (5 bytes for simplicity)
         // 0xAA = 170, 0xBB = 187, etc.
-        let info_hash = vec![0xAA, 0xBB, 0xCC, 0x12, 0x34]; 
+        let info_hash = vec![0xAA, 0xBB, 0xCC, 0x12, 0x34];
         let info_hash_key = info_hash.clone();
 
         let metrics = TorrentMetrics {
@@ -88,8 +88,8 @@ mod tests {
         torrents.insert(info_hash_key, metrics);
 
         let settings = Settings {
-             client_port: 8080,
-             ..Default::default()
+            client_port: 8080,
+            ..Default::default()
         };
 
         let output = AppOutputState {
@@ -105,10 +105,12 @@ mod tests {
         let json = serde_json::to_string(&output).expect("Serialization failed");
 
         // The key in the JSON map MUST be the hex string "aabbcc1234"
-        assert!(json.contains("\"aabbcc1234\":"), "JSON should contain hex-encoded key");
-        
-        // We removed the negative assertion (!json.contains("[170,187")) because 
+        assert!(
+            json.contains("\"aabbcc1234\":"),
+            "JSON should contain hex-encoded key"
+        );
+
+        // We removed the negative assertion (!json.contains("[170,187")) because
         // the 'metrics.info_hash' field inside the object is expected to be a byte array.
     }
 }
-

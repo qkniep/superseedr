@@ -139,8 +139,8 @@ pub fn path_to_command(path: &Path) -> Option<AppCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::File;
     use crate::app::AppCommand;
+    use std::fs::File;
 
     // Helper to create a dummy file for testing (since path_to_command checks is_file())
     fn with_dummy_file<F>(name: &str, test_fn: F)

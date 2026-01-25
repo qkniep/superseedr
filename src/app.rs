@@ -28,13 +28,13 @@ use crate::storage::build_fs_tree;
 
 use crate::resource_manager::ResourceType;
 
+use crate::integrations::status::AppOutputState;
+use crate::integrations::{status, watcher};
 use crate::torrent_file::parser::from_bytes;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
 use crate::torrent_manager::TorrentManager;
 use crate::torrent_manager::TorrentParameters;
-use crate::integrations::{status, watcher};
-use crate::integrations::status::AppOutputState;
 
 use crate::config::get_app_paths;
 use crate::config::save_settings;
@@ -57,9 +57,9 @@ use sha1::Digest;
 use sha2::Sha256;
 use std::path::PathBuf;
 
+use notify::{Error as NotifyError, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use notify::{Error as NotifyError, Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use ratatui::prelude::Rect;
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -3144,5 +3144,3 @@ pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8
 
     (v1, v2)
 }
-
-
