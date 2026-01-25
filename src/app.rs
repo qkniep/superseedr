@@ -33,6 +33,8 @@ use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
 use crate::torrent_manager::TorrentManager;
 use crate::torrent_manager::TorrentParameters;
+use crate::integrations::{status, watcher};
+use crate::integrations::status::AppOutputState;
 
 use crate::config::get_app_paths;
 use crate::config::save_settings;
@@ -57,8 +59,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-
-use notify::{Config, Error as NotifyError, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Error as NotifyError, Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use ratatui::prelude::Rect;
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -417,19 +418,7 @@ pub enum TorrentControlState {
     Deleting,
 }
 
-#[derive(Serialize)]
-pub struct AppOutputState {
-    pub run_time: u64,
-    pub cpu_usage: f32,
-    pub ram_usage_percent: f32,
-    pub total_download_bps: u64,
-    pub total_upload_bps: u64,
-    #[serde(serialize_with = "serialize_torrents_hex")]
-    pub torrents: HashMap<Vec<u8>, TorrentMetrics>,
-    pub settings: Settings,
-}
-
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub address: String,
     pub peer_id: Vec<u8>,
@@ -445,7 +434,7 @@ pub struct PeerInfo {
     pub last_action: String,
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct TorrentMetrics {
     pub torrent_control_state: TorrentControlState,
     pub info_hash: Vec<u8>,
@@ -714,7 +703,7 @@ impl App {
         };
 
         let (notify_tx, notify_rx) = mpsc::channel::<Result<Event, NotifyError>>(100);
-        let watcher = Self::create_watcher(&client_configs, notify_tx)?;
+        let watcher = watcher::create_watcher(&client_configs, notify_tx)?;
 
         let mut app = Self {
             app_state,
@@ -1734,84 +1723,34 @@ impl App {
     async fn handle_file_event(&mut self, result: Result<Event, notify::Error>) {
         match result {
             Ok(event) => {
-                if event.kind.is_create() || event.kind.is_modify() {
-                    const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+                const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+                for path in event.paths {
+                    if path.to_string_lossy().ends_with(".tmp") {
+                        continue;
+                    }
 
-                    for path in &event.paths {
-                        if path.to_string_lossy().ends_with(".tmp") {
-                            tracing_event!(Level::DEBUG, "Skipping temporary file: {:?}", path);
+                    let now = Instant::now();
+                    if let Some(last_time) = self.app_state.recently_processed_files.get(&path) {
+                        if now.duration_since(*last_time) < DEBOUNCE_DURATION {
                             continue;
                         }
+                    }
 
-                        let now = Instant::now();
-                        if let Some(last_time) = self.app_state.recently_processed_files.get(path) {
-                            if now.duration_since(*last_time) < DEBOUNCE_DURATION {
-                                tracing_event!(
-                                    Level::DEBUG,
-                                    "Skipping file {:?} due to debounce.",
-                                    path
-                                );
-                                continue;
-                            }
-                        }
+                    self.app_state
+                        .recently_processed_files
+                        .insert(path.clone(), now);
 
-                        self.app_state
-                            .recently_processed_files
-                            .insert(path.clone(), now);
-                        tracing_event!(
-                            Level::DEBUG,
-                            "Processing file event: {:?} for path: {:?}",
-                            event.kind,
-                            path
-                        );
-
-                        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                            match ext {
-                                "torrent" => {
-                                    let _ = self
-                                        .app_command_tx
-                                        .send(AppCommand::AddTorrentFromFile(path.clone()))
-                                        .await;
-                                }
-                                "path" => {
-                                    let _ = self
-                                        .app_command_tx
-                                        .send(AppCommand::AddTorrentFromPathFile(path.clone()))
-                                        .await;
-                                }
-                                "magnet" => {
-                                    let _ = self
-                                        .app_command_tx
-                                        .send(AppCommand::AddMagnetFromFile(path.clone()))
-                                        .await;
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        if path.file_name().is_some_and(|name| name == "shutdown.cmd") {
-                            tracing_event!(Level::INFO, "Shutdown command detected: {:?}", path);
-                            let _ = self
-                                .app_command_tx
-                                .send(AppCommand::ClientShutdown(path.clone()))
-                                .await;
-                        }
-
-                        if path
-                            .file_name()
-                            .is_some_and(|name| name == "forwarded_port")
-                        {
-                            tracing_event!(Level::INFO, "Port file change detected: {:?}", path);
-                            let _ = self
-                                .app_command_tx
-                                .send(AppCommand::PortFileChanged(path.clone()))
-                                .await;
-                        }
+                    // Use externalized logic for mapping path/event to command
+                    // Note: event_to_commands could be used, but since we are already looping and debouncing,
+                    // we can just use the path-to-command logic if we expose it or just use event_to_commands
+                    // as a batch.
+                    if let Some(cmd) = watcher::path_to_command(&path) {
+                        let _ = self.app_command_tx.send(cmd).await;
                     }
                 }
             }
-            Err(error) => {
-                tracing_event!(Level::ERROR, "File watcher error: {:?}", error);
+            Err(e) => {
+                tracing_event!(Level::ERROR, "File watcher error: {}", e);
             }
         }
     }
@@ -2844,70 +2783,9 @@ impl App {
     }
 
     async fn process_pending_commands(&mut self) {
-        if let Some(user_watch_path) = &self.client_configs.watch_folder {
-            if let Ok(entries) = fs::read_dir(user_watch_path) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if !path.is_file() {
-                        continue;
-                    }
-                    if path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|s| s.starts_with('.'))
-                    {
-                        continue;
-                    }
-
-                    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                        let command = match ext {
-                            "torrent" => Some(AppCommand::AddTorrentFromFile(path.clone())),
-                            "path" => Some(AppCommand::AddTorrentFromPathFile(path.clone())),
-                            "magnet" => Some(AppCommand::AddMagnetFromFile(path.clone())),
-                            _ => None,
-                        };
-
-                        if let Some(cmd) = command {
-                            let _ = self.app_command_tx.send(cmd).await;
-                        }
-                    }
-                }
-            } else {
-                tracing_event!(
-                    Level::WARN,
-                    "Failed to read user watch directory: {:?}",
-                    user_watch_path
-                );
-            }
-        }
-
-        if let Some((watch_path, _)) = get_watch_path() {
-            let Ok(entries) = fs::read_dir(watch_path) else {
-                return;
-            };
-
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    let command = match ext {
-                        "torrent" => Some(AppCommand::AddTorrentFromFile(path.clone())),
-                        "path" => Some(AppCommand::AddTorrentFromPathFile(path.clone())),
-                        "magnet" => Some(AppCommand::AddMagnetFromFile(path.clone())),
-                        "cmd" if path.file_name().is_some_and(|name| name == "shutdown.cmd") => {
-                            Some(AppCommand::ClientShutdown(path.clone()))
-                        }
-                        _ => None,
-                    };
-
-                    if let Some(cmd) = command {
-                        let _ = self.app_command_tx.send(cmd).await;
-                    }
-                }
-            }
+        let commands = watcher::scan_watch_folders(&self.client_configs);
+        for cmd in commands {
+            let _ = self.app_command_tx.send(cmd).await;
         }
     }
 
@@ -2988,61 +2866,7 @@ impl App {
         Ok(resp.krate.max_version)
     }
 
-    fn create_watcher(
-        settings: &Settings,
-        tx: mpsc::Sender<Result<Event, NotifyError>>,
-    ) -> Result<RecommendedWatcher, Box<dyn std::error::Error>> {
-        let mut watcher = RecommendedWatcher::new(
-            move |res: Result<Event, NotifyError>| {
-                if let Err(e) = tx.blocking_send(res) {
-                    tracing_event!(Level::ERROR, "Failed to send file event: {}", e);
-                }
-            },
-            Config::default(),
-        )?;
-
-        // Watch User Configured Folder
-        if let Some(path) = &settings.watch_folder {
-            if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
-                tracing_event!(Level::ERROR, "Failed to watch user path {:?}: {}", path, e);
-            } else {
-                tracing_event!(Level::INFO, "Watching user path: {:?}", path);
-            }
-        }
-
-        // Watch System Folders
-        if let Some((watch_path, _)) = get_watch_path() {
-            if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
-                tracing_event!(
-                    Level::ERROR,
-                    "Failed to watch system path {:?}: {}",
-                    watch_path,
-                    e
-                );
-            }
-        }
-
-        // Watch Port File Directory
-        let port_file_path = PathBuf::from("/port-data/forwarded_port");
-        if let Some(port_dir) = port_file_path.parent() {
-            if let Err(e) = watcher.watch(port_dir, RecursiveMode::NonRecursive) {
-                tracing_event!(
-                    Level::WARN,
-                    "Failed to watch port file directory {:?}: {}",
-                    port_dir,
-                    e
-                );
-            } else {
-                tracing_event!(
-                    Level::INFO,
-                    "Watching for port file changes in {:?}",
-                    port_dir
-                );
-            }
-        }
-
-        Ok(watcher)
-    }
+    // create_watcher moved to watcher.rs
 
     pub fn generate_output_state(&self) -> AppOutputState {
         let s = &self.app_state;
@@ -3064,33 +2888,7 @@ impl App {
     }
 
     pub fn dump_status_to_file(&self) {
-        let base_path = crate::config::get_app_paths()
-            .map(|(_, data_dir)| data_dir)
-            .unwrap_or_else(|| {
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-            });
-
-        let file_path = base_path.join("status_files").join("app_state.json");
-
-        let output_data = self.generate_output_state();
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
-
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = shutdown_rx.recv() => {
-                    tracing::debug!("Status dump aborted due to application shutdown");
-                }
-                result = tokio::task::spawn_blocking(move || {
-                    let _ = std::fs::create_dir_all(file_path.parent().unwrap());
-                    serde_json::to_string_pretty(&output_data)
-                        .map(|json| std::fs::write(file_path, json))
-                }) => {
-                    if let Ok(Err(e)) = result {
-                        tracing::error!("Failed to write status dump: {:?}", e);
-                    }
-                }
-            }
-        });
+        status::dump(self.generate_output_state(), self.shutdown_tx.clone());
     }
 }
 
@@ -3350,17 +3148,4 @@ pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8
     (v1, v2)
 }
 
-fn serialize_torrents_hex<S>(
-    map: &HashMap<Vec<u8>, TorrentMetrics>,
-    s: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    use serde::ser::SerializeMap;
-    let mut map_ser = s.serialize_map(Some(map.len()))?;
-    for (k, v) in map {
-        map_ser.serialize_entry(&hex::encode(k), v)?;
-    }
-    map_ser.end()
-}
+// serialize_torrents_hex moved to integrations::status

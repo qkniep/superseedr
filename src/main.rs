@@ -4,6 +4,7 @@
 mod app;
 mod command;
 mod config;
+mod integrations;
 mod errors;
 mod networking;
 mod resource_manager;
@@ -22,9 +23,6 @@ use fs2::FileExt;
 use std::fs;
 use std::fs::File;
 
-use sha1::{Digest, Sha1};
-
-use std::path::Path;
 use std::path::PathBuf;
 
 use crate::config::load_settings;
@@ -52,111 +50,11 @@ use crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
 const DEFAULT_LOG_FILTER: LevelFilter = LevelFilter::INFO;
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Cli {
-    input: Option<String>,
-
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(Subcommand, Debug)]
-enum Commands {
-    Add { input: String },
-    StopClient,
-}
-
-fn process_input(input_str: &str, watch_path: &Path) {
-    if input_str.starts_with("magnet:") {
-        let hash_bytes = Sha1::digest(input_str.as_bytes());
-        let file_hash_hex = hex::encode(hash_bytes);
-
-        // Define the final and temporary paths for magnet links
-        let final_filename = format!("{}.magnet", file_hash_hex);
-        let final_path = watch_path.join(final_filename);
-        let temp_filename = format!("{}.magnet.tmp", file_hash_hex);
-        let temp_path = watch_path.join(temp_filename);
-
-        tracing::info!(
-            "Attempting to write magnet link to temporary path: {:?}",
-            temp_path
-        );
-
-        // 1. Write the content to the temporary file
-        match fs::write(&temp_path, input_str.as_bytes()) {
-            Ok(_) => {
-                tracing::info!(
-                    "Atomically renaming magnet file to final path: {:?}",
-                    final_path
-                );
-                // 2. Atomically rename the temporary file to the final path
-                if let Err(e) = fs::rename(&temp_path, &final_path) {
-                    tracing::error!("Failed to atomically rename magnet file: {}", e);
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to write magnet file to temporary path: {}", e);
-            }
-        }
-    } else {
-        // --- Handling Torrent Path File (.path) ---
-        let torrent_path = std::path::PathBuf::from(input_str);
-        match fs::canonicalize(&torrent_path) {
-            Ok(absolute_path) => {
-                // This line is fine because the result of digest() is an owned value
-                let hash_bytes = Sha1::digest(absolute_path.to_string_lossy().as_bytes());
-                let file_hash_hex = hex::encode(hash_bytes);
-
-                // Define the final and temporary paths for path files
-                let final_filename = format!("{}.path", file_hash_hex);
-                let final_dest_path = watch_path.join(final_filename);
-                let temp_filename = format!("{}.path.tmp", file_hash_hex);
-                let temp_dest_path = watch_path.join(temp_filename);
-
-                let absolute_path_cow = absolute_path.to_string_lossy();
-                let content = absolute_path_cow.as_bytes(); // The content reference is now valid!
-
-                tracing::info!(
-                    "Attempting to write torrent path to temporary path: {:?}",
-                    temp_dest_path
-                );
-
-                // 1. Write the content to the temporary file
-                match fs::write(&temp_dest_path, content) {
-                    Ok(_) => {
-                        tracing::info!(
-                            "Atomically renaming path file to final path: {:?}",
-                            final_dest_path
-                        );
-                        // 2. Atomically rename the temporary file to the final path
-                        if let Err(e) = fs::rename(&temp_dest_path, &final_dest_path) {
-                            tracing::error!("Failed to atomically rename path file: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to write path file to temporary path: {}", e);
-                    }
-                }
-            }
-            Err(e) => {
-                // Don't treat as error if launched by macOS without a valid path
-                if !input_str.starts_with("magnet:") {
-                    // Avoid logging error for magnet links here
-                    tracing::warn!(
-                        "Input '{}' is not a valid torrent file path: {}",
-                        input_str,
-                        e
-                    );
-                }
-            }
-        }
-    }
-}
+// CLI types and process_input moved to integrations::cli
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -200,13 +98,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::error!("Failed to create watch directories: {}", e);
     }
 
-    let cli = Cli::parse();
+    let cli = integrations::cli::Cli::parse();
     let mut command_processed = false;
 
     if let Some(direct_input) = cli.input {
         if let Some((watch_path, _)) = config::get_watch_path() {
             tracing::info!("Processing direct input: {}", direct_input);
-            process_input(&direct_input, &watch_path);
+            integrations::cli::process_input(&direct_input, &watch_path);
             command_processed = true;
         } else {
             tracing::error!("Could not get watch path to process direct input.");
@@ -215,16 +113,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some((watch_path, _)) = config::get_watch_path() {
             command_processed = true;
             match command {
-                Commands::StopClient => {
+                integrations::cli::Commands::StopClient => {
                     tracing::info!("Processing StopClient command.");
                     let file_path = watch_path.join("shutdown.cmd");
                     if let Err(e) = fs::write(&file_path, "STOP") {
                         tracing::error!("Failed to write stop command file: {}", e);
                     }
                 }
-                Commands::Add { input } => {
+                integrations::cli::Commands::Add { input } => {
                     tracing::info!("Processing Add subcommand input: {}", input);
-                    process_input(&input, &watch_path);
+                    integrations::cli::process_input(&input, &watch_path);
                 }
             }
         } else {
