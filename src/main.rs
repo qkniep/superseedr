@@ -168,9 +168,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let log_dir = base_data_dir.join("logs");
     let general_log = RollingFileAppender::builder()
-        .rotation(Rotation::DAILY) // Sets rotation frequency
-        .max_log_files(31)            // Automatically deletes files so only 4 remain
-        .filename_prefix("app")      // Log files will look like "app.2026-01-25"
+        .rotation(Rotation::DAILY)
+        .max_log_files(31)
+        .filename_prefix("app")
         .filename_suffix("log")
         .build(&log_dir)
         .expect("Failed to initialize rolling file appender");

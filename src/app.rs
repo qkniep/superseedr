@@ -3076,7 +3076,6 @@ impl App {
                     tracing::debug!("Status dump aborted due to application shutdown");
                 }
                 result = tokio::task::spawn_blocking(move || {
-                    // Ensure the directory exists inside the base data path
                     let _ = std::fs::create_dir_all(file_path.parent().unwrap());
                     serde_json::to_string_pretty(&output_data)
                         .map(|json| std::fs::write(file_path, json))
