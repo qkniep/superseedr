@@ -189,7 +189,7 @@ Superseedr includes several integration points designed for automation, headless
 Check out the [Superseedr Plugins Repository](https://github.com/Jagalite/superseedr-plugins) for plugins (beta testing).
 
 <details>
-<summary><strong>Click to expand technical details</strong></summary>
+<summary><strong>Click to expand automation details</strong></summary>
 
 ### 1. File Watcher & Auto-Ingest
 The application automatically watches configured directories for new content. You can drop files into your watch folder to trigger actions immediately.
