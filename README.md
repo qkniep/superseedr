@@ -82,7 +82,14 @@ superseedr
 - 🗺️[Roadmap](ROADMAP.md): Discover upcoming features and future plans for Superseedr.
 - 🧑‍🤝‍🧑[Code of Conduct](CODE_OF_CONDUCT.md): Understand the community standards and expectations.
 
-## 🐳 Docker Quick Start (Intermediate)
+## Running with Docker
+
+Superseedr offers a fully secured Docker setup using Gluetun. All BitTorrent traffic is routed through a VPN tunnel with dynamic port forwarding and zero manual network configuration.
+
+If you want privacy and simplicity, Docker is the recommended way to run Superseedr.
+
+Follow steps below to create .env and .gluetun.env files to configure OpenVPN or WireGuard.
+
 ```bash
 # Docker (No VPN):
 # Uses internal container storage. Data persists until the container is removed.
@@ -91,16 +98,7 @@ docker run -it jagatranvo/superseedr:latest
 # Docker Compose (Gluetun with your VPN):
 # Requires .env and .gluetun.env configuration (see below).
 docker compose up -d && docker compose attach superseedr
-
 ```
-
-## Running with Docker
-
-Superseedr offers a fully secured Docker setup using Gluetun. All BitTorrent traffic is routed through a VPN tunnel with dynamic port forwarding and zero manual network configuration.
-
-If you want privacy and simplicity, Docker is the recommended way to run Superseedr.
-
-Follow steps below to create .env and .gluetun.env files to configure OpenVPN or WireGuard.
 
 <details>
 <summary><strong>Click to expand Docker Setup</strong></summary>
@@ -182,6 +180,56 @@ docker compose -f docker-compose.standalone.yml up -d && docker compose attach s
 > To detach from the TUI without stopping the container, use the Docker key sequence: `Ctrl+P` followed by `Ctrl+Q`.
 > **Optional:** press `[z]` first to enter power-saving mode.
 
+</details>
+
+## Integrations & Automation
+
+Superseedr includes several integration points designed for automation, headless operation, and easy pairing with VPN containers like Gluetun.
+
+Check out the [Superseedr Plugins Repository](https://github.com/Jagalite/superseedr-plugins) for plugins (beta testing).
+
+<details>
+<summary><strong>Click to expand automation details</strong></summary>
+
+### 1. File Watcher & Auto-Ingest
+The application automatically watches configured directories for new content. You can drop files into your watch folder to trigger actions immediately.
+
+| File Type | Action |
+| :--- | :--- |
+| **`.torrent`** | Automatically adds the torrent and begins downloading. |
+| **`.magnet`** | A text file containing a magnet link. Adds the magnet download. |
+| **`.path`** | A text file containing a local absolute path to a `.torrent` file. |
+| **`shutdown.cmd`** | If a file named `shutdown.cmd` appears, the client will initiate a graceful shutdown. |
+
+### 2. CLI Control
+You can control the running daemon using the built-in CLI commands. These commands write to the watch folder, allowing you to control the app from scripts or other containers.
+
+```bash
+# Add a magnet link
+superseedr add "magnet:?xt=urn:btih:..."
+
+# Add a torrent file by path
+superseedr add "/path/to/linux.iso.torrent"
+
+# Stop the client gracefully
+superseedr stop-client
+```
+
+### 3. Status API & Monitoring
+For external monitoring dashboards or health checks, Superseedr periodically dumps its full internal state to a JSON file.
+
+* **Output Location:** `status_files/app_state.json` (inside your data directory).
+* **Content:** Contains CPU/RAM usage, total transfer stats, and detailed metrics for every active torrent.
+
+#### Configuration
+You can control how often this file is updated using the `output_status_interval` setting.
+
+**Environment Variable:**
+Set this variable in your Docker config to change the update frequency (in seconds).
+```bash
+# Update the status file every 5 seconds
+SUPERSEEDR_OUTPUT_STATUS_INTERVAL=5
+```
 </details>
 
 ## 🧠 Advanced: Architecture & Engineering

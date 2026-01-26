@@ -1278,8 +1278,8 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
                 path: initial_path,
                 browser_mode: FileBrowserMode::DownloadLocSelection {
                     torrent_files: vec![],
-                    container_name: "Magnet Download".to_string(),
-                    use_container: true,
+                    container_name: String::new(),
+                    use_container: false,
                     is_editing_name: false,
                     focused_pane: BrowserPane::FileSystem,
                     preview_tree: Vec::new(),
