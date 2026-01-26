@@ -186,8 +186,7 @@ docker compose -f docker-compose.standalone.yml up -d && docker compose attach s
 
 Superseedr includes several integration points designed for automation, headless operation, and easy pairing with VPN containers like Gluetun.
 
-> [!NOTE]
-> Check out the [Superseedr Plugins Repository](https://github.com/Jagalite/superseedr-plugins) for plugins.
+Check out the [Superseedr Plugins Repository](https://github.com/Jagalite/superseedr-plugins) for plugins (beta testing).
 
 <details>
 ### 1. File Watcher & Auto-Ingest
