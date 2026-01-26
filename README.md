@@ -82,7 +82,14 @@ superseedr
 - 🗺️[Roadmap](ROADMAP.md): Discover upcoming features and future plans for Superseedr.
 - 🧑‍🤝‍🧑[Code of Conduct](CODE_OF_CONDUCT.md): Understand the community standards and expectations.
 
-## 🐳 Docker Quick Start (Intermediate)
+## Running with Docker
+
+Superseedr offers a fully secured Docker setup using Gluetun. All BitTorrent traffic is routed through a VPN tunnel with dynamic port forwarding and zero manual network configuration.
+
+If you want privacy and simplicity, Docker is the recommended way to run Superseedr.
+
+Follow steps below to create .env and .gluetun.env files to configure OpenVPN or WireGuard.
+
 ```bash
 # Docker (No VPN):
 # Uses internal container storage. Data persists until the container is removed.
@@ -91,16 +98,7 @@ docker run -it jagatranvo/superseedr:latest
 # Docker Compose (Gluetun with your VPN):
 # Requires .env and .gluetun.env configuration (see below).
 docker compose up -d && docker compose attach superseedr
-
 ```
-
-## Running with Docker
-
-Superseedr offers a fully secured Docker setup using Gluetun. All BitTorrent traffic is routed through a VPN tunnel with dynamic port forwarding and zero manual network configuration.
-
-If you want privacy and simplicity, Docker is the recommended way to run Superseedr.
-
-Follow steps below to create .env and .gluetun.env files to configure OpenVPN or WireGuard.
 
 <details>
 <summary><strong>Click to expand Docker Setup</strong></summary>
