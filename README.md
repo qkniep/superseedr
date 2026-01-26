@@ -230,6 +230,7 @@ Set this variable in your Docker config to change the update frequency (in secon
 ```bash
 # Update the status file every 5 seconds
 SUPERSEEDR_OUTPUT_STATUS_INTERVAL=5
+```
 </details>
 
 ## 🧠 Advanced: Architecture & Engineering
