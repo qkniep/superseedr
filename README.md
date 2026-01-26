@@ -184,6 +184,54 @@ docker compose -f docker-compose.standalone.yml up -d && docker compose attach s
 
 </details>
 
+## Integrations & Automation
+
+Superseedr includes several integration points designed for automation, headless operation, and easy pairing with VPN containers like Gluetun.
+
+> [!NOTE]
+> Check out the [Superseedr Plugins Repository](https://github.com/Jagalite/superseedr-plugins) for plugins.
+
+<details>
+### 1. File Watcher & Auto-Ingest
+The application automatically watches configured directories for new content. You can drop files into your watch folder to trigger actions immediately.
+
+| File Type | Action |
+| :--- | :--- |
+| **`.torrent`** | Automatically adds the torrent and begins downloading. |
+| **`.magnet`** | A text file containing a magnet link. Adds the magnet download. |
+| **`.path`** | A text file containing a local absolute path to a `.torrent` file. |
+| **`shutdown.cmd`** | If a file named `shutdown.cmd` appears, the client will initiate a graceful shutdown. |
+
+### 2. CLI Control
+You can control the running daemon using the built-in CLI commands. These commands write to the watch folder, allowing you to control the app from scripts or other containers.
+
+```bash
+# Add a magnet link
+superseedr add "magnet:?xt=urn:btih:..."
+
+# Add a torrent file by path
+superseedr add "/path/to/linux.iso.torrent"
+
+# Stop the client gracefully
+superseedr stop-client
+```
+
+### 3. Status API & Monitoring
+For external monitoring dashboards or health checks, Superseedr periodically dumps its full internal state to a JSON file.
+
+* **Output Location:** `status_files/app_state.json` (inside your data directory).
+* **Content:** Contains CPU/RAM usage, total transfer stats, and detailed metrics for every active torrent.
+
+#### Configuration
+You can control how often this file is updated using the `output_status_interval` setting.
+
+**Environment Variable:**
+Set this variable in your Docker config to change the update frequency (in seconds).
+```bash
+# Update the status file every 5 seconds
+SUPERSEEDR_OUTPUT_STATUS_INTERVAL=5
+</details>
+
 ## 🧠 Advanced: Architecture & Engineering
 
 Superseedr is built on a **Reactive Actor** architecture verified by model-based fuzzing, ensuring stability under chaos. It features a **Self-Tuning Resource Allocator** that adapts to your hardware in real-time and a hybrid **BitTorrent v2** engine, all powered by asynchronous **Tokio** streams for maximum throughput.
