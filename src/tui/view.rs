@@ -1362,24 +1362,64 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
         (&default_slice[..], &default_slice[..], &default_slice[..])
     };
 
+    // --- RESTORED LEDGER CALCULATION ---
+    let discovered_count: u64 = disc_slice.iter().sum();
+    let connected_count: u64 = conn_slice.iter().sum();
+    let disconnected_count: u64 = disconn_slice.iter().sum();
+
+    let legend_style_fn = |count: u64, color: Color| {
+        if selected_torrent.is_some() && count > 0 {
+            Style::default().fg(color)
+        } else {
+            Style::default().fg(theme::SURFACE1) // Greyed out
+        }
+    };
+
+    let legend_line = Line::from(vec![
+        Span::styled(
+            "Connected:",
+            legend_style_fn(connected_count, color_connected),
+        ),
+        Span::styled(
+            format!(" {} ", connected_count),
+            legend_style_fn(connected_count, color_connected).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "Discovered:",
+            legend_style_fn(discovered_count, color_discovered),
+        ),
+        Span::styled(
+            format!(" {} ", discovered_count),
+            legend_style_fn(discovered_count, color_discovered).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "Disconnected:",
+            legend_style_fn(disconnected_count, color_disconnected),
+        ),
+        Span::styled(
+            format!(" {} ", disconnected_count),
+            legend_style_fn(disconnected_count, color_disconnected).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    // --- EXISTING VISUALIZATION LOGIC ---
     let time_seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
 
-    // Vectors for "Small" activity (Braille)
     let mut conn_points_small = Vec::new();
     let mut disc_points_small = Vec::new();
     let mut disconn_points_small = Vec::new();
 
-    // Vectors for "Large" activity (Dots)
     let mut conn_points_large = Vec::new();
     let mut disc_points_large = Vec::new();
     let mut disconn_points_large = Vec::new();
 
     let mut rng = StdRng::seed_from_u64(time_seed);
 
-    // Closure to split data into small vs large points
     let mut generate_points = |data_slice: &[u64],
                                small_points: &mut Vec<(f64, f64)>,
                                large_points: &mut Vec<(f64, f64)>,
@@ -1389,29 +1429,20 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
                 continue;
             }
             let val_f = val as f64;
-
-            // Threshold: If activity > 3, we add a "Heavy Dot" to emphasize it.
-            // We ALWAYS add small dots (Braille) to create the "cloud" texture.
             let is_heavy = val > 3;
 
-            // 1. Calculate Density (How many Braille dots)
             let small_dot_count = (val_f.sqrt().ceil() as usize).clamp(1, 6);
-
-            // 2. Calculate Jitter (Spread)
             let activity_spread = (val_f * 0.08).min(0.6);
             let base_jitter = 0.05;
             let intensity = base_jitter + activity_spread;
 
-            // Add the "cloud" (Braille points)
             for _ in 0..small_dot_count {
                 let x_jitter = rng.random_range(-intensity..intensity);
                 let y_jitter = rng.random_range(-intensity..intensity);
                 small_points.push((i as f64 + x_jitter, base_y + y_jitter));
             }
 
-            // If heavy activity, add ONE big dot in the center of the cloud
             if is_heavy {
-                // Slight jitter for the heavy dot too so it doesn't look robotic
                 let heavy_jitter = rng.random_range(-0.1..0.1);
                 large_points.push((i as f64 + heavy_jitter, base_y + heavy_jitter));
             }
@@ -1422,9 +1453,8 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     generate_points(disc_slice, &mut disc_points_small, &mut disc_points_large, 2.0);
     generate_points(disconn_slice, &mut disconn_points_small, &mut disconn_points_large, 1.0);
 
-    // We layer the datasets: Braille first (background), Dots second (foreground)
     let datasets = vec![
-        // --- BRAILLE LAYERS (Background Cloud) ---
+        // Background Cloud (Braille)
         Dataset::default()
             .marker(symbols::Marker::Braille)
             .style(Style::default().fg(color_connected).add_modifier(Modifier::DIM))
@@ -1438,7 +1468,7 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
             .style(Style::default().fg(color_disconnected).add_modifier(Modifier::DIM))
             .data(&disconn_points_small),
 
-        // --- DOT LAYERS (Heavy Activity Highlights) ---
+        // Foreground Highlights (Dots)
         Dataset::default()
             .marker(symbols::Marker::Dot)
             .style(Style::default().fg(color_connected).add_modifier(Modifier::BOLD))
@@ -1458,10 +1488,16 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let chart = Chart::new(datasets)
         .block(
             Block::default()
-                .title(Span::styled(
-                    " Peer Activity Stream ",
-                    Style::default().fg(theme::SUBTEXT0),
-                ))
+                // Left Title
+                .title_top(
+                    Line::from(Span::styled(
+                        " Peer Activity Stream ",
+                        Style::default().fg(theme::SUBTEXT0),
+                    ))
+                    .alignment(Alignment::Left),
+                )
+                // Right Title (Restored Ledger)
+                .title_top(legend_line.alignment(Alignment::Right))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(color_border)),
         )
