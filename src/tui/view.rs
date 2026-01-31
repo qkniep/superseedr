@@ -1362,7 +1362,6 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
         (&default_slice[..], &default_slice[..], &default_slice[..])
     };
 
-    // --- RESTORED LEDGER CALCULATION ---
     let discovered_count: u64 = disc_slice.iter().sum();
     let connected_count: u64 = conn_slice.iter().sum();
     let disconnected_count: u64 = disconn_slice.iter().sum();
@@ -1404,7 +1403,6 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
         ),
     ]);
 
-    // --- EXISTING VISUALIZATION LOGIC ---
     let time_seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1449,37 +1447,73 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
         }
     };
 
-    generate_points(conn_slice, &mut conn_points_small, &mut conn_points_large, 3.0);
-    generate_points(disc_slice, &mut disc_points_small, &mut disc_points_large, 2.0);
-    generate_points(disconn_slice, &mut disconn_points_small, &mut disconn_points_large, 1.0);
+    generate_points(
+        conn_slice,
+        &mut conn_points_small,
+        &mut conn_points_large,
+        3.0,
+    );
+    generate_points(
+        disc_slice,
+        &mut disc_points_small,
+        &mut disc_points_large,
+        2.0,
+    );
+    generate_points(
+        disconn_slice,
+        &mut disconn_points_small,
+        &mut disconn_points_large,
+        1.0,
+    );
 
     let datasets = vec![
-        // Background Cloud (Braille)
         Dataset::default()
             .marker(symbols::Marker::Braille)
-            .style(Style::default().fg(color_connected).add_modifier(Modifier::DIM))
+            .style(
+                Style::default()
+                    .fg(color_connected)
+                    .add_modifier(Modifier::DIM),
+            )
             .data(&conn_points_small),
         Dataset::default()
             .marker(symbols::Marker::Braille)
-            .style(Style::default().fg(color_discovered).add_modifier(Modifier::DIM))
+            .style(
+                Style::default()
+                    .fg(color_discovered)
+                    .add_modifier(Modifier::DIM),
+            )
             .data(&disc_points_small),
         Dataset::default()
             .marker(symbols::Marker::Braille)
-            .style(Style::default().fg(color_disconnected).add_modifier(Modifier::DIM))
+            .style(
+                Style::default()
+                    .fg(color_disconnected)
+                    .add_modifier(Modifier::DIM),
+            )
             .data(&disconn_points_small),
-
-        // Foreground Highlights (Dots)
         Dataset::default()
             .marker(symbols::Marker::Dot)
-            .style(Style::default().fg(color_connected).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(color_connected)
+                    .add_modifier(Modifier::BOLD),
+            )
             .data(&conn_points_large),
         Dataset::default()
             .marker(symbols::Marker::Dot)
-            .style(Style::default().fg(color_discovered).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(color_discovered)
+                    .add_modifier(Modifier::BOLD),
+            )
             .data(&disc_points_large),
         Dataset::default()
             .marker(symbols::Marker::Dot)
-            .style(Style::default().fg(color_disconnected).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(color_disconnected)
+                    .add_modifier(Modifier::BOLD),
+            )
             .data(&disconn_points_large),
     ];
 
@@ -1488,7 +1522,6 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let chart = Chart::new(datasets)
         .block(
             Block::default()
-                // Left Title
                 .title_top(
                     Line::from(Span::styled(
                         " Peer Activity Stream ",
@@ -1496,7 +1529,6 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
                     ))
                     .alignment(Alignment::Left),
                 )
-                // Right Title (Restored Ledger)
                 .title_top(legend_line.alignment(Alignment::Right))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(color_border)),
@@ -2850,10 +2882,8 @@ fn draw_torrent_preview_panel(
 fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
     let area = f.area();
 
-    // 1. Draw the Background first (The stars/lines)
     draw_background_dust(f, area);
 
-    // --- SETUP CONTENT ---
     let get_dims = |text: &str| -> (u16, u16) {
         let h = text.lines().count() as u16;
         let w = text.lines().map(|l| l.len()).max().unwrap_or(0) as u16;
@@ -2863,7 +2893,6 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
     let (w_large, h_large) = get_dims(LOGO_LARGE);
     let (w_medium, h_medium) = get_dims(LOGO_MEDIUM);
 
-    // CHANGE: Resolve the path string for display
     let download_path_str = settings
         .default_download_folder
         .as_ref()
@@ -2931,14 +2960,14 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
         Line::from(vec![
             Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
             Span::raw("Download Location: "),
-            Span::styled(
-                download_path_str,
-                Style::default().fg(theme::SKY).bold(),
-            ),
+            Span::styled(download_path_str, Style::default().fg(theme::SKY).bold()),
         ]),
         Line::from(vec![
-             Span::raw("      - "),
-             Span::styled("Change or remove in Config [c]", Style::default().fg(theme::SURFACE2).italic()),
+            Span::raw("      - "),
+            Span::styled(
+                "Change or remove in Config [c]",
+                Style::default().fg(theme::SURFACE2).italic(),
+            ),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -3032,9 +3061,6 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
     let final_logo_area = logo_layout[1];
     let final_box_area = box_layout[1];
 
-    // --- RENDER ---
-
-    // A. Render Transparent Gradient Logo
     let buf = f.buffer_mut();
     for (y_local, line) in logo_text.lines().enumerate() {
         if y_local >= final_logo_area.height as usize {
@@ -3061,7 +3087,6 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
         }
     }
 
-    // B. Render Content Box (Opaque)
     f.render_widget(Clear, final_box_area);
 
     let block = Block::default()
@@ -3118,7 +3143,9 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     let area = centered_rect(60, 100, f.area());
     f.render_widget(Clear, area);
 
-    let watch_path_str = settings.watch_folder.as_deref()
+    let watch_path_str = settings
+        .watch_folder
+        .as_deref()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "Disabled".to_string());
 

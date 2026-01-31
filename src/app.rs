@@ -38,7 +38,6 @@ use crate::torrent_manager::ManagerEvent;
 use crate::torrent_manager::TorrentManager;
 use crate::torrent_manager::TorrentParameters;
 
-
 use std::collections::HashMap;
 use tokio::io::AsyncReadExt;
 use tokio::signal;
