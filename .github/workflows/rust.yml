@@ -185,11 +185,12 @@ jobs:
           
           # Decode and import the .p12
           echo $APPLE_INSTALLER_CERT_P12_BASE64 | base64 --decode > certificate.p12
-          security import certificate.p12 -k "$KEYCHAIN_NAME" -P "$APPLE_INSTALLER_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
+          security import certificate.p12 -k "$KEYCHAIN_NAME" -P "$APPLE_INSTALLER_CERT_PASSWORD" -A
           rm certificate.p12
+
           
           # Set keychain to allow signing
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$RUNNER_TEMP" "$KEYCHAIN_NAME"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$RUNNER_TEMP" -t 0 "$KEYCHAIN_NAME"
           
           echo "Waiting for keychain to settle..."
           sleep 2
