@@ -1,0 +1,43 @@
+name: Test Signing ONLY (No Build)
+
+on: workflow_dispatch
+
+env:
+  KEYCHAIN_PASS: "temp-pass"
+  KEYCHAIN_NAME: "build.keychain"
+
+jobs:
+  test_signing_mechanics:
+    runs-on: macos-latest
+    steps:
+      - name: 🔐 Setup Keychain (Zero Dependency)
+        env:
+          p12_base64: ${{ secrets.APPLE_INSTALLER_CERT_P12_BASE64 }}
+          p12_password: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
+        run: |
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_NAME"
+          security default-keychain -s "$KEYCHAIN_NAME"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_NAME"
+          security set-keychain-settings -t 0 -u "$KEYCHAIN_NAME"
+          
+          echo "$p12_base64" | base64 --decode > certificate.p12
+          security import certificate.p12 -k "$KEYCHAIN_NAME" -P "$p12_password" -A
+          rm certificate.p12
+          
+          # Verify we found the cert
+          security find-identity -v "$KEYCHAIN_NAME"
+
+      - name: ✍️ Test Signing on Dummy File
+        run: |
+          # 1. Create a dummy file
+          touch dummy_app.bin
+          
+          # 2. Get the identity name
+          CERT_IDENTITY=$(security find-identity -v "$KEYCHAIN_NAME" | grep "Developer ID" | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "Signing with: $CERT_IDENTITY"
+          
+          # 3. Try to sign it! (This is where it would hang if broken)
+          # We use --force because it's not a real app, but it tests access to the keychain
+          /usr/bin/codesign --force --sign "$CERT_IDENTITY" dummy_app.bin
+          
+          echo "✅ Signing worked! No hang detected."
