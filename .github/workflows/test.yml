@@ -23,15 +23,20 @@ jobs:
           
           # 2. Decode and Import Cert
           echo "$p12_base64" | base64 --decode > certificate.p12
-          security import certificate.p12 -k "$KEYCHAIN_NAME" -P "$p12_password" -T /usr/bin/codesign
+          
+          # CHANGE 1: Use -A (Allow all apps) instead of -T
+          # This often prevents the need for set-key-partition-list entirely
+          security import certificate.p12 -k "$KEYCHAIN_NAME" -P "$p12_password" -A
           rm certificate.p12
           
-          # 3. SET PARTITION LIST (Critical Step)
-          # This specific command prevents the "UI Prompt" hang.
-          # -S: Defines the partition list (permissions).
-          # -s: Prevents legacy warnings.
-          # -k: The keychain password (REQUIRED, otherwise it hangs waiting for input).
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_NAME"
+          # CHANGE 2: The "Nuclear" Partition List Fix
+          # We echo the password into the command to guarantee no UI prompt.
+          # We also unlock it immediately before to be safe.
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_NAME"
+          
+          echo "Setting partition list..."
+          # Note: We use || true so if it fails (because -A made it unnecessary), the build continues
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_NAME" || true
           
           # Verify identity
           security find-identity -v "$KEYCHAIN_NAME"
@@ -39,7 +44,14 @@ jobs:
       - name: ✍️ Test Signing on Dummy File
         run: |
           touch dummy_app.bin
+          
+          # Find the identity
           CERT_IDENTITY=$(security find-identity -v "$KEYCHAIN_NAME" | grep "Developer ID" | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+          
+          if [ -z "$CERT_IDENTITY" ]; then
+            echo "::error:: No identity found!"
+            exit 1
+          fi
           
           echo "Signing with: $CERT_IDENTITY"
           /usr/bin/codesign --force --sign "$CERT_IDENTITY" dummy_app.bin
