@@ -1,5 +1,9 @@
 # Changelog
 
+## Release v0.9.37
+
+- **Version bump:** fixing github with new macOS flow.
+
 ## Release v0.9.36
 
 ### 🚀 New Features
