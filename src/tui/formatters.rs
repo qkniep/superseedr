@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::theme;
+use crate::theme::Theme;
 use ratatui::style::{Color, Style};
 use std::path::Path;
 use std::time::Duration;
@@ -152,23 +152,8 @@ pub fn path_to_string(path: Option<&Path>) -> String {
         .unwrap_or_else(|| "Not Set".to_string())
 }
 
-pub fn ip_to_color(ip: &str) -> Color {
-    let colors = [
-        theme::ROSEWATER,
-        theme::FLAMINGO,
-        theme::PINK,
-        theme::MAUVE,
-        theme::RED,
-        theme::MAROON,
-        theme::PEACH,
-        theme::YELLOW,
-        theme::GREEN,
-        theme::TEAL,
-        theme::SKY,
-        theme::SAPPHIRE,
-        theme::BLUE,
-        theme::LAVENDER,
-    ];
+pub fn ip_to_color(theme: &Theme, ip: &str) -> Color {
+    let colors = theme.scale.ip_hash;
 
     let hash = ip
         .as_bytes()
@@ -178,33 +163,33 @@ pub fn ip_to_color(ip: &str) -> Color {
     colors[hash as usize % colors.len()]
 }
 
-pub fn speed_to_style(speed_bps: u64) -> Style {
+pub fn speed_to_style(theme: &Theme, speed_bps: u64) -> Style {
     if speed_bps == 0 {
         Style::default() // Let the main row style handle the color for zero speed
     } else if speed_bps < 50_000 {
         // < 50 KB/s
-        Style::default().fg(theme::SKY)
+        Style::default().fg(theme.scale.speed[0])
     } else if speed_bps < 500_000 {
         // < 500 KB/s
-        Style::default().fg(theme::GREEN)
+        Style::default().fg(theme.scale.speed[1])
     } else if speed_bps < 2_000_000 {
         // < 2 MB/s
-        Style::default().fg(theme::YELLOW)
+        Style::default().fg(theme.scale.speed[2])
     } else if speed_bps < 10_000_000 {
         // < 10 Mbps
-        Style::default().fg(theme::PEACH)
+        Style::default().fg(theme.scale.speed[3])
     } else if speed_bps < 20_000_000 {
         // < 20 Mbps
-        Style::default().fg(theme::MAROON)
+        Style::default().fg(theme.scale.speed[4])
     } else if speed_bps < 50_000_000 {
         // < 50 Mbps
-        Style::default().fg(theme::RED)
+        Style::default().fg(theme.scale.speed[5])
     } else if speed_bps < 100_000_000 {
         // < 100 Mbps
-        Style::default().fg(theme::FLAMINGO)
+        Style::default().fg(theme.scale.speed[6])
     } else {
         // >= 100 Mbps
-        Style::default().fg(theme::PINK)
+        Style::default().fg(theme.scale.speed[7])
     }
 }
 
@@ -305,7 +290,7 @@ pub fn format_graph_time_label(duration_secs: usize) -> String {
     }
 }
 
-pub fn generate_x_axis_labels(graph_mode: GraphDisplayMode) -> Vec<Span<'static>> {
+pub fn generate_x_axis_labels(theme: &Theme, graph_mode: GraphDisplayMode) -> Vec<Span<'static>> {
     let labels_str: Vec<String> = match graph_mode {
         GraphDisplayMode::OneMinute => (0..=4)
             .map(|i| format_graph_time_label(60 - i * 15))
@@ -336,10 +321,10 @@ pub fn generate_x_axis_labels(graph_mode: GraphDisplayMode) -> Vec<Span<'static>
     // Convert the strings to styled Spans, replacing the last label with "Now".
     let mut x_labels: Vec<Span> = labels_str
         .into_iter()
-        .map(|s| Span::styled(s, Style::default().fg(theme::SUBTEXT0)))
+        .map(|s| Span::styled(s, Style::default().fg(theme.semantic.subtext0)))
         .collect();
     if let Some(last) = x_labels.last_mut() {
-        *last = Span::styled("Now", Style::default().fg(theme::SUBTEXT0));
+        *last = Span::styled("Now", Style::default().fg(theme.semantic.subtext0));
     }
     x_labels
 }
@@ -386,12 +371,13 @@ pub fn parse_peer_id(peer_id: &[u8]) -> String {
     "Unknown".to_string()
 }
 
-pub fn format_permits_spans(
-    label: &str,
+pub fn format_permits_spans<'a>(
+    theme: &'a Theme,
+    label: &'a str,
     used: usize,
     total: usize,
     base_color: Color,
-) -> Vec<Span<'_>> {
+) -> Vec<Span<'a>> {
     let usage_ratio = if total > 0 {
         used as f64 / total as f64
     } else {
@@ -399,11 +385,11 @@ pub fn format_permits_spans(
     };
 
     let status_color = if usage_ratio > 0.9 {
-        theme::RED
+        theme.scale.categorical.red
     } else if usage_ratio > 0.7 {
-        theme::YELLOW
+        theme.scale.categorical.yellow
     } else {
-        theme::TEXT
+        theme.semantic.text
     };
 
     vec![
@@ -430,15 +416,15 @@ pub fn format_iops(iops: u32) -> String {
     format!("{} ops/s", iops)
 }
 
-pub fn format_limit_delta(current: usize, last: usize) -> Span<'static> {
+pub fn format_limit_delta(theme: &Theme, current: usize, last: usize) -> Span<'static> {
     let delta = current as isize - last as isize;
     if delta == 0 {
         return Span::raw("");
     }
     let (sign, style) = if delta > 0 {
-        ("+", Style::default().fg(theme::GREEN))
+        ("+", Style::default().fg(theme.scale.categorical.green))
     } else {
-        ("-", Style::default().fg(theme::RED))
+        ("-", Style::default().fg(theme.scale.categorical.red))
     };
     Span::styled(format!(" ({}{})", sign, delta.abs()), style)
 }

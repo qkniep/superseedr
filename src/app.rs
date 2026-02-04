@@ -29,6 +29,7 @@ use crate::config::get_watch_path;
 use crate::storage::build_fs_tree;
 
 use crate::resource_manager::ResourceType;
+use crate::theme::Theme;
 
 use crate::integrations::status::AppOutputState;
 use crate::integrations::{status, watcher};
@@ -560,6 +561,7 @@ pub struct AppState {
 
     pub ui_needs_redraw: bool,
     pub data_rate: DataRate,
+    pub theme: Theme,
 
     pub selected_header: SelectedHeader,
     pub torrent_sort: (TorrentSortColumn, SortDirection),
@@ -681,6 +683,7 @@ impl App {
             system_error: None,
             limits: limits.clone(),
             ui_needs_redraw: true,
+            theme: Theme::builtin(client_configs.ui_theme),
             torrent_sort: (
                 client_configs.torrent_sort_column,
                 client_configs.torrent_sort_direction,

@@ -23,7 +23,6 @@ use crate::tui::layout::{calculate_layout, compute_smart_table_layout, LayoutCon
 
 use crate::config::get_app_paths;
 use crate::config::{Settings, SortDirection};
-use crate::theme;
 use throbber_widgets_tui::Throbber;
 
 use rand::rngs::StdRng;
@@ -67,6 +66,7 @@ const LOGO_SMALL: &str = r#"
 
 pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     let area = f.area();
+    let theme = &app_state.theme;
 
     if app_state.show_help {
         draw_help_popup(f, app_state);
@@ -75,7 +75,7 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
 
     match &app_state.mode {
         AppMode::Welcome => {
-            draw_welcome_screen(f, settings);
+            draw_welcome_screen(f, settings, theme);
             return;
         }
         AppMode::PowerSaving => {
@@ -88,7 +88,7 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
             items,
             editing,
         } => {
-            draw_config_screen(f, settings_edit, *selected_index, items, editing);
+            draw_config_screen(f, settings_edit, *selected_index, items, editing, theme);
             return;
         }
         AppMode::DeleteConfirm { .. } => {
@@ -134,12 +134,12 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
 
     if let Some(msg) = plan.warning_message {
         f.render_widget(
-            Paragraph::new(msg).style(Style::default().fg(theme::RED).bg(theme::SURFACE0)),
+            Paragraph::new(msg).style(Style::default().fg(theme.scale.categorical.red).bg(theme.semantic.surface0)),
             plan.list,
         );
     }
     if let Some(error_text) = &app_state.system_error {
-        draw_status_error_popup(f, error_text);
+        draw_status_error_popup(f, error_text, theme);
     }
     if app_state.should_quit {
         draw_shutdown_screen(f, app_state);
@@ -147,6 +147,7 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
 }
 
 fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
+    let theme = &app_state.theme;
     let mut table_state = TableState::default();
     if matches!(app_state.selected_header, SelectedHeader::Torrent(_)) {
         table_state.select(Some(app_state.selected_torrent_index));
@@ -212,9 +213,9 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
             let is_selected = app_state.selected_header == SelectedHeader::Torrent(visual_idx);
             let is_sorting = def.sort_enum == Some(sort_col);
 
-            let mut style = Style::default().fg(theme::YELLOW);
+            let mut style = Style::default().fg(theme.scale.categorical.yellow);
             if is_sorting {
-                style = style.fg(theme::MAUVE);
+                style = style.fg(theme.scale.categorical.mauve);
             }
 
             let mut spans = vec![];
@@ -248,9 +249,9 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                     let is_selected = i == app_state.selected_torrent_index;
 
                     let mut row_style = match state.torrent_control_state {
-                        TorrentControlState::Running => Style::default().fg(theme::TEXT),
-                        TorrentControlState::Paused => Style::default().fg(theme::SURFACE1),
-                        TorrentControlState::Deleting => Style::default().fg(theme::RED),
+                        TorrentControlState::Running => Style::default().fg(theme.semantic.text),
+                        TorrentControlState::Paused => Style::default().fg(theme.semantic.surface1),
+                        TorrentControlState::Deleting => Style::default().fg(theme.scale.categorical.red),
                     };
 
                     if is_selected {
@@ -303,17 +304,17 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
                                     };
                                     let mut c = Cell::from(name);
                                     if is_selected {
-                                        c = c.style(Style::default().fg(theme::YELLOW));
+                                        c = c.style(Style::default().fg(theme.scale.categorical.yellow));
                                     }
                                     c
                                 }
                                 ColumnId::DownSpeed => {
                                     Cell::from(format_speed(torrent.smoothed_download_speed_bps))
-                                        .style(speed_to_style(torrent.smoothed_download_speed_bps))
+                                        .style(speed_to_style(theme, torrent.smoothed_download_speed_bps))
                                 }
                                 ColumnId::UpSpeed => {
                                     Cell::from(format_speed(torrent.smoothed_upload_speed_bps))
-                                        .style(speed_to_style(torrent.smoothed_upload_speed_bps))
+                                        .style(speed_to_style(theme, torrent.smoothed_upload_speed_bps))
                                 }
                             }
                         })
@@ -325,9 +326,9 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
             });
 
     let border_style = if matches!(app_state.selected_header, SelectedHeader::Torrent(_)) {
-        Style::default().fg(theme::MAUVE)
+        Style::default().fg(theme.scale.categorical.mauve)
     } else {
-        Style::default().fg(theme::SURFACE2)
+        Style::default().fg(theme.semantic.surface2)
     };
 
     let mut title_spans = Vec::new();
@@ -335,13 +336,13 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
         title_spans.push(Span::raw("Search: /"));
         title_spans.push(Span::styled(
             &app_state.search_query,
-            Style::default().fg(theme::YELLOW),
+            Style::default().fg(theme.scale.categorical.yellow),
         ));
     } else if !app_state.search_query.is_empty() {
         title_spans.push(Span::styled(
             format!("[{}] ", app_state.search_query),
             Style::default()
-                .fg(theme::SUBTEXT1)
+                .fg(theme.semantic.subtext1)
                 .add_modifier(Modifier::ITALIC),
         ));
     }
@@ -370,7 +371,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
 
                 title_spans.push(Span::styled(
                     display_name,
-                    Style::default().fg(theme::YELLOW),
+                    Style::default().fg(theme.scale.categorical.yellow),
                 ));
             }
         }
@@ -390,12 +391,12 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
             Line::from(Span::styled(
                 "No Torrents",
                 Style::default()
-                    .fg(theme::SURFACE2)
+                    .fg(theme.semantic.surface2)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
                 "Press [a] to add a file or [v] to paste a magnet link",
-                Style::default().fg(theme::SURFACE2),
+                Style::default().fg(theme.semantic.surface2),
             )),
         ];
 
@@ -410,6 +411,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect) {
 }
 
 fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
+    let theme = &app_state.theme;
     if chart_chunk.width < 5 || chart_chunk.height < 5 {
         return;
     }
@@ -515,7 +517,7 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
         .name("File Limits")
         .marker(Marker::Braille)
         .graph_type(GraphType::Scatter)
-        .style(Style::default().fg(theme::RED).add_modifier(Modifier::BOLD))
+        .style(Style::default().fg(theme.scale.categorical.red).add_modifier(Modifier::BOLD))
         .data(&backoff_marker_data);
 
     let datasets = vec![
@@ -524,7 +526,7 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
             .marker(Marker::Braille)
             .style(
                 Style::default()
-                    .fg(theme::BLUE)
+                    .fg(theme.scale.categorical.blue)
                     .add_modifier(Modifier::BOLD),
             )
             .data(&dl_data),
@@ -533,7 +535,7 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
             .marker(Marker::Braille)
             .style(
                 Style::default()
-                    .fg(theme::GREEN)
+                    .fg(theme.scale.categorical.green)
                     .add_modifier(Modifier::BOLD),
             )
             .data(&ul_data),
@@ -544,14 +546,14 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
         Span::raw("0"),
         Span::styled(
             format_speed(nice_max_speed / 2),
-            Style::default().fg(theme::SUBTEXT0),
+            Style::default().fg(theme.semantic.subtext0),
         ),
         Span::styled(
             format_speed(nice_max_speed),
-            Style::default().fg(theme::SUBTEXT0),
+            Style::default().fg(theme.semantic.subtext0),
         ),
     ];
-    let x_labels = generate_x_axis_labels(app_state.graph_mode);
+    let x_labels = generate_x_axis_labels(theme, app_state.graph_mode);
 
     let all_modes = [
         GraphDisplayMode::OneMinute,
@@ -565,7 +567,7 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
     ];
     let mut title_spans: Vec<Span> = vec![Span::styled(
         "Network Activity ",
-        Style::default().fg(theme::PEACH),
+        Style::default().fg(theme.scale.categorical.peach),
     )];
     for (i, &mode) in all_modes.iter().enumerate() {
         let is_active = mode == app_state.graph_mode;
@@ -573,16 +575,16 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
 
         let style = if is_active {
             Style::default()
-                .fg(theme::YELLOW)
+                .fg(theme.scale.categorical.yellow)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::SURFACE0)
+            Style::default().fg(theme.semantic.surface0)
         };
 
         title_spans.push(Span::styled(mode_str, style));
 
         if i < all_modes.len().saturating_sub(1) {
-            title_spans.push(Span::styled(" ", Style::default().fg(theme::SURFACE2)));
+            title_spans.push(Span::styled(" ", Style::default().fg(theme.semantic.surface2)));
         }
     }
     let chart_title = Line::from(title_spans);
@@ -592,17 +594,17 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
             Block::default()
                 .title(chart_title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::SURFACE2)),
+                .border_style(Style::default().fg(theme.semantic.surface2)),
         )
         .x_axis(
             Axis::default()
-                .style(Style::default().fg(theme::OVERLAY0))
+                .style(Style::default().fg(theme.semantic.overlay0))
                 .bounds([0.0, points_to_show.saturating_sub(1) as f64])
                 .labels(x_labels),
         )
         .y_axis(
             Axis::default()
-                .style(Style::default().fg(theme::OVERLAY0))
+                .style(Style::default().fg(theme.semantic.overlay0))
                 .bounds([0.0, nice_max_speed as f64])
                 .labels(y_speed_axis_labels),
         )
@@ -612,6 +614,7 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect) {
 }
 
 fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, stats_chunk: Rect) {
+    let theme = &app_state.theme;
     let total_peers = app_state
         .torrents
         .values()
@@ -628,22 +631,22 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
     let dl_limit = settings.global_download_limit_bps;
 
     let mut dl_spans = vec![
-        Span::styled("DL Speed: ", Style::default().fg(theme::SKY).bold()),
+        Span::styled("DL Speed: ", Style::default().fg(theme.scale.categorical.sky).bold()),
         Span::styled(
             format_speed(dl_speed),
-            Style::default().fg(theme::SKY).bold(),
+            Style::default().fg(theme.scale.categorical.sky).bold(),
         ),
         Span::raw(" / "),
     ];
     if dl_limit > 0 && dl_speed >= dl_limit {
         dl_spans.push(Span::styled(
             format_limit_bps(dl_limit),
-            Style::default().fg(theme::RED),
+            Style::default().fg(theme.scale.categorical.red),
         ));
     } else {
         dl_spans.push(Span::styled(
             format_limit_bps(dl_limit),
-            Style::default().fg(theme::SUBTEXT0),
+            Style::default().fg(theme.semantic.subtext0),
         ));
     }
 
@@ -651,10 +654,10 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
     let ul_limit = settings.global_upload_limit_bps;
 
     let mut ul_spans = vec![
-        Span::styled("UL Speed: ", Style::default().fg(theme::GREEN).bold()),
+        Span::styled("UL Speed: ", Style::default().fg(theme.scale.categorical.green).bold()),
         Span::styled(
             format_speed(ul_speed),
-            Style::default().fg(theme::GREEN).bold(),
+            Style::default().fg(theme.scale.categorical.green).bold(),
         ),
         Span::raw(" / "),
     ];
@@ -662,12 +665,12 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
     if ul_limit > 0 && ul_speed >= ul_limit {
         ul_spans.push(Span::styled(
             format_limit_bps(ul_limit),
-            Style::default().fg(theme::RED),
+            Style::default().fg(theme.scale.categorical.red),
         ));
     } else {
         ul_spans.push(Span::styled(
             format_limit_bps(ul_limit),
-            Style::default().fg(theme::SUBTEXT0),
+            Style::default().fg(theme.semantic.subtext0),
         ));
     }
 
@@ -679,36 +682,36 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
 
     if thrash_score_val < 0.01 {
         thrash_text = format!("- ({})", thrash_score_str);
-        thrash_style = Style::default().fg(theme::SUBTEXT0);
+        thrash_style = Style::default().fg(theme.semantic.subtext0);
     } else if baseline_val == 0.0 {
         thrash_text = format!("∞ ({})", thrash_score_str);
-        thrash_style = Style::default().fg(theme::RED).bold();
+        thrash_style = Style::default().fg(theme.scale.categorical.red).bold();
     } else {
         let diff = thrash_score_val - baseline_val;
         let thrash_percentage = (diff / baseline_val) * 100.0;
 
         if thrash_percentage > -0.01 && thrash_percentage < 0.01 {
             thrash_text = format!("0.0% ({})", thrash_score_str);
-            thrash_style = Style::default().fg(theme::TEXT);
+            thrash_style = Style::default().fg(theme.semantic.text);
         } else {
             thrash_text = format!("{:+.1}% ({})", thrash_percentage, thrash_score_str);
             if thrash_percentage > 15.0 {
-                thrash_style = Style::default().fg(theme::RED).bold();
+                thrash_style = Style::default().fg(theme.scale.categorical.red).bold();
             } else if thrash_percentage > 0.0 {
-                thrash_style = Style::default().fg(theme::YELLOW);
+                thrash_style = Style::default().fg(theme.scale.categorical.yellow);
             } else {
-                thrash_style = Style::default().fg(theme::GREEN);
+                thrash_style = Style::default().fg(theme.scale.categorical.green);
             }
         }
     }
 
     let stats_text = vec![
         Line::from(vec![
-            Span::styled("Run Time: ", Style::default().fg(theme::TEAL)),
+            Span::styled("Run Time: ", Style::default().fg(theme.scale.categorical.teal)),
             Span::raw(format_time(app_state.run_time)),
         ]),
         Line::from(vec![
-            Span::styled("Torrents: ", Style::default().fg(theme::PEACH)),
+            Span::styled("Torrents: ", Style::default().fg(theme.scale.categorical.peach)),
             Span::raw(format!(
                 "{} ({})",
                 app_state.torrents.len(),
@@ -718,11 +721,11 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
         Line::from(""),
         Line::from(dl_spans),
         Line::from(vec![
-            Span::styled("Session DL: ", Style::default().fg(theme::SKY)),
+            Span::styled("Session DL: ", Style::default().fg(theme.scale.categorical.sky)),
             Span::raw(format_bytes(app_state.session_total_downloaded)),
         ]),
         Line::from(vec![
-            Span::styled("Lifetime DL: ", Style::default().fg(theme::SKY)),
+            Span::styled("Lifetime DL: ", Style::default().fg(theme.scale.categorical.sky)),
             Span::raw(format_bytes(
                 app_state.lifetime_downloaded_from_config + app_state.session_total_downloaded,
             )),
@@ -730,125 +733,125 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
         Line::from(""),
         Line::from(ul_spans),
         Line::from(vec![
-            Span::styled("Session UL: ", Style::default().fg(theme::GREEN)),
+            Span::styled("Session UL: ", Style::default().fg(theme.scale.categorical.green)),
             Span::raw(format_bytes(app_state.session_total_uploaded)),
         ]),
         Line::from(vec![
-            Span::styled("Lifetime UL: ", Style::default().fg(theme::GREEN)),
+            Span::styled("Lifetime UL: ", Style::default().fg(theme.scale.categorical.green)),
             Span::raw(format_bytes(
                 app_state.lifetime_uploaded_from_config + app_state.session_total_uploaded,
             )),
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("CPU: ", Style::default().fg(theme::RED)),
+            Span::styled("CPU: ", Style::default().fg(theme.scale.categorical.red)),
             Span::raw(format!("{:.1}%", app_state.cpu_usage)),
         ]),
         Line::from(vec![
-            Span::styled("RAM: ", Style::default().fg(theme::YELLOW)),
+            Span::styled("RAM: ", Style::default().fg(theme.scale.categorical.yellow)),
             Span::raw(format!("{:.1}%", app_state.ram_usage_percent)),
         ]),
         Line::from(vec![
-            Span::styled("App RAM: ", Style::default().fg(theme::FLAMINGO)),
+            Span::styled("App RAM: ", Style::default().fg(theme.scale.categorical.flamingo)),
             Span::raw(format_memory(app_state.app_ram_usage)),
         ]),
         Line::from(vec![
-            Span::styled("Disk    ", Style::default().fg(theme::TEXT)),
-            Span::styled("↑ ", Style::default().fg(theme::GREEN)),
+            Span::styled("Disk    ", Style::default().fg(theme.semantic.text)),
+            Span::styled("↑ ", Style::default().fg(theme.scale.categorical.green)),
             Span::styled(
                 format!("{:<12}", format_speed(app_state.avg_disk_read_bps)),
-                Style::default().fg(theme::GREEN),
+                Style::default().fg(theme.scale.categorical.green),
             ),
-            Span::styled("↓ ", Style::default().fg(theme::SKY)),
+            Span::styled("↓ ", Style::default().fg(theme.scale.categorical.sky)),
             Span::styled(
                 format_speed(app_state.avg_disk_write_bps),
-                Style::default().fg(theme::SKY),
+                Style::default().fg(theme.scale.categorical.sky),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Seek    ", Style::default().fg(theme::TEXT)),
-            Span::styled("↑ ", Style::default().fg(theme::GREEN)),
+            Span::styled("Seek    ", Style::default().fg(theme.semantic.text)),
+            Span::styled("↑ ", Style::default().fg(theme.scale.categorical.green)),
             Span::styled(
                 format!(
                     "{:<12}",
                     format_bytes(app_state.global_disk_read_thrash_score)
                 ),
-                Style::default().fg(theme::GREEN),
+                Style::default().fg(theme.scale.categorical.green),
             ),
-            Span::styled("↓ ", Style::default().fg(theme::SKY)),
+            Span::styled("↓ ", Style::default().fg(theme.scale.categorical.sky)),
             Span::styled(
                 format_bytes(app_state.global_disk_write_thrash_score),
-                Style::default().fg(theme::SKY),
+                Style::default().fg(theme.scale.categorical.sky),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Latency ", Style::default().fg(theme::TEXT)),
-            Span::styled("↑ ", Style::default().fg(theme::GREEN)),
+            Span::styled("Latency ", Style::default().fg(theme.semantic.text)),
+            Span::styled("↑ ", Style::default().fg(theme.scale.categorical.green)),
             Span::styled(
                 format!("{:<12}", format_latency(app_state.avg_disk_read_latency)),
-                Style::default().fg(theme::GREEN),
+                Style::default().fg(theme.scale.categorical.green),
             ),
-            Span::styled("↓ ", Style::default().fg(theme::SKY)),
+            Span::styled("↓ ", Style::default().fg(theme.scale.categorical.sky)),
             Span::styled(
                 format_latency(app_state.avg_disk_write_latency),
-                Style::default().fg(theme::SKY),
+                Style::default().fg(theme.scale.categorical.sky),
             ),
         ]),
         Line::from(vec![
-            Span::styled("IOPS    ", Style::default().fg(theme::TEXT)),
-            Span::styled("↑ ", Style::default().fg(theme::GREEN)),
+            Span::styled("IOPS    ", Style::default().fg(theme.semantic.text)),
+            Span::styled("↑ ", Style::default().fg(theme.scale.categorical.green)),
             Span::styled(
                 format!("{:<12}", format_iops(app_state.read_iops)),
-                Style::default().fg(theme::GREEN),
+                Style::default().fg(theme.scale.categorical.green),
             ),
-            Span::styled("↓ ", Style::default().fg(theme::SKY)),
+            Span::styled("↓ ", Style::default().fg(theme.scale.categorical.sky)),
             Span::styled(
                 format_iops(app_state.write_iops),
-                Style::default().fg(theme::SKY),
+                Style::default().fg(theme.scale.categorical.sky),
             ),
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Next Tuning in: ", Style::default().fg(theme::TEXT)),
+            Span::styled("Next Tuning in: ", Style::default().fg(theme.semantic.text)),
             Span::raw(format!("{}s", app_state.tuning_countdown)),
         ]),
         Line::from(vec![
-            Span::styled("Disk Thrash: ", Style::default().fg(theme::TEAL)),
+            Span::styled("Disk Thrash: ", Style::default().fg(theme.scale.categorical.teal)),
             Span::styled(thrash_text, thrash_style),
         ]),
         Line::from(vec![
-            Span::styled("Reserve Pool:  ", Style::default().fg(theme::TEAL)),
+            Span::styled("Reserve Pool:  ", Style::default().fg(theme.scale.categorical.teal)),
             Span::raw(app_state.limits.reserve_permits.to_string()),
-            format_limit_delta(
+            format_limit_delta(theme, 
                 app_state.limits.reserve_permits,
                 app_state.last_tuning_limits.reserve_permits,
             ),
         ]),
         {
-            let mut spans = format_permits_spans(
+            let mut spans = format_permits_spans(theme, 
                 "Peer Slots: ",
                 total_peers,
                 app_state.limits.max_connected_peers,
-                theme::MAUVE,
+                theme.scale.categorical.mauve,
             );
-            spans.push(format_limit_delta(
+            spans.push(format_limit_delta(theme, 
                 app_state.limits.max_connected_peers,
                 app_state.last_tuning_limits.max_connected_peers,
             ));
             Line::from(spans)
         },
         Line::from(vec![
-            Span::styled("Disk Reads:    ", Style::default().fg(theme::GREEN)),
+            Span::styled("Disk Reads:    ", Style::default().fg(theme.scale.categorical.green)),
             Span::raw(app_state.limits.disk_read_permits.to_string()),
-            format_limit_delta(
+            format_limit_delta(theme, 
                 app_state.limits.disk_read_permits,
                 app_state.last_tuning_limits.disk_read_permits,
             ),
         ]),
         Line::from(vec![
-            Span::styled("Disk Writes:   ", Style::default().fg(theme::SKY)),
+            Span::styled("Disk Writes:   ", Style::default().fg(theme.scale.categorical.sky)),
             Span::raw(app_state.limits.disk_write_permits.to_string()),
-            format_limit_delta(
+            format_limit_delta(theme, 
                 app_state.limits.disk_write_permits,
                 app_state.last_tuning_limits.disk_write_permits,
             ),
@@ -872,20 +875,20 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
     let gauge_str = format!("[{}{}]", "=".repeat(filled_len), "-".repeat(empty_len));
 
     let mut title_spans = vec![
-        Span::styled("Stats", Style::default().fg(Color::White)),
+        Span::styled("Stats", Style::default().fg(theme.semantic.white)),
         Span::raw(" | "),
         Span::styled(
             format!("Lvl {}", lvl),
-            Style::default().fg(theme::YELLOW).bold(),
+            Style::default().fg(theme.scale.categorical.yellow).bold(),
         ),
         Span::raw(" "),
-        Span::styled(gauge_str, Style::default().fg(theme::GREEN)),
+        Span::styled(gauge_str, Style::default().fg(theme.scale.categorical.green)),
     ];
 
     if show_pct {
         title_spans.push(Span::styled(
             format!(" {:.0}%", progress * 100.0),
-            Style::default().fg(theme::SUBTEXT1),
+            Style::default().fg(theme.semantic.subtext1),
         ));
     }
 
@@ -894,18 +897,19 @@ fn draw_stats_panel(f: &mut Frame, app_state: &AppState, settings: &Settings, st
             Block::default()
                 .title(Line::from(title_spans))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::SURFACE2)),
+                .border_style(Style::default().fg(theme.semantic.surface2)),
         )
-        .style(Style::default().fg(theme::TEXT));
+        .style(Style::default().fg(theme.semantic.text));
 
     f.render_widget(stats_paragraph, stats_chunk);
 }
 
 fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: Rect) {
+    let theme = &app_state.theme;
     let details_block = Block::default()
-        .title(Span::styled("Details", Style::default().fg(theme::MAUVE)))
+        .title(Span::styled("Details", Style::default().fg(theme.scale.categorical.mauve)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::SURFACE2));
+        .border_style(Style::default().fg(theme.semantic.surface2));
     let details_inner_chunk = details_block.inner(details_text_chunk);
     f.render_widget(details_block, details_text_chunk);
 
@@ -955,7 +959,7 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
             .ratio(progress_ratio)
             .label(progress_label_text)
             .line_set(custom_line_set)
-            .filled_style(Style::default().fg(theme::GREEN));
+            .filled_style(Style::default().fg(theme.scale.categorical.green));
         f.render_widget(line_gauge, progress_chunks[1]);
 
         let status_text = if state.activity_message.is_empty() {
@@ -965,7 +969,7 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
         };
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Status:   ", Style::default().fg(theme::TEXT)),
+                Span::styled("Status:   ", Style::default().fg(theme.semantic.text)),
                 Span::raw(status_text),
             ])),
             detail_rows[1],
@@ -995,14 +999,14 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
             });
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Peers:    ", Style::default().fg(theme::TEXT)),
+                Span::styled("Peers:    ", Style::default().fg(theme.semantic.text)),
                 Span::raw(format!(
                     "{} (",
                     state.number_of_successfully_connected_peers
                 )),
-                Span::styled(format!("{}", seeds), Style::default().fg(theme::GREEN)),
+                Span::styled(format!("{}", seeds), Style::default().fg(theme.scale.categorical.green)),
                 Span::raw(" / "),
-                Span::styled(format!("{}", leeches), Style::default().fg(theme::RED)),
+                Span::styled(format!("{}", leeches), Style::default().fg(theme.scale.categorical.red)),
                 Span::raw(")"),
             ])),
             detail_rows[2],
@@ -1011,13 +1015,13 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
         let written_size_spans = if state.number_of_pieces_completed < state.number_of_pieces_total
         {
             vec![
-                Span::styled("Written:  ", Style::default().fg(theme::TEXT)),
+                Span::styled("Written:  ", Style::default().fg(theme.semantic.text)),
                 Span::raw(format_bytes(state.bytes_written)),
                 Span::raw(format!(" / {}", format_bytes(state.total_size))),
             ]
         } else {
             vec![
-                Span::styled("Size:     ", Style::default().fg(theme::TEXT)),
+                Span::styled("Size:     ", Style::default().fg(theme.semantic.text)),
                 Span::raw(format_bytes(state.total_size)),
             ]
         };
@@ -1028,7 +1032,7 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
 
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Pieces:   ", Style::default().fg(theme::TEXT)),
+                Span::styled("Pieces:   ", Style::default().fg(theme.semantic.text)),
                 Span::raw(format!(
                     "{}/{}",
                     state.number_of_pieces_completed, state.number_of_pieces_total
@@ -1039,7 +1043,7 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
 
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("ETA:      ", Style::default().fg(theme::TEXT)),
+                Span::styled("ETA:      ", Style::default().fg(theme.semantic.text)),
                 Span::raw(format_duration(state.eta)),
             ])),
             detail_rows[5],
@@ -1047,14 +1051,14 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
 
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Announce: ", Style::default().fg(theme::TEXT)),
+                Span::styled("Announce: ", Style::default().fg(theme.semantic.text)),
                 Span::raw(format_countdown(state.next_announce_in)),
             ])),
             detail_rows[6],
         );
     } else {
-        let placeholder_style = Style::default().fg(theme::OVERLAY0);
-        let label_style = Style::default().fg(theme::SURFACE2);
+        let placeholder_style = Style::default().fg(theme.semantic.overlay0);
+        let label_style = Style::default().fg(theme.semantic.surface2);
 
         // Row 0: Progress
         let progress_chunks =
@@ -1126,6 +1130,7 @@ fn draw_details_panel(f: &mut Frame, app_state: &AppState, details_text_chunk: R
 }
 
 fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_chunk: Rect) {
+    let theme = &app_state.theme;
     let show_branding = footer_chunk.width >= 80;
 
     // 1. DETERMINE CONTENT WIDTHS
@@ -1189,23 +1194,23 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
             Line::from(vec![
                 Span::styled(
                     "UPDATE AVAILABLE: ",
-                    Style::default().fg(theme::YELLOW).bold(),
+                    Style::default().fg(theme.scale.categorical.yellow).bold(),
                 ),
                 Span::styled(
                     format!("v{}", APP_VERSION),
                     Style::default()
-                        .fg(theme::SURFACE2)
+                        .fg(theme.semantic.surface2)
                         .add_modifier(Modifier::CROSSED_OUT),
                 ),
-                Span::styled(" \u{2192} ", Style::default().fg(theme::SURFACE2)), // Arrow ->
+                Span::styled(" \u{2192} ", Style::default().fg(theme.semantic.surface2)), // Arrow ->
                 Span::styled(
                     format!("v{}", new_version),
-                    Style::default().fg(theme::GREEN).bold(),
+                    Style::default().fg(theme.scale.categorical.green).bold(),
                 ),
-                Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+                Span::styled(" | ", Style::default().fg(theme.semantic.surface2)),
                 Span::styled(
                     app_state.data_rate.to_string(),
-                    Style::default().fg(theme::SUBTEXT1),
+                    Style::default().fg(theme.semantic.subtext1),
                 ),
             ])
         } else {
@@ -1215,40 +1220,40 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
                 Line::from(vec![
                     Span::styled(
                         "super",
-                        speed_to_style(_current_dl_speed).add_modifier(Modifier::BOLD),
+                        speed_to_style(theme, _current_dl_speed).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         "seedr",
-                        speed_to_style(_current_ul_speed).add_modifier(Modifier::BOLD),
+                        speed_to_style(theme, _current_ul_speed).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         format!(" v{}", APP_VERSION),
-                        Style::default().fg(theme::SUBTEXT1),
+                        Style::default().fg(theme.semantic.subtext1),
                     ),
-                    Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+                    Span::styled(" | ", Style::default().fg(theme.semantic.surface2)),
                     Span::styled(
                         app_state.data_rate.to_string(),
-                        Style::default().fg(theme::YELLOW).bold(),
+                        Style::default().fg(theme.scale.categorical.yellow).bold(),
                     ),
                 ])
             }
             #[cfg(not(all(feature = "dht", feature = "pex")))]
             {
                 Line::from(vec![
-                    Span::styled("superseedr", Style::default().fg(theme::SURFACE2))
+                    Span::styled("superseedr", Style::default().fg(theme.semantic.surface2))
                         .add_modifier(Modifier::CROSSED_OUT),
                     Span::styled(
                         " [PRIVATE]",
-                        Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme.scale.categorical.red).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         format!(" v{}", APP_VERSION),
-                        Style::default().fg(theme::SUBTEXT1),
+                        Style::default().fg(theme.semantic.subtext1),
                     ),
-                    Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
+                    Span::styled(" | ", Style::default().fg(theme.semantic.surface2)),
                     Span::styled(
                         app_state.data_rate.to_string(),
-                        Style::default().fg(theme::YELLOW).bold(),
+                        Style::default().fg(theme.scale.categorical.yellow).bold(),
                     ),
                 ])
             }
@@ -1265,11 +1270,11 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     // Priority 4 (Lowest): Aux tools
     if width > 110 {
         spans.extend(vec![
-            Span::styled("[t]", Style::default().fg(theme::SAPPHIRE)),
+            Span::styled("[t]", Style::default().fg(theme.scale.categorical.sapphire)),
             Span::raw("ime | "),
-            Span::styled("[/]", Style::default().fg(theme::YELLOW)),
+            Span::styled("[/]", Style::default().fg(theme.scale.categorical.yellow)),
             Span::raw("search | "),
-            Span::styled("[c]", Style::default().fg(theme::LAVENDER)),
+            Span::styled("[c]", Style::default().fg(theme.scale.categorical.lavender)),
             Span::raw("onfig | "),
         ]);
     }
@@ -1277,11 +1282,11 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     // Priority 3: Management
     if width > 90 {
         spans.extend(vec![
-            Span::styled("[a]", Style::default().fg(theme::GREEN)),
+            Span::styled("[a]", Style::default().fg(theme.scale.categorical.green)),
             Span::raw("dd | "),
-            Span::styled("[d]", Style::default().fg(theme::YELLOW)),
+            Span::styled("[d]", Style::default().fg(theme.scale.categorical.yellow)),
             Span::raw("elete | "),
-            Span::styled("[s]", Style::default().fg(theme::MAUVE)),
+            Span::styled("[s]", Style::default().fg(theme.scale.categorical.mauve)),
             Span::raw("ort | "),
         ]);
     }
@@ -1289,9 +1294,9 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     // Priority 2: Actions
     if width > 65 {
         spans.extend(vec![
-            Span::styled("[v]", Style::default().fg(theme::TEAL)),
+            Span::styled("[v]", Style::default().fg(theme.scale.categorical.teal)),
             Span::raw("paste | "),
-            Span::styled("[p]", Style::default().fg(theme::GREEN)),
+            Span::styled("[p]", Style::default().fg(theme.scale.categorical.green)),
             Span::raw("ause | "),
         ]);
     }
@@ -1299,9 +1304,9 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     // Priority 1: Navigation & Quit
     if width > 45 {
         spans.extend(vec![
-            Span::styled("Arrows", Style::default().fg(theme::BLUE)),
+            Span::styled("Arrows", Style::default().fg(theme.scale.categorical.blue)),
             Span::raw(" nav | "),
-            Span::styled("[Q]", Style::default().fg(theme::RED)),
+            Span::styled("[Q]", Style::default().fg(theme.scale.categorical.red)),
             Span::raw("uit | "),
         ]);
     }
@@ -1309,26 +1314,26 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     // Priority 0: Help (Always Shown)
     if app_state.system_warning.is_some() {
         spans.extend(vec![
-            Span::styled("[m]", Style::default().fg(theme::TEAL)),
-            Span::styled("anual (warning)", Style::default().fg(theme::YELLOW)),
+            Span::styled("[m]", Style::default().fg(theme.scale.categorical.teal)),
+            Span::styled("anual (warning)", Style::default().fg(theme.scale.categorical.yellow)),
         ]);
     } else {
         spans.extend(vec![
-            Span::styled("[m]", Style::default().fg(theme::TEAL)),
+            Span::styled("[m]", Style::default().fg(theme.scale.categorical.teal)),
             Span::raw("anual"),
         ]);
     }
 
     let footer_paragraph = Paragraph::new(Line::from(spans))
         .alignment(Alignment::Center)
-        .style(Style::default().fg(theme::SUBTEXT1));
+        .style(Style::default().fg(theme.semantic.subtext1));
     f.render_widget(footer_paragraph, commands_chunk);
 
     // --- RIGHT: Port Status ---
     let port_style = if app_state.externally_accessable_port {
-        Style::default().fg(theme::GREEN)
+        Style::default().fg(theme.scale.categorical.green)
     } else {
-        Style::default().fg(theme::RED)
+        Style::default().fg(theme.scale.categorical.red)
     };
     let port_text = if app_state.externally_accessable_port {
         "Open"
@@ -1346,11 +1351,12 @@ fn draw_footer(f: &mut Frame, app_state: &AppState, settings: &Settings, footer_
     .alignment(Alignment::Right);
 
     let status_paragraph =
-        Paragraph::new(footer_status).style(Style::default().fg(theme::SUBTEXT1));
+        Paragraph::new(footer_status).style(Style::default().fg(theme.semantic.subtext1));
     f.render_widget(status_paragraph, status_chunk);
 }
 
 fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
+    let theme = &app_state.theme;
     if area.height < 3 || area.width < 10 {
         return;
     }
@@ -1360,10 +1366,10 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
         .get(app_state.selected_torrent_index)
         .and_then(|info_hash| app_state.torrents.get(info_hash));
 
-    let color_discovered = theme::YELLOW;
-    let color_connected = theme::TEAL;
-    let color_disconnected = theme::MAROON;
-    let color_border = theme::SURFACE2;
+    let color_discovered = theme.scale.categorical.yellow;
+    let color_connected = theme.scale.categorical.teal;
+    let color_disconnected = theme.scale.categorical.maroon;
+    let color_border = theme.semantic.surface2;
 
     let default_slice: Vec<u64> = Vec::new();
 
@@ -1390,7 +1396,7 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
         if selected_torrent.is_some() && count > 0 {
             Style::default().fg(color)
         } else {
-            Style::default().fg(theme::SURFACE1) // Greyed out
+            Style::default().fg(theme.semantic.surface1) // Greyed out
         }
     };
 
@@ -1545,7 +1551,7 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
                 .title_top(
                     Line::from(Span::styled(
                         " Peer Activity Stream ",
-                        Style::default().fg(theme::SUBTEXT0),
+                        Style::default().fg(theme.semantic.subtext0),
                     ))
                     .alignment(Alignment::Left),
                 )
@@ -1560,6 +1566,7 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
 }
 
 fn draw_vertical_block_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
+    let theme = &app_state.theme;
     if area.width < 2 {
         return;
     }
@@ -1572,10 +1579,10 @@ fn draw_vertical_block_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     const DOWN_TRIANGLE: &str = "▼";
     const SEPARATOR: &str = "·";
 
-    let color_inflow = theme::BLUE;
-    let color_outflow = theme::GREEN;
-    let color_border = theme::SURFACE2;
-    let color_empty = theme::SURFACE0;
+    let color_inflow = theme.scale.categorical.blue;
+    let color_outflow = theme.scale.categorical.green;
+    let color_border = theme.semantic.surface2;
+    let color_empty = theme.semantic.surface0;
 
     let (total_in, total_out) = if let Some(t) = selected_torrent {
         let in_sum: u64 = t.latest_state.blocks_in_history.iter().sum();
@@ -1592,7 +1599,7 @@ fn draw_vertical_block_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     let title_spans: Vec<Span> = if total_ops == 0 {
         vec![Span::styled(
             title_str,
-            Style::default().fg(theme::SUBTEXT0),
+            Style::default().fg(theme.semantic.subtext0),
         )]
     } else {
         let blue_ratio = total_in as f64 / total_ops as f64;
@@ -1789,6 +1796,7 @@ fn draw_vertical_block_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
 }
 
 fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
+    let theme = &app_state.theme;
     let torrent = app_state
         .torrent_list_order
         .get(app_state.selected_torrent_index)
@@ -1797,7 +1805,7 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
     let Some(torrent) = torrent else {
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::SURFACE2));
+            .border_style(Style::default().fg(theme.semantic.surface2));
         f.render_widget(block, area);
         return;
     };
@@ -1821,14 +1829,14 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Block::default()
                     .title(Span::styled(
                         format!("DL Activity (Peak: {})", format_speed(nice_max_speed)),
-                        Style::default().fg(theme::SUBTEXT0),
+                        Style::default().fg(theme.semantic.subtext0),
                     ))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::SURFACE2)),
+                    .border_style(Style::default().fg(theme.semantic.surface2)),
             )
             .data(dl_slice)
             .max(nice_max_speed)
-            .style(Style::default().fg(theme::BLUE));
+            .style(Style::default().fg(theme.scale.categorical.blue));
         f.render_widget(dl_sparkline, area);
     } else if !has_dl_activity && has_ul_activity {
         let width = area.width.saturating_sub(2).max(1) as usize;
@@ -1840,20 +1848,20 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Block::default()
                     .title(Span::styled(
                         format!("UL Activity (Peak: {})", format_speed(nice_max_speed)),
-                        Style::default().fg(theme::SUBTEXT0),
+                        Style::default().fg(theme.semantic.subtext0),
                     ))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::SURFACE2)),
+                    .border_style(Style::default().fg(theme.semantic.surface2)),
             )
             .data(ul_slice)
             .max(nice_max_speed)
-            .style(Style::default().fg(theme::GREEN));
+            .style(Style::default().fg(theme.scale.categorical.green));
         f.render_widget(ul_sparkline, area);
     } else if !has_dl_activity && !has_ul_activity {
-        let style = Style::default().fg(theme::MAUVE);
+        let style = Style::default().fg(theme.scale.categorical.mauve);
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::SURFACE2));
+            .border_style(Style::default().fg(theme.semantic.surface2));
         let inner_area = block.inner(area);
         f.render_widget(block, area);
 
@@ -1885,7 +1893,7 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
             .style(style)
             .alignment(Alignment::Center);
         let throbber_style = Style::default()
-            .fg(theme::LAVENDER)
+            .fg(theme.scale.categorical.lavender)
             .add_modifier(Modifier::BOLD);
         let throbber_widget = Throbber::default().style(throbber_style);
 
@@ -1921,14 +1929,14 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Block::default()
                     .title(Span::styled(
                         format!("DL (Peak: {})", format_speed(dl_nice_max)),
-                        Style::default().fg(theme::SUBTEXT0),
+                        Style::default().fg(theme.semantic.subtext0),
                     ))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::SURFACE2)),
+                    .border_style(Style::default().fg(theme.semantic.surface2)),
             )
             .data(dl_slice)
             .max(dl_nice_max)
-            .style(Style::default().fg(theme::BLUE));
+            .style(Style::default().fg(theme.scale.categorical.blue));
         f.render_widget(dl_sparkline, dl_sparkline_chunk);
 
         let ul_sparkline = Sparkline::default()
@@ -1936,19 +1944,20 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Block::default()
                     .title(Span::styled(
                         format!("UL (Peak: {})", format_speed(ul_nice_max)),
-                        Style::default().fg(theme::SUBTEXT0),
+                        Style::default().fg(theme.semantic.subtext0),
                     ))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::SURFACE2)),
+                    .border_style(Style::default().fg(theme.semantic.surface2)),
             )
             .data(ul_slice)
             .max(ul_nice_max)
-            .style(Style::default().fg(theme::GREEN));
+            .style(Style::default().fg(theme.scale.categorical.green));
         f.render_widget(ul_sparkline, ul_sparkline_chunk);
     }
 }
 
 fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
+    let theme = &app_state.theme;
     if let AppMode::DeleteConfirm {
         info_hash,
         with_files,
@@ -1968,7 +1977,7 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
             let vert_padding = if area.height < 10 { 0 } else { 1 };
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::RED))
+                .border_style(Style::default().fg(theme.scale.categorical.red))
                 .padding(Padding::new(2, 2, vert_padding, vert_padding));
 
             let inner_area = block.inner(area);
@@ -1996,9 +2005,9 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
                 Paragraph::new(vec![
                     Line::from(Span::styled(
                         name,
-                        Style::default().fg(theme::YELLOW).bold().underlined(),
+                        Style::default().fg(theme.scale.categorical.yellow).bold().underlined(),
                     )),
-                    Line::from(Span::styled(path, Style::default().fg(theme::TEXT))),
+                    Line::from(Span::styled(path, Style::default().fg(theme.semantic.text))),
                 ])
                 .alignment(Alignment::Center),
                 chunks[0],
@@ -2011,13 +2020,13 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
                         Line::from(""),
                         Line::from(Span::styled(
                             "⚠️ PERMANENT TORRENT FILES DELETION ON ⚠️",
-                            Style::default().fg(theme::RED).bold(),
+                            Style::default().fg(theme.scale.categorical.red).bold(),
                         )),
                         Line::from(vec![
                             Span::raw("All local data for this torrent will be "),
                             Span::styled(
                                 "ERASED",
-                                Style::default().fg(theme::RED).bold().underlined(),
+                                Style::default().fg(theme.scale.categorical.red).bold().underlined(),
                             ),
                         ]),
                     ]
@@ -2026,11 +2035,11 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
                         Line::from(""),
                         Line::from(Span::styled(
                             "Safe Removal (Files Kept)",
-                            Style::default().fg(theme::GREEN),
+                            Style::default().fg(theme.scale.categorical.green),
                         )),
                         Line::from(vec![
                             Span::raw("Use "),
-                            Span::styled("[D]", Style::default().fg(theme::YELLOW).bold()),
+                            Span::styled("[D]", Style::default().fg(theme.scale.categorical.yellow).bold()),
                             Span::raw(" to remove files..."),
                         ]),
                     ]
@@ -2045,9 +2054,9 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
 
             // 3. Action Buttons (Footer)
             let actions = Line::from(vec![
-                Span::styled("[Enter]", Style::default().fg(theme::GREEN).bold()),
+                Span::styled("[Enter]", Style::default().fg(theme.scale.categorical.green).bold()),
                 Span::raw(" Confirm  "),
-                Span::styled("[Esc]", Style::default().fg(theme::RED)),
+                Span::styled("[Esc]", Style::default().fg(theme.scale.categorical.red)),
                 Span::raw(" Cancel"),
             ]);
 
@@ -2059,7 +2068,7 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
     }
 }
 
-fn draw_status_error_popup(f: &mut Frame, error_text: &str) {
+fn draw_status_error_popup(f: &mut Frame, error_text: &str, theme: &crate::theme::Theme) {
     let popup_width_percent: u16 = 50;
     let popup_height: u16 = 8;
     let vertical_chunks = Layout::vertical([
@@ -2079,20 +2088,20 @@ fn draw_status_error_popup(f: &mut Frame, error_text: &str) {
     let text = vec![
         Line::from(Span::styled(
             "Error",
-            Style::default().fg(theme::RED).bold(),
+            Style::default().fg(theme.scale.categorical.red).bold(),
         )),
         Line::from(""),
-        Line::from(Span::styled(error_text, Style::default().fg(theme::YELLOW))),
+        Line::from(Span::styled(error_text, Style::default().fg(theme.scale.categorical.yellow))),
         Line::from(""),
         Line::from(""),
         Line::from(Span::styled(
             "[Press Esc to dismiss]",
-            Style::default().fg(theme::SUBTEXT1),
+            Style::default().fg(theme.semantic.subtext1),
         )),
     ];
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::RED));
+        .border_style(Style::default().fg(theme.scale.categorical.red));
     let paragraph = Paragraph::new(text)
         .block(block)
         .alignment(Alignment::Center)
@@ -2101,6 +2110,7 @@ fn draw_status_error_popup(f: &mut Frame, error_text: &str) {
 }
 
 fn draw_shutdown_screen(f: &mut Frame, app_state: &AppState) {
+    let theme = &app_state.theme;
     const POPUP_WIDTH: u16 = 40;
     const POPUP_HEIGHT: u16 = 3;
     let area = f.area();
@@ -2121,9 +2131,9 @@ fn draw_shutdown_screen(f: &mut Frame, app_state: &AppState) {
 
     f.render_widget(Clear, area);
     let container_block = Block::default()
-        .title(Span::styled(" Exiting ", Style::default().fg(theme::PEACH)))
+        .title(Span::styled(" Exiting ", Style::default().fg(theme.scale.categorical.peach)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::SURFACE2));
+        .border_style(Style::default().fg(theme.semantic.surface2));
     let inner_area = container_block.inner(area);
     f.render_widget(container_block, area);
 
@@ -2135,11 +2145,12 @@ fn draw_shutdown_screen(f: &mut Frame, app_state: &AppState) {
     let progress_bar = Gauge::default()
         .ratio(app_state.shutdown_progress)
         .label(progress_label)
-        .gauge_style(Style::default().fg(theme::MAUVE).bg(theme::SURFACE0));
+        .gauge_style(Style::default().fg(theme.scale.categorical.mauve).bg(theme.semantic.surface0));
     f.render_widget(progress_bar, chunks[0]);
 }
 
 fn draw_power_saving_screen(f: &mut Frame, app_state: &AppState, settings: &Settings) {
+    let theme = &app_state.theme;
     const TRANQUIL_MESSAGES: &[&str] = &[
         "Quietly seeding...",
         "Awaiting peers...",
@@ -2174,7 +2185,7 @@ fn draw_power_saving_screen(f: &mut Frame, app_state: &AppState, settings: &Sett
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::SURFACE1));
+        .border_style(Style::default().fg(theme.semantic.surface1));
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
@@ -2189,36 +2200,36 @@ fn draw_power_saving_screen(f: &mut Frame, app_state: &AppState, settings: &Sett
     let footer_area = vertical_chunks[3];
 
     let mut dl_spans = vec![
-        Span::styled("DL: ", Style::default().fg(theme::SKY)),
-        Span::styled(format_speed(dl_speed), Style::default().fg(theme::SKY)),
+        Span::styled("DL: ", Style::default().fg(theme.scale.categorical.sky)),
+        Span::styled(format_speed(dl_speed), Style::default().fg(theme.scale.categorical.sky)),
         Span::raw(" / "),
     ];
     if dl_limit > 0 && dl_speed >= dl_limit {
         dl_spans.push(Span::styled(
             format_limit_bps(dl_limit),
-            Style::default().fg(theme::RED),
+            Style::default().fg(theme.scale.categorical.red),
         ));
     } else {
         dl_spans.push(Span::styled(
             format_limit_bps(dl_limit),
-            Style::default().fg(theme::SUBTEXT0),
+            Style::default().fg(theme.semantic.subtext0),
         ));
     }
 
     let mut ul_spans = vec![
-        Span::styled("UL: ", Style::default().fg(theme::TEAL)),
-        Span::styled(format_speed(ul_speed), Style::default().fg(theme::TEAL)),
+        Span::styled("UL: ", Style::default().fg(theme.scale.categorical.teal)),
+        Span::styled(format_speed(ul_speed), Style::default().fg(theme.scale.categorical.teal)),
         Span::raw(" / "),
     ];
     if ul_limit > 0 && ul_speed >= ul_limit {
         ul_spans.push(Span::styled(
             format_limit_bps(ul_limit),
-            Style::default().fg(theme::RED),
+            Style::default().fg(theme.scale.categorical.red),
         ));
     } else {
         ul_spans.push(Span::styled(
             format_limit_bps(ul_limit),
-            Style::default().fg(theme::SUBTEXT0),
+            Style::default().fg(theme.semantic.subtext0),
         ));
     }
 
@@ -2234,13 +2245,13 @@ fn draw_power_saving_screen(f: &mut Frame, app_state: &AppState, settings: &Sett
 
     let main_content_lines = vec![
         Line::from(vec![
-            Span::styled("super", Style::default().fg(theme::SKY)),
-            Span::styled("seedr", Style::default().fg(theme::TEAL)),
+            Span::styled("super", Style::default().fg(theme.scale.categorical.sky)),
+            Span::styled("seedr", Style::default().fg(theme.scale.categorical.teal)),
         ]),
         Line::from(""),
         Line::from(Span::styled(
             current_message,
-            Style::default().fg(theme::SUBTEXT1),
+            Style::default().fg(theme.semantic.subtext1),
         )),
         Line::from(""),
         Line::from(dl_spans),
@@ -2249,7 +2260,7 @@ fn draw_power_saving_screen(f: &mut Frame, app_state: &AppState, settings: &Sett
     let main_paragraph = Paragraph::new(main_content_lines).alignment(Alignment::Center);
     let footer_line = Line::from(Span::styled(
         "Press [z] to resume",
-        Style::default().fg(theme::SUBTEXT0),
+        Style::default().fg(theme.semantic.subtext0),
     ));
     let footer_paragraph = Paragraph::new(footer_line).alignment(Alignment::Center);
 
@@ -2264,6 +2275,7 @@ pub fn draw_file_browser(
     data: &[tree::RawNode<FileMetadata>],
     browser_mode: &FileBrowserMode,
 ) {
+    let theme = &app_state.theme;
     let has_preview_content = match browser_mode {
         FileBrowserMode::DownloadLocSelection { .. } => {
             app_state.pending_torrent_path.is_some() || !app_state.pending_torrent_link.is_empty()
@@ -2316,24 +2328,25 @@ pub fn draw_file_browser(
         if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
             match focused_pane {
                 BrowserPane::FileSystem => (
-                    Style::default().fg(theme::MAUVE),
-                    Style::default().fg(theme::SURFACE2),
+                    Style::default().fg(theme.scale.categorical.mauve),
+                    Style::default().fg(theme.semantic.surface2),
                 ),
                 BrowserPane::TorrentPreview => (
-                    Style::default().fg(theme::SURFACE2),
-                    Style::default().fg(theme::MAUVE),
+                    Style::default().fg(theme.semantic.surface2),
+                    Style::default().fg(theme.scale.categorical.mauve),
                 ),
             }
         } else {
             (
-                Style::default().fg(theme::MAUVE),
-                Style::default().fg(theme::SAPPHIRE),
+                Style::default().fg(theme.scale.categorical.mauve),
+                Style::default().fg(theme.scale.categorical.sapphire),
             )
         };
 
     if let Some(preview_area) = layout.preview {
         draw_torrent_preview_panel(
             f,
+            theme,
             preview_area,
             preview_file_path.map(|p| p.as_path()), // Passes Option<&Path>
             browser_mode,
@@ -2344,15 +2357,15 @@ pub fn draw_file_browser(
     if let Some(search_area) = layout.search {
         let search_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::YELLOW))
+            .border_style(Style::default().fg(theme.scale.categorical.yellow))
             .title(" Search Filter ");
         let search_text = Line::from(vec![
-            Span::styled("/", Style::default().fg(theme::SUBTEXT0)),
+            Span::styled("/", Style::default().fg(theme.semantic.subtext0)),
             Span::raw(&app_state.search_query),
             Span::styled(
                 "_",
                 Style::default()
-                    .fg(theme::YELLOW)
+                    .fg(theme.scale.categorical.yellow)
                     .add_modifier(Modifier::SLOW_BLINK),
             ),
         ]);
@@ -2364,17 +2377,17 @@ pub fn draw_file_browser(
         FileBrowserMode::ConfigPathSelection { .. } | FileBrowserMode::Directory => {
             footer_spans.push(Span::styled(
                 "[Arrows/Vim]",
-                Style::default().fg(theme::BLUE),
+                Style::default().fg(theme.scale.categorical.blue),
             ));
             footer_spans.push(Span::raw(" Nav | "));
             footer_spans.push(Span::styled(
                 "[Backspace]",
-                Style::default().fg(theme::YELLOW),
+                Style::default().fg(theme.scale.categorical.yellow),
             ));
             footer_spans.push(Span::raw(" Up | "));
-            footer_spans.push(Span::styled("[Enter]", Style::default().fg(theme::YELLOW)));
+            footer_spans.push(Span::styled("[Enter]", Style::default().fg(theme.scale.categorical.yellow)));
             footer_spans.push(Span::raw(" Down | "));
-            footer_spans.push(Span::styled("[Shift+Y]", Style::default().fg(theme::GREEN)));
+            footer_spans.push(Span::styled("[Shift+Y]", Style::default().fg(theme.scale.categorical.green)));
             footer_spans.push(Span::raw(" Confirm Selection | "));
         }
         FileBrowserMode::DownloadLocSelection {
@@ -2382,7 +2395,7 @@ pub fn draw_file_browser(
             use_container,
             ..
         } => {
-            footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme::SAPPHIRE)));
+            footer_spans.push(Span::styled("[Tab]", Style::default().fg(theme.scale.categorical.sapphire)));
             footer_spans.push(Span::raw(" Switch Pane | "));
 
             match focused_pane {
@@ -2390,35 +2403,35 @@ pub fn draw_file_browser(
                     // Help for FS is generally just Arrows/Enter which are intuitive
                 }
                 BrowserPane::TorrentPreview => {
-                    footer_spans.push(Span::styled("[Space]", Style::default().fg(theme::YELLOW)));
+                    footer_spans.push(Span::styled("[Space]", Style::default().fg(theme.scale.categorical.yellow)));
                     footer_spans.push(Span::raw(" Priority | "));
                 }
             }
 
-            footer_spans.push(Span::styled("[x]", Style::default().fg(theme::MAUVE)));
+            footer_spans.push(Span::styled("[x]", Style::default().fg(theme.scale.categorical.mauve)));
             footer_spans.push(Span::raw(" Container Folder | "));
 
             if *use_container {
-                footer_spans.push(Span::styled("[r]", Style::default().fg(theme::SKY)));
+                footer_spans.push(Span::styled("[r]", Style::default().fg(theme.scale.categorical.sky)));
                 footer_spans.push(Span::raw(" Rename | "));
             }
 
-            footer_spans.push(Span::styled("[Shift+Y]", Style::default().fg(theme::GREEN)));
+            footer_spans.push(Span::styled("[Shift+Y]", Style::default().fg(theme.scale.categorical.green)));
             footer_spans.push(Span::raw(" Confirm"));
         }
         FileBrowserMode::File(_) => {
             // Changed [Enter] to [c]
-            footer_spans.push(Span::styled("[Shift+Y]", Style::default().fg(theme::GREEN)));
+            footer_spans.push(Span::styled("[Shift+Y]", Style::default().fg(theme.scale.categorical.green)));
             footer_spans.push(Span::raw(" Confirm File | "));
         }
     }
     footer_spans.push(Span::raw(" | "));
-    footer_spans.push(Span::styled("[Esc]", Style::default().fg(theme::RED)));
+    footer_spans.push(Span::styled("[Esc]", Style::default().fg(theme.scale.categorical.red)));
     footer_spans.push(Span::raw(" Cancel"));
 
     let footer = Paragraph::new(Line::from(footer_spans))
         .alignment(Alignment::Center)
-        .style(Style::default().fg(theme::SUBTEXT1));
+        .style(Style::default().fg(theme.semantic.subtext1));
     f.render_widget(footer, layout.footer);
 
     // 6. DRAW LIST (SANITIZED & SIMPLIFIED)
@@ -2472,12 +2485,12 @@ pub fn draw_file_browser(
     if data.is_empty() {
         list_items.push(ListItem::new(Line::from(vec![Span::styled(
             "   (Directory is empty)",
-            Style::default().fg(theme::OVERLAY0).italic(),
+            Style::default().fg(theme.semantic.overlay0).italic(),
         )])));
     } else if visible_items.is_empty() {
         list_items.push(ListItem::new(Line::from(vec![Span::styled(
             format!("   (No matching files among {} items)", item_count),
-            Style::default().fg(theme::OVERLAY0).italic(),
+            Style::default().fg(theme.semantic.overlay0).italic(),
         )])));
     } else {
         for item in visible_items {
@@ -2522,19 +2535,19 @@ pub fn draw_file_browser(
             let (icon_style, text_style) = if is_cursor {
                 (
                     Style::default()
-                        .fg(theme::YELLOW)
+                        .fg(theme.scale.categorical.yellow)
                         .add_modifier(Modifier::BOLD),
                     Style::default()
-                        .fg(theme::YELLOW)
+                        .fg(theme.scale.categorical.yellow)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
                 let i_style = if item.node.is_dir {
-                    Style::default().fg(theme::BLUE)
+                    Style::default().fg(theme.scale.categorical.blue)
                 } else {
-                    Style::default().fg(theme::TEXT)
+                    Style::default().fg(theme.semantic.text)
                 };
-                (i_style, Style::default().fg(theme::TEXT))
+                (i_style, Style::default().fg(theme.semantic.text))
             };
 
             // 6. Construct Line
@@ -2549,7 +2562,7 @@ pub fn draw_file_browser(
                 line_spans.push(Span::raw(" "));
                 line_spans.push(Span::styled(
                     meta_str,
-                    Style::default().fg(theme::SURFACE2).italic(),
+                    Style::default().fg(theme.semantic.surface2).italic(),
                 ));
             }
 
@@ -2564,14 +2577,14 @@ pub fn draw_file_browser(
                     .title_top(
                         Line::from(Span::styled(
                             left_title,
-                            Style::default().fg(theme::MAUVE).bold(),
+                            Style::default().fg(theme.scale.categorical.mauve).bold(),
                         ))
                         .alignment(Alignment::Left),
                     )
                     .title_top(
                         Line::from(Span::styled(
                             right_title,
-                            Style::default().fg(theme::MAUVE).italic(),
+                            Style::default().fg(theme.scale.categorical.mauve).italic(),
                         ))
                         .alignment(Alignment::Right),
                     )
@@ -2585,6 +2598,7 @@ pub fn draw_file_browser(
 
 fn draw_torrent_preview_panel(
     f: &mut Frame,
+    theme: &crate::theme::Theme,
     area: Rect,
     path: Option<&std::path::Path>,
     browser_mode: &FileBrowserMode,
@@ -2632,7 +2646,7 @@ fn draw_torrent_preview_panel(
 
         // Render Root Node with adaptive path display
         let root_style = Style::default()
-            .fg(theme::BLUE)
+            .fg(theme.scale.categorical.blue)
             .add_modifier(Modifier::BOLD);
 
         let path_display = if is_narrow {
@@ -2652,10 +2666,10 @@ fn draw_torrent_preview_panel(
         // Render Container Header
         if *use_container {
             let container_style = if *is_editing_name {
-                Style::default().fg(theme::SKY).add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.scale.categorical.sky).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
-                    .fg(theme::MAUVE)
+                    .fg(theme.scale.categorical.mauve)
                     .add_modifier(Modifier::BOLD)
             };
 
@@ -2667,7 +2681,7 @@ fn draw_torrent_preview_panel(
                 spans.push(Span::styled(
                     "█",
                     Style::default()
-                        .fg(theme::SKY)
+                        .fg(theme.scale.categorical.sky)
                         .add_modifier(Modifier::SLOW_BLINK),
                 ));
                 spans.push(Span::styled(after, container_style));
@@ -2677,7 +2691,7 @@ fn draw_torrent_preview_panel(
                     spans.push(Span::styled(
                         " (New)",
                         Style::default()
-                            .fg(theme::SURFACE2)
+                            .fg(theme.semantic.surface2)
                             .add_modifier(Modifier::ITALIC),
                     ));
                 }
@@ -2705,27 +2719,27 @@ fn draw_torrent_preview_panel(
                 let (base_content_style, tag) = match item.node.payload.priority {
                     FilePriority::Skip => (
                         Style::default()
-                            .fg(theme::SURFACE1)
+                            .fg(theme.semantic.surface1)
                             .add_modifier(Modifier::CROSSED_OUT),
                         "[S] ",
                     ),
                     FilePriority::High => (
                         Style::default()
-                            .fg(theme::GREEN)
+                            .fg(theme.scale.categorical.green)
                             .add_modifier(Modifier::BOLD),
                         "[H] ",
                     ),
                     FilePriority::Mixed => (
                         Style::default()
-                            .fg(theme::YELLOW)
+                            .fg(theme.scale.categorical.yellow)
                             .add_modifier(Modifier::ITALIC),
                         "[*] ",
                     ),
                     FilePriority::Normal => (
                         if item.node.is_dir {
-                            Style::default().fg(theme::BLUE)
+                            Style::default().fg(theme.scale.categorical.blue)
                         } else {
-                            Style::default().fg(theme::TEXT)
+                            Style::default().fg(theme.semantic.text)
                         },
                         "",
                     ),
@@ -2775,7 +2789,7 @@ fn draw_torrent_preview_panel(
             Err(e) => {
                 f.render_widget(
                     Paragraph::new(format!("Read Error: {}", e))
-                        .style(Style::default().fg(theme::RED)),
+                        .style(Style::default().fg(theme.scale.categorical.red)),
                     inner_area,
                 );
                 return;
@@ -2787,7 +2801,7 @@ fn draw_torrent_preview_panel(
             Err(e) => {
                 f.render_widget(
                     Paragraph::new(format!("Invalid Torrent: {}", e))
-                        .style(Style::default().fg(theme::RED)),
+                        .style(Style::default().fg(theme.scale.categorical.red)),
                     inner_area,
                 );
                 return;
@@ -2807,15 +2821,15 @@ fn draw_torrent_preview_panel(
         };
         let info_text = vec![
             Line::from(vec![
-                Span::styled("Name: ", Style::default().fg(theme::SUBTEXT0)),
+                Span::styled("Name: ", Style::default().fg(theme.semantic.subtext0)),
                 Span::raw(&torrent.info.name),
             ]),
             Line::from(vec![
-                Span::styled("Protocol: ", Style::default().fg(theme::SUBTEXT0)),
-                Span::styled(protocol_version, Style::default().fg(theme::MAUVE).bold()),
+                Span::styled("Protocol: ", Style::default().fg(theme.semantic.subtext0)),
+                Span::styled(protocol_version, Style::default().fg(theme.scale.categorical.mauve).bold()),
             ]),
             Line::from(vec![
-                Span::styled("Size: ", Style::default().fg(theme::SUBTEXT0)),
+                Span::styled("Size: ", Style::default().fg(theme.semantic.subtext0)),
                 Span::raw(format_bytes(total_size as u64)),
             ]),
         ];
@@ -2829,7 +2843,7 @@ fn draw_torrent_preview_panel(
             Paragraph::new(info_text).block(
                 Block::default()
                     .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(theme::SURFACE2)),
+                    .border_style(Style::default().fg(theme.semantic.surface2)),
             ),
             layout[0],
         );
@@ -2876,9 +2890,9 @@ fn draw_torrent_preview_panel(
                     "   "
                 };
                 let style = if item.node.is_dir {
-                    Style::default().fg(theme::BLUE)
+                    Style::default().fg(theme.scale.categorical.blue)
                 } else {
-                    Style::default().fg(theme::TEXT)
+                    Style::default().fg(theme.semantic.text)
                 };
                 let mut spans = vec![
                     Span::raw(indent),
@@ -2888,7 +2902,7 @@ fn draw_torrent_preview_panel(
                 if !item.node.is_dir && !is_narrow {
                     spans.push(Span::styled(
                         format!(" ({})", format_bytes(item.node.payload.size)),
-                        Style::default().fg(theme::SURFACE2),
+                        Style::default().fg(theme.semantic.surface2),
                     ));
                 }
                 ListItem::new(Line::from(spans))
@@ -2899,10 +2913,10 @@ fn draw_torrent_preview_panel(
     }
 }
 
-fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
+fn draw_welcome_screen(f: &mut Frame, settings: &Settings, theme: &crate::theme::Theme) {
     let area = f.area();
 
-    draw_background_dust(f, area);
+    draw_background_dust(f, area, theme);
 
     let get_dims = |text: &str| -> (u16, u16) {
         let h = text.lines().count() as u16;
@@ -2923,15 +2937,15 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
     let text_lines = vec![
         Line::from(Span::styled(
             "How to Get Started:",
-            Style::default().fg(theme::YELLOW).bold(),
+            Style::default().fg(theme.scale.categorical.yellow).bold(),
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
+            Span::styled(" ★ ", Style::default().fg(theme.scale.categorical.green)),
             Span::raw("Paste ("),
-            Span::styled("Ctrl+V", Style::default().fg(theme::SKY).bold()),
+            Span::styled("Ctrl+V", Style::default().fg(theme.scale.categorical.sky).bold()),
             Span::raw(") a "),
-            Span::styled("magnet link", Style::default().fg(theme::PEACH)),
+            Span::styled("magnet link", Style::default().fg(theme.scale.categorical.peach)),
             Span::raw(" from your clipboard."),
         ]),
         Line::from(vec![
@@ -2939,61 +2953,61 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
             Span::styled(
                 "e.g. \"magnet:?xt=urn:btih:...\"",
                 Style::default()
-                    .fg(theme::SURFACE2)
+                    .fg(theme.semantic.surface2)
                     .add_modifier(Modifier::ITALIC),
             ),
         ]),
         Line::from(vec![
-            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
+            Span::styled(" ★ ", Style::default().fg(theme.scale.categorical.green)),
             Span::raw("Press "),
-            Span::styled("[a]", Style::default().fg(theme::MAUVE).bold()),
+            Span::styled("[a]", Style::default().fg(theme.scale.categorical.mauve).bold()),
             Span::raw(" to open the file picker and select a "),
-            Span::styled("`.torrent`", Style::default().fg(theme::PEACH)),
+            Span::styled("`.torrent`", Style::default().fg(theme.scale.categorical.peach)),
             Span::raw(" file."),
         ]),
         Line::from(vec![
-            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
+            Span::styled(" ★ ", Style::default().fg(theme.scale.categorical.green)),
             Span::raw("Use the "),
-            Span::styled("CLI", Style::default().fg(theme::SKY).bold()),
+            Span::styled("CLI", Style::default().fg(theme.scale.categorical.sky).bold()),
             Span::raw(" from another terminal:"),
         ]),
         Line::from(vec![
             Span::raw("      - magnet: "),
             Span::styled(
                 "superseedr add \"magnet:?xt=urn:btih:...\"",
-                Style::default().fg(theme::SURFACE2),
+                Style::default().fg(theme.semantic.surface2),
             ),
         ]),
         Line::from(vec![
             Span::raw("      - file:   "),
             Span::styled(
                 "superseedr add \"/path/to/my.torrent\"",
-                Style::default().fg(theme::SURFACE2),
+                Style::default().fg(theme.semantic.surface2),
             ),
         ]),
         Line::from(vec![
-            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
+            Span::styled(" ★ ", Style::default().fg(theme.scale.categorical.green)),
             Span::raw("Drop files into your "),
-            Span::styled("Watch Folder", Style::default().fg(theme::SKY).bold()),
+            Span::styled("Watch Folder", Style::default().fg(theme.scale.categorical.sky).bold()),
             Span::raw(" to add them automatically."),
         ]),
         Line::from(vec![
-            Span::styled(" ★ ", Style::default().fg(theme::GREEN)),
+            Span::styled(" ★ ", Style::default().fg(theme.scale.categorical.green)),
             Span::raw("Download Location: "),
-            Span::styled(download_path_str, Style::default().fg(theme::SKY).bold()),
+            Span::styled(download_path_str, Style::default().fg(theme.scale.categorical.sky).bold()),
         ]),
         Line::from(vec![
             Span::raw("      - "),
             Span::styled(
                 "Change or remove in Config [c]",
-                Style::default().fg(theme::SURFACE2).italic(),
+                Style::default().fg(theme.semantic.surface2).italic(),
             ),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled(
                 "Browser Support: ",
-                Style::default().fg(theme::YELLOW).bold(),
+                Style::default().fg(theme.scale.categorical.yellow).bold(),
             ),
             Span::raw("To open magnet links directly from your browser,"),
         ]),
@@ -3001,23 +3015,23 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
             Span::raw("   natively install superseedr: "),
             Span::styled(
                 "https://github.com/Jagalite/superseedr/releases",
-                Style::default().fg(theme::BLUE).underlined(),
+                Style::default().fg(theme.scale.categorical.blue).underlined(),
             ),
         ]),
     ];
 
     let footer_line = Line::from(vec![
-        Span::styled(" [m] ", Style::default().fg(theme::TEAL)),
-        Span::styled("Manual/Help", Style::default().fg(theme::SUBTEXT1)),
-        Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-        Span::styled(" [c] ", Style::default().fg(theme::MAUVE)),
-        Span::styled("Config", Style::default().fg(theme::SUBTEXT1)),
-        Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-        Span::styled(" [Q] ", Style::default().fg(theme::RED)),
-        Span::styled("Quit", Style::default().fg(theme::SUBTEXT1)),
-        Span::styled(" | ", Style::default().fg(theme::SURFACE2)),
-        Span::styled(" [Esc] ", Style::default().fg(theme::RED)),
-        Span::styled("Dismiss", Style::default().fg(theme::SUBTEXT1)),
+        Span::styled(" [m] ", Style::default().fg(theme.scale.categorical.teal)),
+        Span::styled("Manual/Help", Style::default().fg(theme.semantic.subtext1)),
+        Span::styled(" | ", Style::default().fg(theme.semantic.surface2)),
+        Span::styled(" [c] ", Style::default().fg(theme.scale.categorical.mauve)),
+        Span::styled("Config", Style::default().fg(theme.semantic.subtext1)),
+        Span::styled(" | ", Style::default().fg(theme.semantic.surface2)),
+        Span::styled(" [Q] ", Style::default().fg(theme.scale.categorical.red)),
+        Span::styled("Quit", Style::default().fg(theme.semantic.subtext1)),
+        Span::styled(" | ", Style::default().fg(theme.semantic.surface2)),
+        Span::styled(" [Esc] ", Style::default().fg(theme.scale.categorical.red)),
+        Span::styled("Dismiss", Style::default().fg(theme.semantic.subtext1)),
     ]);
 
     let text_content_height = text_lines.len() as u16;
@@ -3100,7 +3114,7 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
             }
 
             let x_global = final_logo_area.x + x_local as u16;
-            let style = get_animated_style(x_local, y_local);
+            let style = get_animated_style(theme, x_local, y_local);
 
             // Write directly to buffer
             buf.set_string(x_global, y_global, c.to_string(), style);
@@ -3111,7 +3125,7 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::SURFACE2));
+        .border_style(Style::default().fg(theme.semantic.surface2));
     let inner_box = block.inner(final_box_area);
     f.render_widget(block, final_box_area);
 
@@ -3130,7 +3144,7 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
     .split(box_internal_chunks[0]);
 
     let text_paragraph = Paragraph::new(text_lines)
-        .style(Style::default().fg(theme::TEXT))
+        .style(Style::default().fg(theme.semantic.text))
         .alignment(Alignment::Left);
 
     f.render_widget(text_paragraph, text_padding_layout[1]);
@@ -3141,6 +3155,7 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings) {
 }
 
 fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
+    let theme = &app_state.theme;
     let (settings_path_str, log_path_str) = if let Some((config_dir, data_dir)) = get_app_paths() {
         (
             config_dir
@@ -3187,80 +3202,81 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::RED)),
+                    .border_style(Style::default().fg(theme.scale.categorical.red)),
             )
-            .style(Style::default().fg(theme::YELLOW));
+            .style(Style::default().fg(theme.scale.categorical.yellow));
         f.render_widget(warning_paragraph, chunks[0]);
         draw_help_table(f, app_state, chunks[1]);
 
-        let footer_block = Block::default().border_style(Style::default().fg(theme::SURFACE2));
+        let footer_block = Block::default().border_style(Style::default().fg(theme.semantic.surface2));
         let footer_inner_area = footer_block.inner(chunks[2]);
         f.render_widget(footer_block, chunks[2]);
         let footer_lines = vec![
             Line::from(vec![
-                Span::styled("Settings: ", Style::default().fg(theme::TEXT)),
+                Span::styled("Settings: ", Style::default().fg(theme.semantic.text)),
                 Span::styled(
                     truncate_with_ellipsis(
                         &settings_path_str,
                         footer_inner_area.width as usize - 10,
                     ),
-                    Style::default().fg(theme::SUBTEXT0),
+                    Style::default().fg(theme.semantic.subtext0),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Log File: ", Style::default().fg(theme::TEXT)),
+                Span::styled("Log File: ", Style::default().fg(theme.semantic.text)),
                 Span::styled(
                     truncate_with_ellipsis(&log_path_str, footer_inner_area.width as usize - 10),
-                    Style::default().fg(theme::SUBTEXT0),
+                    Style::default().fg(theme.semantic.subtext0),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Watch Dir: ", Style::default().fg(theme::TEXT)),
+                Span::styled("Watch Dir: ", Style::default().fg(theme.semantic.text)),
                 Span::styled(
                     truncate_with_ellipsis(&watch_path_str, footer_inner_area.width as usize - 11),
-                    Style::default().fg(theme::SUBTEXT0),
+                    Style::default().fg(theme.semantic.subtext0),
                 ),
             ]),
         ];
-        let footer_paragraph = Paragraph::new(footer_lines).style(Style::default().fg(theme::TEXT));
+        let footer_paragraph = Paragraph::new(footer_lines).style(Style::default().fg(theme.semantic.text));
         f.render_widget(footer_paragraph, footer_inner_area);
     } else {
         let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).split(area);
         draw_help_table(f, app_state, chunks[0]);
-        let footer_block = Block::default().border_style(Style::default().fg(theme::SURFACE2));
+        let footer_block = Block::default().border_style(Style::default().fg(theme.semantic.surface2));
         let footer_inner_area = footer_block.inner(chunks[1]);
         f.render_widget(footer_block, chunks[1]);
         let footer_lines = vec![
             Line::from(vec![
-                Span::styled("Settings: ", Style::default().fg(theme::TEXT)),
+                Span::styled("Settings: ", Style::default().fg(theme.semantic.text)),
                 Span::styled(
                     truncate_with_ellipsis(
                         &settings_path_str,
                         footer_inner_area.width as usize - 10,
                     ),
-                    Style::default().fg(theme::SUBTEXT0),
+                    Style::default().fg(theme.semantic.subtext0),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Log File: ", Style::default().fg(theme::TEXT)),
+                Span::styled("Log File: ", Style::default().fg(theme.semantic.text)),
                 Span::styled(
                     truncate_with_ellipsis(&log_path_str, footer_inner_area.width as usize - 10),
-                    Style::default().fg(theme::SUBTEXT0),
+                    Style::default().fg(theme.semantic.subtext0),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Watch Dir: ", Style::default().fg(theme::TEXT)),
+                Span::styled("Watch Dir: ", Style::default().fg(theme.semantic.text)),
                 Span::styled(
                     truncate_with_ellipsis(&watch_path_str, footer_inner_area.width as usize - 11),
-                    Style::default().fg(theme::SUBTEXT0),
+                    Style::default().fg(theme.semantic.subtext0),
                 ),
             ]),
         ];
-        let footer_paragraph = Paragraph::new(footer_lines).style(Style::default().fg(theme::TEXT));
+        let footer_paragraph = Paragraph::new(footer_lines).style(Style::default().fg(theme.semantic.text));
         f.render_widget(footer_paragraph, footer_inner_area);
     }
 }
 fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
+    let theme = &app_state.theme;
     let mode = &app_state.mode;
 
     let (lvl, progress) = calculate_player_stats(app_state);
@@ -3280,106 +3296,106 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
             vec![
                 Row::new(vec![Cell::from(Span::styled(
                     "General Controls",
-                    Style::default().fg(theme::YELLOW),
+                    Style::default().fg(theme.scale.categorical.yellow),
                 ))]),
                 Row::new(vec![
-                    Cell::from(Span::styled("Ctrl +", Style::default().fg(theme::TEAL))),
+                    Cell::from(Span::styled("Ctrl +", Style::default().fg(theme.scale.categorical.teal))),
                     Cell::from("Zoom in (increase font size)"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("Ctrl -", Style::default().fg(theme::TEAL))),
+                    Cell::from(Span::styled("Ctrl -", Style::default().fg(theme.scale.categorical.teal))),
                     Cell::from("Zoom out (decrease font size)"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("Q (shift+q)", Style::default().fg(theme::RED))),
+                    Cell::from(Span::styled("Q (shift+q)", Style::default().fg(theme.scale.categorical.red))),
                     Cell::from("Quit the application"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("m", Style::default().fg(theme::MAUVE))),
+                    Cell::from(Span::styled("m", Style::default().fg(theme.scale.categorical.mauve))),
                     Cell::from("Toggle this help screen"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("c", Style::default().fg(theme::PEACH))),
+                    Cell::from(Span::styled("c", Style::default().fg(theme.scale.categorical.peach))),
                     Cell::from("Open Config screen"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("z", Style::default().fg(theme::SUBTEXT0))),
+                    Cell::from(Span::styled("z", Style::default().fg(theme.semantic.subtext0))),
                     Cell::from("Toggle Zen/Power Saving mode"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 // --- List Navigation & Sorting ---
                 Row::new(vec![Cell::from(Span::styled(
                     "List Navigation",
-                    Style::default().fg(theme::YELLOW),
+                    Style::default().fg(theme.scale.categorical.yellow),
                 ))]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "↑ / ↓ / k / j",
-                        Style::default().fg(theme::BLUE),
+                        Style::default().fg(theme.scale.categorical.blue),
                     )),
                     Cell::from("Navigate torrents list"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "← / → / h / l",
-                        Style::default().fg(theme::BLUE),
+                        Style::default().fg(theme.scale.categorical.blue),
                     )),
                     Cell::from("Navigate between header columns"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("s", Style::default().fg(theme::GREEN))),
+                    Cell::from(Span::styled("s", Style::default().fg(theme.scale.categorical.green))),
                     Cell::from("Change sort order for the selected column"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 // --- Torrent Management ---
                 Row::new(vec![Cell::from(Span::styled(
                     "Torrent Actions",
-                    Style::default().fg(theme::YELLOW),
+                    Style::default().fg(theme.scale.categorical.yellow),
                 ))]),
                 Row::new(vec![
-                    Cell::from(Span::styled("p", Style::default().fg(theme::GREEN))),
+                    Cell::from(Span::styled("p", Style::default().fg(theme.scale.categorical.green))),
                     Cell::from("Pause / Resume selected torrent"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("d / D", Style::default().fg(theme::RED))),
+                    Cell::from(Span::styled("d / D", Style::default().fg(theme.scale.categorical.red))),
                     Cell::from("Delete torrent (D includes downloaded files)"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 Row::new(vec![Cell::from(Span::styled(
                     "Adding Torrents",
-                    Style::default().fg(theme::YELLOW),
+                    Style::default().fg(theme.scale.categorical.yellow),
                 ))]),
                 Row::new(vec![
-                    Cell::from(Span::styled("a", Style::default().fg(theme::GREEN))),
+                    Cell::from(Span::styled("a", Style::default().fg(theme.scale.categorical.green))),
                     Cell::from("Open file picker to add a .torrent file"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Paste | v",
-                        Style::default().fg(theme::SAPPHIRE),
+                        Style::default().fg(theme.scale.categorical.sapphire),
                     )),
                     Cell::from("Paste a magnet link or local file path to add"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("CLI", Style::default().fg(theme::SAPPHIRE))),
+                    Cell::from(Span::styled("CLI", Style::default().fg(theme.scale.categorical.sapphire))),
                     Cell::from("Use `superseedr add ...` from another terminal"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 // --- Graph Controls ---
                 Row::new(vec![Cell::from(Span::styled(
                     "Graph & Panes",
-                    Style::default().fg(theme::YELLOW),
+                    Style::default().fg(theme.scale.categorical.yellow),
                 ))]),
                 Row::new(vec![
-                    Cell::from(Span::styled("t / T", Style::default().fg(theme::TEAL))),
+                    Cell::from(Span::styled("t / T", Style::default().fg(theme.scale.categorical.teal))),
                     Cell::from("Switch network graph time scale forward/backward"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("[ / ]", Style::default().fg(theme::TEAL))),
+                    Cell::from(Span::styled("[ / ]", Style::default().fg(theme.scale.categorical.teal))),
                     Cell::from("Change UI refresh rate (FPS)"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("x", Style::default().fg(theme::TEAL))),
+                    Cell::from(Span::styled("x", Style::default().fg(theme.scale.categorical.teal))),
                     Cell::from("Anonymize torrent names"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
@@ -3388,68 +3404,68 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
                     // First Cell (for the first column)
                     Cell::from(Span::styled(
                         "Peer Flags Legend",
-                        Style::default().fg(theme::YELLOW),
+                        Style::default().fg(theme.scale.categorical.yellow),
                     )),
                     // Second Cell (for the second column)
                     Cell::from(Line::from(vec![
                         // Legend pairing: DL/UL status
                         Span::raw("DL: (You "),
-                        Span::styled("■", Style::default().fg(theme::SAPPHIRE)), // Toned-Down Interested
-                        Span::styled("■", Style::default().fg(theme::MAROON)), // Toned-Down Choked
+                        Span::styled("■", Style::default().fg(theme.scale.categorical.sapphire)), // Toned-Down Interested
+                        Span::styled("■", Style::default().fg(theme.scale.categorical.maroon)), // Toned-Down Choked
                         Span::raw(") | UL: (Peer "),
-                        Span::styled("■", Style::default().fg(theme::TEAL)), // Toned-Down Interested
-                        Span::styled("■", Style::default().fg(theme::PEACH)), // Toned-Down Choking
+                        Span::styled("■", Style::default().fg(theme.scale.categorical.teal)), // Toned-Down Interested
+                        Span::styled("■", Style::default().fg(theme.scale.categorical.peach)), // Toned-Down Choking
                         Span::raw(")"),
                     ])),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("■", Style::default().fg(theme::SAPPHIRE))),
+                    Cell::from(Span::styled("■", Style::default().fg(theme.scale.categorical.sapphire))),
                     Cell::from("You are interested (DL Potential)"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("■", Style::default().fg(theme::MAROON))),
+                    Cell::from(Span::styled("■", Style::default().fg(theme.scale.categorical.maroon))),
                     Cell::from("Peer is choking you (DL Block)"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("■", Style::default().fg(theme::TEAL))),
+                    Cell::from(Span::styled("■", Style::default().fg(theme.scale.categorical.teal))),
                     Cell::from("Peer is interested (UL Opportunity)"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("■", Style::default().fg(theme::PEACH))),
+                    Cell::from(Span::styled("■", Style::default().fg(theme.scale.categorical.peach))),
                     Cell::from("You are choking peer (UL Restriction)"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 Row::new(vec![Cell::from(Span::styled(
                     "Disk Stats Legend",
-                    Style::default().fg(theme::YELLOW),
+                    Style::default().fg(theme.scale.categorical.yellow),
                 ))]),
                 Row::new(vec![
-                    Cell::from(Span::styled("↑ (Read)", Style::default().fg(theme::GREEN))),
+                    Cell::from(Span::styled("↑ (Read)", Style::default().fg(theme.scale.categorical.green))),
                     Cell::from("Data read from disk"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("↓ (Write)", Style::default().fg(theme::SKY))),
+                    Cell::from(Span::styled("↓ (Write)", Style::default().fg(theme.scale.categorical.sky))),
                     Cell::from("Data written to disk"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("Seek", Style::default().fg(theme::TEXT))),
+                    Cell::from(Span::styled("Seek", Style::default().fg(theme.semantic.text))),
                     Cell::from("Avg. distance between I/O ops (lower is better)"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("Latency", Style::default().fg(theme::TEXT))),
+                    Cell::from(Span::styled("Latency", Style::default().fg(theme.semantic.text))),
                     Cell::from("Time to complete one I/O op (lower is better)"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("IOPS", Style::default().fg(theme::TEXT))),
+                    Cell::from(Span::styled("IOPS", Style::default().fg(theme.semantic.text))),
                     Cell::from("I/O Operations Per Second (total workload)"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 Row::new(vec![Cell::from(Span::styled(
                     "Self-Tuning Legend",
-                    Style::default().fg(theme::YELLOW),
+                    Style::default().fg(theme.scale.categorical.yellow),
                 ))]),
                 Row::new(vec![
-                    Cell::from(Span::styled("Best Score", Style::default().fg(theme::TEXT))),
+                    Cell::from(Span::styled("Best Score", Style::default().fg(theme.semantic.text))),
                     Cell::from(
                         "Score measuring if randomized changes resulted in optimial speeds.",
                     ),
@@ -3457,40 +3473,40 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Next seconds",
-                        Style::default().fg(theme::TEXT),
+                        Style::default().fg(theme.semantic.text),
                     )),
                     Cell::from("Countdown to try a new random resource adjustment (file handles)"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("(+/-)", Style::default().fg(theme::TEXT))),
+                    Cell::from(Span::styled("(+/-)", Style::default().fg(theme.semantic.text))),
                     Cell::from("Random setting change between resources. (Green=Good, Red=Bad)"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 Row::new(vec![Cell::from(Span::styled(
                     "Build Features",
-                    Style::default().fg(theme::YELLOW),
+                    Style::default().fg(theme.scale.categorical.yellow),
                 ))]),
                 Row::new(vec![
-                    Cell::from(Span::styled("DHT", Style::default().fg(theme::TEXT))),
+                    Cell::from(Span::styled("DHT", Style::default().fg(theme.semantic.text))),
                     Cell::from(Line::from(vec![
                         #[cfg(feature = "dht")]
-                        Span::styled("ON", Style::default().fg(theme::GREEN)),
+                        Span::styled("ON", Style::default().fg(theme.scale.categorical.green)),
                         #[cfg(not(feature = "dht"))]
                         Span::styled(
                             "Not included in this [PRIVATE] build of superseedr.",
-                            Style::default().fg(theme::RED),
+                            Style::default().fg(theme.scale.categorical.red),
                         ),
                     ])),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("Pex", Style::default().fg(theme::TEXT))),
+                    Cell::from(Span::styled("Pex", Style::default().fg(theme.semantic.text))),
                     Cell::from(Line::from(vec![
                         #[cfg(feature = "pex")]
-                        Span::styled("ON", Style::default().fg(theme::GREEN)),
+                        Span::styled("ON", Style::default().fg(theme.scale.categorical.green)),
                         #[cfg(not(feature = "pex"))]
                         Span::styled(
                             "Not included in this [PRIVATE] build of superseedr.",
-                            Style::default().fg(theme::RED),
+                            Style::default().fg(theme.scale.categorical.red),
                         ),
                     ])),
                 ]),
@@ -3498,17 +3514,17 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
                 // --- NEW: Session Stats at the Bottom ---
                 Row::new(vec![Cell::from(Span::styled(
                     "Session Stats",
-                    Style::default().fg(theme::YELLOW),
+                    Style::default().fg(theme.scale.categorical.yellow),
                 ))]),
                 Row::new(vec![
-                    Cell::from(Span::styled("Level Up:", Style::default().fg(theme::MAUVE))),
+                    Cell::from(Span::styled("Level Up:", Style::default().fg(theme.scale.categorical.mauve))),
                     Cell::from("Upload data or keep a large library seeding."),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled(gauge_str, Style::default().fg(theme::GREEN))),
+                    Cell::from(Span::styled(gauge_str, Style::default().fg(theme.scale.categorical.green))),
                     Cell::from(Span::styled(
                         level_text,
-                        Style::default().fg(theme::YELLOW).bold(),
+                        Style::default().fg(theme.scale.categorical.yellow).bold(),
                     )),
                 ]),
             ],
@@ -3517,25 +3533,25 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
             " Help / Config ",
             vec![
                 Row::new(vec![
-                    Cell::from(Span::styled("Esc / q", Style::default().fg(theme::GREEN))),
+                    Cell::from(Span::styled("Esc / q", Style::default().fg(theme.scale.categorical.green))),
                     Cell::from("Save and exit config"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "↑ / ↓ / k / j",
-                        Style::default().fg(theme::BLUE),
+                        Style::default().fg(theme.scale.categorical.blue),
                     )),
                     Cell::from("Navigate items"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "← / → / h / l",
-                        Style::default().fg(theme::BLUE),
+                        Style::default().fg(theme.scale.categorical.blue),
                     )),
                     Cell::from("Decrease / Increase value"),
                 ]),
                 Row::new(vec![
-                    Cell::from(Span::styled("Enter", Style::default().fg(theme::YELLOW))),
+                    Cell::from(Span::styled("Enter", Style::default().fg(theme.scale.categorical.yellow))),
                     Cell::from("Start or confirm editing"),
                 ]),
             ],
@@ -3544,7 +3560,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
             " Help / File Browser ",
             vec![
                 Row::new(vec![
-                    Cell::from(Span::styled("Esc", Style::default().fg(theme::RED))),
+                    Cell::from(Span::styled("Esc", Style::default().fg(theme.scale.categorical.red))),
                     Cell::from("Cancel selection"),
                 ]),
                 // ... rest of help items ...
@@ -3562,7 +3578,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect) {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::SURFACE2))
+            .border_style(Style::default().fg(theme.semantic.surface2))
             .padding(Padding::new(2, 2, 1, 1)),
     );
 
@@ -3576,13 +3592,14 @@ fn draw_config_screen(
     selected_index: usize,
     items: &[ConfigItem],
     editing: &Option<(ConfigItem, String)>,
+    theme: &crate::theme::Theme,
 ) {
     let area = centered_rect(80, 60, f.area());
     f.render_widget(Clear, f.area());
     let block = Block::default()
-        .title(Span::styled("Config", Style::default().fg(theme::MAUVE)))
+        .title(Span::styled("Config", Style::default().fg(theme.scale.categorical.mauve)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::SURFACE2));
+        .border_style(Style::default().fg(theme.semantic.surface2));
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
@@ -3633,9 +3650,9 @@ fn draw_config_screen(
             i == selected_index
         };
         let row_style = if is_highlighted {
-            Style::default().fg(theme::YELLOW)
+            Style::default().fg(theme.scale.categorical.yellow)
         } else {
-            Style::default().fg(theme::TEXT)
+            Style::default().fg(theme.semantic.text)
         };
         let name_with_selector = if is_highlighted {
             format!("▶ {}", name_str)
@@ -3648,7 +3665,7 @@ fn draw_config_screen(
 
         if let Some((_edited_item, buffer)) = editing {
             if is_highlighted {
-                let edit_p = Paragraph::new(buffer.as_str()).style(row_style.fg(theme::YELLOW));
+                let edit_p = Paragraph::new(buffer.as_str()).style(row_style.fg(theme.scale.categorical.yellow));
                 f.set_cursor_position((columns[1].x + buffer.len() as u16, columns[1].y));
                 f.render_widget(edit_p, columns[1]);
             } else {
@@ -3663,32 +3680,33 @@ fn draw_config_screen(
 
     let help_text = if editing.is_some() {
         Line::from(vec![
-            Span::styled("[Enter]", Style::default().fg(theme::GREEN)),
+            Span::styled("[Enter]", Style::default().fg(theme.scale.categorical.green)),
             Span::raw(" to confirm, "),
-            Span::styled("[Esc]", Style::default().fg(theme::RED)),
+            Span::styled("[Esc]", Style::default().fg(theme.scale.categorical.red)),
             Span::raw(" to cancel."),
         ])
     } else {
         Line::from(vec![
             Span::raw("Use "),
-            Span::styled("↑/↓/k/j", Style::default().fg(theme::YELLOW)),
+            Span::styled("↑/↓/k/j", Style::default().fg(theme.scale.categorical.yellow)),
             Span::raw(" to navigate. "),
-            Span::styled("[Enter]", Style::default().fg(theme::YELLOW)),
+            Span::styled("[Enter]", Style::default().fg(theme.scale.categorical.yellow)),
             Span::raw(" to edit. "),
-            Span::styled("[r]", Style::default().fg(theme::YELLOW)),
+            Span::styled("[r]", Style::default().fg(theme.scale.categorical.yellow)),
             Span::raw("eset to default. "),
-            Span::styled("[Esc]|[Q]", Style::default().fg(theme::GREEN)),
+            Span::styled("[Esc]|[Q]", Style::default().fg(theme.scale.categorical.green)),
             Span::raw(" to Save & Exit, "),
         ])
     };
 
     let footer_paragraph = Paragraph::new(help_text)
         .alignment(Alignment::Center)
-        .style(Style::default().fg(theme::SUBTEXT1));
+        .style(Style::default().fg(theme.semantic.subtext1));
     f.render_widget(footer_paragraph, footer_area);
 }
 
 fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
+    let theme = &app_state.theme;
     if peers_chunk.height < 2 || peers_chunk.width < 2 {
         return;
     }
@@ -3758,13 +3776,13 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
 
                 let peer_border_style =
                     if matches!(app_state.selected_header, SelectedHeader::Peer(_)) {
-                        Style::default().fg(theme::MAUVE)
+                        Style::default().fg(theme.scale.categorical.mauve)
                     } else {
-                        Style::default().fg(theme::SURFACE2)
+                        Style::default().fg(theme.semantic.surface2)
                     };
 
                 if peers_to_display.is_empty() {
-                    draw_swarm_heatmap(f, &state.peers, state.number_of_pieces_total, peers_chunk);
+                    draw_swarm_heatmap(f, theme, &state.peers, state.number_of_pieces_total, peers_chunk);
                 } else {
                     let header_cells: Vec<Cell> = visible_indices
                         .iter()
@@ -3776,9 +3794,9 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                                 app_state.selected_header == SelectedHeader::Peer(visual_idx);
                             let is_sorting = def.sort_enum == Some(sort_by);
 
-                            let mut style = Style::default().fg(theme::YELLOW);
+                            let mut style = Style::default().fg(theme.scale.categorical.yellow);
                             if is_sorting {
-                                style = style.fg(theme::MAUVE);
+                                style = style.fg(theme.scale.categorical.mauve);
                             }
 
                             let mut text = def.header.to_string();
@@ -3803,9 +3821,9 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                     let peer_rows = peers_to_display.iter().map(|peer| {
                         let row_color =
                             if peer.download_speed_bps == 0 && peer.upload_speed_bps == 0 {
-                                theme::SURFACE1
+                                theme.semantic.surface1
                             } else {
-                                ip_to_color(&peer.address)
+                                ip_to_color(theme, &peer.address)
                             };
 
                         let cells: Vec<Cell> = visible_indices
@@ -3817,33 +3835,33 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                                         Span::styled(
                                             "■",
                                             Style::default().fg(if peer.am_interested {
-                                                theme::SAPPHIRE
+                                                theme.scale.categorical.sapphire
                                             } else {
-                                                theme::SURFACE1
+                                                theme.semantic.surface1
                                             }),
                                         ),
                                         Span::styled(
                                             "■",
                                             Style::default().fg(if peer.peer_choking {
-                                                theme::MAROON
+                                                theme.scale.categorical.maroon
                                             } else {
-                                                theme::SURFACE1
+                                                theme.semantic.surface1
                                             }),
                                         ),
                                         Span::styled(
                                             "■",
                                             Style::default().fg(if peer.peer_interested {
-                                                theme::TEAL
+                                                theme.scale.categorical.teal
                                             } else {
-                                                theme::SURFACE1
+                                                theme.semantic.surface1
                                             }),
                                         ),
                                         Span::styled(
                                             "■",
                                             Style::default().fg(if peer.am_choking {
-                                                theme::PEACH
+                                                theme.scale.categorical.peach
                                             } else {
-                                                theme::SURFACE1
+                                                theme.semantic.surface1
                                             }),
                                         ),
                                     ])
@@ -3929,6 +3947,7 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
                         f.render_widget(peers_table, inner_peers_area);
                         draw_swarm_heatmap(
                             f,
+                            theme,
                             &state.peers,
                             state.number_of_pieces_total,
                             layout_chunks[1],
@@ -3943,26 +3962,32 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
         }
     } else {
         // [UPDATED] No torrent selected: draw a placeholder heatmap
-        draw_swarm_heatmap(f, &[], 0, peers_chunk);
+        draw_swarm_heatmap(f, theme, &[], 0, peers_chunk);
     }
 }
 
-fn draw_swarm_heatmap(f: &mut Frame, peers: &[PeerInfo], total_pieces: u32, area: Rect) {
-    let color_status_low = Style::default().fg(theme::RED).add_modifier(Modifier::DIM);
+fn draw_swarm_heatmap(
+    f: &mut Frame,
+    theme: &crate::theme::Theme,
+    peers: &[PeerInfo],
+    total_pieces: u32,
+    area: Rect,
+) {
+    let color_status_low = Style::default().fg(theme.scale.categorical.red).add_modifier(Modifier::DIM);
     let color_status_medium = Style::default()
-        .fg(theme::YELLOW)
+        .fg(theme.scale.categorical.yellow)
         .add_modifier(Modifier::DIM);
-    let color_status_high = Style::default().fg(theme::BLUE).add_modifier(Modifier::DIM);
+    let color_status_high = Style::default().fg(theme.scale.categorical.blue).add_modifier(Modifier::DIM);
     let color_status_complete = Style::default()
-        .fg(theme::LAVENDER)
+        .fg(theme.scale.categorical.lavender)
         .add_modifier(Modifier::BOLD);
-    let color_status_empty = Style::default().fg(theme::SUBTEXT1);
-    let color_status_waiting = Style::default().fg(theme::SUBTEXT1);
+    let color_status_empty = Style::default().fg(theme.semantic.subtext1);
+    let color_status_waiting = Style::default().fg(theme.semantic.subtext1);
 
-    let color_heatmap_low = theme::MAUVE;
-    let color_heatmap_medium = theme::MAUVE;
-    let color_heatmap_high = theme::MAUVE;
-    let color_heatmap_empty = theme::SURFACE1;
+    let color_heatmap_low = theme.scale.categorical.mauve;
+    let color_heatmap_medium = theme.scale.categorical.mauve;
+    let color_heatmap_high = theme.scale.categorical.mauve;
+    let color_heatmap_empty = theme.semantic.surface1;
 
     let shade_light = symbols::shade::LIGHT;
     let shade_medium = symbols::shade::MEDIUM;
@@ -4018,7 +4043,7 @@ fn draw_swarm_heatmap(f: &mut Frame, peers: &[PeerInfo], total_pieces: u32, area
     let title = Line::from(vec![
         Span::styled(
             " Swarm Availability: ",
-            Style::default().fg(theme::LAVENDER),
+            Style::default().fg(theme.scale.categorical.lavender),
         ),
         Span::styled(status_text, status_style),
     ]);
@@ -4026,7 +4051,7 @@ fn draw_swarm_heatmap(f: &mut Frame, peers: &[PeerInfo], total_pieces: u32, area
         .title(title)
         .borders(Borders::NONE)
         .padding(Padding::new(1, 1, 0, 1))
-        .border_style(Style::default().fg(theme::SURFACE2));
+        .border_style(Style::default().fg(theme.semantic.surface2));
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
@@ -4041,7 +4066,7 @@ fn draw_swarm_heatmap(f: &mut Frame, peers: &[PeerInfo], total_pieces: u32, area
             let row_str = shade_light.repeat(available_width);
             lines.push(Line::from(Span::styled(
                 row_str,
-                Style::default().fg(theme::SURFACE1),
+                Style::default().fg(theme.semantic.surface1),
             )));
         }
 
@@ -4174,7 +4199,16 @@ fn blend_colors(c1: (u8, u8, u8), c2: (u8, u8, u8), ratio: f64) -> Color {
     Color::Rgb(r, g, b)
 }
 
-fn get_animated_style(x: usize, y: usize) -> Style {
+fn color_to_rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::White => (255, 255, 255),
+        Color::Black => (0, 0, 0),
+        _ => (255, 255, 255),
+    }
+}
+
+fn get_animated_style(theme: &crate::theme::Theme, x: usize, y: usize) -> Style {
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -4189,8 +4223,8 @@ fn get_animated_style(x: usize, y: usize) -> Style {
 
     // 2. Block Stream Colors
     // Blue (Inflow) -> Green (Outflow)
-    let color_blue = (137, 180, 250); // Matches theme::BLUE
-    let color_green = (166, 227, 161); // Matches theme::GREEN
+    let color_blue = color_to_rgb(theme.scale.categorical.blue);
+    let color_green = color_to_rgb(theme.scale.categorical.green);
 
     // Blend between the two stream colors
     let base_color = blend_colors(color_blue, color_green, ratio);
@@ -4203,7 +4237,7 @@ fn get_animated_style(x: usize, y: usize) -> Style {
     if seed > 0.85 {
         // High energy sparkle: White/Bright + Bold (Active Data)
         Style::default()
-            .fg(Color::White)
+            .fg(theme.semantic.white)
             .add_modifier(Modifier::BOLD)
     } else if seed > 0.5 {
         // Medium energy: Base Color + Bold
@@ -4215,7 +4249,7 @@ fn get_animated_style(x: usize, y: usize) -> Style {
 }
 
 // Updated: 3-Layer Parallax "Data Field" Background
-fn draw_background_dust(f: &mut Frame, area: Rect) {
+fn draw_background_dust(f: &mut Frame, area: Rect, theme: &crate::theme::Theme) {
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -4247,7 +4281,7 @@ fn draw_background_dust(f: &mut Frame, area: Rect) {
                 spans.push(Span::styled(
                     "+", // Distinctive shape
                     Style::default()
-                        .fg(theme::GREEN)
+                        .fg(theme.scale.categorical.green)
                         .add_modifier(Modifier::BOLD),
                 ));
                 continue; // Pixel filled, skip to next x
@@ -4263,7 +4297,7 @@ fn draw_background_dust(f: &mut Frame, area: Rect) {
             if noise_2 > 0.95 {
                 spans.push(Span::styled(
                     "·",
-                    Style::default().fg(theme::BLUE), // Standard Dim Blue
+                    Style::default().fg(theme.scale.categorical.blue), // Standard Dim Blue
                 ));
                 continue;
             }
@@ -4279,7 +4313,7 @@ fn draw_background_dust(f: &mut Frame, area: Rect) {
                 spans.push(Span::styled(
                     ".",
                     Style::default()
-                        .fg(theme::SURFACE2)
+                        .fg(theme.semantic.surface2)
                         .add_modifier(Modifier::DIM),
                 ));
                 continue;

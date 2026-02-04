@@ -22,35 +22,33 @@ Create an extensible theming foundation for the TUI that preserves all current c
 - No central concept of a theme beyond the constants file.
 
 **Proposed Design**
-- Replace global color constants with a `Theme` struct that exposes the same palette slots.
+- Replace global color constants with a `Theme` struct that exposes semantic and scale slots.
 - Add a `ThemeName` enum for built-ins.
 - Add optional `ThemeEffects` that can be used to compute glow/flicker styles later.
 - Store the resolved theme in app state and pass it into all drawing/formatting paths.
 - Components request palette colors from the theme; optional modifiers (bold/underline) remain component-controlled.
 
 **Theme Schema (Initial)**
-The initial theme schema mirrors the existing palette one-for-one to preserve output:
-- `ROSEWATER`
-- `FLAMINGO`
-- `PINK`
-- `MAUVE`
-- `RED`
-- `MAROON`
-- `PEACH`
-- `YELLOW`
-- `GREEN`
-- `TEAL`
-- `SKY`
-- `SAPPHIRE`
-- `BLUE`
-- `LAVENDER`
-- `TEXT`
-- `SUBTEXT1`
-- `SUBTEXT0`
-- `OVERLAY0`
-- `SURFACE2`
-- `SURFACE1`
-- `SURFACE0`
+The theme is split into **semantic** and **scale** slots. Semantic slots describe intent (text, surfaces, errors), while scale slots are for gradients and categorical palettes.
+
+**Semantic Slots (Initial)**
+- `text`
+- `subtext0`
+- `subtext1`
+- `overlay0`
+- `surface0`
+- `surface1`
+- `surface2`
+- `border`
+- `white`
+
+**Scale Slots (Initial)**
+- `speed` (ordered gradient array used by speed tiers)
+- `ip_hash` (categorical array used to color IPs deterministically)
+- `heatmap` (low/medium/high/empty)
+- `stream` (inflow/outflow for block stream visuals)
+- `dust` (foreground/midground/background for parallax dust)
+- `categorical` (legacy categorical palette used across components)
 
 **Theme Effects (Initial, No Behavioral Change)**
 - `glow_enabled: bool`
@@ -65,11 +63,12 @@ Effects should be addable later without refactoring if components always source 
 - TUI config screen integration can be deferred.
 
 **Neon Theme Strategy**
-- Provide a complete palette with neon-leaning colors for every slot.
+- Provide a complete semantic + scale palette with neon-leaning colors for every slot.
 - Effects can be enabled later (glow/flicker) without changing component code.
 
 **Candy Land Pink Strategy**
-- Provide a complete pastel palette for every slot.
+- Provide a complete semantic + scale palette for every slot.
+- Gradients (e.g. `speed`) can be white-to-pink without requiring any red hues.
 - Effects should be off or minimal by default.
 
 **Migration Plan**
