@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum ThemeName {
     CatppuccinMocha,
+    Neon,
+    #[serde(alias = "candly_land_pink")]
+    CandyLandPink,
 }
 
 impl Default for ThemeName {
@@ -97,6 +100,8 @@ impl Theme {
     pub fn builtin(name: ThemeName) -> Self {
         match name {
             ThemeName::CatppuccinMocha => Self::catppuccin_mocha(),
+            ThemeName::Neon => Self::neon(),
+            ThemeName::CandyLandPink => Self::candy_land_pink(),
         }
     }
 
@@ -173,6 +178,168 @@ impl Theme {
                     foreground: categorical.green,
                     midground: categorical.blue,
                     background: Color::Rgb(88, 91, 112),
+                },
+                categorical,
+            },
+        }
+    }
+
+    pub fn neon() -> Self {
+        let categorical = ThemeCategorical {
+            rosewater: Color::Rgb(255, 220, 245),
+            flamingo: Color::Rgb(255, 150, 230),
+            pink: Color::Rgb(255, 70, 230),
+            mauve: Color::Rgb(210, 90, 255),
+            red: Color::Rgb(255, 60, 120),
+            maroon: Color::Rgb(255, 90, 160),
+            peach: Color::Rgb(255, 170, 80),
+            yellow: Color::Rgb(255, 240, 90),
+            green: Color::Rgb(100, 255, 190),
+            teal: Color::Rgb(0, 255, 255),
+            sky: Color::Rgb(80, 220, 255),
+            sapphire: Color::Rgb(40, 190, 255),
+            blue: Color::Rgb(40, 110, 255),
+            lavender: Color::Rgb(190, 170, 255),
+        };
+
+        Self {
+            name: ThemeName::Neon,
+            effects: ThemeEffects {
+                glow_enabled: true,
+                flicker_hz: 18.0,
+                flicker_intensity: 0.35,
+            },
+            semantic: ThemeSemantic {
+                text: Color::Rgb(230, 255, 255),
+                subtext1: Color::Rgb(140, 230, 245),
+                subtext0: Color::Rgb(90, 200, 220),
+                overlay0: Color::Rgb(30, 70, 95),
+                surface2: Color::Rgb(18, 40, 64),
+                surface1: Color::Rgb(12, 30, 52),
+                surface0: Color::Rgb(8, 22, 42),
+                border: Color::Rgb(18, 40, 64),
+                white: Color::White,
+            },
+            scale: ThemeScale {
+                speed: [
+                    Color::Rgb(200, 255, 255),
+                    Color::Rgb(120, 255, 240),
+                    Color::Rgb(60, 245, 255),
+                    Color::Rgb(80, 190, 255),
+                    Color::Rgb(170, 120, 255),
+                    Color::Rgb(255, 90, 230),
+                    Color::Rgb(255, 60, 190),
+                    Color::Rgb(255, 40, 150),
+                ],
+                ip_hash: [
+                    categorical.rosewater,
+                    categorical.flamingo,
+                    categorical.pink,
+                    categorical.mauve,
+                    categorical.red,
+                    categorical.maroon,
+                    categorical.peach,
+                    categorical.yellow,
+                    categorical.green,
+                    categorical.teal,
+                    categorical.sky,
+                    categorical.sapphire,
+                    categorical.blue,
+                    categorical.lavender,
+                ],
+                heatmap: ThemeHeatmap {
+                    low: categorical.mauve,
+                    medium: categorical.pink,
+                    high: categorical.teal,
+                    empty: Color::Rgb(30, 45, 65),
+                },
+                stream: ThemeStream {
+                    inflow: categorical.blue,
+                    outflow: categorical.green,
+                },
+                dust: ThemeDust {
+                    foreground: categorical.green,
+                    midground: categorical.blue,
+                    background: Color::Rgb(40, 60, 80),
+                },
+                categorical,
+            },
+        }
+    }
+
+    pub fn candy_land_pink() -> Self {
+        let categorical = ThemeCategorical {
+            rosewater: Color::Rgb(255, 228, 241),
+            flamingo: Color::Rgb(255, 204, 231),
+            pink: Color::Rgb(255, 176, 224),
+            mauve: Color::Rgb(236, 178, 255),
+            red: Color::Rgb(255, 154, 198),
+            maroon: Color::Rgb(255, 170, 210),
+            peach: Color::Rgb(255, 196, 168),
+            yellow: Color::Rgb(255, 236, 170),
+            green: Color::Rgb(198, 235, 200),
+            teal: Color::Rgb(176, 228, 220),
+            sky: Color::Rgb(176, 214, 255),
+            sapphire: Color::Rgb(156, 198, 255),
+            blue: Color::Rgb(136, 180, 255),
+            lavender: Color::Rgb(214, 186, 255),
+        };
+
+        Self {
+            name: ThemeName::CandyLandPink,
+            effects: ThemeEffects::default(),
+            semantic: ThemeSemantic {
+                text: Color::Rgb(255, 245, 252),
+                subtext1: Color::Rgb(246, 218, 236),
+                subtext0: Color::Rgb(232, 190, 218),
+                overlay0: Color::Rgb(208, 160, 190),
+                surface2: Color::Rgb(190, 128, 170),
+                surface1: Color::Rgb(170, 110, 150),
+                surface0: Color::Rgb(152, 94, 134),
+                border: Color::Rgb(190, 128, 170),
+                white: Color::White,
+            },
+            scale: ThemeScale {
+                speed: [
+                    Color::Rgb(255, 248, 252),
+                    Color::Rgb(255, 224, 241),
+                    Color::Rgb(255, 204, 234),
+                    Color::Rgb(255, 184, 226),
+                    Color::Rgb(255, 164, 218),
+                    Color::Rgb(255, 144, 210),
+                    Color::Rgb(255, 124, 200),
+                    Color::Rgb(255, 104, 192),
+                ],
+                ip_hash: [
+                    categorical.rosewater,
+                    categorical.flamingo,
+                    categorical.pink,
+                    categorical.mauve,
+                    categorical.red,
+                    categorical.maroon,
+                    categorical.peach,
+                    categorical.yellow,
+                    categorical.lavender,
+                    categorical.sky,
+                    categorical.sapphire,
+                    categorical.blue,
+                    categorical.teal,
+                    categorical.green,
+                ],
+                heatmap: ThemeHeatmap {
+                    low: categorical.rosewater,
+                    medium: categorical.pink,
+                    high: categorical.mauve,
+                    empty: Color::Rgb(170, 110, 150),
+                },
+                stream: ThemeStream {
+                    inflow: categorical.sky,
+                    outflow: categorical.pink,
+                },
+                dust: ThemeDust {
+                    foreground: categorical.pink,
+                    midground: categorical.lavender,
+                    background: Color::Rgb(190, 128, 170),
                 },
                 categorical,
             },

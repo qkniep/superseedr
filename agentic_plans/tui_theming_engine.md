@@ -61,6 +61,7 @@ Effects should be addable later without refactoring if components always source 
 - Introduce a `ui_theme` config field in settings to select a built-in theme.
 - Default remains Catppuccin Mocha to preserve existing visuals.
 - TUI config screen integration can be deferred.
+ - Built-in theme options: `catppuccin_mocha`, `neon`, `candy_land_pink`.
 
 **Neon Theme Strategy**
 - Provide a complete semantic + scale palette with neon-leaning colors for every slot.
