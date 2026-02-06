@@ -1866,8 +1866,8 @@ fn draw_vertical_block_stream(f: &mut Frame, app_state: &AppState, area: Rect) {
     const DOWN_TRIANGLE: &str = "▼";
     const SEPARATOR: &str = "·";
 
-    let color_inflow = theme.scale.categorical.blue;
-    let color_outflow = theme.scale.categorical.green;
+    let color_inflow = theme.scale.stream.inflow;
+    let color_outflow = theme.scale.stream.outflow;
     let color_border = theme.semantic.border;
     let color_empty = theme.semantic.surface0;
 
@@ -4578,7 +4578,6 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect) {
             }
         }
     } else {
-        // [UPDATED] No torrent selected: draw a placeholder heatmap
         draw_swarm_heatmap(f, theme, &[], 0, peers_chunk);
     }
 }
@@ -4605,10 +4604,10 @@ fn draw_swarm_heatmap(
     let color_status_empty = Style::default().fg(theme.semantic.subtext1);
     let color_status_waiting = Style::default().fg(theme.semantic.subtext1);
 
-    let color_heatmap_low = theme.scale.categorical.mauve;
-    let color_heatmap_medium = theme.scale.categorical.mauve;
-    let color_heatmap_high = theme.scale.categorical.mauve;
-    let color_heatmap_empty = theme.semantic.surface1;
+    let color_heatmap_low = theme.scale.heatmap.low;
+    let color_heatmap_medium = theme.scale.heatmap.medium;
+    let color_heatmap_high = theme.scale.heatmap.high;
+    let color_heatmap_empty = theme.scale.heatmap.empty;
 
     let shade_light = symbols::shade::LIGHT;
     let shade_medium = symbols::shade::MEDIUM;
@@ -4812,7 +4811,6 @@ fn calculate_player_stats(app_state: &AppState) -> (u32, f64) {
     (current_level, ratio.clamp(0.0, 1.0))
 }
 
-// Functions moved to crate::theme
 fn get_animated_style(theme: &crate::theme::Theme, x: usize, y: usize) -> Style {
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4828,8 +4826,8 @@ fn get_animated_style(theme: &crate::theme::Theme, x: usize, y: usize) -> Style 
 
     // 2. Block Stream Colors
     // Blue (Inflow) -> Green (Outflow)
-    let color_blue = color_to_rgb(theme.scale.categorical.blue);
-    let color_green = color_to_rgb(theme.scale.categorical.green);
+    let color_blue = color_to_rgb(theme.scale.stream.inflow);
+    let color_green = color_to_rgb(theme.scale.stream.outflow);
 
     // Blend between the two stream colors
     let base_color = blend_colors(color_blue, color_green, ratio);
