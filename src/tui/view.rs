@@ -2139,7 +2139,10 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
     let Some(torrent) = torrent else {
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.semantic.border));
+            .border_style(apply_theme_effects(
+                Style::default().fg(theme.semantic.border),
+                theme,
+            ));
         f.render_widget(block, area);
         return;
     };
@@ -2163,14 +2166,23 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Block::default()
                     .title(Span::styled(
                         format!("DL Activity (Peak: {})", format_speed(nice_max_speed)),
-                        Style::default().fg(theme.semantic.subtext0),
+                        apply_theme_effects(
+                            Style::default().fg(theme.semantic.subtext0),
+                            theme,
+                        ),
                     ))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.semantic.border)),
+                    .border_style(apply_theme_effects(
+                        Style::default().fg(theme.semantic.border),
+                        theme,
+                    )),
             )
             .data(dl_slice)
             .max(nice_max_speed)
-            .style(Style::default().fg(theme.scale.categorical.blue));
+            .style(apply_theme_effects(
+                Style::default().fg(theme.scale.categorical.blue),
+                theme,
+            ));
         f.render_widget(dl_sparkline, area);
     } else if !has_dl_activity && has_ul_activity {
         let width = area.width.saturating_sub(2).max(1) as usize;
@@ -2182,20 +2194,32 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Block::default()
                     .title(Span::styled(
                         format!("UL Activity (Peak: {})", format_speed(nice_max_speed)),
-                        Style::default().fg(theme.semantic.subtext0),
+                        apply_theme_effects(
+                            Style::default().fg(theme.semantic.subtext0),
+                            theme,
+                        ),
                     ))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.semantic.border)),
+                    .border_style(apply_theme_effects(
+                        Style::default().fg(theme.semantic.border),
+                        theme,
+                    )),
             )
             .data(ul_slice)
             .max(nice_max_speed)
-            .style(Style::default().fg(theme.scale.categorical.green));
+            .style(apply_theme_effects(
+                Style::default().fg(theme.scale.categorical.green),
+                theme,
+            ));
         f.render_widget(ul_sparkline, area);
     } else if !has_dl_activity && !has_ul_activity {
-        let style = Style::default().fg(theme.scale.categorical.mauve);
+        let style = apply_theme_effects(Style::default().fg(theme.scale.categorical.mauve), theme);
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.semantic.border));
+            .border_style(apply_theme_effects(
+                Style::default().fg(theme.semantic.border),
+                theme,
+            ));
         let inner_area = block.inner(area);
         f.render_widget(block, area);
 
@@ -2226,9 +2250,12 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
         let label_text = Paragraph::new(" Searching for Peers ")
             .style(style)
             .alignment(Alignment::Center);
-        let throbber_style = Style::default()
-            .fg(theme.scale.categorical.lavender)
-            .add_modifier(Modifier::BOLD);
+        let throbber_style = apply_theme_effects(
+            Style::default()
+                .fg(theme.scale.categorical.lavender)
+                .add_modifier(Modifier::BOLD),
+            theme,
+        );
         let throbber_widget = Throbber::default().style(throbber_style);
 
         f.render_widget(label_text, label_area);
@@ -2263,14 +2290,23 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Block::default()
                     .title(Span::styled(
                         format!("DL (Peak: {})", format_speed(dl_nice_max)),
-                        Style::default().fg(theme.semantic.subtext0),
+                        apply_theme_effects(
+                            Style::default().fg(theme.semantic.subtext0),
+                            theme,
+                        ),
                     ))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.semantic.border)),
+                    .border_style(apply_theme_effects(
+                        Style::default().fg(theme.semantic.border),
+                        theme,
+                    )),
             )
             .data(dl_slice)
             .max(dl_nice_max)
-            .style(Style::default().fg(theme.scale.categorical.blue));
+            .style(apply_theme_effects(
+                Style::default().fg(theme.scale.categorical.blue),
+                theme,
+            ));
         f.render_widget(dl_sparkline, dl_sparkline_chunk);
 
         let ul_sparkline = Sparkline::default()
@@ -2278,14 +2314,23 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect) {
                 Block::default()
                     .title(Span::styled(
                         format!("UL (Peak: {})", format_speed(ul_nice_max)),
-                        Style::default().fg(theme.semantic.subtext0),
+                        apply_theme_effects(
+                            Style::default().fg(theme.semantic.subtext0),
+                            theme,
+                        ),
                     ))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.semantic.border)),
+                    .border_style(apply_theme_effects(
+                        Style::default().fg(theme.semantic.border),
+                        theme,
+                    )),
             )
             .data(ul_slice)
             .max(ul_nice_max)
-            .style(Style::default().fg(theme.scale.categorical.green));
+            .style(apply_theme_effects(
+                Style::default().fg(theme.scale.categorical.green),
+                theme,
+            ));
         f.render_widget(ul_sparkline, ul_sparkline_chunk);
     }
 }
@@ -2311,7 +2356,10 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
             let vert_padding = if area.height < 10 { 0 } else { 1 };
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.scale.categorical.red))
+                .border_style(apply_theme_effects(
+                    Style::default().fg(theme.scale.categorical.red),
+                    theme,
+                ))
                 .padding(Padding::new(2, 2, vert_padding, vert_padding));
 
             let inner_area = block.inner(area);
@@ -2339,12 +2387,18 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
                 Paragraph::new(vec![
                     Line::from(Span::styled(
                         name,
-                        Style::default()
-                            .fg(theme.scale.categorical.yellow)
-                            .bold()
-                            .underlined(),
+                        apply_theme_effects(
+                            Style::default()
+                                .fg(theme.scale.categorical.yellow)
+                                .bold()
+                                .underlined(),
+                            theme,
+                        ),
                     )),
-                    Line::from(Span::styled(path, Style::default().fg(theme.semantic.text))),
+                    Line::from(Span::styled(
+                        path,
+                        apply_theme_effects(Style::default().fg(theme.semantic.text), theme),
+                    )),
                 ])
                 .alignment(Alignment::Center),
                 chunks[0],
@@ -2355,33 +2409,45 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
                 let body = if *with_files {
                     vec![
                         Line::from(""),
-                        Line::from(Span::styled(
+                            Line::from(Span::styled(
                             "⚠️ PERMANENT TORRENT FILES DELETION ON ⚠️",
-                            Style::default().fg(theme.scale.categorical.red).bold(),
+                            apply_theme_effects(
+                                Style::default().fg(theme.scale.categorical.red).bold(),
+                                theme,
+                            ),
                         )),
                         Line::from(vec![
                             Span::raw("All local data for this torrent will be "),
                             Span::styled(
                                 "ERASED",
-                                Style::default()
-                                    .fg(theme.scale.categorical.red)
-                                    .bold()
-                                    .underlined(),
+                                apply_theme_effects(
+                                    Style::default()
+                                        .fg(theme.scale.categorical.red)
+                                        .bold()
+                                        .underlined(),
+                                    theme,
+                                ),
                             ),
                         ]),
                     ]
                 } else {
                     vec![
                         Line::from(""),
-                        Line::from(Span::styled(
+                            Line::from(Span::styled(
                             "Safe Removal (Files Kept)",
-                            Style::default().fg(theme.scale.categorical.green),
+                            apply_theme_effects(
+                                Style::default().fg(theme.scale.categorical.green),
+                                theme,
+                            ),
                         )),
                         Line::from(vec![
                             Span::raw("Use "),
                             Span::styled(
                                 "[D]",
-                                Style::default().fg(theme.scale.categorical.yellow).bold(),
+                                apply_theme_effects(
+                                    Style::default().fg(theme.scale.categorical.yellow).bold(),
+                                    theme,
+                                ),
                             ),
                             Span::raw(" to remove files..."),
                         ]),
@@ -2399,10 +2465,16 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app_state: &AppState) {
             let actions = Line::from(vec![
                 Span::styled(
                     "[Enter]",
-                    Style::default().fg(theme.scale.categorical.green).bold(),
+                    apply_theme_effects(
+                        Style::default().fg(theme.scale.categorical.green).bold(),
+                        theme,
+                    ),
                 ),
                 Span::raw(" Confirm  "),
-                Span::styled("[Esc]", Style::default().fg(theme.scale.categorical.red)),
+                Span::styled(
+                    "[Esc]",
+                    apply_theme_effects(Style::default().fg(theme.scale.categorical.red), theme),
+                ),
                 Span::raw(" Cancel"),
             ]);
 
@@ -2434,23 +2506,29 @@ fn draw_status_error_popup(f: &mut Frame, error_text: &str, theme: &crate::theme
     let text = vec![
         Line::from(Span::styled(
             "Error",
-            Style::default().fg(theme.scale.categorical.red).bold(),
+            apply_theme_effects(
+                Style::default().fg(theme.scale.categorical.red).bold(),
+                theme,
+            ),
         )),
         Line::from(""),
         Line::from(Span::styled(
             error_text,
-            Style::default().fg(theme.scale.categorical.yellow),
+            apply_theme_effects(Style::default().fg(theme.scale.categorical.yellow), theme),
         )),
         Line::from(""),
         Line::from(""),
         Line::from(Span::styled(
             "[Press Esc to dismiss]",
-            Style::default().fg(theme.semantic.subtext1),
+            apply_theme_effects(Style::default().fg(theme.semantic.subtext1), theme),
         )),
     ];
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.scale.categorical.red));
+        .border_style(apply_theme_effects(
+            Style::default().fg(theme.scale.categorical.red),
+            theme,
+        ));
     let paragraph = Paragraph::new(text)
         .block(block)
         .alignment(Alignment::Center)
@@ -2482,10 +2560,13 @@ fn draw_shutdown_screen(f: &mut Frame, app_state: &AppState) {
     let container_block = Block::default()
         .title(Span::styled(
             " Exiting ",
-            Style::default().fg(theme.scale.categorical.peach),
+            apply_theme_effects(Style::default().fg(theme.scale.categorical.peach), theme),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.semantic.border));
+        .border_style(apply_theme_effects(
+            Style::default().fg(theme.semantic.border),
+            theme,
+        ));
     let inner_area = container_block.inner(area);
     f.render_widget(container_block, area);
 
@@ -2498,9 +2579,12 @@ fn draw_shutdown_screen(f: &mut Frame, app_state: &AppState) {
         .ratio(app_state.shutdown_progress)
         .label(progress_label)
         .gauge_style(
-            Style::default()
-                .fg(theme.scale.categorical.mauve)
-                .bg(theme.semantic.surface0),
+            apply_theme_effects(
+                Style::default()
+                    .fg(theme.scale.categorical.mauve)
+                    .bg(theme.semantic.surface0),
+                theme,
+            ),
         );
     f.render_widget(progress_bar, chunks[0]);
 }
@@ -2541,7 +2625,10 @@ fn draw_power_saving_screen(f: &mut Frame, app_state: &AppState, settings: &Sett
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.semantic.border));
+        .border_style(apply_theme_effects(
+            Style::default().fg(theme.semantic.border),
+            theme,
+        ));
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
@@ -2556,42 +2643,48 @@ fn draw_power_saving_screen(f: &mut Frame, app_state: &AppState, settings: &Sett
     let footer_area = vertical_chunks[3];
 
     let mut dl_spans = vec![
-        Span::styled("DL: ", Style::default().fg(theme.scale.categorical.sky)),
+        Span::styled(
+            "DL: ",
+            apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
+        ),
         Span::styled(
             format_speed(dl_speed),
-            Style::default().fg(theme.scale.categorical.sky),
+            apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
         ),
         Span::raw(" / "),
     ];
     if dl_limit > 0 && dl_speed >= dl_limit {
         dl_spans.push(Span::styled(
             format_limit_bps(dl_limit),
-            Style::default().fg(theme.scale.categorical.red),
+            apply_theme_effects(Style::default().fg(theme.scale.categorical.red), theme),
         ));
     } else {
         dl_spans.push(Span::styled(
             format_limit_bps(dl_limit),
-            Style::default().fg(theme.semantic.subtext0),
+            apply_theme_effects(Style::default().fg(theme.semantic.subtext0), theme),
         ));
     }
 
     let mut ul_spans = vec![
-        Span::styled("UL: ", Style::default().fg(theme.scale.categorical.teal)),
+        Span::styled(
+            "UL: ",
+            apply_theme_effects(Style::default().fg(theme.scale.categorical.teal), theme),
+        ),
         Span::styled(
             format_speed(ul_speed),
-            Style::default().fg(theme.scale.categorical.teal),
+            apply_theme_effects(Style::default().fg(theme.scale.categorical.teal), theme),
         ),
         Span::raw(" / "),
     ];
     if ul_limit > 0 && ul_speed >= ul_limit {
         ul_spans.push(Span::styled(
             format_limit_bps(ul_limit),
-            Style::default().fg(theme.scale.categorical.red),
+            apply_theme_effects(Style::default().fg(theme.scale.categorical.red), theme),
         ));
     } else {
         ul_spans.push(Span::styled(
             format_limit_bps(ul_limit),
-            Style::default().fg(theme.semantic.subtext0),
+            apply_theme_effects(Style::default().fg(theme.semantic.subtext0), theme),
         ));
     }
 
@@ -2607,13 +2700,19 @@ fn draw_power_saving_screen(f: &mut Frame, app_state: &AppState, settings: &Sett
 
     let main_content_lines = vec![
         Line::from(vec![
-            Span::styled("super", Style::default().fg(theme.scale.categorical.sky)),
-            Span::styled("seedr", Style::default().fg(theme.scale.categorical.teal)),
+            Span::styled(
+                "super",
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
+            ),
+            Span::styled(
+                "seedr",
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.teal), theme),
+            ),
         ]),
         Line::from(""),
         Line::from(Span::styled(
             current_message,
-            Style::default().fg(theme.semantic.subtext1),
+            apply_theme_effects(Style::default().fg(theme.semantic.subtext1), theme),
         )),
         Line::from(""),
         Line::from(dl_spans),
@@ -2690,18 +2789,18 @@ pub fn draw_file_browser(
         if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
             match focused_pane {
                 BrowserPane::FileSystem => (
-                    Style::default().fg(theme.scale.categorical.mauve),
-                    Style::default().fg(theme.semantic.surface2),
+                    apply_theme_effects(Style::default().fg(theme.scale.categorical.mauve), theme),
+                    apply_theme_effects(Style::default().fg(theme.semantic.surface2), theme),
                 ),
                 BrowserPane::TorrentPreview => (
-                    Style::default().fg(theme.semantic.surface2),
-                    Style::default().fg(theme.scale.categorical.mauve),
+                    apply_theme_effects(Style::default().fg(theme.semantic.surface2), theme),
+                    apply_theme_effects(Style::default().fg(theme.scale.categorical.mauve), theme),
                 ),
             }
         } else {
             (
-                Style::default().fg(theme.scale.categorical.mauve),
-                Style::default().fg(theme.scale.categorical.sapphire),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.mauve), theme),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sapphire), theme),
             )
         };
 
@@ -2719,16 +2818,25 @@ pub fn draw_file_browser(
     if let Some(search_area) = layout.search {
         let search_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.scale.categorical.yellow))
+            .border_style(apply_theme_effects(
+                Style::default().fg(theme.scale.categorical.yellow),
+                theme,
+            ))
             .title(" Search Filter ");
         let search_text = Line::from(vec![
-            Span::styled("/", Style::default().fg(theme.semantic.subtext0)),
+            Span::styled(
+                "/",
+                apply_theme_effects(Style::default().fg(theme.semantic.subtext0), theme),
+            ),
             Span::raw(&app_state.search_query),
             Span::styled(
                 "_",
-                Style::default()
-                    .fg(theme.scale.categorical.yellow)
-                    .add_modifier(Modifier::SLOW_BLINK),
+                apply_theme_effects(
+                    Style::default()
+                        .fg(theme.scale.categorical.yellow)
+                        .add_modifier(Modifier::SLOW_BLINK),
+                    theme,
+                ),
             ),
         ]);
         f.render_widget(Paragraph::new(search_text).block(search_block), search_area);
@@ -2739,22 +2847,22 @@ pub fn draw_file_browser(
         FileBrowserMode::ConfigPathSelection { .. } | FileBrowserMode::Directory => {
             footer_spans.push(Span::styled(
                 "[Arrows/Vim]",
-                Style::default().fg(theme.scale.categorical.blue),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.blue), theme),
             ));
             footer_spans.push(Span::raw(" Nav | "));
             footer_spans.push(Span::styled(
                 "[Backspace]",
-                Style::default().fg(theme.scale.categorical.yellow),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.yellow), theme),
             ));
             footer_spans.push(Span::raw(" Up | "));
             footer_spans.push(Span::styled(
                 "[Enter]",
-                Style::default().fg(theme.scale.categorical.yellow),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.yellow), theme),
             ));
             footer_spans.push(Span::raw(" Down | "));
             footer_spans.push(Span::styled(
                 "[Shift+Y]",
-                Style::default().fg(theme.scale.categorical.green),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ));
             footer_spans.push(Span::raw(" Confirm Selection | "));
         }
@@ -2765,7 +2873,7 @@ pub fn draw_file_browser(
         } => {
             footer_spans.push(Span::styled(
                 "[Tab]",
-                Style::default().fg(theme.scale.categorical.sapphire),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.sapphire), theme),
             ));
             footer_spans.push(Span::raw(" Switch Pane | "));
 
@@ -2776,7 +2884,7 @@ pub fn draw_file_browser(
                 BrowserPane::TorrentPreview => {
                     footer_spans.push(Span::styled(
                         "[Space]",
-                        Style::default().fg(theme.scale.categorical.yellow),
+                        apply_theme_effects(Style::default().fg(theme.scale.categorical.yellow), theme),
                     ));
                     footer_spans.push(Span::raw(" Priority | "));
                 }
@@ -2784,21 +2892,21 @@ pub fn draw_file_browser(
 
             footer_spans.push(Span::styled(
                 "[x]",
-                Style::default().fg(theme.scale.categorical.mauve),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.mauve), theme),
             ));
             footer_spans.push(Span::raw(" Container Folder | "));
 
             if *use_container {
                 footer_spans.push(Span::styled(
                     "[r]",
-                    Style::default().fg(theme.scale.categorical.sky),
+                    apply_theme_effects(Style::default().fg(theme.scale.categorical.sky), theme),
                 ));
                 footer_spans.push(Span::raw(" Rename | "));
             }
 
             footer_spans.push(Span::styled(
                 "[Shift+Y]",
-                Style::default().fg(theme.scale.categorical.green),
+                apply_theme_effects(Style::default().fg(theme.scale.categorical.green), theme),
             ));
             footer_spans.push(Span::raw(" Confirm"));
         }

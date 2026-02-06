@@ -257,7 +257,7 @@ pub fn apply_theme_effects(style: Style, theme: &Theme) -> Style {
         .unwrap_or_default()
         .as_secs_f64();
 
-    // Frequency and intensity from theme
+    // frequency and intensity from theme
     let freq = theme.effects.flicker_hz as f64;
     let intensity = theme.effects.flicker_intensity as f64;
 
@@ -265,20 +265,37 @@ pub fn apply_theme_effects(style: Style, theme: &Theme) -> Style {
         return style;
     }
 
-    // Sine wave calculation for pulse
-    // (sin(t * freq) + 1) / 2 maps [-1,1] to [0,1]
-    let sine_val = (time * freq).sin();
-    let pulse = (sine_val + 1.0) / 2.0;
-
-    // Calculate blend factor: 0.0 = original color, 1.0 = full white mix based on intensity
-    // We scale by intensity so the effect isn't too overwhelming
-    let factor = pulse * intensity;
-
     if let Some(fg) = style.fg {
         let (r, g, b) = color_to_rgb(fg);
-        // Mix with white to simulate a bright glow/flicker
-        let glow_color = blend_colors((r, g, b), (255, 255, 255), factor);
-        style.fg(glow_color)
+
+        // Interference Pattern Algorithm:
+        // 1. Global Rhythm: A steady pulse shared by everyone (sync anchor)
+        // 2. Local Drift: A faster, phase-shifted pulse unique to the color (chaos)
+        
+        // Color-based phase shift
+        let phase_offset = (r as f64 * 3.0 + g as f64 * 5.0 + b as f64 * 7.0) * 0.01;
+
+        // Base wave (Global sync)
+        let base_wave = (time * freq).sin();
+        
+        // Offset wave (Local drift) - 1.4x speed creates a polyrhythm
+        let drift_wave = ((time * freq * 1.4) + phase_offset).sin();
+
+        // Combined wave [-1.0, 1.0]
+        let wave = (base_wave + drift_wave) / 2.0;
+
+        let final_color = if wave > 0.0 {
+            // Positive cycle: Glow (mix with White)
+            let factor = wave * intensity;
+            blend_colors((r, g, b), (255, 255, 255), factor)
+        } else {
+            // Negative cycle: Dim (mix with Black)
+            // We use a slightly reduced intensity for dimming to preserve legibility
+            let factor = wave.abs() * (intensity * 0.8); 
+            blend_colors((r, g, b), (0, 0, 0), factor)
+        };
+
+        style.fg(final_color)
     } else {
         style
     }
@@ -414,8 +431,8 @@ impl Theme {
             name: ThemeName::Neon,
             effects: ThemeEffects {
                 glow_enabled: true,
-                flicker_hz: 18.0,
-                flicker_intensity: 0.35,
+                flicker_hz: 3.0,
+                flicker_intensity: 0.6,
             },
             semantic: ThemeSemantic {
                 text: Color::Rgb(230, 255, 255),
