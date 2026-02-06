@@ -197,13 +197,6 @@ pub struct ThemeStream {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ThemeDust {
-    pub foreground: Color,
-    pub midground: Color,
-    pub background: Color,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct ThemeCategorical {
     pub rosewater: Color,
     pub flamingo: Color,
@@ -227,7 +220,6 @@ pub struct ThemeScale {
     pub ip_hash: [Color; 14],
     pub heatmap: ThemeHeatmap,
     pub stream: ThemeStream,
-    pub dust: ThemeDust,
     pub categorical: ThemeCategorical,
 }
 
@@ -399,11 +391,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.green,
-                    midground: categorical.blue,
-                    background: Color::Rgb(88, 91, 112),
-                },
+
                 categorical,
             },
         }
@@ -467,11 +455,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.green,
-                    midground: categorical.blue,
-                    background: Color::Rgb(40, 60, 80),
-                },
+
                 categorical,
             },
         }
@@ -546,11 +530,7 @@ impl Theme {
                     inflow: categorical.sky,
                     outflow: categorical.pink,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.pink,
-                    midground: categorical.lavender,
-                    background: Color::Rgb(255, 140, 208),
-                },
+
                 categorical,
             },
         }
@@ -609,11 +589,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.blue,
                     outflow: categorical.green,
-                },
-                dust: ThemeDust {
-                    foreground: categorical.pink,
-                    midground: categorical.mauve,
-                    background: Color::Rgb(68, 71, 90),
                 },
                 categorical,
             },
@@ -674,11 +649,6 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.sky,
-                    midground: categorical.blue,
-                    background: Color::Rgb(59, 66, 82),
-                },
                 categorical,
             },
         }
@@ -737,11 +707,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.blue,
                     outflow: categorical.green,
-                },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(60, 56, 54),
                 },
                 categorical,
             },
@@ -802,11 +767,6 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.sky,
-                    midground: categorical.blue,
-                    background: Color::Rgb(41, 46, 66),
-                },
                 categorical,
             },
         }
@@ -865,11 +825,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.blue,
                     outflow: categorical.green,
-                },
-                dust: ThemeDust {
-                    foreground: categorical.sky,
-                    midground: categorical.blue,
-                    background: Color::Rgb(40, 44, 52),
                 },
                 categorical,
             },
@@ -930,11 +885,6 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(7, 54, 66),
-                },
                 categorical,
             },
         }
@@ -993,11 +943,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.blue,
                     outflow: categorical.green,
-                },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(39, 40, 34),
                 },
                 categorical,
             },
@@ -1058,11 +1003,6 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(59, 69, 71),
-                },
                 categorical,
             },
         }
@@ -1121,11 +1061,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.blue,
                     outflow: categorical.green,
-                },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(54, 54, 75),
                 },
                 categorical,
             },
@@ -1186,11 +1121,6 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(33, 38, 45),
-                },
                 categorical,
             },
         }
@@ -1249,11 +1179,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.blue,
                     outflow: categorical.green,
-                },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(238, 232, 213),
                 },
                 categorical,
             },
@@ -1333,11 +1258,6 @@ impl Theme {
                     inflow: Color::Rgb(0, 255, 65),
                     outflow: Color::Rgb(0, 143, 17),
                 },
-                dust: ThemeDust {
-                    foreground: Color::Rgb(0, 255, 65),
-                    midground: Color::Rgb(0, 143, 17),
-                    background: Color::Rgb(0, 59, 0),
-                },
                 categorical,
             },
         }
@@ -1396,11 +1316,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.blue,
                     outflow: categorical.green,
-                },
-                dust: ThemeDust {
-                    foreground: categorical.green,
-                    midground: categorical.blue,
-                    background: Color::Rgb(172, 176, 190),
                 },
                 categorical,
             },
@@ -1465,11 +1380,6 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.pink,
-                    background: Color::Rgb(30, 0, 60),
-                },
                 categorical,
             },
         }
@@ -1529,11 +1439,6 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(25, 30, 36),
-                },
                 categorical,
             },
         }
@@ -1592,11 +1497,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.blue,
                     outflow: categorical.green,
-                },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(71, 71, 71),
                 },
                 categorical,
             },
@@ -1661,11 +1561,6 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.pink,
-                    background: Color::Rgb(52, 43, 73),
-                },
                 categorical,
             },
         }
@@ -1724,11 +1619,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.blue,
                     outflow: categorical.green,
-                },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(234, 238, 242),
                 },
                 categorical,
             },
@@ -1804,11 +1694,6 @@ impl Theme {
                     inflow: Color::Rgb(255, 175, 0),
                     outflow: Color::Rgb(255, 128, 0),
                 },
-                dust: ThemeDust {
-                    foreground: Color::Rgb(255, 128, 0),
-                    midground: Color::Rgb(255, 175, 0),
-                    background: Color::Rgb(40, 40, 40),
-                },
                 categorical,
             },
         }
@@ -1867,11 +1752,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.blue,
                     outflow: categorical.green,
-                },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(25, 27, 41),
                 },
                 categorical,
             },
@@ -1932,11 +1812,6 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(213, 196, 161),
-                },
                 categorical,
             },
         }
@@ -1995,11 +1870,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.blue,
                     outflow: categorical.green,
-                },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(38, 38, 38),
                 },
                 categorical,
             },
@@ -2064,11 +1934,6 @@ impl Theme {
                     inflow: Color::Rgb(0, 255, 255),
                     outflow: Color::Rgb(255, 0, 255),
                 },
-                dust: ThemeDust {
-                    foreground: Color::Rgb(255, 255, 0),
-                    midground: Color::Rgb(0, 255, 0),
-                    background: Color::Rgb(50, 50, 50),
-                },
                 categorical,
             },
         }
@@ -2131,11 +1996,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: Color::Rgb(255, 255, 0),
                     outflow: Color::Rgb(255, 50, 0),
-                },
-                dust: ThemeDust {
-                    foreground: Color::Rgb(255, 255, 0),
-                    midground: Color::Rgb(255, 100, 0),
-                    background: Color::Rgb(60, 10, 0),
                 },
                 categorical,
             },
@@ -2200,11 +2060,6 @@ impl Theme {
                     inflow: Color::Rgb(0, 255, 255),
                     outflow: Color::Rgb(200, 150, 255),
                 },
-                dust: ThemeDust {
-                    foreground: Color::Rgb(0, 255, 128),
-                    midground: Color::Rgb(100, 200, 255),
-                    background: Color::Rgb(20, 30, 60),
-                },
                 categorical,
             },
         }
@@ -2264,11 +2119,6 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(43, 48, 59),
-                },
                 categorical,
             },
         }
@@ -2327,11 +2177,6 @@ impl Theme {
                 stream: ThemeStream {
                     inflow: categorical.blue,
                     outflow: categorical.green,
-                },
-                dust: ThemeDust {
-                    foreground: categorical.yellow,
-                    midground: categorical.blue,
-                    background: Color::Rgb(38, 35, 58),
                 },
                 categorical,
             },
