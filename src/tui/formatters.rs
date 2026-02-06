@@ -13,6 +13,7 @@ use ratatui::prelude::Rect;
 use ratatui::text::Span;
 
 use crate::app::GraphDisplayMode;
+use crate::theme::apply_theme_effects;
 
 pub fn format_speed(bits_per_second: u64) -> String {
     if bits_per_second < 1_000 {
@@ -393,10 +394,13 @@ pub fn format_permits_spans<'a>(
     };
 
     vec![
-        Span::styled(label, Style::default().fg(base_color)),
+        Span::styled(
+            label,
+            apply_theme_effects(Style::default().fg(base_color), theme),
+        ),
         Span::styled(
             format!(" {} / {}", used, total),
-            Style::default().fg(status_color),
+            apply_theme_effects(Style::default().fg(status_color), theme),
         ),
     ]
 }
@@ -416,7 +420,7 @@ pub fn format_iops(iops: u32) -> String {
     format!("{} ops/s", iops)
 }
 
-pub fn format_limit_delta(theme: &Theme, current: usize, last: usize) -> Span<'static> {
+    pub fn format_limit_delta(theme: &Theme, current: usize, last: usize) -> Span<'static> {
     let delta = current as isize - last as isize;
     if delta == 0 {
         return Span::raw("");
@@ -426,7 +430,10 @@ pub fn format_limit_delta(theme: &Theme, current: usize, last: usize) -> Span<'s
     } else {
         ("-", Style::default().fg(theme.scale.categorical.red))
     };
-    Span::styled(format!(" ({}{})", sign, delta.abs()), style)
+    Span::styled(
+        format!(" ({}{})", sign, delta.abs()),
+        apply_theme_effects(style, theme),
+    )
 }
 
 pub fn sanitize_text(text: &str) -> String {

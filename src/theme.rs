@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Style, Modifier};
+use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Deserializer, Serialize};
 use strum_macros::{Display, EnumIter};
 
@@ -228,6 +229,59 @@ pub struct ThemeScale {
     pub stream: ThemeStream,
     pub dust: ThemeDust,
     pub categorical: ThemeCategorical,
+}
+
+pub fn color_to_rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::White => (255, 255, 255),
+        Color::Black => (0, 0, 0),
+        _ => (255, 255, 255),
+    }
+}
+
+pub fn blend_colors(c1: (u8, u8, u8), c2: (u8, u8, u8), ratio: f64) -> Color {
+    let r = (c1.0 as f64 * (1.0 - ratio) + c2.0 as f64 * ratio) as u8;
+    let g = (c1.1 as f64 * (1.0 - ratio) + c2.1 as f64 * ratio) as u8;
+    let b = (c1.2 as f64 * (1.0 - ratio) + c2.2 as f64 * ratio) as u8;
+    Color::Rgb(r, g, b)
+}
+
+pub fn apply_theme_effects(style: Style, theme: &Theme) -> Style {
+    if !theme.effects.glow_enabled {
+        return style;
+    }
+
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+
+    // Frequency and intensity from theme
+    let freq = theme.effects.flicker_hz as f64;
+    let intensity = theme.effects.flicker_intensity as f64;
+
+    if intensity <= 0.001 {
+        return style;
+    }
+
+    // Sine wave calculation for pulse
+    // (sin(t * freq) + 1) / 2 maps [-1,1] to [0,1]
+    let sine_val = (time * freq).sin();
+    let pulse = (sine_val + 1.0) / 2.0;
+
+    // Calculate blend factor: 0.0 = original color, 1.0 = full white mix based on intensity
+    // We scale by intensity so the effect isn't too overwhelming
+    let factor = pulse * intensity;
+
+    if let Some(fg) = style.fg {
+        let (r, g, b) = color_to_rgb(fg);
+        // Mix with white to simulate a bright glow/flicker
+        let glow_color = blend_colors((r, g, b), (255, 255, 255), factor);
+        style.fg(glow_color)
+    } else {
+        style
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
