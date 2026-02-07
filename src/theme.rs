@@ -503,7 +503,7 @@ impl Theme {
                 surface2: Color::Rgb(88, 91, 112),
                 surface1: Color::Rgb(69, 71, 90),
                 surface0: Color::Rgb(49, 50, 68),
-                border: Color::Rgb(88, 91, 112),
+                border: Color::Rgb(108, 112, 134),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -556,12 +556,12 @@ impl Theme {
             name: ThemeName::Neon,
             effects: ThemeEffects {
                 local_enabled: true,
-                flicker_hz: 14.0,
-                flicker_intensity: 0.6,
-                local_burst_duty: 0.10,
+                flicker_hz: 9.0,
+                flicker_intensity: 0.35,
+                local_burst_duty: 0.08,
                 local_burst_hz: 0.8,
-                local_idle_intensity: 0.06,
-                local_burst_boost: 1.35,
+                local_idle_intensity: 0.05,
+                local_burst_boost: 1.20,
                 ..ThemeEffects::default()
             },
             semantic: ThemeSemantic {
@@ -605,20 +605,20 @@ impl Theme {
 
     pub fn bubblegum() -> Self {
         let categorical = ThemeCategorical {
-            rosewater: Color::Rgb(255, 200, 230),
-            flamingo: Color::Rgb(255, 150, 220),
-            pink: Color::Rgb(255, 100, 200),
-            mauve: Color::Rgb(255, 120, 220),
-            red: Color::Rgb(255, 80, 180),
-            maroon: Color::Rgb(255, 90, 190),
-            peach: Color::Rgb(255, 160, 210),
-            yellow: Color::Rgb(255, 200, 230),
-            green: Color::Rgb(255, 180, 220),
-            teal: Color::Rgb(255, 170, 215),
-            sky: Color::Rgb(255, 190, 225),
-            sapphire: Color::Rgb(255, 185, 223),
-            blue: Color::Rgb(255, 175, 218),
-            lavender: Color::Rgb(255, 195, 228),
+            rosewater: Color::Rgb(255, 208, 235),
+            flamingo: Color::Rgb(255, 173, 219),
+            pink: Color::Rgb(245, 132, 204),
+            mauve: Color::Rgb(213, 126, 203),
+            red: Color::Rgb(236, 92, 149),
+            maroon: Color::Rgb(191, 79, 128),
+            peach: Color::Rgb(255, 178, 170),
+            yellow: Color::Rgb(255, 224, 158),
+            green: Color::Rgb(126, 214, 171),
+            teal: Color::Rgb(122, 201, 207),
+            sky: Color::Rgb(157, 196, 247),
+            sapphire: Color::Rgb(126, 173, 235),
+            blue: Color::Rgb(98, 145, 221),
+            lavender: Color::Rgb(189, 162, 244),
         };
 
         Self {
@@ -626,20 +626,20 @@ impl Theme {
             effects: ThemeEffects {
                 wave_enabled: true,
                 wave_hz: 0.45,
-                wave_intensity: 0.12,
+                wave_intensity: 0.08,
                 wave_wavelength: 26.0,
                 wave_mode: WaveMode::RadialOut,
                 ..ThemeEffects::default()
             },
             semantic: ThemeSemantic {
-                text: Color::Rgb(255, 240, 250),
-                subtext1: Color::Rgb(255, 220, 240),
-                subtext0: Color::Rgb(255, 200, 230),
-                overlay0: Color::Rgb(255, 180, 220),
-                surface2: Color::Rgb(255, 150, 210),
-                surface1: Color::Rgb(255, 120, 200),
-                surface0: Color::Rgb(255, 100, 190),
-                border: Color::Rgb(255, 160, 215),
+                text: Color::Rgb(255, 236, 247),
+                subtext1: Color::Rgb(245, 206, 228),
+                subtext0: Color::Rgb(224, 176, 207),
+                overlay0: Color::Rgb(171, 117, 152),
+                surface2: Color::Rgb(112, 67, 98),
+                surface1: Color::Rgb(89, 50, 78),
+                surface0: Color::Rgb(63, 31, 56),
+                border: Color::Rgb(203, 142, 180),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -786,7 +786,7 @@ impl Theme {
                 subtext1: Color::Rgb(55, 103, 161),
                 subtext0: Color::Rgb(80, 126, 183),
                 overlay0: Color::Rgb(116, 157, 208),
-                surface2: Color::Rgb(226, 240, 252),
+                surface2: Color::Rgb(170, 198, 226),
                 surface1: Color::Rgb(214, 232, 247),
                 surface0: Color::Rgb(202, 223, 241),
                 border: Color::Rgb(104, 149, 201),
@@ -841,15 +841,15 @@ impl Theme {
             name: ThemeName::Gold,
             effects: ThemeEffects {
                 local_enabled: true,
-                flicker_hz: 18.0,
-                flicker_intensity: 0.34,
-                local_burst_duty: 0.14,
+                flicker_hz: 10.0,
+                flicker_intensity: 0.22,
+                local_burst_duty: 0.10,
                 local_burst_hz: 1.2,
                 local_idle_intensity: 0.03,
-                local_burst_boost: 1.75,
+                local_burst_boost: 1.45,
                 wave_enabled: true,
                 wave_hz: 0.75,
-                wave_intensity: 0.32,
+                wave_intensity: 0.18,
                 wave_wavelength: 34.0,
                 wave_angle_degrees: 22.0,
                 wave_mode: WaveMode::Linear,
@@ -922,7 +922,7 @@ impl Theme {
                 surface2: Color::Rgb(68, 71, 90),
                 surface1: Color::Rgb(56, 59, 77),
                 surface0: Color::Rgb(40, 42, 54),
-                border: Color::Rgb(68, 71, 90),
+                border: Color::Rgb(95, 100, 128),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -981,7 +981,7 @@ impl Theme {
                 surface2: Color::Rgb(59, 66, 82),
                 surface1: Color::Rgb(46, 52, 64),
                 surface0: Color::Rgb(43, 48, 59),
-                border: Color::Rgb(76, 86, 106),
+                border: Color::Rgb(98, 112, 137),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -1037,10 +1037,10 @@ impl Theme {
                 subtext1: Color::Rgb(213, 196, 161),
                 subtext0: Color::Rgb(168, 153, 132),
                 overlay0: Color::Rgb(124, 111, 100),
-                surface2: Color::Rgb(60, 56, 54),
+                surface2: Color::Rgb(66, 61, 58),
                 surface1: Color::Rgb(50, 48, 47),
                 surface0: Color::Rgb(40, 40, 40),
-                border: Color::Rgb(60, 56, 54),
+                border: Color::Rgb(97, 88, 78),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -1094,12 +1094,12 @@ impl Theme {
             semantic: ThemeSemantic {
                 text: Color::Rgb(192, 202, 245),
                 subtext1: Color::Rgb(169, 177, 214),
-                subtext0: Color::Rgb(86, 95, 137),
+                subtext0: Color::Rgb(113, 123, 174),
                 overlay0: Color::Rgb(65, 72, 104),
                 surface2: Color::Rgb(41, 46, 66),
                 surface1: Color::Rgb(60, 65, 90),
                 surface0: Color::Rgb(26, 27, 38),
-                border: Color::Rgb(65, 72, 104),
+                border: Color::Rgb(89, 98, 142),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -1153,12 +1153,12 @@ impl Theme {
             semantic: ThemeSemantic {
                 text: Color::Rgb(171, 178, 191),
                 subtext1: Color::Rgb(146, 150, 165),
-                subtext0: Color::Rgb(92, 99, 112),
+                subtext0: Color::Rgb(111, 119, 137),
                 overlay0: Color::Rgb(73, 78, 90),
-                surface2: Color::Rgb(40, 44, 52),
+                surface2: Color::Rgb(47, 51, 61),
                 surface1: Color::Rgb(65, 72, 80),
                 surface0: Color::Rgb(30, 33, 39),
-                border: Color::Rgb(73, 78, 90),
+                border: Color::Rgb(97, 105, 121),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -1273,10 +1273,10 @@ impl Theme {
                 subtext1: Color::Rgb(174, 129, 255),
                 subtext0: Color::Rgb(117, 113, 94),
                 overlay0: Color::Rgb(73, 72, 62),
-                surface2: Color::Rgb(39, 40, 34),
+                surface2: Color::Rgb(49, 50, 43),
                 surface1: Color::Rgb(70, 72, 65),
                 surface0: Color::Rgb(27, 28, 24),
-                border: Color::Rgb(73, 72, 62),
+                border: Color::Rgb(96, 96, 82),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -1335,7 +1335,7 @@ impl Theme {
                 surface2: Color::Rgb(59, 69, 71),
                 surface1: Color::Rgb(47, 56, 58),
                 surface0: Color::Rgb(43, 51, 57),
-                border: Color::Rgb(59, 69, 71),
+                border: Color::Rgb(84, 101, 103),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -1453,7 +1453,7 @@ impl Theme {
                 surface2: Color::Rgb(33, 38, 45),
                 surface1: Color::Rgb(50, 60, 70),
                 surface0: Color::Rgb(13, 17, 23),
-                border: Color::Rgb(48, 54, 61),
+                border: Color::Rgb(70, 79, 90),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -1505,14 +1505,14 @@ impl Theme {
             name: ThemeName::SolarizedLight,
             effects: ThemeEffects::default(),
             semantic: ThemeSemantic {
-                text: Color::Rgb(101, 123, 131),
+                text: Color::Rgb(88, 110, 117),
                 subtext1: Color::Rgb(88, 110, 117),
                 subtext0: Color::Rgb(131, 148, 150),
                 overlay0: Color::Rgb(147, 161, 161),
                 surface2: Color::Rgb(238, 232, 213),
                 surface1: Color::Rgb(253, 246, 227),
                 surface0: Color::Rgb(255, 255, 240),
-                border: Color::Rgb(222, 214, 193),
+                border: Color::Rgb(147, 161, 161),
                 white: Color::Black,
             },
             scale: ThemeScale {
@@ -1548,10 +1548,10 @@ impl Theme {
             flamingo: Color::Rgb(0, 143, 17),
             pink: Color::Rgb(0, 255, 65),
             mauve: Color::Rgb(0, 59, 0),
-            red: Color::Rgb(0, 255, 65),
+            red: Color::Rgb(255, 95, 95),
             maroon: Color::Rgb(0, 143, 17),
             peach: Color::Rgb(0, 255, 65),
-            yellow: Color::Rgb(0, 255, 65),
+            yellow: Color::Rgb(255, 240, 120),
             green: Color::Rgb(0, 255, 65),
             teal: Color::Rgb(0, 255, 65),
             sky: Color::Rgb(0, 255, 65),
@@ -1565,7 +1565,7 @@ impl Theme {
             effects: ThemeEffects {
                 local_enabled: true,
                 flicker_hz: 5.0,
-                flicker_intensity: 0.2,
+                flicker_intensity: 0.16,
                 ..ThemeEffects::default()
             },
             semantic: ThemeSemantic {
@@ -1650,7 +1650,7 @@ impl Theme {
                 surface2: Color::Rgb(172, 176, 190),
                 surface1: Color::Rgb(188, 192, 204),
                 surface0: Color::Rgb(204, 208, 218),
-                border: Color::Rgb(172, 176, 190),
+                border: Color::Rgb(130, 134, 151),
                 white: Color::Black,
             },
             scale: ThemeScale {
@@ -1702,8 +1702,8 @@ impl Theme {
             name: ThemeName::Cyberpunk,
             effects: ThemeEffects {
                 local_enabled: true,
-                flicker_hz: 12.0,
-                flicker_intensity: 0.4,
+                flicker_hz: 9.0,
+                flicker_intensity: 0.26,
                 ..ThemeEffects::default()
             },
             semantic: ThemeSemantic {
@@ -1711,7 +1711,7 @@ impl Theme {
                 subtext1: Color::Rgb(0, 255, 255),
                 subtext0: Color::Rgb(255, 0, 255),
                 overlay0: Color::Rgb(50, 0, 100),
-                surface2: Color::Rgb(30, 0, 60),
+                surface2: Color::Rgb(45, 8, 82),
                 surface1: Color::Rgb(120, 50, 160),
                 surface0: Color::Rgb(0, 0, 0),
                 border: Color::Rgb(255, 0, 255),
@@ -1770,10 +1770,10 @@ impl Theme {
                 subtext1: Color::Rgb(171, 176, 191),
                 subtext0: Color::Rgb(92, 103, 115),
                 overlay0: Color::Rgb(62, 71, 82),
-                surface2: Color::Rgb(25, 30, 36),
+                surface2: Color::Rgb(33, 39, 47),
                 surface1: Color::Rgb(55, 65, 75),
                 surface0: Color::Rgb(15, 20, 25),
-                border: Color::Rgb(62, 71, 82),
+                border: Color::Rgb(84, 96, 112),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -1832,7 +1832,7 @@ impl Theme {
                 surface2: Color::Rgb(71, 71, 71),
                 surface1: Color::Rgb(63, 63, 63),
                 surface0: Color::Rgb(50, 50, 50),
-                border: Color::Rgb(83, 83, 83),
+                border: Color::Rgb(105, 105, 105),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -1885,7 +1885,7 @@ impl Theme {
             effects: ThemeEffects {
                 wave_enabled: true,
                 wave_hz: 0.85,
-                wave_intensity: 0.16,
+                wave_intensity: 0.11,
                 wave_wavelength: 30.0,
                 wave_mode: WaveMode::RadialOut,
                 ..ThemeEffects::default()
@@ -1895,7 +1895,7 @@ impl Theme {
                 subtext1: Color::Rgb(255, 126, 219),
                 subtext0: Color::Rgb(54, 249, 246),
                 overlay0: Color::Rgb(103, 78, 131),
-                surface2: Color::Rgb(52, 43, 73),
+                surface2: Color::Rgb(65, 55, 90),
                 surface1: Color::Rgb(70, 50, 90),
                 surface0: Color::Rgb(36, 27, 47),
                 border: Color::Rgb(255, 126, 219),
@@ -1954,10 +1954,10 @@ impl Theme {
                 subtext1: Color::Rgb(87, 96, 106),
                 subtext0: Color::Rgb(101, 109, 118),
                 overlay0: Color::Rgb(208, 215, 222),
-                surface2: Color::Rgb(234, 238, 242),
+                surface2: Color::Rgb(220, 226, 233),
                 surface1: Color::Rgb(246, 248, 250),
                 surface0: Color::Rgb(255, 255, 255),
-                border: Color::Rgb(208, 215, 222),
+                border: Color::Rgb(163, 173, 185),
                 white: Color::Black,
             },
             scale: ThemeScale {
@@ -2085,9 +2085,9 @@ impl Theme {
             semantic: ThemeSemantic {
                 text: Color::Rgb(143, 147, 162),
                 subtext1: Color::Rgb(113, 123, 145),
-                subtext0: Color::Rgb(84, 91, 107),
+                subtext0: Color::Rgb(105, 114, 138),
                 overlay0: Color::Rgb(53, 57, 74),
-                surface2: Color::Rgb(25, 27, 41),
+                surface2: Color::Rgb(37, 41, 58),
                 surface1: Color::Rgb(45, 50, 75),
                 surface0: Color::Rgb(15, 17, 26),
                 border: Color::Rgb(100, 110, 140),
@@ -2149,7 +2149,7 @@ impl Theme {
                 surface2: Color::Rgb(213, 196, 161),
                 surface1: Color::Rgb(200, 185, 155),
                 surface0: Color::Rgb(251, 241, 199),
-                border: Color::Rgb(213, 196, 161),
+                border: Color::Rgb(173, 154, 132),
                 white: Color::Black,
             },
             scale: ThemeScale {
@@ -2265,14 +2265,14 @@ impl Theme {
                 ..ThemeEffects::default()
             },
             semantic: ThemeSemantic {
-                text: Color::White,
-                subtext1: Color::Rgb(255, 255, 255),
-                subtext0: Color::Rgb(255, 255, 255),
-                overlay0: Color::Rgb(255, 255, 255),
-                surface2: Color::Rgb(255, 255, 255),
-                surface1: Color::Rgb(255, 255, 0),
-                surface0: Color::Rgb(0, 255, 255),
-                border: Color::Rgb(255, 255, 255),
+                text: Color::Rgb(242, 246, 252),
+                subtext1: Color::Rgb(208, 217, 235),
+                subtext0: Color::Rgb(171, 184, 209),
+                overlay0: Color::Rgb(100, 119, 154),
+                surface2: Color::Rgb(49, 64, 92),
+                surface1: Color::Rgb(36, 49, 74),
+                surface0: Color::Rgb(20, 30, 48),
+                border: Color::Rgb(127, 149, 189),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -2324,8 +2324,8 @@ impl Theme {
             name: ThemeName::Inferno,
             effects: ThemeEffects {
                 local_enabled: true,
-                flicker_hz: 15.0,
-                flicker_intensity: 0.5,
+                flicker_hz: 10.0,
+                flicker_intensity: 0.30,
                 ..ThemeEffects::default()
             },
             semantic: ThemeSemantic {
@@ -2389,10 +2389,10 @@ impl Theme {
             effects: ThemeEffects {
                 local_enabled: true,
                 flicker_hz: 3.0,
-                flicker_intensity: 0.40,
+                flicker_intensity: 0.28,
                 wave_enabled: true,
-                wave_hz: 0.9,
-                wave_intensity: 0.16,
+                wave_hz: 0.65,
+                wave_intensity: 0.12,
                 wave_wavelength: 34.0,
                 wave_angle_degrees: 45.0,
                 ..ThemeEffects::default()
@@ -2464,7 +2464,7 @@ impl Theme {
                 surface2: Color::Rgb(43, 48, 59),
                 surface1: Color::Rgb(65, 70, 80),
                 surface0: Color::Rgb(29, 32, 38),
-                border: Color::Rgb(59, 64, 72),
+                border: Color::Rgb(79, 86, 100),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -2520,10 +2520,10 @@ impl Theme {
                 subtext1: Color::Rgb(144, 140, 170),
                 subtext0: Color::Rgb(110, 106, 134),
                 overlay0: Color::Rgb(64, 61, 82),
-                surface2: Color::Rgb(38, 35, 58),
+                surface2: Color::Rgb(49, 45, 73),
                 surface1: Color::Rgb(65, 60, 90),
                 surface0: Color::Rgb(25, 23, 36),
-                border: Color::Rgb(64, 61, 82),
+                border: Color::Rgb(92, 88, 120),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -2582,6 +2582,76 @@ fn categorical_ip_hash(categorical: ThemeCategorical) -> [Color; 14] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn all_theme_names() -> Vec<ThemeName> {
+        vec![
+            ThemeName::Andromeda,
+            ThemeName::Aurora,
+            ThemeName::AyuDark,
+            ThemeName::Bubblegum,
+            ThemeName::CatppuccinLatte,
+            ThemeName::CatppuccinMocha,
+            ThemeName::Cyberpunk,
+            ThemeName::DeepOcean,
+            ThemeName::DeepSky,
+            ThemeName::Gold,
+            ThemeName::Dracula,
+            ThemeName::EverforestDark,
+            ThemeName::GitHubDark,
+            ThemeName::GitHubLight,
+            ThemeName::GruvboxDark,
+            ThemeName::GruvboxLight,
+            ThemeName::Inferno,
+            ThemeName::Kanagawa,
+            ThemeName::MaterialOcean,
+            ThemeName::Matrix,
+            ThemeName::Monokai,
+            ThemeName::Neon,
+            ThemeName::Nord,
+            ThemeName::OneDark,
+            ThemeName::Oxocarbon,
+            ThemeName::Rainbow,
+            ThemeName::RosePine,
+            ThemeName::SolarizedDark,
+            ThemeName::SolarizedLight,
+            ThemeName::Synthwave84,
+            ThemeName::TokyoNight,
+            ThemeName::Vesper,
+            ThemeName::Zenburn,
+        ]
+    }
+
+    fn relative_luminance(color: Color) -> f64 {
+        let (r, g, b) = color_to_rgb(color);
+        let to_linear = |v: u8| {
+            let v = v as f64 / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let r = to_linear(r);
+        let g = to_linear(g);
+        let b = to_linear(b);
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    fn contrast_ratio(a: Color, b: Color) -> f64 {
+        let la = relative_luminance(a);
+        let lb = relative_luminance(b);
+        let (bright, dark) = if la >= lb { (la, lb) } else { (lb, la) };
+        (bright + 0.05) / (dark + 0.05)
+    }
+
+    fn color_distance(a: Color, b: Color) -> f64 {
+        let (ar, ag, ab) = color_to_rgb(a);
+        let (br, bg, bb) = color_to_rgb(b);
+        let dr = ar as f64 - br as f64;
+        let dg = ag as f64 - bg as f64;
+        let db = ab as f64 - bb as f64;
+        (dr * dr + dg * dg + db * db).sqrt()
+    }
 
     #[test]
     fn test_known_themes_snake_case() {
@@ -2706,46 +2776,97 @@ mod tests {
     #[test]
     fn test_theme_name_roundtrip() {
         // Test that all themes can be serialized and deserialized
-        let all_themes = vec![
-            ThemeName::Andromeda,
-            ThemeName::Aurora,
-            ThemeName::AyuDark,
-            ThemeName::Bubblegum,
-            ThemeName::CatppuccinLatte,
-            ThemeName::CatppuccinMocha,
-            ThemeName::Cyberpunk,
-            ThemeName::DeepOcean,
-            ThemeName::DeepSky,
-            ThemeName::Gold,
-            ThemeName::Dracula,
-            ThemeName::EverforestDark,
-            ThemeName::GitHubDark,
-            ThemeName::GitHubLight,
-            ThemeName::GruvboxDark,
-            ThemeName::GruvboxLight,
-            ThemeName::Inferno,
-            ThemeName::Kanagawa,
-            ThemeName::MaterialOcean,
-            ThemeName::Matrix,
-            ThemeName::Monokai,
-            ThemeName::Neon,
-            ThemeName::Nord,
-            ThemeName::OneDark,
-            ThemeName::Oxocarbon,
-            ThemeName::Rainbow,
-            ThemeName::RosePine,
-            ThemeName::SolarizedDark,
-            ThemeName::SolarizedLight,
-            ThemeName::Synthwave84,
-            ThemeName::TokyoNight,
-            ThemeName::Vesper,
-            ThemeName::Zenburn,
-        ];
-
-        for theme in all_themes {
+        for theme in all_theme_names() {
             let serialized = serde_json::to_string(&theme).unwrap();
             let deserialized: ThemeName = serde_json::from_str(&serialized).unwrap();
             assert_eq!(theme, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_theme_semantic_readability_guards() {
+        for name in all_theme_names() {
+            let theme = Theme::builtin(name);
+            let surface0 = theme.semantic.surface0;
+
+            let text_contrast = contrast_ratio(theme.semantic.text, surface0);
+            assert!(
+                text_contrast >= 4.5,
+                "{name}: text contrast too low ({text_contrast:.2})"
+            );
+
+            let subtext_contrast = contrast_ratio(theme.semantic.subtext0, surface0);
+            assert!(
+                subtext_contrast >= 3.0,
+                "{name}: subtext0 contrast too low ({subtext_contrast:.2})"
+            );
+
+            let border_contrast = contrast_ratio(theme.semantic.border, surface0);
+            assert!(
+                border_contrast >= 2.0,
+                "{name}: border contrast too low ({border_contrast:.2})"
+            );
+
+            let surface_separation = contrast_ratio(theme.semantic.surface2, surface0);
+            assert!(
+                surface_separation >= 1.2,
+                "{name}: surface2 too close to surface0 ({surface_separation:.2})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_theme_status_colors_are_distinct() {
+        for name in all_theme_names() {
+            let theme = Theme::builtin(name);
+            let red = theme.scale.categorical.red;
+            let yellow = theme.scale.categorical.yellow;
+            let green = theme.scale.categorical.green;
+
+            let red_yellow = color_distance(red, yellow);
+            let red_green = color_distance(red, green);
+            let yellow_green = color_distance(yellow, green);
+
+            assert!(
+                red_yellow >= 20.0,
+                "{name}: red/yellow too similar ({red_yellow:.1})"
+            );
+            assert!(
+                red_green >= 20.0,
+                "{name}: red/green too similar ({red_green:.1})"
+            );
+            assert!(
+                yellow_green >= 20.0,
+                "{name}: yellow/green too similar ({yellow_green:.1})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_theme_effects_within_comfort_bounds() {
+        for name in all_theme_names() {
+            let theme = Theme::builtin(name);
+            let effects = theme.effects;
+            assert!(
+                effects.flicker_hz <= 12.0,
+                "{name}: flicker_hz too high ({:.2})",
+                effects.flicker_hz
+            );
+            assert!(
+                effects.flicker_intensity <= 0.35,
+                "{name}: flicker_intensity too high ({:.2})",
+                effects.flicker_intensity
+            );
+            assert!(
+                effects.local_burst_boost <= 1.5,
+                "{name}: local_burst_boost too high ({:.2})",
+                effects.local_burst_boost
+            );
+            assert!(
+                effects.wave_intensity <= 0.2,
+                "{name}: wave_intensity too high ({:.2})",
+                effects.wave_intensity
+            );
         }
     }
 }
