@@ -1464,6 +1464,10 @@ impl App {
                 let old_settings = self.client_configs.clone();
                 self.client_configs = new_settings.clone();
 
+                if new_settings.ui_theme != old_settings.ui_theme {
+                    self.app_state.theme = Theme::builtin(new_settings.ui_theme);
+                }
+
                 // 1. Handle Port Change (Re-bind Listener)
                 if new_settings.client_port != old_settings.client_port {
                     tracing::info!(

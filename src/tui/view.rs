@@ -1512,6 +1512,11 @@ fn draw_footer(
             ),
             Span::raw("ime | "),
             Span::styled(
+                "[< >]",
+                ctx.apply(Style::default().fg(ctx.theme.scale.categorical.mauve)),
+            ),
+            Span::raw("theme | "),
+            Span::styled(
                 "[/]",
                 ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
             ),
@@ -3897,6 +3902,13 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         Style::default().fg(ctx.theme.scale.categorical.teal),
                     )),
                     Cell::from("Anonymize torrent names"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "< / >",
+                        Style::default().fg(ctx.theme.scale.categorical.mauve),
+                    )),
+                    Cell::from("Cycle UI theme"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 // --- Peer Flags Legend ---

@@ -213,7 +213,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             }
                         }
                         KeyCode::Char('<') => {
-                            use strum::IntoEnumIterator;
                             let themes: Vec<_> = crate::theme::ThemeName::iter().collect();
                             let current_idx = themes
                                 .iter()
@@ -226,9 +225,11 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             };
                             app.client_configs.ui_theme = themes[new_idx];
                             app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
+                            let _ = app
+                                .app_command_tx
+                                .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
                         }
                         KeyCode::Char('>') => {
-                            use strum::IntoEnumIterator;
                             let themes: Vec<_> = crate::theme::ThemeName::iter().collect();
                             let current_idx = themes
                                 .iter()
@@ -237,6 +238,9 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             let new_idx = (current_idx + 1) % themes.len();
                             app.client_configs.ui_theme = themes[new_idx];
                             app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
+                            let _ = app
+                                .app_command_tx
+                                .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
                         }
                         KeyCode::Char('p') => {
                             if let Some(info_hash) = app
