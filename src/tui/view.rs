@@ -77,16 +77,19 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
 
     if app_state.show_help {
         draw_help_popup(f, app_state, &ctx);
+        apply_theme_effects_to_frame(f, &ctx);
         return;
     }
 
     match &app_state.mode {
         AppMode::Welcome => {
             draw_welcome_screen(f, settings, &ctx);
+            apply_theme_effects_to_frame(f, &ctx);
             return;
         }
         AppMode::PowerSaving => {
             draw_power_saving_screen(f, app_state, settings, &ctx);
+            apply_theme_effects_to_frame(f, &ctx);
             return;
         }
         AppMode::Config {
@@ -96,10 +99,12 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
             editing,
         } => {
             draw_config_screen(f, settings_edit, *selected_index, items, editing, &ctx);
+            apply_theme_effects_to_frame(f, &ctx);
             return;
         }
         AppMode::DeleteConfirm { .. } => {
             draw_delete_confirm_dialog(f, app_state, &ctx);
+            apply_theme_effects_to_frame(f, &ctx);
             return;
         }
         AppMode::FileBrowser {
@@ -110,6 +115,7 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
             let _is_torrent_mode = app_state.pending_torrent_path.is_some()
                 || !app_state.pending_torrent_link.is_empty();
             draw_file_browser(f, app_state, state, data, browser_mode, &ctx);
+            apply_theme_effects_to_frame(f, &ctx);
             return;
         }
         _ => {}
@@ -154,6 +160,87 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     }
     if app_state.should_quit {
         draw_shutdown_screen(f, app_state, &ctx);
+    }
+
+    apply_theme_effects_to_frame(f, &ctx);
+}
+
+fn themed_palette_colors(ctx: &ThemeContext) -> Vec<Color> {
+    let t = &ctx.theme;
+    vec![
+        t.semantic.text,
+        t.semantic.subtext0,
+        t.semantic.subtext1,
+        t.semantic.overlay0,
+        t.semantic.surface0,
+        t.semantic.surface1,
+        t.semantic.surface2,
+        t.semantic.border,
+        t.semantic.white,
+        t.scale.heatmap.low,
+        t.scale.heatmap.medium,
+        t.scale.heatmap.high,
+        t.scale.heatmap.empty,
+        t.scale.stream.inflow,
+        t.scale.stream.outflow,
+        t.scale.categorical.rosewater,
+        t.scale.categorical.flamingo,
+        t.scale.categorical.pink,
+        t.scale.categorical.mauve,
+        t.scale.categorical.red,
+        t.scale.categorical.maroon,
+        t.scale.categorical.peach,
+        t.scale.categorical.yellow,
+        t.scale.categorical.green,
+        t.scale.categorical.teal,
+        t.scale.categorical.sky,
+        t.scale.categorical.sapphire,
+        t.scale.categorical.blue,
+        t.scale.categorical.lavender,
+        t.scale.speed[0],
+        t.scale.speed[1],
+        t.scale.speed[2],
+        t.scale.speed[3],
+        t.scale.speed[4],
+        t.scale.speed[5],
+        t.scale.speed[6],
+        t.scale.speed[7],
+        t.scale.ip_hash[0],
+        t.scale.ip_hash[1],
+        t.scale.ip_hash[2],
+        t.scale.ip_hash[3],
+        t.scale.ip_hash[4],
+        t.scale.ip_hash[5],
+        t.scale.ip_hash[6],
+        t.scale.ip_hash[7],
+        t.scale.ip_hash[8],
+        t.scale.ip_hash[9],
+        t.scale.ip_hash[10],
+        t.scale.ip_hash[11],
+        t.scale.ip_hash[12],
+        t.scale.ip_hash[13],
+    ]
+}
+
+fn apply_theme_effects_to_frame(f: &mut Frame, ctx: &ThemeContext) {
+    if !ctx.theme.effects.glow_enabled {
+        return;
+    }
+
+    let palette = themed_palette_colors(ctx);
+    let area = f.area();
+    let buf = f.buffer_mut();
+
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = buf.get_mut(x, y);
+            if palette.iter().any(|&c| c == cell.fg) {
+                let style = ctx.apply(Style::default().fg(cell.fg));
+                if let Some(new_fg) = style.fg {
+                    cell.fg = new_fg;
+                }
+            }
+        }
     }
 }
 
@@ -223,7 +310,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &Them
             let is_selected = app_state.selected_header == SelectedHeader::Torrent(visual_idx);
             let is_sorting = def.sort_enum == Some(sort_col);
 
-            let mut style = Style::default().fg(ctx.theme.scale.categorical.yellow);
+            let mut style = ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow));
             if is_sorting {
                 style = style.fg(ctx.theme.scale.categorical.mauve);
             }
@@ -261,13 +348,13 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &Them
 
                     let mut row_style = match state.torrent_control_state {
                         TorrentControlState::Running => {
-                            Style::default().fg(ctx.theme.semantic.text)
+                            ctx.apply(Style::default().fg(ctx.theme.semantic.text))
                         }
                         TorrentControlState::Paused => {
-                            Style::default().fg(ctx.theme.semantic.surface1)
+                            ctx.apply(Style::default().fg(ctx.theme.semantic.surface1))
                         }
                         TorrentControlState::Deleting => {
-                            Style::default().fg(ctx.theme.scale.categorical.red)
+                            ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red))
                         }
                     };
                     row_style = ctx.apply(row_style);
@@ -323,7 +410,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &Them
                                     let mut c = Cell::from(name);
                                     if is_selected {
                                         let s = ctx.apply(
-                                            Style::default().fg(ctx.theme.scale.categorical.yellow),
+                                            ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
                                         );
                                         c = c.style(s);
                                     }
@@ -586,11 +673,11 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect, ct
         Span::raw("0"),
         Span::styled(
             format_speed(nice_max_speed / 2),
-            Style::default().fg(ctx.theme.semantic.subtext0),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
         ),
         Span::styled(
             format_speed(nice_max_speed),
-            Style::default().fg(ctx.theme.semantic.subtext0),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
         ),
     ];
     let x_labels = generate_x_axis_labels(ctx, app_state.graph_mode);
@@ -620,7 +707,7 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect, ct
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            Style::default().fg(ctx.theme.semantic.surface0)
+            ctx.apply(Style::default().fg(ctx.theme.semantic.surface0))
         };
 
         title_spans.push(Span::styled(mode_str, style));
@@ -628,7 +715,7 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect, ct
         if i < all_modes.len().saturating_sub(1) {
             title_spans.push(Span::styled(
                 " ",
-                Style::default().fg(ctx.theme.semantic.surface2),
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
             ));
         }
     }
@@ -643,13 +730,13 @@ fn draw_network_chart(f: &mut Frame, app_state: &AppState, chart_chunk: Rect, ct
         )
         .x_axis(
             Axis::default()
-                .style(Style::default().fg(ctx.theme.semantic.overlay0))
+                .style(ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0)))
                 .bounds([0.0, points_to_show.saturating_sub(1) as f64])
                 .labels(x_labels),
         )
         .y_axis(
             Axis::default()
-                .style(Style::default().fg(ctx.theme.semantic.overlay0))
+                .style(ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0)))
                 .bounds([0.0, nice_max_speed as f64])
                 .labels(y_speed_axis_labels),
         )
@@ -694,12 +781,12 @@ fn draw_stats_panel(
     if dl_limit > 0 && dl_speed >= dl_limit {
         dl_spans.push(Span::styled(
             format_limit_bps(dl_limit),
-            Style::default().fg(ctx.theme.scale.categorical.red),
+            ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)),
         ));
     } else {
         dl_spans.push(Span::styled(
             format_limit_bps(dl_limit),
-            Style::default().fg(ctx.theme.semantic.subtext0),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
         ));
     }
 
@@ -729,12 +816,12 @@ fn draw_stats_panel(
     if ul_limit > 0 && ul_speed >= ul_limit {
         ul_spans.push(Span::styled(
             format_limit_bps(ul_limit),
-            Style::default().fg(ctx.theme.scale.categorical.red),
+            ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)),
         ));
     } else {
         ul_spans.push(Span::styled(
             format_limit_bps(ul_limit),
-            Style::default().fg(ctx.theme.semantic.subtext0),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
         ));
     }
 
@@ -746,25 +833,25 @@ fn draw_stats_panel(
 
     if thrash_score_val < 0.01 {
         thrash_text = format!("- ({})", thrash_score_str);
-        thrash_style = Style::default().fg(ctx.theme.semantic.subtext0);
+        thrash_style = ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0));
     } else if baseline_val == 0.0 {
         thrash_text = format!("∞ ({})", thrash_score_str);
-        thrash_style = Style::default().fg(ctx.theme.scale.categorical.red).bold();
+        thrash_style = ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)).bold();
     } else {
         let diff = thrash_score_val - baseline_val;
         let thrash_percentage = (diff / baseline_val) * 100.0;
 
         if thrash_percentage > -0.01 && thrash_percentage < 0.01 {
             thrash_text = format!("0.0% ({})", thrash_score_str);
-            thrash_style = Style::default().fg(ctx.theme.semantic.text);
+            thrash_style = ctx.apply(Style::default().fg(ctx.theme.semantic.text));
         } else {
             thrash_text = format!("{:+.1}% ({})", thrash_percentage, thrash_score_str);
             if thrash_percentage > 15.0 {
-                thrash_style = Style::default().fg(ctx.theme.scale.categorical.red).bold();
+                thrash_style = ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)).bold();
             } else if thrash_percentage > 0.0 {
-                thrash_style = Style::default().fg(ctx.theme.scale.categorical.yellow);
+                thrash_style = ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow));
             } else {
-                thrash_style = Style::default().fg(ctx.theme.scale.categorical.green);
+                thrash_style = ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green));
             }
         }
     }
@@ -866,7 +953,7 @@ fn draw_stats_panel(
         Line::from(vec![
             Span::styled(
                 "App RAM: ",
-                Style::default().fg(ctx.theme.scale.categorical.flamingo),
+                ctx.apply(Style::default().fg(ctx.theme.scale.categorical.flamingo)),
             ),
             Span::styled(
                 format_memory(app_state.app_ram_usage),
@@ -874,7 +961,7 @@ fn draw_stats_panel(
             ),
         ]),
         Line::from(vec![
-            Span::styled("Disk    ", Style::default().fg(ctx.theme.semantic.text)),
+            Span::styled("Disk    ", ctx.apply(Style::default().fg(ctx.theme.semantic.text))),
             Span::styled(
                 "↑ ",
                 ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)),
@@ -893,7 +980,7 @@ fn draw_stats_panel(
             ),
         ]),
         Line::from(vec![
-            Span::styled("Seek    ", Style::default().fg(ctx.theme.semantic.text)),
+            Span::styled("Seek    ", ctx.apply(Style::default().fg(ctx.theme.semantic.text))),
             Span::styled(
                 "↑ ",
                 ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)),
@@ -915,7 +1002,7 @@ fn draw_stats_panel(
             ),
         ]),
         Line::from(vec![
-            Span::styled("Latency ", Style::default().fg(ctx.theme.semantic.text)),
+            Span::styled("Latency ", ctx.apply(Style::default().fg(ctx.theme.semantic.text))),
             Span::styled(
                 "↑ ",
                 ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)),
@@ -934,7 +1021,7 @@ fn draw_stats_panel(
             ),
         ]),
         Line::from(vec![
-            Span::styled("IOPS    ", Style::default().fg(ctx.theme.semantic.text)),
+            Span::styled("IOPS    ", ctx.apply(Style::default().fg(ctx.theme.semantic.text))),
             Span::styled(
                 "↑ ",
                 ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)),
@@ -956,21 +1043,21 @@ fn draw_stats_panel(
         Line::from(vec![
             Span::styled(
                 "Next Tuning in: ",
-                Style::default().fg(ctx.theme.semantic.text),
+                ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
             ),
             Span::raw(format!("{}s", app_state.tuning_countdown)),
         ]),
         Line::from(vec![
             Span::styled(
                 "Disk Thrash: ",
-                Style::default().fg(ctx.theme.scale.categorical.teal),
+                ctx.apply(Style::default().fg(ctx.theme.scale.categorical.teal)),
             ),
             Span::styled(thrash_text, ctx.apply(thrash_style)),
         ]),
         Line::from(vec![
             Span::styled(
                 "Reserve Pool:  ",
-                Style::default().fg(ctx.theme.scale.categorical.teal),
+                ctx.apply(Style::default().fg(ctx.theme.scale.categorical.teal)),
             ),
             Span::raw(app_state.limits.reserve_permits.to_string()),
             format_limit_delta(
@@ -1037,7 +1124,7 @@ fn draw_stats_panel(
     let gauge_str = format!("[{}{}]", "=".repeat(filled_len), "-".repeat(empty_len));
 
     let mut title_spans = vec![
-        Span::styled("Stats", Style::default().fg(ctx.theme.semantic.white)),
+        Span::styled("Stats", ctx.apply(Style::default().fg(ctx.theme.semantic.white))),
         Span::raw(" | "),
         Span::styled(
             format!("Lvl {}", lvl),
@@ -1057,7 +1144,7 @@ fn draw_stats_panel(
     if show_pct {
         title_spans.push(Span::styled(
             format!(" {:.0}%", progress * 100.0),
-            Style::default().fg(ctx.theme.semantic.subtext1),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
         ));
     }
 
@@ -1069,7 +1156,7 @@ fn draw_stats_panel(
                 .borders(Borders::ALL)
                 .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
         )
-        .style(Style::default().fg(ctx.theme.semantic.text));
+        .style(ctx.apply(Style::default().fg(ctx.theme.semantic.text)));
 
     f.render_widget(stats_paragraph, stats_chunk);
 }
@@ -1083,7 +1170,7 @@ fn draw_details_panel(
     let details_block = Block::default()
         .title(Span::styled(
             "Details",
-            Style::default().fg(ctx.theme.scale.categorical.mauve),
+            ctx.apply(Style::default().fg(ctx.theme.scale.categorical.mauve)),
         ))
         .borders(Borders::ALL)
         .borders(Borders::ALL)
@@ -1262,7 +1349,7 @@ fn draw_details_panel(
             detail_rows[6],
         );
     } else {
-        let placeholder_style = Style::default().fg(ctx.theme.semantic.overlay0);
+        let placeholder_style = ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0));
         let label_style = ctx.apply(Style::default().fg(ctx.theme.semantic.surface2));
 
         // Row 0: Progress
@@ -1401,7 +1488,7 @@ fn draw_footer(
                 ),
                 Span::styled(
                     " \u{2192} ",
-                    Style::default().fg(ctx.theme.semantic.surface2),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                 ),
                 Span::styled(
                     format!("v{}", new_version),
@@ -1411,12 +1498,12 @@ fn draw_footer(
                             .bold(),
                     ),
                 ),
-                Span::styled(" | ", Style::default().fg(ctx.theme.semantic.surface2)),
+                Span::styled(" | ", ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))),
                 Span::styled(
                     app_state.data_rate.to_string(),
-                    Style::default().fg(ctx.theme.semantic.subtext1),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
                 ),
-                Span::styled(" | ", Style::default().fg(ctx.theme.semantic.surface2)),
+                Span::styled(" | ", ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))),
                 Span::styled(
                     ctx.theme.name.to_string(),
                     ctx.apply(Style::default().fg(ctx.theme.scale.categorical.mauve)),
@@ -1441,9 +1528,9 @@ fn draw_footer(
                     ),
                     Span::styled(
                         format!(" v{}", APP_VERSION),
-                        Style::default().fg(ctx.theme.semantic.subtext1),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
                     ),
-                    Span::styled(" | ", Style::default().fg(ctx.theme.semantic.surface2)),
+                    Span::styled(" | ", ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))),
                     Span::styled(
                         app_state.data_rate.to_string(),
                         ctx.apply(
@@ -1452,7 +1539,7 @@ fn draw_footer(
                                 .bold(),
                         ),
                     ),
-                    Span::styled(" | ", Style::default().fg(ctx.theme.semantic.surface2)),
+                    Span::styled(" | ", ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))),
                     Span::styled(
                         ctx.theme.name.to_string(),
                         ctx.apply(Style::default().fg(ctx.theme.scale.categorical.mauve)),
@@ -1464,7 +1551,7 @@ fn draw_footer(
                 Line::from(vec![
                     Span::styled(
                         "superseedr",
-                        Style::default().fg(ctx.theme.semantic.surface2),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                     )
                     .add_modifier(Modifier::CROSSED_OUT),
                     Span::styled(
@@ -1475,9 +1562,9 @@ fn draw_footer(
                     ),
                     Span::styled(
                         format!(" v{}", APP_VERSION),
-                        Style::default().fg(ctx.theme.semantic.subtext1),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
                     ),
-                    Span::styled(" | ", Style::default().fg(ctx.theme.semantic.surface2)),
+                    Span::styled(" | ", ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))),
                     Span::styled(
                         app_state.data_rate.to_string(),
                         ctx.apply(
@@ -1486,7 +1573,7 @@ fn draw_footer(
                                 .bold(),
                         ),
                     ),
-                    Span::styled(" | ", Style::default().fg(ctx.theme.semantic.surface2)),
+                    Span::styled(" | ", ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))),
                     Span::styled(
                         ctx.theme.name.to_string(),
                         ctx.apply(Style::default().fg(ctx.theme.scale.categorical.mauve)),
@@ -1606,7 +1693,7 @@ fn draw_footer(
 
     let footer_paragraph = Paragraph::new(Line::from(spans))
         .alignment(Alignment::Center)
-        .style(Style::default().fg(ctx.theme.semantic.subtext1));
+        .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
     f.render_widget(footer_paragraph, commands_chunk);
 
     // --- RIGHT: Port Status ---
@@ -1631,7 +1718,7 @@ fn draw_footer(
     .alignment(Alignment::Right);
 
     let status_paragraph =
-        Paragraph::new(footer_status).style(Style::default().fg(ctx.theme.semantic.subtext1));
+        Paragraph::new(footer_status).style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
     f.render_widget(status_paragraph, status_chunk);
 }
 
@@ -1673,9 +1760,9 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &Theme
 
     let legend_style_fn = |count: u64, color: Color| {
         if selected_torrent.is_some() && count > 0 {
-            Style::default().fg(color)
+            ctx.apply(Style::default().fg(color))
         } else {
-            Style::default().fg(ctx.theme.semantic.surface1)
+            ctx.apply(Style::default().fg(ctx.theme.semantic.surface1))
         }
     };
 
@@ -1830,7 +1917,7 @@ fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &Theme
                 .title_top(
                     Line::from(Span::styled(
                         " Peer Activity Stream ",
-                        Style::default().fg(ctx.theme.semantic.subtext0),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                     ))
                     .alignment(Alignment::Left),
                 )
@@ -1877,7 +1964,7 @@ fn draw_vertical_block_stream(f: &mut Frame, app_state: &AppState, area: Rect, c
     let title_spans: Vec<Span> = if total_ops == 0 {
         vec![Span::styled(
             title_str,
-            Style::default().fg(ctx.theme.semantic.subtext0),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
         )]
     } else {
         let blue_ratio = total_in as f64 / total_ops as f64;
@@ -1885,10 +1972,10 @@ fn draw_vertical_block_stream(f: &mut Frame, app_state: &AppState, area: Rect, c
         let (blue_part, green_part) = title_str.split_at(blue_chars.min(title_len));
         let mut spans = Vec::new();
         if !blue_part.is_empty() {
-            spans.push(Span::styled(blue_part, Style::default().fg(color_inflow)));
+            spans.push(Span::styled(blue_part, ctx.apply(Style::default().fg(color_inflow))));
         }
         if !green_part.is_empty() {
-            spans.push(Span::styled(green_part, Style::default().fg(color_outflow)));
+            spans.push(Span::styled(green_part, ctx.apply(Style::default().fg(color_outflow))));
         }
         spans
     };
@@ -1985,7 +2072,7 @@ fn draw_vertical_block_stream(f: &mut Frame, app_state: &AppState, area: Rect, c
                 .saturating_sub(1)
                 .saturating_sub(padding.len());
             spans.push(Span::raw(padding));
-            spans.push(Span::styled(SEPARATOR, Style::default().fg(color_empty)));
+            spans.push(Span::styled(SEPARATOR, ctx.apply(Style::default().fg(color_empty))));
             spans.push(Span::raw(" ".repeat(trailing_padding)));
         } else {
             let padding = (content_width.saturating_sub(total_blocks)) / 2;
@@ -2601,7 +2688,7 @@ fn draw_power_saving_screen(
     let main_paragraph = Paragraph::new(main_content_lines).alignment(Alignment::Center);
     let footer_line = Line::from(Span::styled(
         "Press [z] to resume",
-        Style::default().fg(ctx.theme.semantic.subtext0),
+        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
     ));
     let footer_paragraph = Paragraph::new(footer_line).alignment(Alignment::Center);
 
@@ -2790,7 +2877,7 @@ pub fn draw_file_browser(
             // Changed [Enter] to [c]
             footer_spans.push(Span::styled(
                 "[Shift+Y]",
-                Style::default().fg(ctx.theme.scale.categorical.green),
+                ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)),
             ));
             footer_spans.push(Span::raw(" Confirm File | "));
         }
@@ -2798,13 +2885,13 @@ pub fn draw_file_browser(
     footer_spans.push(Span::raw(" | "));
     footer_spans.push(Span::styled(
         "[Esc]",
-        Style::default().fg(ctx.theme.scale.categorical.red),
+        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)),
     ));
     footer_spans.push(Span::raw(" Cancel"));
 
     let footer = Paragraph::new(Line::from(footer_spans))
         .alignment(Alignment::Center)
-        .style(Style::default().fg(ctx.theme.semantic.subtext1));
+        .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
     f.render_widget(footer, layout.footer);
 
     // 6. DRAW LIST (SANITIZED & SIMPLIFIED)
@@ -2858,12 +2945,12 @@ pub fn draw_file_browser(
     if data.is_empty() {
         list_items.push(ListItem::new(Line::from(vec![Span::styled(
             "   (Directory is empty)",
-            Style::default().fg(ctx.theme.semantic.overlay0).italic(),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0)).italic(),
         )])));
     } else if visible_items.is_empty() {
         list_items.push(ListItem::new(Line::from(vec![Span::styled(
             format!("   (No matching files among {} items)", item_count),
-            Style::default().fg(ctx.theme.semantic.overlay0).italic(),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0)).italic(),
         )])));
     } else {
         for item in visible_items {
@@ -2916,11 +3003,11 @@ pub fn draw_file_browser(
                 )
             } else {
                 let i_style = if item.node.is_dir {
-                    Style::default().fg(ctx.theme.scale.categorical.blue)
+                    ctx.apply(Style::default().fg(ctx.theme.scale.categorical.blue))
                 } else {
-                    Style::default().fg(ctx.theme.semantic.text)
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.text))
                 };
-                (i_style, Style::default().fg(ctx.theme.semantic.text))
+                (i_style, ctx.apply(Style::default().fg(ctx.theme.semantic.text)))
             };
 
             // 6. Construct Line
@@ -2935,7 +3022,7 @@ pub fn draw_file_browser(
                 line_spans.push(Span::raw(" "));
                 line_spans.push(Span::styled(
                     meta_str,
-                    Style::default().fg(ctx.theme.semantic.surface2).italic(),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)).italic(),
                 ));
             }
 
@@ -3116,9 +3203,9 @@ fn draw_torrent_preview_panel(
                     ),
                     FilePriority::Normal => (
                         if item.node.is_dir {
-                            Style::default().fg(ctx.theme.scale.categorical.blue)
+                            ctx.apply(Style::default().fg(ctx.theme.scale.categorical.blue))
                         } else {
-                            Style::default().fg(ctx.theme.semantic.text)
+                            ctx.apply(Style::default().fg(ctx.theme.semantic.text))
                         },
                         "",
                     ),
@@ -3168,7 +3255,7 @@ fn draw_torrent_preview_panel(
             Err(e) => {
                 f.render_widget(
                     Paragraph::new(format!("Read Error: {}", e))
-                        .style(Style::default().fg(ctx.theme.scale.categorical.red)),
+                        .style(ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red))),
                     inner_area,
                 );
                 return;
@@ -3180,7 +3267,7 @@ fn draw_torrent_preview_panel(
             Err(e) => {
                 f.render_widget(
                     Paragraph::new(format!("Invalid Torrent: {}", e))
-                        .style(Style::default().fg(ctx.theme.scale.categorical.red)),
+                        .style(ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red))),
                     inner_area,
                 );
                 return;
@@ -3200,13 +3287,13 @@ fn draw_torrent_preview_panel(
         };
         let info_text = vec![
             Line::from(vec![
-                Span::styled("Name: ", Style::default().fg(ctx.theme.semantic.subtext0)),
+                Span::styled("Name: ", ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))),
                 Span::raw(&torrent.info.name),
             ]),
             Line::from(vec![
                 Span::styled(
                     "Protocol: ",
-                    Style::default().fg(ctx.theme.semantic.subtext0),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                 ),
                 Span::styled(
                     protocol_version,
@@ -3216,7 +3303,7 @@ fn draw_torrent_preview_panel(
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Size: ", Style::default().fg(ctx.theme.semantic.subtext0)),
+                Span::styled("Size: ", ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))),
                 Span::raw(format_bytes(total_size as u64)),
             ]),
         ];
@@ -3277,9 +3364,9 @@ fn draw_torrent_preview_panel(
                     "   "
                 };
                 let style = if item.node.is_dir {
-                    Style::default().fg(ctx.theme.scale.categorical.blue)
+                    ctx.apply(Style::default().fg(ctx.theme.scale.categorical.blue))
                 } else {
-                    Style::default().fg(ctx.theme.semantic.text)
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.text))
                 };
                 let mut spans = vec![
                     Span::raw(indent),
@@ -3289,7 +3376,7 @@ fn draw_torrent_preview_panel(
                 if !item.node.is_dir && !is_narrow {
                     spans.push(Span::styled(
                         format!(" ({})", format_bytes(item.node.payload.size)),
-                        Style::default().fg(ctx.theme.semantic.surface2),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                     ));
                 }
                 ListItem::new(Line::from(spans))
@@ -3394,14 +3481,14 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, ctx: &ThemeContext) {
             Span::raw("      - magnet: "),
             Span::styled(
                 "superseedr add \"magnet:?xt=urn:btih:...\"",
-                Style::default().fg(ctx.theme.semantic.surface2),
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
             ),
         ]),
         Line::from(vec![
             Span::raw("      - file:   "),
             Span::styled(
                 "superseedr add \"/path/to/my.torrent\"",
-                Style::default().fg(ctx.theme.semantic.surface2),
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
             ),
         ]),
         Line::from(vec![
@@ -3431,7 +3518,7 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, ctx: &ThemeContext) {
             Span::raw("      - "),
             Span::styled(
                 "Change or remove in Config [c]",
-                Style::default().fg(ctx.theme.semantic.surface2).italic(),
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)).italic(),
             ),
         ]),
         Line::from(""),
@@ -3466,7 +3553,7 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, ctx: &ThemeContext) {
             "Manual/Help",
             ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
         ),
-        Span::styled(" | ", Style::default().fg(ctx.theme.semantic.surface2)),
+        Span::styled(" | ", ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))),
         Span::styled(
             " [c] ",
             ctx.apply(Style::default().fg(ctx.theme.scale.categorical.mauve)),
@@ -3475,7 +3562,7 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, ctx: &ThemeContext) {
             "Config",
             ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
         ),
-        Span::styled(" | ", Style::default().fg(ctx.theme.semantic.surface2)),
+        Span::styled(" | ", ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))),
         Span::styled(
             " [Q] ",
             ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)),
@@ -3484,7 +3571,7 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, ctx: &ThemeContext) {
             "Quit",
             ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
         ),
-        Span::styled(" | ", Style::default().fg(ctx.theme.semantic.surface2)),
+        Span::styled(" | ", ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))),
         Span::styled(
             " [Esc] ",
             ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)),
@@ -3605,7 +3692,7 @@ fn draw_welcome_screen(f: &mut Frame, settings: &Settings, ctx: &ThemeContext) {
     .split(box_internal_chunks[0]);
 
     let text_paragraph = Paragraph::new(text_lines)
-        .style(Style::default().fg(ctx.theme.semantic.text))
+        .style(ctx.apply(Style::default().fg(ctx.theme.semantic.text)))
         .alignment(Alignment::Left);
 
     f.render_widget(text_paragraph, text_padding_layout[1]);
@@ -3664,7 +3751,7 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState, ctx: &ThemeContext) {
                     .borders(Borders::ALL)
                     .border_style(ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red))),
             )
-            .style(Style::default().fg(ctx.theme.scale.categorical.yellow));
+            .style(ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)));
         f.render_widget(warning_paragraph, chunks[0]);
         draw_help_table(f, app_state, chunks[1], ctx);
 
@@ -3674,32 +3761,32 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState, ctx: &ThemeContext) {
         f.render_widget(footer_block, chunks[2]);
         let footer_lines = vec![
             Line::from(vec![
-                Span::styled("Settings: ", Style::default().fg(ctx.theme.semantic.text)),
+                Span::styled("Settings: ", ctx.apply(Style::default().fg(ctx.theme.semantic.text))),
                 Span::styled(
                     truncate_with_ellipsis(
                         &settings_path_str,
                         footer_inner_area.width as usize - 10,
                     ),
-                    Style::default().fg(ctx.theme.semantic.subtext0),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Log File: ", Style::default().fg(ctx.theme.semantic.text)),
+                Span::styled("Log File: ", ctx.apply(Style::default().fg(ctx.theme.semantic.text))),
                 Span::styled(
                     truncate_with_ellipsis(&log_path_str, footer_inner_area.width as usize - 10),
-                    Style::default().fg(ctx.theme.semantic.subtext0),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Watch Dir: ", Style::default().fg(ctx.theme.semantic.text)),
+                Span::styled("Watch Dir: ", ctx.apply(Style::default().fg(ctx.theme.semantic.text))),
                 Span::styled(
                     truncate_with_ellipsis(&watch_path_str, footer_inner_area.width as usize - 11),
-                    Style::default().fg(ctx.theme.semantic.subtext0),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                 ),
             ]),
         ];
         let footer_paragraph =
-            Paragraph::new(footer_lines).style(Style::default().fg(ctx.theme.semantic.text));
+            Paragraph::new(footer_lines).style(ctx.apply(Style::default().fg(ctx.theme.semantic.text)));
         f.render_widget(footer_paragraph, footer_inner_area);
     } else {
         let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).split(area);
@@ -3710,32 +3797,32 @@ fn draw_help_popup(f: &mut Frame, app_state: &AppState, ctx: &ThemeContext) {
         f.render_widget(footer_block, chunks[1]);
         let footer_lines = vec![
             Line::from(vec![
-                Span::styled("Settings: ", Style::default().fg(ctx.theme.semantic.text)),
+                Span::styled("Settings: ", ctx.apply(Style::default().fg(ctx.theme.semantic.text))),
                 Span::styled(
                     truncate_with_ellipsis(
                         &settings_path_str,
                         footer_inner_area.width as usize - 10,
                     ),
-                    Style::default().fg(ctx.theme.semantic.subtext0),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Log File: ", Style::default().fg(ctx.theme.semantic.text)),
+                Span::styled("Log File: ", ctx.apply(Style::default().fg(ctx.theme.semantic.text))),
                 Span::styled(
                     truncate_with_ellipsis(&log_path_str, footer_inner_area.width as usize - 10),
-                    Style::default().fg(ctx.theme.semantic.subtext0),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Watch Dir: ", Style::default().fg(ctx.theme.semantic.text)),
+                Span::styled("Watch Dir: ", ctx.apply(Style::default().fg(ctx.theme.semantic.text))),
                 Span::styled(
                     truncate_with_ellipsis(&watch_path_str, footer_inner_area.width as usize - 11),
-                    Style::default().fg(ctx.theme.semantic.subtext0),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                 ),
             ]),
         ];
         let footer_paragraph =
-            Paragraph::new(footer_lines).style(Style::default().fg(ctx.theme.semantic.text));
+            Paragraph::new(footer_lines).style(ctx.apply(Style::default().fg(ctx.theme.semantic.text)));
         f.render_widget(footer_paragraph, footer_inner_area);
     }
 }
@@ -3759,47 +3846,47 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
             vec![
                 Row::new(vec![Cell::from(Span::styled(
                     "General Controls",
-                    Style::default().fg(ctx.theme.scale.categorical.yellow),
+                    ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
                 ))]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Ctrl +",
-                        Style::default().fg(ctx.theme.scale.categorical.teal),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.teal)),
                     )),
                     Cell::from("Zoom in (increase font size)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Ctrl -",
-                        Style::default().fg(ctx.theme.scale.categorical.teal),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.teal)),
                     )),
                     Cell::from("Zoom out (decrease font size)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Q (shift+q)",
-                        Style::default().fg(ctx.theme.scale.categorical.red),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)),
                     )),
                     Cell::from("Quit the application"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "m",
-                        Style::default().fg(ctx.theme.scale.categorical.mauve),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.mauve)),
                     )),
                     Cell::from("Toggle this help screen"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "c",
-                        Style::default().fg(ctx.theme.scale.categorical.peach),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.peach)),
                     )),
                     Cell::from("Open Config screen"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "z",
-                        Style::default().fg(ctx.theme.semantic.subtext0),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                     )),
                     Cell::from("Toggle Zen/Power Saving mode"),
                 ]),
@@ -3807,26 +3894,26 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 // --- List Navigation & Sorting ---
                 Row::new(vec![Cell::from(Span::styled(
                     "List Navigation",
-                    Style::default().fg(ctx.theme.scale.categorical.yellow),
+                    ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
                 ))]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "↑ / ↓ / k / j",
-                        Style::default().fg(ctx.theme.scale.categorical.blue),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.blue)),
                     )),
                     Cell::from("Navigate torrents list"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "← / → / h / l",
-                        Style::default().fg(ctx.theme.scale.categorical.blue),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.blue)),
                     )),
                     Cell::from("Navigate between header columns"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "s",
-                        Style::default().fg(ctx.theme.scale.categorical.green),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)),
                     )),
                     Cell::from("Change sort order for the selected column"),
                 ]),
@@ -3834,45 +3921,45 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 // --- Torrent Management ---
                 Row::new(vec![Cell::from(Span::styled(
                     "Torrent Actions",
-                    Style::default().fg(ctx.theme.scale.categorical.yellow),
+                    ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
                 ))]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "p",
-                        Style::default().fg(ctx.theme.scale.categorical.green),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)),
                     )),
                     Cell::from("Pause / Resume selected torrent"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "d / D",
-                        Style::default().fg(ctx.theme.scale.categorical.red),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)),
                     )),
                     Cell::from("Delete torrent (D includes downloaded files)"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 Row::new(vec![Cell::from(Span::styled(
                     "Adding Torrents",
-                    Style::default().fg(ctx.theme.scale.categorical.yellow),
+                    ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
                 ))]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "a",
-                        Style::default().fg(ctx.theme.scale.categorical.green),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)),
                     )),
                     Cell::from("Open file picker to add a .torrent file"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Paste | v",
-                        Style::default().fg(ctx.theme.scale.categorical.sapphire),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.sapphire)),
                     )),
                     Cell::from("Paste a magnet link or local file path to add"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "CLI",
-                        Style::default().fg(ctx.theme.scale.categorical.sapphire),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.sapphire)),
                     )),
                     Cell::from("Use `superseedr add ...` from another terminal"),
                 ]),
@@ -3880,33 +3967,33 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 // --- Graph Controls ---
                 Row::new(vec![Cell::from(Span::styled(
                     "Graph & Panes",
-                    Style::default().fg(ctx.theme.scale.categorical.yellow),
+                    ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
                 ))]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "t / T",
-                        Style::default().fg(ctx.theme.scale.categorical.teal),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.teal)),
                     )),
                     Cell::from("Switch network graph time scale forward/backward"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "[ / ]",
-                        Style::default().fg(ctx.theme.scale.categorical.teal),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.teal)),
                     )),
                     Cell::from("Change UI refresh rate (FPS)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "x",
-                        Style::default().fg(ctx.theme.scale.categorical.teal),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.teal)),
                     )),
                     Cell::from("Anonymize torrent names"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "< / >",
-                        Style::default().fg(ctx.theme.scale.categorical.mauve),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.mauve)),
                     )),
                     Cell::from("Cycle UI theme"),
                 ]),
@@ -3916,7 +4003,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                     // First Cell (for the first column)
                     Cell::from(Span::styled(
                         "Peer Flags Legend",
-                        Style::default().fg(ctx.theme.scale.categorical.yellow),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
                     )),
                     // Second Cell (for the second column)
                     Cell::from(Line::from(vec![
@@ -3924,92 +4011,92 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         Span::raw("DL: (You "),
                         Span::styled(
                             "■",
-                            Style::default().fg(ctx.theme.scale.categorical.sapphire),
+                            ctx.apply(Style::default().fg(ctx.theme.scale.categorical.sapphire)),
                         ),
-                        Span::styled("■", Style::default().fg(ctx.theme.scale.categorical.maroon)),
+                        Span::styled("■", ctx.apply(Style::default().fg(ctx.theme.scale.categorical.maroon))),
                         Span::raw(") | UL: (Peer "),
-                        Span::styled("■", Style::default().fg(ctx.theme.scale.categorical.teal)),
-                        Span::styled("■", Style::default().fg(ctx.theme.scale.categorical.peach)),
+                        Span::styled("■", ctx.apply(Style::default().fg(ctx.theme.scale.categorical.teal))),
+                        Span::styled("■", ctx.apply(Style::default().fg(ctx.theme.scale.categorical.peach))),
                         Span::raw(")"),
                     ])),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "■",
-                        Style::default().fg(ctx.theme.scale.categorical.sapphire),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.sapphire)),
                     )),
                     Cell::from("You are interested (DL Potential)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "■",
-                        Style::default().fg(ctx.theme.scale.categorical.maroon),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.maroon)),
                     )),
                     Cell::from("Peer is choking you (DL Block)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "■",
-                        Style::default().fg(ctx.theme.scale.categorical.teal),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.teal)),
                     )),
                     Cell::from("Peer is interested (UL Opportunity)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "■",
-                        Style::default().fg(ctx.theme.scale.categorical.peach),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.peach)),
                     )),
                     Cell::from("You are choking peer (UL Restriction)"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 Row::new(vec![Cell::from(Span::styled(
                     "Disk Stats Legend",
-                    Style::default().fg(ctx.theme.scale.categorical.yellow),
+                    ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
                 ))]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "↑ (Read)",
-                        Style::default().fg(ctx.theme.scale.categorical.green),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)),
                     )),
                     Cell::from("Data read from disk"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "↓ (Write)",
-                        Style::default().fg(ctx.theme.scale.categorical.sky),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.sky)),
                     )),
                     Cell::from("Data written to disk"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Seek",
-                        Style::default().fg(ctx.theme.semantic.text),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
                     )),
                     Cell::from("Avg. distance between I/O ops (lower is better)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Latency",
-                        Style::default().fg(ctx.theme.semantic.text),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
                     )),
                     Cell::from("Time to complete one I/O op (lower is better)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "IOPS",
-                        Style::default().fg(ctx.theme.semantic.text),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
                     )),
                     Cell::from("I/O Operations Per Second (total workload)"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 Row::new(vec![Cell::from(Span::styled(
                     "Self-Tuning Legend",
-                    Style::default().fg(ctx.theme.scale.categorical.yellow),
+                    ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
                 ))]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Best Score",
-                        Style::default().fg(ctx.theme.semantic.text),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
                     )),
                     Cell::from(
                         "Score measuring if randomized changes resulted in optimial speeds.",
@@ -4018,49 +4105,49 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Next seconds",
-                        Style::default().fg(ctx.theme.semantic.text),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
                     )),
                     Cell::from("Countdown to try a new random resource adjustment (file handles)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "(+/-)",
-                        Style::default().fg(ctx.theme.semantic.text),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
                     )),
                     Cell::from("Random setting change between resources. (Green=Good, Red=Bad)"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 Row::new(vec![Cell::from(Span::styled(
                     "Build Features",
-                    Style::default().fg(ctx.theme.scale.categorical.yellow),
+                    ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
                 ))]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "DHT",
-                        Style::default().fg(ctx.theme.semantic.text),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
                     )),
                     Cell::from(Line::from(vec![
                         #[cfg(feature = "dht")]
-                        Span::styled("ON", Style::default().fg(ctx.theme.scale.categorical.green)),
+                        Span::styled("ON", ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green))),
                         #[cfg(not(feature = "dht"))]
                         Span::styled(
                             "Not included in this [PRIVATE] build of superseedr.",
-                            Style::default().fg(ctx.theme.scale.categorical.red),
+                            ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)),
                         ),
                     ])),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Pex",
-                        Style::default().fg(ctx.theme.semantic.text),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
                     )),
                     Cell::from(Line::from(vec![
                         #[cfg(feature = "pex")]
-                        Span::styled("ON", Style::default().fg(ctx.theme.scale.categorical.green)),
+                        Span::styled("ON", ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green))),
                         #[cfg(not(feature = "pex"))]
                         Span::styled(
                             "Not included in this [PRIVATE] build of superseedr.",
-                            Style::default().fg(ctx.theme.scale.categorical.red),
+                            ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)),
                         ),
                     ])),
                 ]),
@@ -4068,12 +4155,12 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 // --- NEW: Session Stats at the Bottom ---
                 Row::new(vec![Cell::from(Span::styled(
                     "Session Stats",
-                    Style::default().fg(ctx.theme.scale.categorical.yellow),
+                    ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
                 ))]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Level Up:",
-                        Style::default().fg(ctx.theme.scale.categorical.mauve),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.mauve)),
                     )),
                     Cell::from("Upload data or keep a large library seeding."),
                 ]),
@@ -4097,28 +4184,28 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Esc / q",
-                        Style::default().fg(ctx.theme.scale.categorical.green),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)),
                     )),
                     Cell::from("Save and exit config"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "↑ / ↓ / k / j",
-                        Style::default().fg(ctx.theme.scale.categorical.blue),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.blue)),
                     )),
                     Cell::from("Navigate items"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "← / → / h / l",
-                        Style::default().fg(ctx.theme.scale.categorical.blue),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.blue)),
                     )),
                     Cell::from("Decrease / Increase value"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Enter",
-                        Style::default().fg(ctx.theme.scale.categorical.yellow),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
                     )),
                     Cell::from("Start or confirm editing"),
                 ]),
@@ -4130,7 +4217,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "Esc",
-                        Style::default().fg(ctx.theme.scale.categorical.red),
+                        ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)),
                     )),
                     Cell::from("Cancel selection"),
                 ]),
@@ -4170,7 +4257,7 @@ fn draw_config_screen(
     let block = Block::default()
         .title(Span::styled(
             "Config",
-            Style::default().fg(ctx.theme.scale.categorical.mauve),
+            ctx.apply(Style::default().fg(ctx.theme.scale.categorical.mauve)),
         ))
         .borders(Borders::ALL)
         .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
@@ -4224,9 +4311,9 @@ fn draw_config_screen(
             i == selected_index
         };
         let row_style = if is_highlighted {
-            Style::default().fg(ctx.theme.scale.categorical.yellow)
+            ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow))
         } else {
-            Style::default().fg(ctx.theme.semantic.text)
+            ctx.apply(Style::default().fg(ctx.theme.semantic.text))
         };
         let name_with_selector = if is_highlighted {
             format!("▶ {}", name_str)
@@ -4257,12 +4344,12 @@ fn draw_config_screen(
         Line::from(vec![
             Span::styled(
                 "[Enter]",
-                Style::default().fg(ctx.theme.scale.categorical.green),
+                ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)),
             ),
             Span::raw(" to confirm, "),
             Span::styled(
                 "[Esc]",
-                Style::default().fg(ctx.theme.scale.categorical.red),
+                ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)),
             ),
             Span::raw(" to cancel."),
         ])
@@ -4271,22 +4358,22 @@ fn draw_config_screen(
             Span::raw("Use "),
             Span::styled(
                 "↑/↓/k/j",
-                Style::default().fg(ctx.theme.scale.categorical.yellow),
+                ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
             ),
             Span::raw(" to navigate. "),
             Span::styled(
                 "[Enter]",
-                Style::default().fg(ctx.theme.scale.categorical.yellow),
+                ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
             ),
             Span::raw(" to edit. "),
             Span::styled(
                 "[r]",
-                Style::default().fg(ctx.theme.scale.categorical.yellow),
+                ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
             ),
             Span::raw("eset to default. "),
             Span::styled(
                 "[Esc]|[Q]",
-                Style::default().fg(ctx.theme.scale.categorical.green),
+                ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)),
             ),
             Span::raw(" to Save & Exit, "),
         ])
@@ -4294,7 +4381,7 @@ fn draw_config_screen(
 
     let footer_paragraph = Paragraph::new(help_text)
         .alignment(Alignment::Center)
-        .style(Style::default().fg(ctx.theme.semantic.subtext1));
+        .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
     f.render_widget(footer_paragraph, footer_area);
 }
 
@@ -4392,7 +4479,7 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect, ctx:
                                 app_state.selected_header == SelectedHeader::Peer(visual_idx);
                             let is_sorting = def.sort_enum == Some(sort_by);
 
-                            let mut style = Style::default().fg(ctx.theme.scale.categorical.yellow);
+                            let mut style = ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow));
                             if is_sorting {
                                 style = style.fg(ctx.theme.scale.categorical.mauve);
                             }
@@ -4440,35 +4527,35 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect, ctx:
                                     PeerColumnId::Flags => Line::from(vec![
                                         Span::styled(
                                             "■",
-                                            Style::default().fg(if peer.am_interested {
+                                            ctx.apply(Style::default().fg(if peer.am_interested {
                                                 ctx.theme.scale.categorical.sapphire
                                             } else {
                                                 ctx.theme.semantic.surface1
-                                            }),
+                                            })),
                                         ),
                                         Span::styled(
                                             "■",
-                                            Style::default().fg(if peer.peer_choking {
+                                            ctx.apply(Style::default().fg(if peer.peer_choking {
                                                 ctx.theme.scale.categorical.maroon
                                             } else {
                                                 ctx.theme.semantic.surface1
-                                            }),
+                                            })),
                                         ),
                                         Span::styled(
                                             "■",
-                                            Style::default().fg(if peer.peer_interested {
+                                            ctx.apply(Style::default().fg(if peer.peer_interested {
                                                 ctx.theme.scale.categorical.teal
                                             } else {
                                                 ctx.theme.semantic.surface1
-                                            }),
+                                            })),
                                         ),
                                         Span::styled(
                                             "■",
-                                            Style::default().fg(if peer.am_choking {
+                                            ctx.apply(Style::default().fg(if peer.am_choking {
                                                 ctx.theme.scale.categorical.peach
                                             } else {
                                                 ctx.theme.semantic.surface1
-                                            }),
+                                            })),
                                         ),
                                     ])
                                     .into(),
@@ -4525,7 +4612,7 @@ fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect, ctx:
                                 }
                             })
                             .collect();
-                        Row::new(cells).style(Style::default().fg(row_color))
+                        Row::new(cells).style(ctx.apply(Style::default().fg(row_color)))
                     });
 
                     let peers_table = Table::new(peer_rows, constraints)
@@ -4578,20 +4665,28 @@ fn draw_swarm_heatmap(
     total_pieces: u32,
     area: Rect,
 ) {
-    let color_status_low = Style::default()
-        .fg(ctx.theme.scale.categorical.red)
-        .add_modifier(Modifier::DIM);
-    let color_status_medium = Style::default()
-        .fg(ctx.theme.scale.categorical.yellow)
-        .add_modifier(Modifier::DIM);
-    let color_status_high = Style::default()
-        .fg(ctx.theme.scale.categorical.blue)
-        .add_modifier(Modifier::DIM);
-    let color_status_complete = Style::default()
-        .fg(ctx.theme.scale.categorical.lavender)
-        .add_modifier(Modifier::BOLD);
-    let color_status_empty = Style::default().fg(ctx.theme.semantic.subtext1);
-    let color_status_waiting = Style::default().fg(ctx.theme.semantic.subtext1);
+    let color_status_low = ctx.apply(
+        Style::default()
+            .fg(ctx.theme.scale.categorical.red)
+            .add_modifier(Modifier::DIM),
+    );
+    let color_status_medium = ctx.apply(
+        Style::default()
+            .fg(ctx.theme.scale.categorical.yellow)
+            .add_modifier(Modifier::DIM),
+    );
+    let color_status_high = ctx.apply(
+        Style::default()
+            .fg(ctx.theme.scale.categorical.blue)
+            .add_modifier(Modifier::DIM),
+    );
+    let color_status_complete = ctx.apply(
+        Style::default()
+            .fg(ctx.theme.scale.categorical.lavender)
+            .add_modifier(Modifier::BOLD),
+    );
+    let color_status_empty = ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1));
+    let color_status_waiting = ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1));
 
     let color_heatmap_low = ctx.theme.scale.heatmap.low;
     let color_heatmap_medium = ctx.theme.scale.heatmap.medium;
@@ -4652,7 +4747,7 @@ fn draw_swarm_heatmap(
     let title = Line::from(vec![
         Span::styled(
             " Swarm Availability: ",
-            Style::default().fg(ctx.theme.scale.categorical.lavender),
+            ctx.apply(Style::default().fg(ctx.theme.scale.categorical.lavender)),
         ),
         Span::styled(status_text, status_style),
     ]);
@@ -4675,7 +4770,7 @@ fn draw_swarm_heatmap(
             let row_str = shade_light.repeat(available_width);
             lines.push(Line::from(Span::styled(
                 row_str,
-                Style::default().fg(ctx.theme.semantic.surface1),
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface1)),
             )));
         }
 
@@ -4720,7 +4815,7 @@ fn draw_swarm_heatmap(
             };
             spans.push(Span::styled(
                 piece_char.to_string(),
-                Style::default().fg(color),
+                ctx.apply(Style::default().fg(color)),
             ));
         }
         lines.push(Line::from(spans));
@@ -4739,7 +4834,7 @@ fn render_sparkles<'a>(
     let mut rng = StdRng::seed_from_u64(seed);
     for _ in 0..count {
         let is_bold: bool = rng.random();
-        let mut style = Style::default().fg(color);
+        let mut style = ctx.apply(Style::default().fg(color));
         style = if is_bold {
             style.add_modifier(Modifier::BOLD)
         } else {
@@ -4833,10 +4928,10 @@ fn get_animated_style(ctx: &ThemeContext, x: usize, y: usize) -> Style {
             .add_modifier(Modifier::BOLD)
     } else if seed > 0.5 {
         // Medium energy: Base Color + Bold
-        Style::default().fg(base_color).add_modifier(Modifier::BOLD)
+        ctx.apply(Style::default().fg(base_color)).add_modifier(Modifier::BOLD)
     } else {
         // Low energy: Base Color + Dim (Background Flow)
-        Style::default().fg(base_color).add_modifier(Modifier::DIM)
+        ctx.apply(Style::default().fg(base_color)).add_modifier(Modifier::DIM)
     };
 
     ctx.apply(style)
@@ -4891,7 +4986,7 @@ fn draw_background_dust(f: &mut Frame, area: Rect, ctx: &ThemeContext) {
             if noise_2 > 0.95 {
                 spans.push(Span::styled(
                     "·",
-                    Style::default().fg(ctx.theme.scale.categorical.blue),
+                    ctx.apply(Style::default().fg(ctx.theme.scale.categorical.blue)),
                 ));
                 continue;
             }

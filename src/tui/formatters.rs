@@ -167,24 +167,24 @@ pub fn speed_to_style(ctx: &ThemeContext, speed_bps: u64) -> Style {
     if speed_bps == 0 {
         Style::default() // Let the main row style handle the color for zero speed
     } else if speed_bps < 50_000 {
-        Style::default().fg(ctx.theme.scale.speed[0])
+        ctx.apply(Style::default().fg(ctx.theme.scale.speed[0]))
     } else if speed_bps < 500_000 {
-        Style::default().fg(ctx.theme.scale.speed[1])
+        ctx.apply(Style::default().fg(ctx.theme.scale.speed[1]))
     } else if speed_bps < 2_000_000 {
-        Style::default().fg(ctx.theme.scale.speed[2])
+        ctx.apply(Style::default().fg(ctx.theme.scale.speed[2]))
     } else if speed_bps < 10_000_000 {
-        Style::default().fg(ctx.theme.scale.speed[3])
+        ctx.apply(Style::default().fg(ctx.theme.scale.speed[3]))
     } else if speed_bps < 20_000_000 {
-        Style::default().fg(ctx.theme.scale.speed[4])
+        ctx.apply(Style::default().fg(ctx.theme.scale.speed[4]))
     } else if speed_bps < 50_000_000 {
         // < 50 Mbps
-        Style::default().fg(ctx.theme.scale.speed[5])
+        ctx.apply(Style::default().fg(ctx.theme.scale.speed[5]))
     } else if speed_bps < 100_000_000 {
         // < 100 Mbps
-        Style::default().fg(ctx.theme.scale.speed[6])
+        ctx.apply(Style::default().fg(ctx.theme.scale.speed[6]))
     } else {
         // >= 100 Mbps
-        Style::default().fg(ctx.theme.scale.speed[7])
+        ctx.apply(Style::default().fg(ctx.theme.scale.speed[7]))
     }
 }
 
@@ -319,10 +319,10 @@ pub fn generate_x_axis_labels(
     // Convert the strings to styled Spans, replacing the last label with "Now".
     let mut x_labels: Vec<Span> = labels_str
         .into_iter()
-        .map(|s| Span::styled(s, Style::default().fg(ctx.theme.semantic.subtext0)))
+        .map(|s| Span::styled(s, ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))))
         .collect();
     if let Some(last) = x_labels.last_mut() {
-        *last = Span::styled("Now", Style::default().fg(ctx.theme.semantic.subtext0));
+        *last = Span::styled("Now", ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)));
     }
     x_labels
 }
@@ -420,9 +420,9 @@ pub fn format_limit_delta(ctx: &ThemeContext, current: usize, last: usize) -> Sp
         return Span::raw("");
     }
     let (sign, style) = if delta > 0 {
-        ("+", Style::default().fg(ctx.theme.scale.categorical.green))
+        ("+", ctx.apply(Style::default().fg(ctx.theme.scale.categorical.green)))
     } else {
-        ("-", Style::default().fg(ctx.theme.scale.categorical.red))
+        ("-", ctx.apply(Style::default().fg(ctx.theme.scale.categorical.red)))
     };
     Span::styled(format!(" ({}{})", sign, delta.abs()), ctx.apply(style))
 }
