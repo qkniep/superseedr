@@ -34,6 +34,7 @@ const MAX_BLOCK_SIZE: u32 = 131_072;
 const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
 pub const MAX_PIPELINE_DEPTH: usize = 512;
+const PEER_ADMISSION_CONNECTED_THRESHOLD: usize = 200;
 
 pub type PeerAddr = (String, u16);
 
@@ -333,6 +334,7 @@ pub struct TorrentState {
     pub file_priorities: HashMap<usize, FilePriority>,
     pub pending_disconnects: Vec<String>,
     pub pending_failures: Vec<String>,
+    pub accepting_new_peers: bool,
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -371,6 +373,7 @@ impl Default for TorrentState {
             file_priorities: HashMap::new(),
             pending_disconnects: Vec::with_capacity(100),
             pending_failures: Vec::with_capacity(100),
+            accepting_new_peers: true,
         }
     }
 }
@@ -508,6 +511,7 @@ impl TorrentState {
             }
             Action::Tick { dt_ms } => {
                 self.now += Duration::from_millis(dt_ms);
+                self.refresh_peer_admission_guard();
                 let scaling_factor = if dt_ms > 0 {
                     1000.0 / dt_ms as f64
                 } else {
@@ -2395,6 +2399,21 @@ impl TorrentState {
     }
 }
 
+impl TorrentState {
+    fn refresh_peer_admission_guard(&mut self) {
+        let reopen_threshold = (PEER_ADMISSION_CONNECTED_THRESHOLD * 75) / 100;
+        let connected = self.number_of_successfully_connected_peers;
+
+        if self.accepting_new_peers {
+            if connected >= PEER_ADMISSION_CONNECTED_THRESHOLD {
+                self.accepting_new_peers = false;
+            }
+        } else if connected <= reopen_threshold {
+            self.accepting_new_peers = true;
+        }
+    }
+}
+
 fn calculate_deletion_lists(
     mfi: &MultiFileInfo,
     base_path: &Path,
@@ -2554,6 +2573,44 @@ mod tests {
         // Assume peer has handshake
         peer.peer_id = id.as_bytes().to_vec();
         state.peers.insert(id.to_string(), peer);
+    }
+
+    #[test]
+    fn test_peer_admission_guard_closes_under_high_connected_pressure() {
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+        state.accepting_new_peers = true;
+
+        for i in 0..200 {
+            add_peer(&mut state, &format!("peer_{}", i));
+        }
+        state.number_of_successfully_connected_peers = state.peers.len();
+
+        let _ = state.update(Action::Tick { dt_ms: 1000 });
+
+        assert!(
+            !state.accepting_new_peers,
+            "expected admission guard to close under heavy connected-peer pressure"
+        );
+    }
+
+    #[test]
+    fn test_peer_admission_guard_reopens_at_75_percent_threshold() {
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+        state.accepting_new_peers = false;
+
+        for i in 0..150 {
+            add_peer(&mut state, &format!("peer_{}", i));
+        }
+        state.number_of_successfully_connected_peers = state.peers.len();
+
+        let _ = state.update(Action::Tick { dt_ms: 1000 });
+
+        assert!(
+            state.accepting_new_peers,
+            "expected admission guard to reopen at 75 percent of threshold"
+        );
     }
 
     // --- SCENARIO 1: Initialization ---

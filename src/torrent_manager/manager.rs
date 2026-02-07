@@ -158,6 +158,10 @@ pub struct TorrentManager {
 }
 
 impl TorrentManager {
+    fn should_accept_new_peers(&self) -> bool {
+        self.state.accepting_new_peers
+    }
+
     fn init_base(
         torrent_parameters: TorrentParameters,
         info_hash: Vec<u8>,
@@ -827,7 +831,9 @@ impl TorrentManager {
             }
 
             Effect::ConnectToPeer { ip, port } => {
-                self.connect_to_peer(ip, port);
+                if self.should_accept_new_peers() {
+                    self.connect_to_peer(ip, port);
+                }
             }
 
             Effect::StartValidation => {
@@ -2203,7 +2209,9 @@ impl TorrentManager {
                             self.state.last_activity = TorrentActivity::SearchingDht;
                             for peer in peers {
                                 event!(Level::DEBUG, "PEER FROM DHT {}", peer);
-                                self.connect_to_peer(peer.ip().to_string(), peer.port());
+                                if self.should_accept_new_peers() {
+                                    self.connect_to_peer(peer.ip().to_string(), peer.port());
+                                }
                             }
                         } else {
                             event!(Level::WARN, "DHT channel closed. No longer receiving DHT peers.");
@@ -2212,6 +2220,9 @@ impl TorrentManager {
                 }
 
                 Some((stream, handshake_response)) = self.incoming_peer_rx.recv(), if !self.state.is_paused => {
+                    if !self.should_accept_new_peers() {
+                        continue;
+                    }
                     let _ = self.manager_event_tx.try_send(ManagerEvent::PeerDiscovered { info_hash: self.state.info_hash.clone() });
                     if let Ok(peer_addr) = stream.peer_addr() {
 
@@ -2372,7 +2383,9 @@ impl TorrentManager {
                         #[cfg(feature = "pex")]
                         TorrentCommand::AddPexPeers(_peer_id, new_peers) => {
                             for peer_tuple in new_peers {
-                                self.connect_to_peer(peer_tuple.0, peer_tuple.1);
+                                if self.should_accept_new_peers() {
+                                    self.connect_to_peer(peer_tuple.0, peer_tuple.1);
+                                }
                             }
                         },
                         TorrentCommand::PeerBitfield(pid, bf) => self.apply_action(Action::PeerBitfieldReceived { peer_id: pid, bitfield: bf }),
@@ -2815,6 +2828,65 @@ mod resource_tests {
         let torrent_tx = manager.torrent_manager_tx.clone();
 
         (manager, torrent_tx, cmd_tx, shutdown_tx, resource_manager)
+    }
+
+    #[tokio::test]
+    async fn test_peer_admission_guard_blocks_new_outgoing_connection() {
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _resource_manager) =
+            setup_test_harness();
+
+        manager.state.accepting_new_peers = false;
+
+        let ip = "127.0.0.1".to_string();
+        let port = 1;
+        let peer_id = format!("{}:{}", ip, port);
+
+        manager.handle_effect(Effect::ConnectToPeer { ip, port });
+
+        assert!(
+            !manager.state.peers.contains_key(&peer_id),
+            "peer admission guard should block new outgoing peers"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peer_admission_guard_allows_new_outgoing_connection_when_open() {
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _resource_manager) =
+            setup_test_harness();
+
+        manager.state.accepting_new_peers = true;
+
+        let ip = "127.0.0.1".to_string();
+        let port = 1;
+        let peer_id = format!("{}:{}", ip, port);
+
+        manager.handle_effect(Effect::ConnectToPeer { ip, port });
+
+        assert!(
+            manager.state.peers.contains_key(&peer_id),
+            "peer admission guard should allow new outgoing peers when open"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peer_admission_guard_handles_10k_candidates_when_closed() {
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _resource_manager) =
+            setup_test_harness();
+
+        manager.state.accepting_new_peers = false;
+
+        for port in 10_000u16..20_000u16 {
+            manager.handle_effect(Effect::ConnectToPeer {
+                ip: "127.0.0.1".to_string(),
+                port,
+            });
+        }
+
+        assert_eq!(
+            manager.state.peers.len(),
+            0,
+            "closed peer admission guard should drop all 10k candidates"
+        );
     }
 
     #[tokio::test]
