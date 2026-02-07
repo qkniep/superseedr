@@ -1545,10 +1545,10 @@ fn draw_footer(
             ),
             Span::raw("ime | "),
             Span::styled(
-                "[< >]",
+                "[<] theme [>]",
                 ctx.apply(Style::default().fg(ctx.theme.scale.categorical.mauve)),
             ),
-            Span::raw("theme | "),
+            Span::raw(" | "),
             Span::styled(
                 "[/]",
                 ctx.apply(Style::default().fg(ctx.theme.scale.categorical.yellow)),
