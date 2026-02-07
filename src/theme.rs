@@ -52,12 +52,20 @@ pub enum ThemeName {
     Monokai,
     #[strum(serialize = "Neon")]
     Neon,
+    #[strum(serialize = "Nightfox")]
+    Nightfox,
     #[strum(serialize = "Nord")]
     Nord,
     #[strum(serialize = "One Dark")]
     OneDark,
     #[strum(serialize = "Oxocarbon")]
     Oxocarbon,
+    #[strum(serialize = "PaperColor Light")]
+    PaperColorLight,
+    #[strum(serialize = "Black Hole")]
+    BlackHole,
+    #[strum(serialize = "Bioluminescent Reef")]
+    BioluminescentReef,
     #[strum(serialize = "Rainbow")]
     Rainbow,
     #[strum(serialize = "Rose Pine")]
@@ -110,9 +118,13 @@ impl Serialize for ThemeName {
             ThemeName::Matrix => "matrix",
             ThemeName::Monokai => "monokai",
             ThemeName::Neon => "neon",
+            ThemeName::Nightfox => "nightfox",
             ThemeName::Nord => "nord",
             ThemeName::OneDark => "one_dark",
             ThemeName::Oxocarbon => "oxocarbon",
+            ThemeName::PaperColorLight => "papercolor_light",
+            ThemeName::BlackHole => "black_hole",
+            ThemeName::BioluminescentReef => "bioluminescent_reef",
             ThemeName::Rainbow => "rainbow",
             ThemeName::RosePine => "rose_pine",
             ThemeName::SolarizedDark => "solarized_dark",
@@ -155,9 +167,13 @@ impl<'de> Deserialize<'de> for ThemeName {
             "matrix" | "Matrix" => Ok(ThemeName::Matrix),
             "monokai" | "Monokai" => Ok(ThemeName::Monokai),
             "neon" | "Neon" => Ok(ThemeName::Neon),
+            "nightfox" | "Nightfox" => Ok(ThemeName::Nightfox),
             "nord" | "Nord" => Ok(ThemeName::Nord),
             "one_dark" | "One Dark" => Ok(ThemeName::OneDark),
             "oxocarbon" | "Oxocarbon" => Ok(ThemeName::Oxocarbon),
+            "papercolor_light" | "PaperColor Light" => Ok(ThemeName::PaperColorLight),
+            "black_hole" | "Black Hole" => Ok(ThemeName::BlackHole),
+            "bioluminescent_reef" | "Bioluminescent Reef" => Ok(ThemeName::BioluminescentReef),
             "rainbow" | "Rainbow" => Ok(ThemeName::Rainbow),
             "rose_pine" | "Rose Pine" => Ok(ThemeName::RosePine),
             "solarized_dark" | "Solarized Dark" => Ok(ThemeName::SolarizedDark),
@@ -460,9 +476,13 @@ impl Theme {
             ThemeName::Matrix => Self::matrix(),
             ThemeName::Monokai => Self::monokai(),
             ThemeName::Neon => Self::neon(),
+            ThemeName::Nightfox => Self::nightfox(),
             ThemeName::Nord => Self::nord(),
             ThemeName::OneDark => Self::one_dark(),
             ThemeName::Oxocarbon => Self::oxocarbon(),
+            ThemeName::PaperColorLight => Self::papercolor_light(),
+            ThemeName::BlackHole => Self::black_hole(),
+            ThemeName::BioluminescentReef => Self::bioluminescent_reef(),
             ThemeName::Rainbow => Self::rainbow(),
             ThemeName::RosePine => Self::rose_pine(),
             ThemeName::SolarizedDark => Self::solarized_dark(),
@@ -2552,6 +2572,272 @@ impl Theme {
             },
         }
     }
+
+    pub fn nightfox() -> Self {
+        let categorical = ThemeCategorical {
+            rosewater: Color::Rgb(219, 225, 245),
+            flamingo: Color::Rgb(244, 163, 116),
+            pink: Color::Rgb(210, 156, 255),
+            mauve: Color::Rgb(187, 154, 247),
+            red: Color::Rgb(242, 109, 130),
+            maroon: Color::Rgb(219, 118, 126),
+            peach: Color::Rgb(244, 163, 116),
+            yellow: Color::Rgb(230, 201, 126),
+            green: Color::Rgb(126, 207, 143),
+            teal: Color::Rgb(86, 205, 205),
+            sky: Color::Rgb(131, 206, 255),
+            sapphire: Color::Rgb(110, 176, 255),
+            blue: Color::Rgb(99, 156, 255),
+            lavender: Color::Rgb(175, 152, 252),
+        };
+
+        Self {
+            name: ThemeName::Nightfox,
+            effects: ThemeEffects::default(),
+            semantic: ThemeSemantic {
+                text: Color::Rgb(210, 220, 248),
+                subtext1: Color::Rgb(174, 186, 223),
+                subtext0: Color::Rgb(142, 156, 196),
+                overlay0: Color::Rgb(92, 104, 145),
+                surface2: Color::Rgb(55, 66, 96),
+                surface1: Color::Rgb(40, 50, 76),
+                surface0: Color::Rgb(26, 33, 54),
+                border: Color::Rgb(92, 104, 145),
+                white: Color::White,
+            },
+            scale: ThemeScale {
+                speed: [
+                    categorical.sky,
+                    categorical.green,
+                    categorical.yellow,
+                    categorical.peach,
+                    categorical.red,
+                    categorical.pink,
+                    categorical.mauve,
+                    categorical.lavender,
+                ],
+                ip_hash: categorical_ip_hash(categorical),
+                heatmap: ThemeHeatmap {
+                    low: categorical.blue,
+                    medium: categorical.yellow,
+                    high: categorical.red,
+                    empty: Color::Rgb(40, 50, 76),
+                },
+                stream: ThemeStream {
+                    inflow: categorical.blue,
+                    outflow: categorical.green,
+                },
+                categorical,
+            },
+        }
+    }
+
+    pub fn papercolor_light() -> Self {
+        let categorical = ThemeCategorical {
+            rosewater: Color::Rgb(70, 78, 87),
+            flamingo: Color::Rgb(181, 90, 60),
+            pink: Color::Rgb(161, 85, 170),
+            mauve: Color::Rgb(123, 102, 204),
+            red: Color::Rgb(200, 72, 65),
+            maroon: Color::Rgb(161, 81, 85),
+            peach: Color::Rgb(196, 122, 62),
+            yellow: Color::Rgb(155, 132, 26),
+            green: Color::Rgb(77, 133, 67),
+            teal: Color::Rgb(51, 135, 122),
+            sky: Color::Rgb(55, 130, 171),
+            sapphire: Color::Rgb(67, 112, 182),
+            blue: Color::Rgb(52, 98, 175),
+            lavender: Color::Rgb(122, 100, 182),
+        };
+
+        Self {
+            name: ThemeName::PaperColorLight,
+            effects: ThemeEffects::default(),
+            semantic: ThemeSemantic {
+                text: Color::Rgb(55, 62, 72),
+                subtext1: Color::Rgb(84, 92, 104),
+                subtext0: Color::Rgb(109, 117, 129),
+                overlay0: Color::Rgb(150, 145, 133),
+                surface2: Color::Rgb(228, 221, 205),
+                surface1: Color::Rgb(241, 237, 225),
+                surface0: Color::Rgb(250, 248, 240),
+                border: Color::Rgb(158, 149, 133),
+                white: Color::Black,
+            },
+            scale: ThemeScale {
+                speed: [
+                    categorical.sapphire,
+                    categorical.green,
+                    categorical.yellow,
+                    categorical.peach,
+                    categorical.red,
+                    categorical.pink,
+                    categorical.mauve,
+                    categorical.lavender,
+                ],
+                ip_hash: categorical_ip_hash(categorical),
+                heatmap: ThemeHeatmap {
+                    low: categorical.blue,
+                    medium: categorical.yellow,
+                    high: categorical.red,
+                    empty: Color::Rgb(228, 221, 205),
+                },
+                stream: ThemeStream {
+                    inflow: categorical.blue,
+                    outflow: categorical.green,
+                },
+                categorical,
+            },
+        }
+    }
+
+    pub fn black_hole() -> Self {
+        let categorical = ThemeCategorical {
+            rosewater: Color::Rgb(235, 240, 255),
+            flamingo: Color::Rgb(255, 163, 193),
+            pink: Color::Rgb(233, 148, 255),
+            mauve: Color::Rgb(180, 149, 255),
+            red: Color::Rgb(255, 97, 130),
+            maroon: Color::Rgb(217, 89, 118),
+            peach: Color::Rgb(255, 182, 128),
+            yellow: Color::Rgb(245, 210, 110),
+            green: Color::Rgb(98, 220, 180),
+            teal: Color::Rgb(90, 214, 229),
+            sky: Color::Rgb(128, 190, 255),
+            sapphire: Color::Rgb(110, 168, 247),
+            blue: Color::Rgb(95, 148, 240),
+            lavender: Color::Rgb(165, 146, 250),
+        };
+
+        Self {
+            name: ThemeName::BlackHole,
+            effects: ThemeEffects {
+                local_enabled: true,
+                flicker_hz: 4.8,
+                flicker_intensity: 0.12,
+                local_burst_duty: 0.12,
+                local_burst_hz: 0.6,
+                local_idle_intensity: 0.05,
+                local_burst_boost: 1.15,
+                wave_enabled: true,
+                wave_hz: 0.24,
+                wave_intensity: 0.13,
+                wave_wavelength: 72.0,
+                wave_angle_degrees: -40.0,
+                wave_mode: WaveMode::Linear,
+                ..ThemeEffects::default()
+            },
+            semantic: ThemeSemantic {
+                text: Color::Rgb(222, 230, 255),
+                subtext1: Color::Rgb(176, 190, 232),
+                subtext0: Color::Rgb(136, 152, 204),
+                overlay0: Color::Rgb(74, 84, 120),
+                surface2: Color::Rgb(34, 40, 60),
+                surface1: Color::Rgb(21, 25, 40),
+                surface0: Color::Rgb(8, 10, 18),
+                border: Color::Rgb(100, 115, 168),
+                white: Color::White,
+            },
+            scale: ThemeScale {
+                speed: [
+                    categorical.sky,
+                    categorical.green,
+                    categorical.yellow,
+                    categorical.peach,
+                    categorical.red,
+                    categorical.pink,
+                    categorical.mauve,
+                    categorical.lavender,
+                ],
+                ip_hash: categorical_ip_hash(categorical),
+                heatmap: ThemeHeatmap {
+                    low: categorical.blue,
+                    medium: categorical.mauve,
+                    high: categorical.red,
+                    empty: Color::Rgb(21, 25, 40),
+                },
+                stream: ThemeStream {
+                    inflow: categorical.sapphire,
+                    outflow: categorical.green,
+                },
+                categorical,
+            },
+        }
+    }
+
+    pub fn bioluminescent_reef() -> Self {
+        let categorical = ThemeCategorical {
+            rosewater: Color::Rgb(222, 249, 242),
+            flamingo: Color::Rgb(162, 234, 214),
+            pink: Color::Rgb(154, 220, 238),
+            mauve: Color::Rgb(138, 190, 231),
+            red: Color::Rgb(234, 112, 136),
+            maroon: Color::Rgb(194, 94, 119),
+            peach: Color::Rgb(242, 174, 122),
+            yellow: Color::Rgb(238, 214, 128),
+            green: Color::Rgb(72, 212, 174),
+            teal: Color::Rgb(56, 203, 196),
+            sky: Color::Rgb(96, 198, 236),
+            sapphire: Color::Rgb(84, 173, 222),
+            blue: Color::Rgb(72, 153, 206),
+            lavender: Color::Rgb(144, 172, 232),
+        };
+
+        Self {
+            name: ThemeName::BioluminescentReef,
+            effects: ThemeEffects {
+                local_enabled: true,
+                flicker_hz: 5.6,
+                flicker_intensity: 0.10,
+                local_burst_duty: 0.14,
+                local_burst_hz: 0.8,
+                local_idle_intensity: 0.05,
+                local_burst_boost: 1.18,
+                wave_enabled: true,
+                wave_hz: 0.38,
+                wave_intensity: 0.14,
+                wave_wavelength: 46.0,
+                wave_angle_degrees: -55.0,
+                wave_mode: WaveMode::Linear,
+                ..ThemeEffects::default()
+            },
+            semantic: ThemeSemantic {
+                text: Color::Rgb(213, 245, 239),
+                subtext1: Color::Rgb(156, 223, 209),
+                subtext0: Color::Rgb(116, 193, 181),
+                overlay0: Color::Rgb(58, 112, 114),
+                surface2: Color::Rgb(26, 67, 74),
+                surface1: Color::Rgb(16, 47, 56),
+                surface0: Color::Rgb(8, 28, 34),
+                border: Color::Rgb(82, 165, 154),
+                white: Color::White,
+            },
+            scale: ThemeScale {
+                speed: [
+                    categorical.sky,
+                    categorical.green,
+                    categorical.yellow,
+                    categorical.peach,
+                    categorical.red,
+                    categorical.pink,
+                    categorical.mauve,
+                    categorical.lavender,
+                ],
+                ip_hash: categorical_ip_hash(categorical),
+                heatmap: ThemeHeatmap {
+                    low: categorical.blue,
+                    medium: categorical.teal,
+                    high: categorical.green,
+                    empty: Color::Rgb(16, 47, 56),
+                },
+                stream: ThemeStream {
+                    inflow: categorical.sky,
+                    outflow: categorical.green,
+                },
+                categorical,
+            },
+        }
+    }
 }
 
 impl Default for Theme {
@@ -2607,9 +2893,13 @@ mod tests {
             ThemeName::Matrix,
             ThemeName::Monokai,
             ThemeName::Neon,
+            ThemeName::Nightfox,
             ThemeName::Nord,
             ThemeName::OneDark,
             ThemeName::Oxocarbon,
+            ThemeName::PaperColorLight,
+            ThemeName::BlackHole,
+            ThemeName::BioluminescentReef,
             ThemeName::Rainbow,
             ThemeName::RosePine,
             ThemeName::SolarizedDark,
@@ -2679,9 +2969,13 @@ mod tests {
             ("matrix", ThemeName::Matrix),
             ("monokai", ThemeName::Monokai),
             ("neon", ThemeName::Neon),
+            ("nightfox", ThemeName::Nightfox),
             ("nord", ThemeName::Nord),
             ("one_dark", ThemeName::OneDark),
             ("oxocarbon", ThemeName::Oxocarbon),
+            ("papercolor_light", ThemeName::PaperColorLight),
+            ("black_hole", ThemeName::BlackHole),
+            ("bioluminescent_reef", ThemeName::BioluminescentReef),
             ("rainbow", ThemeName::Rainbow),
             ("rose_pine", ThemeName::RosePine),
             ("solarized_dark", ThemeName::SolarizedDark),
@@ -2724,9 +3018,13 @@ mod tests {
             ("Matrix", ThemeName::Matrix),
             ("Monokai", ThemeName::Monokai),
             ("Neon", ThemeName::Neon),
+            ("Nightfox", ThemeName::Nightfox),
             ("Nord", ThemeName::Nord),
             ("One Dark", ThemeName::OneDark),
             ("Oxocarbon", ThemeName::Oxocarbon),
+            ("PaperColor Light", ThemeName::PaperColorLight),
+            ("Black Hole", ThemeName::BlackHole),
+            ("Bioluminescent Reef", ThemeName::BioluminescentReef),
             ("Rainbow", ThemeName::Rainbow),
             ("Rose Pine", ThemeName::RosePine),
             ("Solarized Dark", ThemeName::SolarizedDark),
