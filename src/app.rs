@@ -2277,13 +2277,6 @@ impl App {
         self.client_configs.peer_sort_column = self.app_state.peer_sort.0;
         self.client_configs.peer_sort_direction = self.app_state.peer_sort.1;
 
-        let old_validation_statuses: HashMap<String, bool> = self
-            .client_configs
-            .torrents
-            .iter()
-            .map(|cfg| (cfg.torrent_or_magnet.clone(), cfg.validation_status))
-            .collect();
-
         self.client_configs.torrents = self
             .app_state
             .torrents
@@ -2291,16 +2284,10 @@ impl App {
             .map(|torrent| {
                 let torrent_state = &torrent.latest_state;
 
-                let is_complete = torrent_state.number_of_pieces_total > 0
-                    && torrent_state.number_of_pieces_total
-                        == torrent_state.number_of_pieces_completed;
-
-                let old_status = old_validation_statuses
-                    .get(&torrent_state.torrent_or_magnet)
-                    .cloned()
-                    .unwrap_or(false);
-
-                let final_validation_status = if is_complete { true } else { old_status };
+                let final_validation_status = persisted_validation_status_from_piece_completion(
+                    torrent_state.number_of_pieces_total,
+                    torrent_state.number_of_pieces_completed,
+                );
 
                 TorrentSettings {
                     torrent_or_magnet: torrent_state.torrent_or_magnet.clone(),
@@ -2906,6 +2893,13 @@ impl App {
     }
 }
 
+fn persisted_validation_status_from_piece_completion(
+    total_pieces: u32,
+    completed_pieces: u32,
+) -> bool {
+    total_pieces > 0 && completed_pieces == total_pieces
+}
+
 fn calculate_thrash_score(history_log: &VecDeque<DiskIoOperation>) -> u64 {
     if history_log.len() < 2 {
         return 0;
@@ -3160,4 +3154,24 @@ pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8
         .and_then(|h| decode_info_hash(h).ok());
 
     (v1, v2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::persisted_validation_status_from_piece_completion;
+
+    #[test]
+    fn persisted_validation_status_is_true_only_when_complete() {
+        assert!(!persisted_validation_status_from_piece_completion(0, 0));
+        assert!(!persisted_validation_status_from_piece_completion(10, 9));
+        assert!(persisted_validation_status_from_piece_completion(10, 10));
+    }
+
+    #[test]
+    fn persisted_validation_status_downgrades_when_incomplete() {
+        assert!(
+            !persisted_validation_status_from_piece_completion(10, 8),
+            "Validation status must not stay true once piece completion regresses"
+        );
+    }
 }

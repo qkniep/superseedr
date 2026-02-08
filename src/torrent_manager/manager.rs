@@ -1200,26 +1200,34 @@ impl TorrentManager {
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
         if skip_hashing {
-            let piece_len = torrent.info.piece_length as u64;
-            let mut completed_pieces = Vec::new();
+            if Self::has_complete_storage_layout(&multi_file_info).await? {
+                let piece_len = torrent.info.piece_length as u64;
+                let mut completed_pieces = Vec::new();
 
-            if piece_len > 0 {
-                if torrent.info.meta_version == Some(2) {
-                    let v2_piece_count = torrent.calculate_v2_mapping().piece_count as u32;
-                    completed_pieces = (0..v2_piece_count).collect();
-                } else {
-                    let num_pieces = multi_file_info.total_size.div_ceil(piece_len) as u32;
-                    completed_pieces = (0..num_pieces).collect();
+                if piece_len > 0 {
+                    if torrent.info.meta_version == Some(2) {
+                        let v2_piece_count = torrent.calculate_v2_mapping().piece_count as u32;
+                        completed_pieces = (0..v2_piece_count).collect();
+                    } else {
+                        let num_pieces = multi_file_info.total_size.div_ceil(piece_len) as u32;
+                        completed_pieces = (0..num_pieces).collect();
+                    }
                 }
+
+                let _ = manager_tx
+                    .send(TorrentCommand::ValidationProgress(
+                        completed_pieces.len() as u32
+                    ))
+                    .await;
+
+                return Ok(completed_pieces);
             }
 
-            let _ = manager_tx
-                .send(TorrentCommand::ValidationProgress(
-                    completed_pieces.len() as u32
-                ))
-                .await;
-
-            return Ok(completed_pieces);
+            tracing::warn!(
+                "Validation: skip_hashing requested but persisted layout is incomplete. Marking as unvalidated."
+            );
+            let _ = manager_tx.send(TorrentCommand::ValidationProgress(0)).await;
+            return Ok(Vec::new());
         }
 
         let is_fresh_download = tokio::select! {
@@ -1440,6 +1448,28 @@ impl TorrentManager {
         }
 
         Ok(completed_pieces)
+    }
+
+    async fn has_complete_storage_layout(
+        multi_file_info: &MultiFileInfo,
+    ) -> Result<bool, StorageError> {
+        for file_info in &multi_file_info.files {
+            if file_info.is_padding {
+                continue;
+            }
+
+            let metadata = match fs::metadata(&file_info.path).await {
+                Ok(metadata) => metadata,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(err) => return Err(StorageError::Io(err)),
+            };
+
+            if !metadata.is_file() || metadata.len() != file_info.length {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 
     async fn write_block_with_retry(
@@ -4484,18 +4514,14 @@ mod resource_tests {
     }
 
     #[tokio::test]
-    async fn test_skip_hashing_true_does_not_require_disk_reads() {
+    async fn test_skip_hashing_true_does_not_mark_complete_when_storage_missing() {
         let (_manager, _torrent_tx, _cmd_tx, shutdown_tx, rm_client) = setup_scale_test_harness();
 
-        let temp_dir = std::env::temp_dir().join("skip_hashing_no_disk_read");
+        let temp_dir = std::env::temp_dir().join("skip_hashing_missing_storage");
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let torrent_name = "payload.bin";
-        let payload_path = temp_dir.join(torrent_name);
-
-        // Deliberately create a directory at the payload path; any disk read would error.
-        std::fs::create_dir_all(&payload_path).unwrap();
 
         let piece_len: i64 = 16 * 1024;
         let total_len: u64 = (piece_len as u64) * 2;
@@ -4531,19 +4557,19 @@ mod resource_tests {
         )
         .await;
 
-        assert!(
-            result.is_ok(),
-            "skip_hashing=true should not block on disk reads"
-        );
+        assert!(result.is_ok(), "Validation should complete without hanging");
 
         let result = result.unwrap();
         assert!(
             result.is_ok(),
-            "skip_hashing=true should bypass disk reads and succeed"
+            "Validation should return a result even when storage is missing"
         );
 
         let completed = result.unwrap();
-        assert_eq!(completed, vec![0, 1]);
+        assert!(
+            completed.is_empty(),
+            "Missing payload must not be treated as fully validated when skip_hashing=true"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -4593,6 +4619,9 @@ mod resource_tests {
             &HashMap::new(),
         )
         .unwrap();
+
+        std::fs::write(temp_dir.join("a.bin"), vec![0xAB; 100]).unwrap();
+        std::fs::write(temp_dir.join("b.bin"), vec![0xCD; 100]).unwrap();
 
         let (event_tx, _event_rx) = mpsc::channel(4);
         let result = TorrentManager::perform_validation(
