@@ -34,7 +34,9 @@ const MAX_BLOCK_SIZE: u32 = 131_072;
 const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
 pub const MAX_PIPELINE_DEPTH: usize = 512;
-const PEER_ADMISSION_CONNECTED_THRESHOLD: usize = 200;
+// Quality gate: once we have this many connected peers, pause admitting new peers
+// to avoid churn storms. This is intentionally independent of resource-manager limits.
+const PEER_ADMISSION_QUALITY_THRESHOLD: usize = 200;
 
 pub type PeerAddr = (String, u16);
 
@@ -2401,11 +2403,11 @@ impl TorrentState {
 
 impl TorrentState {
     fn refresh_peer_admission_guard(&mut self) {
-        let reopen_threshold = (PEER_ADMISSION_CONNECTED_THRESHOLD * 75) / 100;
+        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 75) / 100;
         let connected = self.number_of_successfully_connected_peers;
 
         if self.accepting_new_peers {
-            if connected >= PEER_ADMISSION_CONNECTED_THRESHOLD {
+            if connected >= PEER_ADMISSION_QUALITY_THRESHOLD {
                 self.accepting_new_peers = false;
             }
         } else if connected <= reopen_threshold {
