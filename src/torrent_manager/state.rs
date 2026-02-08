@@ -2589,7 +2589,7 @@ mod tests {
         state.torrent_status = TorrentStatus::Standard;
         state.accepting_new_peers = true;
 
-        for i in 0..200 {
+        for i in 0..PEER_ADMISSION_QUALITY_THRESHOLD {
             add_peer(&mut state, &format!("peer_{}", i));
         }
         state.number_of_successfully_connected_peers = state.peers.len();

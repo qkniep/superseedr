@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::app::torrent_is_effectively_incomplete;
 use crate::app::AppState;
-use crate::app::FilePriority;
 use crate::config::{PeerSortColumn, TorrentSortColumn};
 use ratatui::prelude::*;
 
@@ -165,24 +165,10 @@ pub fn torrent_has_upload_activity(app_state: &AppState) -> bool {
 }
 
 pub fn has_incomplete_torrents(app_state: &AppState) -> bool {
-    app_state.torrents.values().any(|t| {
-        let s = &t.latest_state;
-        if s.activity_message.contains("Seeding") || s.activity_message.contains("Finished") {
-            return false;
-        }
-
-        let skipped_count = s
-            .file_priorities
-            .values()
-            .filter(|&&p| p == FilePriority::Skip)
-            .count() as u32;
-        let effective_total = s.number_of_pieces_total.saturating_sub(skipped_count);
-
-        if effective_total == 0 {
-            return false;
-        }
-        s.number_of_pieces_completed < effective_total
-    })
+    app_state
+        .torrents
+        .values()
+        .any(|t| torrent_is_effectively_incomplete(&t.latest_state))
 }
 
 pub fn active_torrent_column_indices(app_state: &AppState) -> Vec<usize> {

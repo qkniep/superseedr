@@ -2552,6 +2552,30 @@ fn persisted_validation_status_from_piece_completion(
     total_pieces > 0 && completed_pieces == total_pieces
 }
 
+fn activity_marks_torrent_complete(activity_message: &str) -> bool {
+    activity_message.contains("Seeding") || activity_message.contains("Finished")
+}
+
+pub fn torrent_is_effectively_incomplete(metrics: &TorrentMetrics) -> bool {
+    if activity_marks_torrent_complete(&metrics.activity_message) {
+        return false;
+    }
+    metrics.number_of_pieces_total > 0
+        && metrics.number_of_pieces_completed < metrics.number_of_pieces_total
+}
+
+pub fn torrent_completion_percent(metrics: &TorrentMetrics) -> f64 {
+    if activity_marks_torrent_complete(&metrics.activity_message) {
+        return 100.0;
+    }
+    if metrics.number_of_pieces_total == 0 {
+        return 0.0;
+    }
+
+    ((metrics.number_of_pieces_completed as f64 / metrics.number_of_pieces_total as f64) * 100.0)
+        .min(100.0)
+}
+
 fn calculate_adaptive_limits(client_configs: &Settings) -> (CalculatedLimits, Option<String>) {
     let effective_limit;
     let mut system_warning = None;
@@ -2752,7 +2776,11 @@ pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8
 
 #[cfg(test)]
 mod tests {
-    use super::{persisted_validation_status_from_piece_completion, App, AppMode};
+    use super::{
+        persisted_validation_status_from_piece_completion, torrent_completion_percent,
+        torrent_is_effectively_incomplete, App, AppMode, FilePriority, TorrentMetrics,
+    };
+    use std::collections::HashMap;
 
     #[test]
     fn persisted_validation_status_is_true_only_when_complete() {
@@ -2799,5 +2827,31 @@ mod tests {
     fn should_only_draw_dirty_in_power_saving_mode() {
         assert!(!App::should_draw_this_frame(&AppMode::PowerSaving, false));
         assert!(App::should_draw_this_frame(&AppMode::PowerSaving, true));
+    }
+
+    #[test]
+    fn completion_helper_marks_seeding_complete() {
+        let mut metrics = TorrentMetrics {
+            number_of_pieces_total: 100,
+            number_of_pieces_completed: 0,
+            ..Default::default()
+        };
+        metrics.activity_message = "Seeding".to_string();
+
+        assert!(!torrent_is_effectively_incomplete(&metrics));
+        assert_eq!(torrent_completion_percent(&metrics), 100.0);
+    }
+
+    #[test]
+    fn completion_helper_uses_piece_progress_without_skip_piece_guessing() {
+        let metrics = TorrentMetrics {
+            number_of_pieces_total: 8,
+            number_of_pieces_completed: 2,
+            file_priorities: HashMap::from([(0, FilePriority::Skip)]),
+            ..Default::default()
+        };
+
+        assert!(torrent_is_effectively_incomplete(&metrics));
+        assert_eq!(torrent_completion_percent(&metrics), 25.0);
     }
 }

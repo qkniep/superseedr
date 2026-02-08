@@ -11,6 +11,7 @@ use crate::tui::layout::{get_torrent_columns, ColumnId};
 use crate::tui::tree;
 use crate::tui::tree::{TreeFilter, TreeMathHelper};
 
+use crate::app::torrent_completion_percent;
 use crate::app::FileBrowserMode;
 use crate::app::FileMetadata;
 use crate::app::GraphDisplayMode;
@@ -409,33 +410,7 @@ fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &Them
                             let def = &all_cols[real_idx];
                             match def.id {
                                 ColumnId::Status => {
-                                    let total = state.number_of_pieces_total;
-                                    let skipped_count = state
-                                        .file_priorities
-                                        .values()
-                                        .filter(|&&p| p == FilePriority::Skip)
-                                        .count()
-                                        as u32;
-                                    let effective_total = total.saturating_sub(skipped_count);
-
-                                    let display_pct = if state.number_of_pieces_total > 0
-                                        && effective_total > 0
-                                    {
-                                        let completed = state.number_of_pieces_completed;
-                                        if torrent.latest_state.activity_message.contains("Seeding")
-                                            || torrent
-                                                .latest_state
-                                                .activity_message
-                                                .contains("Finished")
-                                        {
-                                            100.0
-                                        } else {
-                                            ((completed as f64 / effective_total as f64) * 100.0)
-                                                .min(100.0)
-                                        }
-                                    } else {
-                                        0.0
-                                    };
+                                    let display_pct = torrent_completion_percent(state);
                                     Cell::from(format!("{:.1}%", display_pct))
                                 }
                                 ColumnId::Name => {
