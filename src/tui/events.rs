@@ -196,7 +196,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         KeyCode::Char('T') => {
                             app.app_state.graph_mode = app.app_state.graph_mode.prev();
                         }
-                        KeyCode::Char('[') => {
+                        KeyCode::Char('[') | KeyCode::Char('{') => {
                             app.app_state.data_rate = app.app_state.data_rate.next_slower();
                             let new_rate = app.app_state.data_rate.as_ms();
 
@@ -204,7 +204,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 let _ = manager_tx.try_send(ManagerCommand::SetDataRate(new_rate));
                             }
                         }
-                        KeyCode::Char(']') => {
+                        KeyCode::Char(']') | KeyCode::Char('}') => {
                             app.app_state.data_rate = app.app_state.data_rate.next_faster();
                             let new_rate = app.app_state.data_rate.as_ms();
 
