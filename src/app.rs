@@ -562,6 +562,9 @@ pub struct AppState {
     pub ui_needs_redraw: bool,
     pub data_rate: DataRate,
     pub theme: Theme,
+    pub effects_phase_time: f64,
+    pub effects_last_wall_time: f64,
+    pub effects_speed_multiplier: f64,
 
     pub selected_header: SelectedHeader,
     pub torrent_sort: (TorrentSortColumn, SortDirection),
@@ -856,7 +859,7 @@ impl App {
 
                     if self.app_state.ui_needs_redraw || force_animation {
                         terminal.draw(|f| {
-                            draw(f, &self.app_state, &self.client_configs);
+                            draw(f, &mut self.app_state, &self.client_configs);
                         })?;
                         self.app_state.ui_needs_redraw = false;
                     }
@@ -976,7 +979,7 @@ impl App {
             self.app_state.shutdown_progress =
                 managers_shut_down as f64 / total_managers_to_shut_down as f64;
             let _ = terminal.draw(|f| {
-                draw(f, &self.app_state, &self.client_configs);
+                draw(f, &mut self.app_state, &self.client_configs);
             });
 
             tokio::select! {

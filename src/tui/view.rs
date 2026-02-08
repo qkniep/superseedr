@@ -65,15 +65,24 @@ const LOGO_SMALL: &str = r#"
  \/___/  \/___/ 
 "#;
 
-pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
+pub fn draw(f: &mut Frame, app_state: &mut AppState, settings: &Settings) {
     let area = f.area();
 
     // Calculate frame time once per render cycle for all theme effects
-    let frame_time = SystemTime::now()
+    let wall_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
-    let ctx = ThemeContext::new(app_state.theme, frame_time);
+    let activity_speed_multiplier = compute_effects_activity_speed_multiplier(app_state, settings);
+    if app_state.effects_last_wall_time <= 0.0 {
+        app_state.effects_last_wall_time = wall_time;
+    }
+    let dt = (wall_time - app_state.effects_last_wall_time).clamp(0.0, 0.25);
+    app_state.effects_last_wall_time = wall_time;
+    app_state.effects_speed_multiplier = activity_speed_multiplier;
+    app_state.effects_phase_time += dt * activity_speed_multiplier;
+
+    let ctx = ThemeContext::new(app_state.theme, app_state.effects_phase_time);
 
     if app_state.show_help {
         draw_help_popup(f, app_state, &ctx);
@@ -163,6 +172,31 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
     }
 
     apply_theme_effects_to_frame(f, &ctx);
+}
+
+fn compute_effects_activity_speed_multiplier(app_state: &AppState, settings: &Settings) -> f64 {
+    let dl_bps = app_state.avg_download_history.last().copied().unwrap_or(0) as f64;
+    let ul_bps = app_state.avg_upload_history.last().copied().unwrap_or(0) as f64;
+
+    let dl_ref = if settings.global_download_limit_bps > 0 {
+        settings.global_download_limit_bps as f64
+    } else {
+        4_000_000.0
+    };
+    let ul_ref = if settings.global_upload_limit_bps > 0 {
+        settings.global_upload_limit_bps as f64
+    } else {
+        1_000_000.0
+    };
+
+    let dl_activity = (dl_bps / dl_ref).clamp(0.0, 1.0);
+    let ul_activity = (ul_bps / ul_ref).clamp(0.0, 1.0);
+
+    let activity_score = (dl_activity * 0.60) + (ul_activity * 0.40);
+
+    // Keep default behavior at idle, then smoothly speed up effects during activity.
+    // Range: 1.0x..3.0x based on UL/DL activity.
+    1.0 + (activity_score * 2.0)
 }
 
 fn apply_theme_effects_to_frame(f: &mut Frame, ctx: &ThemeContext) {
@@ -1545,7 +1579,7 @@ fn draw_footer(
             ),
             Span::raw("ime | "),
             Span::styled(
-                "[<] theme [>]",
+                "[<]theme[>]",
                 ctx.apply(Style::default().fg(ctx.state_selected())),
             ),
             Span::raw(" | "),
