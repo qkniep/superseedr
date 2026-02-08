@@ -488,6 +488,28 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_ui_theme_type_does_not_fail_settings_parse() {
+        let toml_str = r#"
+            client_id = "theme-type-regression"
+            client_port = 7777
+            ui_theme = 123
+        "#;
+
+        let settings: Settings = Figment::new()
+            .merge(Toml::string(toml_str))
+            .extract()
+            .expect("Settings parsing should not fail for non-string ui_theme");
+
+        assert_eq!(settings.client_id, "theme-type-regression");
+        assert_eq!(settings.client_port, 7777);
+        assert_eq!(
+            settings.ui_theme,
+            ThemeName::default(),
+            "Invalid ui_theme type should safely fallback to default"
+        );
+    }
+
+    #[test]
     fn test_invalid_torrent_state_parsing() {
         let toml_str = r#"
             [[torrents]]

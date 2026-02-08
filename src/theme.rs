@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use ratatui::style::{Color, Style};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::de::{self, Deserializer, Visitor};
+use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 
 use strum_macros::{Display, EnumIter};
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display)]
 pub enum ThemeName {
@@ -161,51 +163,208 @@ impl<'de> Deserialize<'de> for ThemeName {
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "andromeda" | "Andromeda" => Ok(ThemeName::Andromeda),
-            "aurora" | "Aurora" => Ok(ThemeName::Aurora),
-            "ayu_dark" | "Ayu Dark" => Ok(ThemeName::AyuDark),
-            "bubblegum" | "Bubblegum" => Ok(ThemeName::Bubblegum),
-            "catppuccin_latte" | "Catppuccin Latte" => Ok(ThemeName::CatppuccinLatte),
-            "catppuccin_mocha" | "Catppuccin Mocha" => Ok(ThemeName::CatppuccinMocha),
-            "cyberpunk" | "Cyberpunk" => Ok(ThemeName::Cyberpunk),
-            "deep_ocean" | "Deep Ocean" => Ok(ThemeName::DeepOcean),
-            "deep_sky" | "Deep Sky" => Ok(ThemeName::DeepSky),
-            "diamond" | "Diamond" => Ok(ThemeName::Diamond),
-            "gold" | "Gold" => Ok(ThemeName::Gold),
-            "dracula" | "Dracula" => Ok(ThemeName::Dracula),
-            "everforest_dark" | "Everforest Dark" => Ok(ThemeName::EverforestDark),
-            "github_dark" | "GitHub Dark" => Ok(ThemeName::GitHubDark),
-            "github_light" | "GitHub Light" => Ok(ThemeName::GitHubLight),
-            "gruvbox_dark" | "Gruvbox Dark" => Ok(ThemeName::GruvboxDark),
-            "gruvbox_light" | "Gruvbox Light" => Ok(ThemeName::GruvboxLight),
-            "inferno" | "Inferno" => Ok(ThemeName::Inferno),
-            "kanagawa" | "Kanagawa" => Ok(ThemeName::Kanagawa),
-            "material_ocean" | "Material Ocean" => Ok(ThemeName::MaterialOcean),
-            "matrix" | "Matrix" => Ok(ThemeName::Matrix),
-            "monokai" | "Monokai" => Ok(ThemeName::Monokai),
-            "neon" | "Neon" => Ok(ThemeName::Neon),
-            "nightfox" | "Nightfox" => Ok(ThemeName::Nightfox),
-            "nord" | "Nord" => Ok(ThemeName::Nord),
-            "one_dark" | "One Dark" => Ok(ThemeName::OneDark),
-            "obsidian_forge" | "Obsidian Forge" => Ok(ThemeName::ObsidianForge),
-            "oxocarbon" | "Oxocarbon" => Ok(ThemeName::Oxocarbon),
-            "arctic_whiteout" | "Arctic Whiteout" => Ok(ThemeName::ArcticWhiteout),
-            "papercolor_light" | "PaperColor Light" => Ok(ThemeName::PaperColorLight),
-            "black_hole" | "Black Hole" => Ok(ThemeName::BlackHole),
-            "bioluminescent_reef" | "Bioluminescent Reef" => Ok(ThemeName::BioluminescentReef),
-            "rainbow" | "Rainbow" => Ok(ThemeName::Rainbow),
-            "rose_pine" | "Rose Pine" => Ok(ThemeName::RosePine),
-            "solarized_dark" | "Solarized Dark" => Ok(ThemeName::SolarizedDark),
-            "solarized_light" | "Solarized Light" => Ok(ThemeName::SolarizedLight),
-            "synthwave_84" | "Synthwave '84" => Ok(ThemeName::Synthwave84),
-            "tokyo_night" | "Tokyo Night" => Ok(ThemeName::TokyoNight),
-            "vesper" | "Vesper" => Ok(ThemeName::Vesper),
-            "zenburn" | "Zenburn" => Ok(ThemeName::Zenburn),
-            _ => Ok(ThemeName::CatppuccinMocha),
+        struct ThemeNameVisitor;
+
+        impl<'de> Visitor<'de> for ThemeNameVisitor {
+            type Value = ThemeName;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a theme name string")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(parse_theme_name(v))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(parse_theme_name(&v))
+            }
+
+            fn visit_bool<E>(self, _v: bool) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ThemeName::default())
+            }
+
+            fn visit_i64<E>(self, _v: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ThemeName::default())
+            }
+
+            fn visit_u64<E>(self, _v: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ThemeName::default())
+            }
+
+            fn visit_f64<E>(self, _v: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ThemeName::default())
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ThemeName::default())
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ThemeName::default())
+            }
+
+            fn visit_seq<A>(self, _seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                Ok(ThemeName::default())
+            }
+
+            fn visit_map<A>(self, _map: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::MapAccess<'de>,
+            {
+                Ok(ThemeName::default())
+            }
+
+            fn visit_some<D2>(self, deserializer: D2) -> Result<Self::Value, D2::Error>
+            where
+                D2: Deserializer<'de>,
+            {
+                deserializer.deserialize_any(ThemeNameVisitor)
+            }
+        }
+
+        deserializer.deserialize_any(ThemeNameVisitor)
+    }
+}
+
+enum ThemeResolution {
+    Supported(ThemeName),
+    Deprecated {
+        replacement: ThemeName,
+        deprecated_alias: &'static str,
+    },
+    Unknown,
+}
+
+fn parse_theme_name(raw: &str) -> ThemeName {
+    match resolve_theme_name(raw) {
+        ThemeResolution::Supported(theme) => theme,
+        ThemeResolution::Deprecated {
+            replacement,
+            deprecated_alias,
+        } => {
+            warn!(
+                "Theme '{}' is deprecated; using '{}'.",
+                deprecated_alias, replacement
+            );
+            replacement
+        }
+        ThemeResolution::Unknown => {
+            warn!(
+                "Unknown theme '{}'; falling back to '{}'.",
+                raw,
+                ThemeName::default()
+            );
+            ThemeName::default()
         }
     }
+}
+
+fn resolve_theme_name(raw: &str) -> ThemeResolution {
+    let normalized = normalize_theme_name_key(raw);
+    if normalized.is_empty() {
+        return ThemeResolution::Unknown;
+    }
+
+    let supported = match normalized.as_str() {
+        "andromeda" => Some(ThemeName::Andromeda),
+        "aurora" => Some(ThemeName::Aurora),
+        "ayu_dark" => Some(ThemeName::AyuDark),
+        "bubblegum" => Some(ThemeName::Bubblegum),
+        "catppuccin_latte" => Some(ThemeName::CatppuccinLatte),
+        "catppuccin_mocha" => Some(ThemeName::CatppuccinMocha),
+        "cyberpunk" => Some(ThemeName::Cyberpunk),
+        "deep_ocean" => Some(ThemeName::DeepOcean),
+        "deep_sky" => Some(ThemeName::DeepSky),
+        "diamond" => Some(ThemeName::Diamond),
+        "gold" => Some(ThemeName::Gold),
+        "dracula" => Some(ThemeName::Dracula),
+        "everforest_dark" => Some(ThemeName::EverforestDark),
+        "github_dark" => Some(ThemeName::GitHubDark),
+        "github_light" => Some(ThemeName::GitHubLight),
+        "gruvbox_dark" => Some(ThemeName::GruvboxDark),
+        "gruvbox_light" => Some(ThemeName::GruvboxLight),
+        "inferno" => Some(ThemeName::Inferno),
+        "kanagawa" => Some(ThemeName::Kanagawa),
+        "material_ocean" => Some(ThemeName::MaterialOcean),
+        "matrix" => Some(ThemeName::Matrix),
+        "monokai" => Some(ThemeName::Monokai),
+        "neon" => Some(ThemeName::Neon),
+        "nightfox" => Some(ThemeName::Nightfox),
+        "nord" => Some(ThemeName::Nord),
+        "one_dark" => Some(ThemeName::OneDark),
+        "obsidian_forge" => Some(ThemeName::ObsidianForge),
+        "oxocarbon" => Some(ThemeName::Oxocarbon),
+        "arctic_whiteout" => Some(ThemeName::ArcticWhiteout),
+        "papercolor_light" => Some(ThemeName::PaperColorLight),
+        "black_hole" => Some(ThemeName::BlackHole),
+        "bioluminescent_reef" => Some(ThemeName::BioluminescentReef),
+        "rainbow" => Some(ThemeName::Rainbow),
+        "rose_pine" => Some(ThemeName::RosePine),
+        "solarized_dark" => Some(ThemeName::SolarizedDark),
+        "solarized_light" => Some(ThemeName::SolarizedLight),
+        "synthwave_84" => Some(ThemeName::Synthwave84),
+        "tokyo_night" => Some(ThemeName::TokyoNight),
+        "vesper" => Some(ThemeName::Vesper),
+        "zenburn" => Some(ThemeName::Zenburn),
+        _ => None,
+    };
+
+    if let Some(theme) = supported {
+        return ThemeResolution::Supported(theme);
+    }
+
+    let deprecated = match normalized.as_str() {
+        "catppuccin" => Some(("catppuccin", ThemeName::CatppuccinMocha)),
+        "synthwave84" => Some(("synthwave84", ThemeName::Synthwave84)),
+        "tokyonight" => Some(("tokyonight", ThemeName::TokyoNight)),
+        _ => None,
+    };
+
+    if let Some((alias, replacement)) = deprecated {
+        return ThemeResolution::Deprecated {
+            replacement,
+            deprecated_alias: alias,
+        };
+    }
+
+    ThemeResolution::Unknown
+}
+
+fn normalize_theme_name_key(input: &str) -> String {
+    input
+        .trim()
+        .to_lowercase()
+        .replace('\'', "")
+        .replace('-', "_")
+        .replace(' ', "_")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3441,6 +3600,52 @@ mod tests {
                 "Unknown theme '{}' should default to CatppuccinMocha",
                 input
             );
+        }
+    }
+
+    #[test]
+    fn test_deprecated_theme_aliases_map_to_replacements() {
+        let aliases = vec![
+            ("catppuccin", ThemeName::CatppuccinMocha),
+            ("synthwave84", ThemeName::Synthwave84),
+            ("tokyonight", ThemeName::TokyoNight),
+        ];
+
+        for (input, expected) in aliases {
+            let deserialized: ThemeName = serde_json::from_str(&format!("\"{}\"", input)).unwrap();
+            assert_eq!(
+                deserialized, expected,
+                "Deprecated alias '{}' mismatch",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_theme_deserialize_non_string_types_fallback_to_default() {
+        let invalid_types = vec!["123", "true", "null", "[]", "{}"];
+        for input in invalid_types {
+            let deserialized: ThemeName = serde_json::from_str(input).unwrap();
+            assert_eq!(
+                deserialized,
+                ThemeName::CatppuccinMocha,
+                "Non-string value '{}' should fallback to default",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_theme_name_normalization_accepts_case_and_delimiter_variants() {
+        let variants = vec![
+            ("TOKYO-NIGHT", ThemeName::TokyoNight),
+            ("  synthwave '84  ", ThemeName::Synthwave84),
+            ("GitHub_Dark", ThemeName::GitHubDark),
+        ];
+
+        for (input, expected) in variants {
+            let deserialized: ThemeName = serde_json::from_str(&format!("\"{}\"", input)).unwrap();
+            assert_eq!(deserialized, expected, "Variant '{}' mismatch", input);
         }
     }
 
