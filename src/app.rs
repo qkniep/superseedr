@@ -45,6 +45,7 @@ use tokio::io::AsyncReadExt;
 use tokio::signal;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::watch;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -448,6 +449,8 @@ pub struct TorrentMetrics {
     pub upload_speed_bps: u64,
     pub bytes_downloaded_this_tick: u64,
     pub bytes_uploaded_this_tick: u64,
+    pub session_total_downloaded: u64,
+    pub session_total_uploaded: u64,
     pub eta: Duration,
 
     #[serde(skip)]
@@ -493,6 +496,8 @@ pub struct TorrentDisplayState {
     pub peer_discovery_history: Vec<u64>,
     pub peer_connection_history: Vec<u64>,
     pub peer_disconnect_history: Vec<u64>,
+    pub last_seen_session_total_downloaded: u64,
+    pub last_seen_session_total_uploaded: u64,
 }
 
 #[derive(Default)]
@@ -605,8 +610,7 @@ pub struct App {
     pub global_dl_bucket: Arc<TokenBucket>,
     pub global_ul_bucket: Arc<TokenBucket>,
 
-    pub torrent_tx: broadcast::Sender<TorrentMetrics>,
-    pub torrent_rx: broadcast::Receiver<TorrentMetrics>,
+    pub torrent_metric_watch_rxs: HashMap<Vec<u8>, watch::Receiver<TorrentMetrics>>,
     pub manager_event_tx: mpsc::Sender<ManagerEvent>,
     pub manager_event_rx: mpsc::Receiver<ManagerEvent>,
     pub app_command_tx: mpsc::Sender<AppCommand>,
@@ -627,7 +631,6 @@ impl App {
         let (manager_event_tx, manager_event_rx) = mpsc::channel::<ManagerEvent>(1000);
         let (app_command_tx, app_command_rx) = mpsc::channel::<AppCommand>(10);
         let (tui_event_tx, tui_event_rx) = mpsc::channel::<CrosstermEvent>(100);
-        let (torrent_tx, torrent_rx) = broadcast::channel::<TorrentMetrics>(100);
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let (limits, system_warning) = calculate_adaptive_limits(&client_configs);
@@ -718,8 +721,7 @@ impl App {
             resource_manager: resource_manager_client,
             global_dl_bucket,
             global_ul_bucket,
-            torrent_tx,
-            torrent_rx,
+            torrent_metric_watch_rxs: HashMap::new(),
             manager_event_tx,
             manager_event_rx,
             app_command_tx,
@@ -818,11 +820,6 @@ impl App {
                     self.app_state.ui_needs_redraw = true;
                 }
 
-                result = self.torrent_rx.recv() => {
-                    self.update_torrent_state(result);
-                    self.app_state.ui_needs_redraw = true;
-                }
-
                 Some(command) = self.app_command_rx.recv() => {
                     self.handle_app_command(command).await;
                 },
@@ -852,6 +849,7 @@ impl App {
 
                 _ = time::sleep_until(next_draw_time.into()) => {
                     next_draw_time = Instant::now() + current_target_framerate;
+                    self.drain_latest_torrent_metrics();
                     if Self::should_draw_this_frame(&self.app_state.mode, self.app_state.ui_needs_redraw) {
                         terminal.draw(|f| {
                             draw(f, &mut self.app_state, &self.client_configs);
@@ -1555,6 +1553,7 @@ impl App {
                 self.app_state.torrents.remove(&info_hash);
                 self.torrent_manager_command_txs.remove(&info_hash);
                 self.torrent_manager_incoming_peer_txs.remove(&info_hash);
+                self.torrent_metric_watch_rxs.remove(&info_hash);
                 self.app_state
                     .torrent_list_order
                     .retain(|ih| *ih != info_hash);
@@ -1797,19 +1796,31 @@ impl App {
         UiTelemetry::on_second_tick(&mut self.app_state, sys);
     }
 
-    fn update_torrent_state(
-        &mut self,
-        result: Result<TorrentMetrics, broadcast::error::RecvError>,
-    ) {
-        match result {
-            Ok(message) => {
-                UiTelemetry::on_metrics(&mut self.app_state, message);
-                self.sort_and_filter_torrent_list();
+    fn drain_latest_torrent_metrics(&mut self) {
+        let mut changed = false;
+        let mut closed_info_hashes = Vec::new();
+
+        for (info_hash, rx) in self.torrent_metric_watch_rxs.iter_mut() {
+            match rx.has_changed() {
+                Ok(false) => {}
+                Ok(true) => {
+                    let message = rx.borrow_and_update().clone();
+                    UiTelemetry::on_metrics(&mut self.app_state, message);
+                    changed = true;
+                }
+                Err(_) => {
+                    closed_info_hashes.push(info_hash.clone());
+                }
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing_event!(Level::DEBUG, "TUI metrics lagged, skipped {} updates", n);
-            }
-            Err(broadcast::error::RecvError::Closed) => {}
+        }
+
+        for info_hash in closed_info_hashes {
+            self.torrent_metric_watch_rxs.remove(&info_hash);
+        }
+
+        if changed {
+            self.sort_and_filter_torrent_list();
+            self.app_state.ui_needs_redraw = true;
         }
     }
 
@@ -2253,7 +2264,9 @@ impl App {
         self.torrent_manager_command_txs
             .insert(info_hash.clone(), manager_command_tx);
 
-        let torrent_tx_clone = self.torrent_tx.clone();
+        let (torrent_metrics_tx, torrent_metrics_rx) = watch::channel(TorrentMetrics::default());
+        self.torrent_metric_watch_rxs
+            .insert(info_hash.clone(), torrent_metrics_rx);
         let manager_event_tx_clone = self.manager_event_tx.clone();
         let resource_manager_clone = self.resource_manager.clone();
         let global_dl_bucket_clone = self.global_dl_bucket.clone();
@@ -2267,7 +2280,7 @@ impl App {
         let torrent_params = TorrentParameters {
             dht_handle: dht_clone,
             incoming_peer_rx,
-            metrics_tx: torrent_tx_clone,
+            metrics_tx: torrent_metrics_tx,
             torrent_validation_status: is_validated,
             torrent_data_path: download_path,
             container_name: container_name.clone(),
@@ -2298,6 +2311,7 @@ impl App {
                 self.app_state
                     .torrent_list_order
                     .retain(|ih| *ih != info_hash);
+                self.torrent_metric_watch_rxs.remove(&info_hash);
             }
         }
     }
@@ -2371,7 +2385,9 @@ impl App {
             .insert(info_hash.clone(), manager_command_tx);
 
         let dht_clone = self.distributed_hash_table.clone();
-        let torrent_tx_clone = self.torrent_tx.clone();
+        let (torrent_metrics_tx, torrent_metrics_rx) = watch::channel(TorrentMetrics::default());
+        self.torrent_metric_watch_rxs
+            .insert(info_hash.clone(), torrent_metrics_rx);
         let manager_event_tx_clone = self.manager_event_tx.clone();
         let resource_manager_clone = self.resource_manager.clone();
         let global_dl_bucket_clone = self.global_dl_bucket.clone();
@@ -2379,7 +2395,7 @@ impl App {
         let torrent_params = TorrentParameters {
             dht_handle: dht_clone,
             incoming_peer_rx,
-            metrics_tx: torrent_tx_clone,
+            metrics_tx: torrent_metrics_tx,
             torrent_validation_status: is_validated,
             torrent_data_path: download_path.clone(),
             container_name: container_name.clone(),
@@ -2410,6 +2426,7 @@ impl App {
                 self.app_state
                     .torrent_list_order
                     .retain(|ih| *ih != info_hash);
+                self.torrent_metric_watch_rxs.remove(&info_hash);
             }
         }
     }

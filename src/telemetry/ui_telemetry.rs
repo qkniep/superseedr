@@ -127,10 +127,17 @@ impl UiTelemetry {
     }
 
     pub fn on_metrics(app_state: &mut AppState, message: TorrentMetrics) {
-        app_state.session_total_downloaded += message.bytes_downloaded_this_tick;
-        app_state.session_total_uploaded += message.bytes_uploaded_this_tick;
-
         let display_state = app_state.torrents.entry(message.info_hash).or_default();
+        let downloaded_delta = message
+            .session_total_downloaded
+            .saturating_sub(display_state.last_seen_session_total_downloaded);
+        let uploaded_delta = message
+            .session_total_uploaded
+            .saturating_sub(display_state.last_seen_session_total_uploaded);
+        app_state.session_total_downloaded += downloaded_delta;
+        app_state.session_total_uploaded += uploaded_delta;
+        display_state.last_seen_session_total_downloaded = message.session_total_downloaded;
+        display_state.last_seen_session_total_uploaded = message.session_total_uploaded;
 
         display_state
             .latest_state
@@ -140,6 +147,8 @@ impl UiTelemetry {
         display_state.latest_state.number_of_pieces_completed = message.number_of_pieces_completed;
         display_state.latest_state.download_speed_bps = message.download_speed_bps;
         display_state.latest_state.upload_speed_bps = message.upload_speed_bps;
+        display_state.latest_state.session_total_downloaded = message.session_total_downloaded;
+        display_state.latest_state.session_total_uploaded = message.session_total_uploaded;
         display_state.latest_state.eta = message.eta;
         display_state.latest_state.next_announce_in = message.next_announce_in;
 
@@ -492,8 +501,8 @@ mod tests {
             number_of_pieces_completed: 3,
             download_speed_bps: 512,
             upload_speed_bps: 128,
-            bytes_downloaded_this_tick: 64,
-            bytes_uploaded_this_tick: 16,
+            session_total_downloaded: 64,
+            session_total_uploaded: 16,
             activity_message: "Downloading".to_string(),
             ..Default::default()
         };
@@ -592,11 +601,13 @@ mod tests {
         // Nonzero byte ticks must emit even if all other fields are unchanged.
         let mut tick_a = base.clone();
         tick_a.bytes_downloaded_this_tick = 64;
+        tick_a.session_total_downloaded = 64;
         assert!(manager_telemetry.should_emit(&tick_a));
         UiTelemetry::on_metrics(&mut app_state, tick_a);
 
         let mut tick_b = base.clone();
         tick_b.bytes_downloaded_this_tick = 64;
+        tick_b.session_total_downloaded = 128;
         assert!(manager_telemetry.should_emit(&tick_b));
         UiTelemetry::on_metrics(&mut app_state, tick_b);
 

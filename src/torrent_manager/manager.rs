@@ -78,13 +78,11 @@ use tokio::signal;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::watch;
 
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
-
-#[cfg(feature = "dht")]
-use tokio::sync::watch;
 
 #[cfg(feature = "dht")]
 use tokio_stream::StreamExt;
@@ -119,7 +117,7 @@ pub struct TorrentManager {
     #[allow(dead_code)]
     dht_tx: Sender<()>,
 
-    metrics_tx: broadcast::Sender<TorrentMetrics>,
+    metrics_tx: watch::Sender<TorrentMetrics>,
     manager_event_tx: Sender<ManagerEvent>,
     shutdown_tx: broadcast::Sender<()>,
 
@@ -1987,7 +1985,6 @@ impl TorrentManager {
             let activity_message =
                 self.generate_activity_message(smoothed_total_dl_speed, smoothed_total_ul_speed);
 
-            let metrics_tx_clone = self.metrics_tx.clone();
             let info_hash_clone = self.state.info_hash.clone();
             let torrent_name_clone = torrent.info.name.clone();
             let number_of_pieces_total = self.state.piece_manager.bitfield.len() as u32;
@@ -2087,6 +2084,8 @@ impl TorrentManager {
                 upload_speed_bps: smoothed_total_ul_speed,
                 bytes_downloaded_this_tick,
                 bytes_uploaded_this_tick,
+                session_total_downloaded: self.state.session_total_downloaded,
+                session_total_uploaded: self.state.session_total_uploaded,
                 eta,
                 peers: peers_info,
                 activity_message,
@@ -2097,11 +2096,7 @@ impl TorrentManager {
                 ..Default::default()
             };
             if self.telemetry.should_emit(&torrent_state) {
-                tokio::spawn(async move {
-                    if let Err(e) = metrics_tx_clone.send(torrent_state) {
-                        tracing::event!(Level::ERROR, "Failed to send metrics to TUI: {}", e);
-                    }
-                });
+                let _ = self.metrics_tx.send(torrent_state);
             }
         }
     }
@@ -2586,9 +2581,14 @@ impl TorrentManager {
                                 );
                             }
 
-                            let _ = self.manager_event_tx.try_send(ManagerEvent::MetadataLoaded {
-                                info_hash: calculated_hash,
-                                torrent: Box::new(torrent),
+                            let manager_event_tx = self.manager_event_tx.clone();
+                            tokio::spawn(async move {
+                                let _ = manager_event_tx
+                                    .send(ManagerEvent::MetadataLoaded {
+                                        info_hash: calculated_hash,
+                                        torrent: Box::new(torrent),
+                                    })
+                                    .await;
                             });
                         },
 
@@ -2652,13 +2652,13 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::{broadcast, mpsc, watch};
 
     #[tokio::test]
     async fn test_manager_event_loop_throughput() {
         let (_incoming_peer_tx, incoming_peer_rx) = mpsc::channel(1000);
         let (manager_command_tx, manager_command_rx) = mpsc::channel(1000);
-        let (metrics_tx, _) = broadcast::channel(1000);
+        let (metrics_tx, _) = watch::channel(TorrentMetrics::default());
         let (manager_event_tx, _manager_event_rx) = mpsc::channel(1000);
         let (shutdown_tx, _) = broadcast::channel(1);
         let settings = Arc::new(Settings::default());
@@ -2835,7 +2835,7 @@ mod resource_tests {
         let (_incoming_tx, _incoming_rx) = mpsc::channel(100); // Fixed warning: unused variable
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
         let (event_tx, _event_rx) = mpsc::channel(100);
-        let (metrics_tx, _) = broadcast::channel(100);
+        let (metrics_tx, _) = watch::channel(TorrentMetrics::default());
         let (shutdown_tx, _) = broadcast::channel(1);
         let settings = Arc::new(Settings::default());
 
@@ -3069,7 +3069,7 @@ mod resource_tests {
         let (event_tx, mut event_rx) = mpsc::channel(100);
         tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
 
-        let (metrics_tx, mut metrics_rx) = broadcast::channel(100);
+        let (metrics_tx, mut metrics_rx) = watch::channel(TorrentMetrics::default());
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let settings_val = Settings {
@@ -3270,7 +3270,8 @@ mod resource_tests {
 
         let check_loop = async {
             loop {
-                if let Ok(m) = metrics_rx.recv().await {
+                if metrics_rx.changed().await.is_ok() {
+                    let m = metrics_rx.borrow_and_update().clone();
                     // Check if we finished the 1 piece
                     if m.number_of_pieces_completed >= 1 {
                         break;
@@ -3313,7 +3314,7 @@ mod resource_tests {
         let (event_tx, mut event_rx) = mpsc::channel(100);
         tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
 
-        let (metrics_tx, mut metrics_rx) = broadcast::channel(100);
+        let (metrics_tx, mut metrics_rx) = watch::channel(TorrentMetrics::default());
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let settings_val = Settings {
@@ -3524,8 +3525,9 @@ mod resource_tests {
             let mut accumulated_download: u64 = 0;
 
             loop {
-                match timeout(Duration::from_secs(1), metrics_rx.recv()).await {
-                    Ok(Ok(m)) => {
+                match timeout(Duration::from_secs(1), metrics_rx.changed()).await {
+                    Ok(Ok(())) => {
+                        let m = metrics_rx.borrow_and_update().clone();
                         accumulated_download += m.bytes_downloaded_this_tick;
 
                         // Print status occasionally
@@ -3942,7 +3944,7 @@ mod resource_tests {
         let (_incoming_tx, _incoming_rx) = mpsc::channel(100);
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
         let (event_tx, mut event_rx) = mpsc::channel(100);
-        let (metrics_tx, _) = broadcast::channel(100);
+        let (metrics_tx, _) = watch::channel(TorrentMetrics::default());
         let (shutdown_tx, _) = broadcast::channel(1);
         let settings = Arc::new(Settings::default());
 

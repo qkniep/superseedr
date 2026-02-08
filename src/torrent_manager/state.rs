@@ -8685,12 +8685,12 @@ mod integration_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::{broadcast, mpsc, watch};
     // Correct Import for the client struct
     use crate::resource_manager::{ResourceManager, ResourceManagerClient};
     use crate::token_bucket::TokenBucket;
     use crate::torrent_file::Torrent;
-    use crate::torrent_manager::{ManagerCommand, TorrentManager, TorrentParameters};
+    use crate::torrent_manager::{ManagerCommand, TorrentManager, TorrentMetrics, TorrentParameters};
 
     fn create_manager_harness(
         name: &str,
@@ -8709,7 +8709,7 @@ mod integration_tests {
         let (event_tx, mut event_rx) = mpsc::channel(500);
         tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
 
-        let (metrics_tx, _) = broadcast::channel(100);
+        let (metrics_tx, _) = watch::channel(TorrentMetrics::default());
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let settings_val = Settings {
