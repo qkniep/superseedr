@@ -2702,6 +2702,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::SystemTime;
     use std::time::{Duration, Instant};
     use tokio::sync::{broadcast, mpsc, watch};
 
@@ -2830,6 +2831,70 @@ mod tests {
             Ok(Err(e)) => panic!("Manager task panicked: {:?}", e),
             Err(_) => panic!("Test timed out! Manager loop likely deadlocked processing blocks."),
         }
+    }
+
+    #[tokio::test]
+    async fn test_has_complete_storage_layout_true_for_exact_single_file() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ss_layout_true_{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let mfi = crate::storage::MultiFileInfo::new(
+            &temp_dir,
+            "payload.bin",
+            None,
+            Some(1024),
+            &HashMap::new(),
+        )
+        .unwrap();
+        std::fs::write(temp_dir.join("payload.bin"), vec![0xAB; 1024]).unwrap();
+
+        let result = TorrentManager::has_complete_storage_layout(&mfi)
+            .await
+            .unwrap();
+        assert!(
+            result,
+            "exact-size persisted layout should be considered complete"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_has_complete_storage_layout_false_for_size_mismatch() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ss_layout_mismatch_{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let mfi = crate::storage::MultiFileInfo::new(
+            &temp_dir,
+            "payload.bin",
+            None,
+            Some(1024),
+            &HashMap::new(),
+        )
+        .unwrap();
+        std::fs::write(temp_dir.join("payload.bin"), vec![0xAB; 1000]).unwrap();
+
+        let result = TorrentManager::has_complete_storage_layout(&mfi)
+            .await
+            .unwrap();
+        assert!(
+            !result,
+            "length mismatch must not be considered a complete persisted layout"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
 

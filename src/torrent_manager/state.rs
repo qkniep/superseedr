@@ -2661,6 +2661,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_peer_admission_guard_stays_closed_above_reopen_threshold() {
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+        state.accepting_new_peers = false;
+
+        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 75) / 100;
+        for i in 0..(reopen_threshold + 1) {
+            add_peer(&mut state, &format!("peer_{}", i));
+        }
+        state.number_of_successfully_connected_peers = state.peers.len();
+
+        let _ = state.update(Action::Tick { dt_ms: 1000 });
+
+        assert!(
+            !state.accepting_new_peers,
+            "guard should remain closed while connected count is above reopen threshold"
+        );
+    }
+
+    #[test]
+    fn test_peer_admission_guard_reopens_at_exact_reopen_threshold() {
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+        state.accepting_new_peers = false;
+
+        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 75) / 100;
+        for i in 0..reopen_threshold {
+            add_peer(&mut state, &format!("peer_{}", i));
+        }
+        state.number_of_successfully_connected_peers = state.peers.len();
+
+        let _ = state.update(Action::Tick { dt_ms: 1000 });
+
+        assert!(
+            state.accepting_new_peers,
+            "guard should reopen when connected count reaches the exact reopen threshold"
+        );
+    }
+
     // --- SCENARIO 1: Initialization ---
 
     #[test]
