@@ -52,6 +52,8 @@ If Phase 1 passed, generate the output strictly following this structure (only t
 ### 🐛 Bug Fixes
 - **[Fix Area]**: [Description of what was fixed]
 
+Add this to CHANGELOG.md
+
 ---
 
 # Action

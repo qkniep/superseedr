@@ -1,5 +1,22 @@
 # Changelog
 
+## Release v0.9.38
+### 🚀 New Features
+- **Richer Built-In Theme System**: Added a semantic theme engine plus multiple new themes (including Neon and Candy Land Pink) for deeper, more consistent UI personalization.
+- **One-Key Theme Cycling**: You can now switch themes instantly from the keyboard, without leaving your workflow.
+- **Global Theme Effects**: Visual effects now apply across more of the interface, including swarm and stream styling, for a more cohesive live UI experience.
+
+### ✨ Improvements
+- **Smarter Footer Readability**: Footer and command hints now fit terminal width more intelligently, with cleaner truncation and stable theme/effects labels.
+- **More Reliable Table Navigation**: Torrent/peer column visibility, sorting, and header navigation are now synchronized for predictable behavior in dynamic layouts.
+- **Higher Peer Capacity and Clearer Status**: Connection admission limits were raised and activity messaging was improved, helping large swarms stay clearer and more stable.
+- **More Flexible Rate Shortcuts**: Data-rate controls now accept both `[`/`]` and `{`/`}` for easier use across keyboard layouts.
+
+### 🐛 Bug Fixes
+- **Skip-Hashing Validation Accuracy**: Skip-hashing no longer marks torrents as validated when required files are missing or incomplete on disk.
+- **Validation State Correctness**: Metadata-transition edge cases now preserve prior valid state correctly and downgrade it when completion regresses.
+- **Theme and Layout Sync Fixes**: Fixed cases where theme/config sync and hidden-column handling could drift, plus footer cutoff issues on narrower screens.
+
 ## Release v0.9.37
 
 - **Version bump:** fixing github with new macOS flow.

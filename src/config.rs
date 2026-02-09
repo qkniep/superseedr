@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 use crate::app::FilePriority;
 use crate::app::TorrentControlState;
+use crate::theme::ThemeName;
 
 use strum_macros::EnumCount;
 use strum_macros::EnumIter;
@@ -67,6 +68,7 @@ pub struct Settings {
     pub torrent_sort_direction: SortDirection,
     pub peer_sort_column: PeerSortColumn,
     pub peer_sort_direction: SortDirection,
+    pub ui_theme: ThemeName,
 
     // Disk
     pub watch_folder: Option<PathBuf>,
@@ -110,6 +112,7 @@ impl Default for Settings {
             torrent_sort_direction: SortDirection::default(),
             peer_sort_column: PeerSortColumn::default(),
             peer_sort_direction: SortDirection::default(),
+            ui_theme: ThemeName::default(),
             max_connected_peers: 2000,
             bootstrap_nodes: vec![
                 "router.utorrent.com:6881".to_string(),
@@ -482,6 +485,28 @@ mod tests {
         assert_eq!(settings.max_connected_peers, 2000);
         assert_eq!(settings.bootstrap_nodes, default_settings.bootstrap_nodes);
         assert!(settings.torrents.is_empty());
+    }
+
+    #[test]
+    fn test_invalid_ui_theme_type_does_not_fail_settings_parse() {
+        let toml_str = r#"
+            client_id = "theme-type-regression"
+            client_port = 7777
+            ui_theme = 123
+        "#;
+
+        let settings: Settings = Figment::new()
+            .merge(Toml::string(toml_str))
+            .extract()
+            .expect("Settings parsing should not fail for non-string ui_theme");
+
+        assert_eq!(settings.client_id, "theme-type-regression");
+        assert_eq!(settings.client_port, 7777);
+        assert_eq!(
+            settings.ui_theme,
+            ThemeName::default(),
+            "Invalid ui_theme type should safely fallback to default"
+        );
     }
 
     #[test]
