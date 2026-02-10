@@ -246,7 +246,7 @@ impl BlockManager {
     }
 
     pub fn is_non_aligned_piece_grid(&self) -> bool {
-        self.piece_length != 0 && self.piece_length % BLOCK_SIZE != 0
+        self.piece_length != 0 && !self.piece_length.is_multiple_of(BLOCK_SIZE)
     }
 
     pub fn piece_block_addresses(&self, piece_index: u32) -> Vec<BlockAddress> {

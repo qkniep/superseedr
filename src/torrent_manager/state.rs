@@ -3813,7 +3813,7 @@ mod tests {
         });
 
         assert!(
-            state.piece_manager.bitfield.get(0) == Some(&PieceStatus::Done),
+            state.piece_manager.bitfield.first() == Some(&PieceStatus::Done),
             "Piece 0 completion state must remain unchanged"
         );
         assert!(
