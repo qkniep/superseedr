@@ -339,6 +339,9 @@ pub struct TorrentState {
     pub pending_disconnects: Vec<String>,
     pub pending_failures: Vec<String>,
     pub accepting_new_peers: bool,
+    pub piece_write_failures: HashMap<u32, u32>,
+    pub last_completed_pieces_snapshot: usize,
+    pub last_no_piece_progress_log: Instant,
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -378,6 +381,9 @@ impl Default for TorrentState {
             pending_disconnects: Vec::with_capacity(100),
             pending_failures: Vec::with_capacity(100),
             accepting_new_peers: true,
+            piece_write_failures: HashMap::new(),
+            last_completed_pieces_snapshot: 0,
+            last_no_piece_progress_log: Instant::now(),
         }
     }
 }
@@ -9490,6 +9496,16 @@ mod integration_tests {
         ManagerCommand, TorrentManager, TorrentMetrics, TorrentParameters,
     };
 
+    fn full_bitfield(num_pieces: usize) -> Vec<u8> {
+        let mut bf = vec![0u8; num_pieces.div_ceil(8)];
+        for i in 0..num_pieces {
+            let byte_idx = i / 8;
+            let bit_idx = 7 - (i % 8);
+            bf[byte_idx] |= 1 << bit_idx;
+        }
+        bf
+    }
+
     fn create_manager_harness(
         name: &str,
         num_pieces: usize,
@@ -9915,5 +9931,93 @@ mod integration_tests {
         let _ = std::fs::remove_dir_all(temp_dir);
 
         assert!(success);
+    }
+
+    #[tokio::test]
+    async fn test_non_aligned_piece_length_small_swarm_completes() {
+        let temp_dir = std::env::temp_dir().join("superseedr_non_aligned_20k");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 4;
+        let piece_size = 20_000;
+        let (mut manager, cmd_tx, _res) =
+            create_manager_harness("NonAligned20k", num_pieces, piece_size, temp_dir.clone());
+
+        let bf_all = full_bitfield(num_pieces);
+        spawn_mock_peer(&mut manager, bf_all, std::time::Duration::from_millis(0)).await;
+
+        let manager_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        let expected_size = (num_pieces * piece_size) as u64;
+        let file_path = temp_dir.join("NonAligned20k");
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(12);
+        let mut success = false;
+
+        while start.elapsed() < timeout {
+            if let Ok(meta) = std::fs::metadata(&file_path) {
+                if meta.len() >= expected_size {
+                    success = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
+
+        assert!(
+            success,
+            "Non-aligned piece-length torrent failed to complete in bounded time"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tiny_piece_length_small_swarm_completes() {
+        let temp_dir = std::env::temp_dir().join("superseedr_tiny_piece_1k");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_pieces = 8;
+        let piece_size = 1_024;
+        let (mut manager, cmd_tx, _res) =
+            create_manager_harness("TinyPiece1k", num_pieces, piece_size, temp_dir.clone());
+
+        let bf_all = full_bitfield(num_pieces);
+        spawn_mock_peer(&mut manager, bf_all, std::time::Duration::from_millis(0)).await;
+
+        let manager_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        let expected_size = (num_pieces * piece_size) as u64;
+        let file_path = temp_dir.join("TinyPiece1k");
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(12);
+        let mut success = false;
+
+        while start.elapsed() < timeout {
+            if let Ok(meta) = std::fs::metadata(&file_path) {
+                if meta.len() >= expected_size {
+                    success = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        let _ = cmd_tx.send(ManagerCommand::Shutdown).await;
+        let _ = manager_handle.await;
+        let _ = std::fs::remove_dir_all(temp_dir);
+
+        assert!(
+            success,
+            "Tiny piece-length torrent failed to complete in bounded time"
+        );
     }
 }
