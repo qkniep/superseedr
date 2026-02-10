@@ -36,6 +36,10 @@ const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
 pub const MAX_PIPELINE_DEPTH: usize = 512;
 
+// Quality gate: once we have this many connected peers, pause admitting new peers
+// to avoid churn storms. This is intentionally independent of resource-manager limits.
+const PEER_ADMISSION_QUALITY_THRESHOLD: usize = 400;
+
 pub type PeerAddr = (String, u16);
 
 #[derive(Debug, Clone)]
@@ -334,6 +338,7 @@ pub struct TorrentState {
     pub file_priorities: HashMap<usize, FilePriority>,
     pub pending_disconnects: Vec<String>,
     pub pending_failures: Vec<String>,
+    pub accepting_new_peers: bool,
 }
 impl Default for TorrentState {
     fn default() -> Self {
@@ -372,6 +377,7 @@ impl Default for TorrentState {
             file_priorities: HashMap::new(),
             pending_disconnects: Vec::with_capacity(100),
             pending_failures: Vec::with_capacity(100),
+            accepting_new_peers: true,
         }
     }
 }
@@ -509,6 +515,7 @@ impl TorrentState {
             }
             Action::Tick { dt_ms } => {
                 self.now += Duration::from_millis(dt_ms);
+                self.refresh_peer_admission_guard();
                 let scaling_factor = if dt_ms > 0 {
                     1000.0 / dt_ms as f64
                 } else {
@@ -1126,6 +1133,10 @@ impl TorrentState {
                     let mut peer_state = PeerState::new(peer_id.clone(), tx, self.now);
                     peer_state.peer_id = peer_id.as_bytes().to_vec();
                     self.peers.insert(peer_id, peer_state);
+                    // Admission pressure should react to discovered/registered peers immediately,
+                    // not only after handshake success.
+                    self.number_of_successfully_connected_peers = self.peers.len();
+                    self.refresh_peer_admission_guard();
                 }
                 vec![Effect::DoNothing]
             }
@@ -1139,6 +1150,7 @@ impl TorrentState {
                 }
 
                 self.number_of_successfully_connected_peers = self.peers.len();
+                self.refresh_peer_admission_guard();
 
                 vec![Effect::EmitManagerEvent(ManagerEvent::PeerConnected {
                     info_hash: self.info_hash.clone(),
@@ -1150,7 +1162,7 @@ impl TorrentState {
                     self.pending_disconnects.push(peer_id);
                 }
 
-                if !force && self.pending_disconnects.len() < 100 {
+                if !force && self.pending_disconnects.len() < 50 {
                     return vec![Effect::DoNothing];
                 }
 
@@ -1180,6 +1192,7 @@ impl TorrentState {
                 }
 
                 self.number_of_successfully_connected_peers = self.peers.len();
+                self.refresh_peer_admission_guard();
                 self.piece_manager
                     .update_rarity(self.peers.values().map(|p| &p.bitfield));
 
@@ -2523,6 +2536,21 @@ impl TorrentState {
     }
 }
 
+impl TorrentState {
+    fn refresh_peer_admission_guard(&mut self) {
+        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 50) / 100;
+        let connected = self.number_of_successfully_connected_peers;
+
+        if self.accepting_new_peers {
+            if connected >= PEER_ADMISSION_QUALITY_THRESHOLD {
+                self.accepting_new_peers = false;
+            }
+        } else if connected <= reopen_threshold {
+            self.accepting_new_peers = true;
+        }
+    }
+}
+
 fn calculate_deletion_lists(
     mfi: &MultiFileInfo,
     base_path: &Path,
@@ -2682,6 +2710,125 @@ mod tests {
         // Assume peer has handshake
         peer.peer_id = id.as_bytes().to_vec();
         state.peers.insert(id.to_string(), peer);
+    }
+
+    #[test]
+    fn test_peer_admission_guard_closes_under_high_connected_pressure() {
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+        state.accepting_new_peers = true;
+
+        for i in 0..PEER_ADMISSION_QUALITY_THRESHOLD {
+            add_peer(&mut state, &format!("peer_{}", i));
+        }
+        state.number_of_successfully_connected_peers = state.peers.len();
+
+        let _ = state.update(Action::Tick { dt_ms: 1000 });
+
+        assert!(
+            !state.accepting_new_peers,
+            "expected admission guard to close under heavy connected-peer pressure"
+        );
+    }
+
+    #[test]
+    fn test_peer_admission_guard_reopens_at_reopen_threshold() {
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+        state.accepting_new_peers = false;
+
+        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 50) / 100;
+        for i in 0..reopen_threshold {
+            add_peer(&mut state, &format!("peer_{}", i));
+        }
+        state.number_of_successfully_connected_peers = state.peers.len();
+
+        let _ = state.update(Action::Tick { dt_ms: 1000 });
+
+        assert!(
+            state.accepting_new_peers,
+            "expected admission guard to reopen at configured reopen threshold"
+        );
+    }
+
+    #[test]
+    fn test_peer_admission_guard_closes_immediately_on_successful_connection() {
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+        state.accepting_new_peers = true;
+
+        for i in 0..PEER_ADMISSION_QUALITY_THRESHOLD {
+            add_peer(&mut state, &format!("peer_{}", i));
+        }
+
+        let _ = state.update(Action::PeerSuccessfullyConnected {
+            peer_id: "peer_0".to_string(),
+        });
+
+        assert!(
+            !state.accepting_new_peers,
+            "expected admission guard to close immediately when threshold is reached"
+        );
+    }
+
+    #[test]
+    fn test_peer_admission_guard_closes_immediately_on_peer_discovery() {
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+        state.accepting_new_peers = true;
+
+        for i in 0..PEER_ADMISSION_QUALITY_THRESHOLD {
+            let (tx, _rx) = mpsc::channel(1);
+            let _ = state.update(Action::RegisterPeer {
+                peer_id: format!("peer_{}", i),
+                tx,
+            });
+        }
+
+        assert!(
+            !state.accepting_new_peers,
+            "expected admission guard to close immediately when discovery reaches threshold"
+        );
+    }
+
+    #[test]
+    fn test_peer_admission_guard_stays_closed_above_reopen_threshold() {
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+        state.accepting_new_peers = false;
+
+        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 50) / 100;
+        for i in 0..(reopen_threshold + 1) {
+            add_peer(&mut state, &format!("peer_{}", i));
+        }
+        state.number_of_successfully_connected_peers = state.peers.len();
+
+        let _ = state.update(Action::Tick { dt_ms: 1000 });
+
+        assert!(
+            !state.accepting_new_peers,
+            "guard should remain closed while connected count is above reopen threshold"
+        );
+    }
+
+    #[test]
+    fn test_peer_admission_guard_reopens_at_exact_reopen_threshold() {
+        let mut state = create_empty_state();
+        state.torrent_status = TorrentStatus::Standard;
+        state.accepting_new_peers = false;
+
+        let reopen_threshold = (PEER_ADMISSION_QUALITY_THRESHOLD * 50) / 100;
+        for i in 0..reopen_threshold {
+            add_peer(&mut state, &format!("peer_{}", i));
+        }
+        state.number_of_successfully_connected_peers = state.peers.len();
+
+        let _ = state.update(Action::Tick { dt_ms: 1000 });
+
+        assert!(
+            state.accepting_new_peers,
+            "guard should reopen when connected count reaches the exact reopen threshold"
+        );
     }
 
     // --- SCENARIO 1: Initialization ---
@@ -7203,9 +7350,10 @@ mod tests {
     fn test_peer_disconnect_batches_until_threshold() {
         let mut state = create_empty_state();
         state.torrent_status = TorrentStatus::Standard;
+        let disconnect_batch_threshold = 50;
 
-        // Add 101 peers to ensure we cross the threshold
-        for i in 0..101 {
+        // Add threshold + 1 peers to ensure we cross the threshold exactly once.
+        for i in 0..(disconnect_batch_threshold + 1) {
             let pid = format!("peer_{}", i);
             add_peer(&mut state, &pid);
 
@@ -7214,18 +7362,18 @@ mod tests {
                 force: false,
             });
 
-            if i < 99 {
+            if i < disconnect_batch_threshold - 1 {
                 // Should not have processed yet
                 assert!(effects.is_empty() || matches!(effects[0], Effect::DoNothing));
                 assert_eq!(state.pending_disconnects.len(), i + 1);
-            } else if i == 99 {
-                // On the 100th peer, it should flush the first 100
-                assert_eq!(effects.len(), 200); // 100 DisconnectPeer + 100 EmitManagerEvent
+            } else if i == disconnect_batch_threshold - 1 {
+                // On the threshold peer, it should flush that full batch.
+                assert_eq!(effects.len(), disconnect_batch_threshold * 2);
                 assert!(state.pending_disconnects.is_empty());
             }
         }
 
-        // The 101st peer should now be sitting alone in the new batch
+        // The final peer should now be sitting alone in the new batch.
         assert_eq!(state.pending_disconnects.len(), 1);
     }
 
@@ -7233,7 +7381,7 @@ mod tests {
     fn test_peer_disconnect_force_flush() {
         let mut state = create_empty_state();
 
-        // Add only 5 peers (well below the 100 threshold)
+        // Add only 5 peers (well below the batch threshold)
         for i in 0..5 {
             let pid = format!("peer_{}", i);
             add_peer(&mut state, &pid);
@@ -9333,12 +9481,14 @@ mod integration_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::{broadcast, mpsc, watch};
     // Correct Import for the client struct
     use crate::resource_manager::{ResourceManager, ResourceManagerClient};
     use crate::token_bucket::TokenBucket;
     use crate::torrent_file::Torrent;
-    use crate::torrent_manager::{ManagerCommand, TorrentManager, TorrentParameters};
+    use crate::torrent_manager::{
+        ManagerCommand, TorrentManager, TorrentMetrics, TorrentParameters,
+    };
 
     fn create_manager_harness(
         name: &str,
@@ -9357,7 +9507,7 @@ mod integration_tests {
         let (event_tx, mut event_rx) = mpsc::channel(500);
         tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
 
-        let (metrics_tx, _) = broadcast::channel(100);
+        let (metrics_tx, _) = watch::channel(TorrentMetrics::default());
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let settings_val = Settings {

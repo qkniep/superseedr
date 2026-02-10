@@ -15,11 +15,11 @@ use crate::config::SortDirection;
 use crate::tui::formatters::centered_rect;
 use crate::tui::layout::calculate_file_browser_layout;
 use crate::tui::layout::calculate_layout;
-use crate::tui::layout::compute_smart_table_layout;
+use crate::tui::layout::compute_visible_peer_columns;
+use crate::tui::layout::compute_visible_torrent_columns;
 use crate::tui::layout::get_peer_columns;
 use crate::tui::layout::get_torrent_columns;
 use crate::tui::layout::LayoutContext;
-use crate::tui::layout::SmartCol;
 use crate::tui::tree::RawNode;
 use crate::tui::tree::TreeViewState;
 use crate::tui::tree::{TreeAction, TreeFilter, TreeMathHelper};
@@ -66,7 +66,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 return;
             }
 
-            // Otherwise, update the timestamp and let the event proceed
             GLOBAL_ESC_TIMESTAMP.store(now, Ordering::Relaxed);
         }
     }
@@ -197,7 +196,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         KeyCode::Char('T') => {
                             app.app_state.graph_mode = app.app_state.graph_mode.prev();
                         }
-                        KeyCode::Char('[') => {
+                        KeyCode::Char('[') | KeyCode::Char('{') => {
                             app.app_state.data_rate = app.app_state.data_rate.next_slower();
                             let new_rate = app.app_state.data_rate.as_ms();
 
@@ -205,13 +204,43 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 let _ = manager_tx.try_send(ManagerCommand::SetDataRate(new_rate));
                             }
                         }
-                        KeyCode::Char(']') => {
+                        KeyCode::Char(']') | KeyCode::Char('}') => {
                             app.app_state.data_rate = app.app_state.data_rate.next_faster();
                             let new_rate = app.app_state.data_rate.as_ms();
 
                             for manager_tx in app.torrent_manager_command_txs.values() {
                                 let _ = manager_tx.try_send(ManagerCommand::SetDataRate(new_rate));
                             }
+                        }
+                        KeyCode::Char('<') => {
+                            let themes = crate::theme::ThemeName::sorted_for_ui();
+                            let current_idx = themes
+                                .iter()
+                                .position(|&t| t == app.client_configs.ui_theme)
+                                .unwrap_or(0);
+                            let new_idx = if current_idx == 0 {
+                                themes.len() - 1
+                            } else {
+                                current_idx - 1
+                            };
+                            app.client_configs.ui_theme = themes[new_idx];
+                            app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
+                            let _ = app
+                                .app_command_tx
+                                .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
+                        }
+                        KeyCode::Char('>') => {
+                            let themes = crate::theme::ThemeName::sorted_for_ui();
+                            let current_idx = themes
+                                .iter()
+                                .position(|&t| t == app.client_configs.ui_theme)
+                                .unwrap_or(0);
+                            let new_idx = (current_idx + 1) % themes.len();
+                            app.client_configs.ui_theme = themes[new_idx];
+                            app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
+                            let _ = app
+                                .app_command_tx
+                                .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
                         }
                         KeyCode::Char('p') => {
                             if let Some(info_hash) = app
@@ -281,11 +310,24 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         }
 
                         KeyCode::Char('s') => {
+                            let layout_ctx =
+                                LayoutContext::new(app.app_state.screen_area, &app.app_state, 35);
+                            let layout_plan =
+                                calculate_layout(app.app_state.screen_area, &layout_ctx);
+                            let (_, visible_torrent_columns) = compute_visible_torrent_columns(
+                                &app.app_state,
+                                layout_plan.list.width,
+                            );
+                            let (_, visible_peer_columns) =
+                                compute_visible_peer_columns(layout_plan.peers.width);
                             match app.app_state.selected_header {
                                 SelectedHeader::Torrent(i) => {
                                     let cols = get_torrent_columns();
 
-                                    if let Some(def) = cols.get(i) {
+                                    if let Some(def) = visible_torrent_columns
+                                        .get(i)
+                                        .and_then(|&real_idx| cols.get(real_idx))
+                                    {
                                         if let Some(column) = def.sort_enum {
                                             if app.app_state.torrent_sort.0 == column {
                                                 app.app_state.torrent_sort.1 =
@@ -308,7 +350,10 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 SelectedHeader::Peer(i) => {
                                     let cols = get_peer_columns();
 
-                                    if let Some(def) = cols.get(i) {
+                                    if let Some(def) = visible_peer_columns
+                                        .get(i)
+                                        .and_then(|&real_idx| cols.get(real_idx))
+                                    {
                                         if let Some(column) = def.sort_enum {
                                             if app.app_state.peer_sort.0 == column {
                                                 app.app_state.peer_sort.1 =
@@ -1142,34 +1187,30 @@ fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     let selected_torrent_peer_count =
         selected_torrent.map_or(0, |torrent| torrent.latest_state.peers.len());
 
-    let ctx = LayoutContext::new(app_state.screen_area, app_state, 35);
-    let layout_plan = calculate_layout(app_state.screen_area, &ctx);
+    let layout_ctx = LayoutContext::new(app_state.screen_area, app_state, 35);
+    let layout_plan = calculate_layout(app_state.screen_area, &layout_ctx);
+    let (_, visible_torrent_columns) =
+        compute_visible_torrent_columns(app_state, layout_plan.list.width);
+    let (_, visible_peer_columns) = compute_visible_peer_columns(layout_plan.peers.width);
+    let torrent_col_count = visible_torrent_columns.len();
+    let peer_col_count = visible_peer_columns.len();
 
-    let t_cols = get_torrent_columns();
-    let smart_t_cols: Vec<SmartCol> = t_cols
-        .iter()
-        .map(|c| SmartCol {
-            min_width: c.min_width,
-            priority: c.priority,
-            constraint: c.default_constraint,
-        })
-        .collect();
-    let (_, visible_t_indices) =
-        compute_smart_table_layout(&smart_t_cols, layout_plan.list.width, 1);
-    let torrent_col_count = visible_t_indices.len();
-
-    let p_cols = get_peer_columns();
-    let smart_p_cols: Vec<SmartCol> = p_cols
-        .iter()
-        .map(|c| SmartCol {
-            min_width: c.min_width,
-            priority: c.priority,
-            constraint: c.default_constraint,
-        })
-        .collect();
-    let (_, visible_p_indices) =
-        compute_smart_table_layout(&smart_p_cols, layout_plan.peers.width, 1);
-    let peer_col_count = visible_p_indices.len();
+    app_state.selected_header = match app_state.selected_header {
+        SelectedHeader::Torrent(i) => {
+            if torrent_col_count == 0 {
+                SelectedHeader::Torrent(0)
+            } else {
+                SelectedHeader::Torrent(i.min(torrent_col_count - 1))
+            }
+        }
+        SelectedHeader::Peer(i) => {
+            if !selected_torrent_has_peers || peer_col_count == 0 {
+                SelectedHeader::Torrent(torrent_col_count.saturating_sub(1))
+            } else {
+                SelectedHeader::Peer(i.min(peer_col_count - 1))
+            }
+        }
+    };
 
     match key_code {
         // --- UP/DOWN/J/K Navigation (Rows) ---
@@ -1325,9 +1366,7 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
 mod tests {
     use super::*;
     use crate::app::{AppState, PeerInfo, SelectedHeader, TorrentDisplayState, TorrentMetrics};
-    use crate::config::TorrentSortColumn;
     use ratatui::crossterm::event::KeyCode;
-    use strum::EnumCount;
 
     /// Creates a mock TorrentMetrics with a specific number of peers.
     fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
@@ -1417,7 +1456,7 @@ mod tests {
     fn test_nav_right_to_peers_when_peers_exist() {
         let mut app_state = create_test_app_state();
         app_state.selected_torrent_index = 0; // "hash_a" has peers
-        app_state.selected_header = SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1);
+        app_state.selected_header = SelectedHeader::Torrent(99);
 
         handle_navigation(&mut app_state, KeyCode::Right);
 
@@ -1428,14 +1467,11 @@ mod tests {
     fn test_nav_right_to_peers_when_no_peers() {
         let mut app_state = create_test_app_state();
         app_state.selected_torrent_index = 1; // "hash_b" has 0 peers
-        app_state.selected_header = SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1);
+        app_state.selected_header = SelectedHeader::Torrent(99);
 
         handle_navigation(&mut app_state, KeyCode::Right);
 
-        assert_eq!(
-            app_state.selected_header,
-            SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1)
-        );
+        assert_eq!(app_state.selected_header, SelectedHeader::Torrent(0));
     }
 
     #[test]
@@ -1446,10 +1482,7 @@ mod tests {
 
         handle_navigation(&mut app_state, KeyCode::Left);
 
-        assert_eq!(
-            app_state.selected_header,
-            SelectedHeader::Torrent(TorrentSortColumn::COUNT - 1)
-        );
+        assert_eq!(app_state.selected_header, SelectedHeader::Torrent(0));
     }
 
     #[test]
@@ -1513,5 +1546,27 @@ mod tests {
 
         // Should stay at 1
         assert_eq!(app_state.selected_peer_index, 1);
+    }
+
+    #[test]
+    fn test_nav_right_jumps_to_peers_when_only_name_column_visible() {
+        let mut app_state = create_test_app_state();
+        app_state.selected_torrent_index = 0;
+        app_state.selected_header = SelectedHeader::Torrent(0);
+
+        if let Some(torrent) = app_state.torrents.get_mut("hash_a".as_bytes()) {
+            torrent.latest_state.activity_message = "Seeding".to_string();
+            torrent.latest_state.number_of_pieces_total = 100;
+            torrent.latest_state.number_of_pieces_completed = 100;
+        }
+
+        for torrent in app_state.torrents.values_mut() {
+            torrent.smoothed_download_speed_bps = 0;
+            torrent.smoothed_upload_speed_bps = 0;
+        }
+
+        handle_navigation(&mut app_state, KeyCode::Right);
+
+        assert_eq!(app_state.selected_header, SelectedHeader::Peer(0));
     }
 }

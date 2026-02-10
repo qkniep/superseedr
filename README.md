@@ -6,9 +6,7 @@
 
 # A BitTorrent Client in your Terminal
 
-[![Rust](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml) [![Nightly Fuzzing](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml)
-
-![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr) [![crates.io](https://img.shields.io/crates/d/superseedr)](https://crates.io/crates/superseedr) [![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/) <a title="This tool is Tool of The Week on Terminal Trove, The $HOME of all things in the terminal" href="https://terminaltrove.com/"><img src="https://cdn.terminaltrove.com/media/badges/tool_of_the_week/png/terminal_trove_tool_of_the_week_gold_transparent.png" alt="Terminal Trove Tool of The Week" /></a>
+[![Rust](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/rust.yml) [![Nightly Fuzzing](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml/badge.svg)](https://github.com/Jagalite/superseedr/actions/workflows/nightly.yml) ![GitHub release](https://img.shields.io/github/v/release/Jagalite/superseedr) [![crates.io](https://img.shields.io/crates/d/superseedr)](https://crates.io/crates/superseedr) [![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/) <a title="This tool is Tool of The Week on Terminal Trove, The $HOME of all things in the terminal" href="https://terminaltrove.com/"><img src="https://cdn.terminaltrove.com/media/badges/tool_of_the_week/png/terminal_trove_tool_of_the_week_gold_transparent.png" alt="Terminal Trove Tool of The Week" /></a>
 
 Superseedr is a modern Rust BitTorrent client featuring a high-performance terminal UI, real-time swarm observability, secure VPN-aware Docker setups, and zero manual network configuration. It is fast, privacy-oriented, and built for both desktop users and homelab/server workflows.
 
@@ -20,16 +18,18 @@ Superseedr is a modern Rust BitTorrent client featuring a high-performance termi
 | :--- | :--- | :--- |
 | 🎨 **60 FPS TUI**<br>Fluid, animated interface with heatmaps. | 🐳 **Docker + VPN**<br>Gluetun integration out of the box. | 🧬 **BitTorrent v2**<br>Hybrid swarms & Merkle tree verification. |
 | 📊 **Deep Analytics**<br>Real-time bandwidth graphs & peer metrics. | ⚓ **Auto-Bind**<br>Dynamic port reloading without restarts. | 🧠 **Self-Tuning**<br>Adaptive limits control for max speed and I/O Stability. |
-| 🧲 **Magnet Links**<br>Native OS-level handler support. | 👻 **Private Mode**<br>Optional builds disabling DHT/PEX. | ✅ **Verified Core**<br>Pure Rust, fuzz-tested for correctness. |
+| 🧲 **Magnet Links**<br>Native OS-level handler support. | 👻 **Private Mode**<br>Optional builds disabling DHT/PEX. | 🎨 **Themes**<br>Large built-in theme library with live switching. |
 
 ### Terminal Torrenting With Superseedr
 
-* **Pushing TUI Boundaries:** Experience a fluid, 60 FPS interface that feels like a native GUI, featuring smooth animations and high-density visualizations rarely seen in terminal apps.
+* **Pushing TUI Boundaries:** Experience a fluid, 60 FPS interface that feels like a native GUI, featuring smooth animations, high-density visualizations, and 40 built-in themes rarely seen in terminal apps.
 * **See What's Happening:** Diagnose slow downloads instantly with deep swarm analytics, heatmaps, and live bandwidth graphs.
 * **Set It and Forget It:** Automatic port forwarding and dynamic listener reloading in Docker ensure your connection stays alive, even if your VPN resets.
 * **Crash-Proof Design:** Leverages Rust's memory safety guarantees to run indefinitely on low-resource servers without leaks or instability.
 
-<img src="https://raw.githubusercontent.com/Jagalite/superseedr-assets/main/superseedr_cube.jpg"/>
+<p align="center">
+  <img src="https://github.com/Jagalite/superseedr-assets/blob/main/superseedr_theme.webp"/>
+</p>
 
 ## Installation
 

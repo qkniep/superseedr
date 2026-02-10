@@ -9,6 +9,7 @@ mod integrations;
 mod networking;
 mod resource_manager;
 mod storage;
+mod telemetry;
 mod theme;
 mod token_bucket;
 mod torrent_file;

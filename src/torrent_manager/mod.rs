@@ -19,14 +19,13 @@ use crate::app::FilePriority;
 use crate::app::TorrentMetrics;
 
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::watch;
 use tokio::time::Duration;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::net::TcpStream;
-
-use tokio::sync::broadcast;
 
 #[cfg(feature = "dht")]
 use mainline::async_dht::AsyncDht;
@@ -38,7 +37,7 @@ use crate::resource_manager::ResourceManagerClient;
 pub struct TorrentParameters {
     pub dht_handle: AsyncDht,
     pub incoming_peer_rx: Receiver<(TcpStream, Vec<u8>)>,
-    pub metrics_tx: broadcast::Sender<TorrentMetrics>,
+    pub metrics_tx: watch::Sender<TorrentMetrics>,
     pub torrent_validation_status: bool,
     pub torrent_data_path: Option<PathBuf>,
     pub container_name: Option<String>,

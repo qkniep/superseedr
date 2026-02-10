@@ -78,13 +78,11 @@ use tokio::signal;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::watch;
 
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
-
-#[cfg(feature = "dht")]
-use tokio::sync::watch;
 
 #[cfg(feature = "dht")]
 use tokio_stream::StreamExt;
@@ -96,12 +94,14 @@ use std::sync::Arc;
 #[cfg(feature = "dht")]
 use std::net::SocketAddrV4;
 
+use crate::telemetry::manager_telemetry::ManagerTelemetry;
 use crate::torrent_manager::TorrentParameters;
 
 const HASH_LENGTH: usize = 20;
 
 const MAX_UPLOAD_REQUEST_ATTEMPTS: u32 = 7;
 const MAX_PIECE_WRITE_ATTEMPTS: u32 = 12;
+const ACTIVITY_MESSAGE_MAX_LEN: usize = 28;
 
 const BASE_BACKOFF_MS: u64 = 1000;
 const JITTER_MS: u64 = 100;
@@ -118,7 +118,7 @@ pub struct TorrentManager {
     #[allow(dead_code)]
     dht_tx: Sender<()>,
 
-    metrics_tx: broadcast::Sender<TorrentMetrics>,
+    metrics_tx: watch::Sender<TorrentMetrics>,
     manager_event_tx: Sender<ManagerEvent>,
     shutdown_tx: broadcast::Sender<()>,
 
@@ -155,9 +155,14 @@ pub struct TorrentManager {
 
     global_dl_bucket: Arc<TokenBucket>,
     global_ul_bucket: Arc<TokenBucket>,
+    telemetry: ManagerTelemetry,
 }
 
 impl TorrentManager {
+    fn should_accept_new_peers(&self) -> bool {
+        self.state.accepting_new_peers
+    }
+
     fn init_base(
         torrent_parameters: TorrentParameters,
         info_hash: Vec<u8>,
@@ -229,6 +234,7 @@ impl TorrentManager {
             resource_manager,
             global_dl_bucket,
             global_ul_bucket,
+            telemetry: ManagerTelemetry::default(),
         }
     }
 
@@ -827,7 +833,9 @@ impl TorrentManager {
             }
 
             Effect::ConnectToPeer { ip, port } => {
-                self.connect_to_peer(ip, port);
+                if self.should_accept_new_peers() {
+                    self.connect_to_peer(ip, port);
+                }
             }
 
             Effect::StartValidation => {
@@ -1193,6 +1201,37 @@ impl TorrentManager {
         _event_tx: Sender<ManagerEvent>,
         skip_hashing: bool,
     ) -> Result<Vec<u32>, StorageError> {
+        if skip_hashing {
+            if Self::has_complete_storage_layout(&multi_file_info).await? {
+                let piece_len = torrent.info.piece_length as u64;
+                let mut completed_pieces = Vec::new();
+
+                if piece_len > 0 {
+                    if torrent.info.meta_version == Some(2) {
+                        let v2_piece_count = torrent.calculate_v2_mapping().piece_count as u32;
+                        completed_pieces = (0..v2_piece_count).collect();
+                    } else {
+                        let num_pieces = multi_file_info.total_size.div_ceil(piece_len) as u32;
+                        completed_pieces = (0..num_pieces).collect();
+                    }
+                }
+
+                let _ = manager_tx
+                    .send(TorrentCommand::ValidationProgress(
+                        completed_pieces.len() as u32
+                    ))
+                    .await;
+
+                return Ok(completed_pieces);
+            }
+
+            tracing::warn!(
+                "Validation: skip_hashing requested but persisted layout is incomplete. Marking as unvalidated."
+            );
+            let _ = manager_tx.send(TorrentCommand::ValidationProgress(0)).await;
+            return Ok(Vec::new());
+        }
+
         let is_fresh_download = tokio::select! {
             biased;
             _ = shutdown_rx.recv() => return Err(StorageError::Io(std::io::Error::other("Shutdown"))),
@@ -1411,6 +1450,28 @@ impl TorrentManager {
         }
 
         Ok(completed_pieces)
+    }
+
+    async fn has_complete_storage_layout(
+        multi_file_info: &MultiFileInfo,
+    ) -> Result<bool, StorageError> {
+        for file_info in &multi_file_info.files {
+            if file_info.is_padding {
+                continue;
+            }
+
+            let metadata = match fs::metadata(&file_info.path).await {
+                Ok(metadata) => metadata,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(err) => return Err(StorageError::Io(err)),
+            };
+
+            if !metadata.is_file() || metadata.len() != file_info.length {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 
     async fn write_block_with_retry(
@@ -1825,16 +1886,53 @@ impl TorrentManager {
             return "Paused".to_string();
         }
 
+        let connected_peers = self.state.peers.len();
+        let useful_peers = self
+            .state
+            .peers
+            .values()
+            .filter(|p| p.am_interested)
+            .count();
+        let peers_sending_data = self
+            .state
+            .peers
+            .values()
+            .filter(|p| p.peer_choking == ChokeStatus::Unchoke)
+            .count();
+        let need_count = self.state.piece_manager.need_queue.len();
+        let total_pieces = self.state.piece_manager.bitfield.len() as u32;
+        let completed_pieces =
+            total_pieces.saturating_sub(self.state.piece_manager.pieces_remaining as u32);
+        let completion_pct = if total_pieces > 0 {
+            (completed_pieces * 100) / total_pieces
+        } else {
+            0
+        };
+
         if let TorrentActivity::ProcessingPeers(count) = &self.state.last_activity {
-            return format!("Processing peers ({})", count);
+            return Self::cap_activity_message(format!("Processing peer ({})", count));
         }
 
         if self.state.torrent_status == TorrentStatus::AwaitingMetadata {
-            return "Retrieving Metadata...".to_string();
+            let message = if self.state.torrent_metadata_length.is_some() {
+                format!("Metadata ({} peers)", connected_peers)
+            } else {
+                format!("Metadata from peers ({})", connected_peers)
+            };
+            return Self::cap_activity_message(message);
         }
 
         if self.state.torrent_status == TorrentStatus::Validating {
-            return "Validating...".to_string();
+            let message = if total_pieces > 0 {
+                let validation_pct = (self.state.validation_pieces_found * 100) / total_pieces;
+                format!(
+                    "Validating {}% ({}/{})",
+                    validation_pct, self.state.validation_pieces_found, total_pieces
+                )
+            } else {
+                "Validating".to_string()
+            };
+            return Self::cap_activity_message(message);
         }
 
         if self.state.torrent_status == TorrentStatus::Done {
@@ -1863,34 +1961,47 @@ impl TorrentManager {
 
         // 2. Handle specific non-transfer activities
         match &self.state.last_activity {
-            TorrentActivity::RequestingPieces => return "Requesting pieces...".to_string(),
-            TorrentActivity::AnnouncingToTracker => return "Contacting tracker...".to_string(),
+            TorrentActivity::RequestingPieces => {
+                return Self::cap_activity_message(format!(
+                    "Request {} ({}/{})",
+                    need_count, useful_peers, connected_peers
+                ));
+            }
+            TorrentActivity::AnnouncingToTracker => {
+                return Self::cap_activity_message(format!("Tracker ({} peers)", connected_peers));
+            }
             #[cfg(feature = "dht")]
-            TorrentActivity::SearchingDht => return "Searching DHT for peers...".to_string(),
+            TorrentActivity::SearchingDht => {
+                return Self::cap_activity_message(format!("DHT search ({})", connected_peers));
+            }
             _ => {}
         }
 
         // 3. Refined "Stalled" vs "Connecting" Logic
-        let connected_peers = self.state.peers.len();
         if connected_peers == 0 {
-            return "Connecting to peers...".to_string();
+            return Self::cap_activity_message(format!("Connecting ({}%)", completion_pct));
         }
 
-        // If we have peers but no download speed:
-        let is_interested_in_anyone = self.state.peers.values().any(|p| p.am_interested);
-        let need_pieces = !self.state.piece_manager.need_queue.is_empty();
-
-        if need_pieces {
-            if is_interested_in_anyone {
-                // We want data, we have peers, but no one is giving it to us (Choked or Slow)
-                return "Stalled (Waiting for unchoke)".to_string();
-            } else {
-                // We have peers, but none of them have the pieces we need
-                return "Stalled (No peers have required pieces)".to_string();
+        if need_count > 0 {
+            if useful_peers > 0 {
+                return Self::cap_activity_message(format!(
+                    "Waiting data ({}/{})",
+                    peers_sending_data, connected_peers
+                ));
             }
+            return Self::cap_activity_message(format!("Need pieces ({})", connected_peers));
         }
 
-        "Idle".to_string()
+        Self::cap_activity_message(format!("Idle ({}, {}%)", connected_peers, completion_pct))
+    }
+
+    fn cap_activity_message(message: String) -> String {
+        if message.chars().count() <= ACTIVITY_MESSAGE_MAX_LEN {
+            return message;
+        }
+        let keep = ACTIVITY_MESSAGE_MAX_LEN.saturating_sub(3);
+        let truncated: String = message.chars().take(keep).collect();
+        format!("{}...", truncated)
     }
 
     fn send_metrics(&mut self, bytes_dl: u64, bytes_ul: u64) {
@@ -1925,7 +2036,6 @@ impl TorrentManager {
             let activity_message =
                 self.generate_activity_message(smoothed_total_dl_speed, smoothed_total_ul_speed);
 
-            let metrics_tx_clone = self.metrics_tx.clone();
             let info_hash_clone = self.state.info_hash.clone();
             let torrent_name_clone = torrent.info.name.clone();
             let number_of_pieces_total = self.state.piece_manager.bitfield.len() as u32;
@@ -2025,6 +2135,8 @@ impl TorrentManager {
                 upload_speed_bps: smoothed_total_ul_speed,
                 bytes_downloaded_this_tick,
                 bytes_uploaded_this_tick,
+                session_total_downloaded: self.state.session_total_downloaded,
+                session_total_uploaded: self.state.session_total_uploaded,
                 eta,
                 peers: peers_info,
                 activity_message,
@@ -2034,11 +2146,9 @@ impl TorrentManager {
                 file_priorities: self.state.file_priorities.clone(),
                 ..Default::default()
             };
-            tokio::spawn(async move {
-                if let Err(e) = metrics_tx_clone.send(torrent_state) {
-                    tracing::event!(Level::ERROR, "Failed to send metrics to TUI: {}", e);
-                }
-            });
+            if self.telemetry.should_emit(&torrent_state) {
+                let _ = self.metrics_tx.send(torrent_state);
+            }
         }
     }
 
@@ -2203,7 +2313,9 @@ impl TorrentManager {
                             self.state.last_activity = TorrentActivity::SearchingDht;
                             for peer in peers {
                                 event!(Level::DEBUG, "PEER FROM DHT {}", peer);
-                                self.connect_to_peer(peer.ip().to_string(), peer.port());
+                                if self.should_accept_new_peers() {
+                                    self.connect_to_peer(peer.ip().to_string(), peer.port());
+                                }
                             }
                         } else {
                             event!(Level::WARN, "DHT channel closed. No longer receiving DHT peers.");
@@ -2212,6 +2324,9 @@ impl TorrentManager {
                 }
 
                 Some((stream, handshake_response)) = self.incoming_peer_rx.recv(), if !self.state.is_paused => {
+                    if !self.should_accept_new_peers() {
+                        continue;
+                    }
                     let _ = self.manager_event_tx.try_send(ManagerEvent::PeerDiscovered { info_hash: self.state.info_hash.clone() });
                     if let Ok(peer_addr) = stream.peer_addr() {
 
@@ -2372,7 +2487,9 @@ impl TorrentManager {
                         #[cfg(feature = "pex")]
                         TorrentCommand::AddPexPeers(_peer_id, new_peers) => {
                             for peer_tuple in new_peers {
-                                self.connect_to_peer(peer_tuple.0, peer_tuple.1);
+                                if self.should_accept_new_peers() {
+                                    self.connect_to_peer(peer_tuple.0, peer_tuple.1);
+                                }
                             }
                         },
                         TorrentCommand::PeerBitfield(pid, bf) => self.apply_action(Action::PeerBitfieldReceived { peer_id: pid, bitfield: bf }),
@@ -2515,9 +2632,14 @@ impl TorrentManager {
                                 );
                             }
 
-                            let _ = self.manager_event_tx.try_send(ManagerEvent::MetadataLoaded {
-                                info_hash: calculated_hash,
-                                torrent: Box::new(torrent),
+                            let manager_event_tx = self.manager_event_tx.clone();
+                            tokio::spawn(async move {
+                                let _ = manager_event_tx
+                                    .send(ManagerEvent::MetadataLoaded {
+                                        info_hash: calculated_hash,
+                                        torrent: Box::new(torrent),
+                                    })
+                                    .await;
                             });
                         },
 
@@ -2580,14 +2702,15 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::SystemTime;
     use std::time::{Duration, Instant};
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::{broadcast, mpsc, watch};
 
     #[tokio::test]
     async fn test_manager_event_loop_throughput() {
         let (_incoming_peer_tx, incoming_peer_rx) = mpsc::channel(1000);
         let (manager_command_tx, manager_command_rx) = mpsc::channel(1000);
-        let (metrics_tx, _) = broadcast::channel(1000);
+        let (metrics_tx, _) = watch::channel(TorrentMetrics::default());
         let (manager_event_tx, _manager_event_rx) = mpsc::channel(1000);
         let (shutdown_tx, _) = broadcast::channel(1);
         let settings = Arc::new(Settings::default());
@@ -2709,6 +2832,70 @@ mod tests {
             Err(_) => panic!("Test timed out! Manager loop likely deadlocked processing blocks."),
         }
     }
+
+    #[tokio::test]
+    async fn test_has_complete_storage_layout_true_for_exact_single_file() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ss_layout_true_{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let mfi = crate::storage::MultiFileInfo::new(
+            &temp_dir,
+            "payload.bin",
+            None,
+            Some(1024),
+            &HashMap::new(),
+        )
+        .unwrap();
+        std::fs::write(temp_dir.join("payload.bin"), vec![0xAB; 1024]).unwrap();
+
+        let result = TorrentManager::has_complete_storage_layout(&mfi)
+            .await
+            .unwrap();
+        assert!(
+            result,
+            "exact-size persisted layout should be considered complete"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_has_complete_storage_layout_false_for_size_mismatch() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ss_layout_mismatch_{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let mfi = crate::storage::MultiFileInfo::new(
+            &temp_dir,
+            "payload.bin",
+            None,
+            Some(1024),
+            &HashMap::new(),
+        )
+        .unwrap();
+        std::fs::write(temp_dir.join("payload.bin"), vec![0xAB; 1000]).unwrap();
+
+        let result = TorrentManager::has_complete_storage_layout(&mfi)
+            .await
+            .unwrap();
+        assert!(
+            !result,
+            "length mismatch must not be considered a complete persisted layout"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
 
 #[cfg(test)]
@@ -2764,7 +2951,7 @@ mod resource_tests {
         let (_incoming_tx, _incoming_rx) = mpsc::channel(100); // Fixed warning: unused variable
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
         let (event_tx, _event_rx) = mpsc::channel(100);
-        let (metrics_tx, _) = broadcast::channel(100);
+        let (metrics_tx, _) = watch::channel(TorrentMetrics::default());
         let (shutdown_tx, _) = broadcast::channel(1);
         let settings = Arc::new(Settings::default());
 
@@ -2815,6 +3002,162 @@ mod resource_tests {
         let torrent_tx = manager.torrent_manager_tx.clone();
 
         (manager, torrent_tx, cmd_tx, shutdown_tx, resource_manager)
+    }
+
+    #[cfg(not(feature = "dht"))]
+    fn add_peer(
+        manager: &mut TorrentManager,
+        id: &str,
+        am_interested: bool,
+        peer_choking: ChokeStatus,
+    ) {
+        let (peer_tx, _peer_rx) = mpsc::channel(4);
+        let mut peer =
+            crate::torrent_manager::state::PeerState::new(id.to_string(), peer_tx, Instant::now());
+        peer.am_interested = am_interested;
+        peer.peer_choking = peer_choking;
+        manager.state.peers.insert(id.to_string(), peer);
+    }
+
+    #[cfg(not(feature = "dht"))]
+    #[test]
+    fn test_activity_message_metadata_and_peer_count() {
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _resource_manager) =
+            setup_test_harness();
+
+        manager.state.torrent_status = TorrentStatus::AwaitingMetadata;
+        manager.state.torrent_metadata_length = Some(2048);
+        add_peer(&mut manager, "p1", false, ChokeStatus::Choke);
+        add_peer(&mut manager, "p2", false, ChokeStatus::Choke);
+        add_peer(&mut manager, "p3", false, ChokeStatus::Choke);
+
+        let msg = manager.generate_activity_message(0, 0);
+        assert_eq!(msg, "Metadata (3 peers)");
+        assert!(msg.chars().count() <= ACTIVITY_MESSAGE_MAX_LEN);
+    }
+
+    #[cfg(not(feature = "dht"))]
+    #[test]
+    fn test_activity_message_validation_shows_progress_percentage() {
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _resource_manager) =
+            setup_test_harness();
+
+        manager.state.torrent_status = TorrentStatus::Validating;
+        manager.state.validation_pieces_found = 4;
+        manager.state.piece_manager.bitfield = vec![PieceStatus::Need; 10];
+
+        let msg = manager.generate_activity_message(0, 0);
+        assert_eq!(msg, "Validating 40% (4/10)");
+        assert!(msg.chars().count() <= ACTIVITY_MESSAGE_MAX_LEN);
+    }
+
+    #[cfg(not(feature = "dht"))]
+    #[test]
+    fn test_activity_message_requesting_pieces_shows_quantifiers() {
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _resource_manager) =
+            setup_test_harness();
+
+        manager.state.torrent_status = TorrentStatus::Standard;
+        manager.state.last_activity = TorrentActivity::RequestingPieces;
+        manager.state.piece_manager.need_queue = vec![1, 2, 3, 4];
+        add_peer(&mut manager, "p1", true, ChokeStatus::Unchoke);
+        add_peer(&mut manager, "p2", false, ChokeStatus::Choke);
+
+        let msg = manager.generate_activity_message(0, 0);
+        assert_eq!(msg, "Request 4 (1/2)");
+        assert!(msg.chars().count() <= ACTIVITY_MESSAGE_MAX_LEN);
+    }
+
+    #[cfg(not(feature = "dht"))]
+    #[test]
+    fn test_activity_message_waiting_for_data_is_plain_language() {
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _resource_manager) =
+            setup_test_harness();
+
+        manager.state.torrent_status = TorrentStatus::Standard;
+        manager.state.last_activity = TorrentActivity::Initializing;
+        manager.state.piece_manager.need_queue = vec![1];
+        manager.state.piece_manager.bitfield = vec![PieceStatus::Need; 5];
+        manager.state.piece_manager.pieces_remaining = 3;
+
+        add_peer(&mut manager, "p1", true, ChokeStatus::Unchoke);
+        add_peer(&mut manager, "p2", true, ChokeStatus::Choke);
+        add_peer(&mut manager, "p3", false, ChokeStatus::Choke);
+
+        let msg = manager.generate_activity_message(0, 0);
+        assert_eq!(msg, "Waiting data (1/3)");
+        assert!(!msg.to_lowercase().contains("unchoke"));
+        assert!(msg.chars().count() <= ACTIVITY_MESSAGE_MAX_LEN);
+    }
+
+    #[cfg(not(feature = "dht"))]
+    #[test]
+    fn test_activity_message_done_strings_preserved() {
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _resource_manager) =
+            setup_test_harness();
+        manager.state.torrent_status = TorrentStatus::Done;
+
+        assert_eq!(manager.generate_activity_message(0, 10), "Seeding");
+        assert_eq!(manager.generate_activity_message(0, 0), "Finished");
+    }
+
+    #[tokio::test]
+    async fn test_peer_admission_guard_blocks_new_outgoing_connection() {
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _resource_manager) =
+            setup_test_harness();
+
+        manager.state.accepting_new_peers = false;
+
+        let ip = "127.0.0.1".to_string();
+        let port = 1;
+        let peer_id = format!("{}:{}", ip, port);
+
+        manager.handle_effect(Effect::ConnectToPeer { ip, port });
+
+        assert!(
+            !manager.state.peers.contains_key(&peer_id),
+            "peer admission guard should block new outgoing peers"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peer_admission_guard_allows_new_outgoing_connection_when_open() {
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _resource_manager) =
+            setup_test_harness();
+
+        manager.state.accepting_new_peers = true;
+
+        let ip = "127.0.0.1".to_string();
+        let port = 1;
+        let peer_id = format!("{}:{}", ip, port);
+
+        manager.handle_effect(Effect::ConnectToPeer { ip, port });
+
+        assert!(
+            manager.state.peers.contains_key(&peer_id),
+            "peer admission guard should allow new outgoing peers when open"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peer_admission_guard_handles_10k_candidates_when_closed() {
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _resource_manager) =
+            setup_test_harness();
+
+        manager.state.accepting_new_peers = false;
+
+        for port in 10_000u16..20_000u16 {
+            manager.handle_effect(Effect::ConnectToPeer {
+                ip: "127.0.0.1".to_string(),
+                port,
+            });
+        }
+
+        assert_eq!(
+            manager.state.peers.len(),
+            0,
+            "closed peer admission guard should drop all 10k candidates"
+        );
     }
 
     #[tokio::test]
@@ -2939,7 +3282,7 @@ mod resource_tests {
         let (event_tx, mut event_rx) = mpsc::channel(100);
         tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
 
-        let (metrics_tx, mut metrics_rx) = broadcast::channel(100);
+        let (metrics_tx, mut metrics_rx) = watch::channel(TorrentMetrics::default());
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let settings_val = Settings {
@@ -3140,7 +3483,8 @@ mod resource_tests {
 
         let check_loop = async {
             loop {
-                if let Ok(m) = metrics_rx.recv().await {
+                if metrics_rx.changed().await.is_ok() {
+                    let m = metrics_rx.borrow_and_update().clone();
                     // Check if we finished the 1 piece
                     if m.number_of_pieces_completed >= 1 {
                         break;
@@ -3183,7 +3527,7 @@ mod resource_tests {
         let (event_tx, mut event_rx) = mpsc::channel(100);
         tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
 
-        let (metrics_tx, mut metrics_rx) = broadcast::channel(100);
+        let (metrics_tx, mut metrics_rx) = watch::channel(TorrentMetrics::default());
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let settings_val = Settings {
@@ -3394,8 +3738,9 @@ mod resource_tests {
             let mut accumulated_download: u64 = 0;
 
             loop {
-                match timeout(Duration::from_secs(1), metrics_rx.recv()).await {
-                    Ok(Ok(m)) => {
+                match timeout(Duration::from_secs(1), metrics_rx.changed()).await {
+                    Ok(Ok(())) => {
+                        let m = metrics_rx.borrow_and_update().clone();
                         accumulated_download += m.bytes_downloaded_this_tick;
 
                         // Print status occasionally
@@ -3812,7 +4157,7 @@ mod resource_tests {
         let (_incoming_tx, _incoming_rx) = mpsc::channel(100);
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
         let (event_tx, mut event_rx) = mpsc::channel(100);
-        let (metrics_tx, _) = broadcast::channel(100);
+        let (metrics_tx, _) = watch::channel(TorrentMetrics::default());
         let (shutdown_tx, _) = broadcast::channel(1);
         let settings = Arc::new(Settings::default());
 
@@ -4386,5 +4731,137 @@ mod resource_tests {
         );
 
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_skip_hashing_true_does_not_mark_complete_when_storage_missing() {
+        let (_manager, _torrent_tx, _cmd_tx, shutdown_tx, rm_client) = setup_scale_test_harness();
+
+        let temp_dir = std::env::temp_dir().join("skip_hashing_missing_storage");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let torrent_name = "payload.bin";
+
+        let piece_len: i64 = 16 * 1024;
+        let total_len: u64 = (piece_len as u64) * 2;
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.name = torrent_name.to_string();
+        torrent.info.piece_length = piece_len;
+        torrent.info.length = total_len as i64;
+
+        let multi_file_info = crate::storage::MultiFileInfo::new(
+            &temp_dir,
+            torrent_name,
+            None,
+            Some(total_len),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        let (progress_tx, mut progress_rx) = mpsc::channel(64);
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            TorrentManager::perform_validation(
+                multi_file_info,
+                torrent,
+                rm_client,
+                shutdown_tx.subscribe(),
+                progress_tx,
+                event_tx,
+                true,
+            ),
+        )
+        .await;
+
+        assert!(result.is_ok(), "Validation should complete without hanging");
+
+        let result = result.unwrap();
+        assert!(
+            result.is_ok(),
+            "Validation should return a result even when storage is missing"
+        );
+
+        let completed = result.unwrap();
+        assert!(
+            completed.is_empty(),
+            "Missing payload must not be treated as fully validated when skip_hashing=true"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_skip_hashing_v2_uses_aligned_v2_piece_space() {
+        let (_manager, torrent_tx, _cmd_tx, shutdown_tx, rm_client) = setup_scale_test_harness();
+
+        let temp_dir = std::env::temp_dir().join("skip_hashing_v2_piece_space");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let piece_len: i64 = 16384;
+        let root_a = vec![0x11; 32];
+        let root_b = vec![0x22; 32];
+
+        let mut torrent = create_dummy_torrent(2);
+        torrent.info.name = "v2_skip_hashing_alignment".to_string();
+        torrent.info.piece_length = piece_len;
+        torrent.info.meta_version = Some(2);
+        torrent.info.pieces = Vec::new();
+        torrent.info.length = 0;
+        torrent.info.file_tree = Some(build_mock_v2_file_tree(vec![
+            ("a.bin".to_string(), 100, root_a.clone()),
+            ("b.bin".to_string(), 100, root_b.clone()),
+        ]));
+        torrent.info.files = vec![
+            crate::torrent_file::InfoFile {
+                length: 100,
+                path: vec!["a.bin".into()],
+                md5sum: None,
+                attr: None,
+            },
+            crate::torrent_file::InfoFile {
+                length: 100,
+                path: vec!["b.bin".into()],
+                md5sum: None,
+                attr: None,
+            },
+        ];
+
+        let multi_file_info = crate::storage::MultiFileInfo::new(
+            &temp_dir,
+            &torrent.info.name,
+            Some(&torrent.info.files),
+            None,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        std::fs::write(temp_dir.join("a.bin"), vec![0xAB; 100]).unwrap();
+        std::fs::write(temp_dir.join("b.bin"), vec![0xCD; 100]).unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let result = TorrentManager::perform_validation(
+            multi_file_info,
+            torrent,
+            rm_client,
+            shutdown_tx.subscribe(),
+            torrent_tx,
+            event_tx,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result,
+            vec![0, 1],
+            "V2 skip_hashing should return aligned V2 piece indices"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
