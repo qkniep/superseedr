@@ -895,7 +895,8 @@ impl TorrentState {
                             break;
                         }
 
-                        let global_block_idx = self.piece_manager.block_manager.flatten_address(addr);
+                        let global_block_idx =
+                            self.piece_manager.block_manager.flatten_address(addr);
                         if self
                             .piece_manager
                             .block_manager
@@ -1013,7 +1014,8 @@ impl TorrentState {
                             break;
                         }
 
-                        let global_block_idx = self.piece_manager.block_manager.flatten_address(addr);
+                        let global_block_idx =
+                            self.piece_manager.block_manager.flatten_address(addr);
                         if self
                             .piece_manager
                             .block_manager
@@ -3745,7 +3747,10 @@ mod tests {
             .flatten()
             .collect();
 
-        assert!(!requests.is_empty(), "Expected at least one boundary request");
+        assert!(
+            !requests.is_empty(),
+            "Expected at least one boundary request"
+        );
         assert!(
             requests.iter().all(|(idx, _, _)| *idx == 1),
             "All requests must target piece 1, got {:?}",
@@ -3873,23 +3878,25 @@ mod tests {
                 block_offset,
                 data: vec![0u8; length as usize],
             });
-            saw_verify_piece_1 |= effects.iter().any(|e| {
-                matches!(
-                    e,
-                    Effect::VerifyPiece {
-                        piece_index: 1,
-                        ..
-                    }
-                )
-            });
+            saw_verify_piece_1 |= effects
+                .iter()
+                .any(|e| matches!(e, Effect::VerifyPiece { piece_index: 1, .. }));
         }
 
         assert!(
-            !state.piece_manager.block_manager.legacy_buffers.contains_key(&0),
+            !state
+                .piece_manager
+                .block_manager
+                .legacy_buffers
+                .contains_key(&0),
             "Assembler for piece 0 should remain untouched while downloading piece 1"
         );
         // Piece 1 may either still be buffering or already have emitted verification and cleared buffer.
-        let piece_1_buffering = state.piece_manager.block_manager.legacy_buffers.contains_key(&1);
+        let piece_1_buffering = state
+            .piece_manager
+            .block_manager
+            .legacy_buffers
+            .contains_key(&1);
         assert!(
             piece_1_buffering || saw_verify_piece_1,
             "Piece 1 must either buffer in its own assembler or reach verification"
@@ -3986,7 +3993,9 @@ mod tests {
         state.torrent_status = TorrentStatus::Standard;
 
         state.piece_manager.mark_as_complete(0);
-        state.piece_manager.mark_as_pending(1, "target_peer".to_string());
+        state
+            .piece_manager
+            .mark_as_pending(1, "target_peer".to_string());
 
         let _ = state.update(Action::PieceVerified {
             peer_id: "target_peer".to_string(),
@@ -4128,15 +4137,9 @@ mod tests {
             });
         }
 
-        let verify_piece_1 = effects.iter().any(|e| {
-            matches!(
-                e,
-                Effect::VerifyPiece {
-                    piece_index: 1,
-                    ..
-                }
-            )
-        });
+        let verify_piece_1 = effects
+            .iter()
+            .any(|e| matches!(e, Effect::VerifyPiece { piece_index: 1, .. }));
         assert!(
             verify_piece_1,
             "Completing target non-aligned piece should emit VerifyPiece for piece 1"
@@ -10056,11 +10059,19 @@ mod integration_tests {
 
         let num_pieces = 2;
         let piece_size = 20_000;
-        let (mut manager, cmd_tx, _res) =
-            create_manager_harness("ReqIdentityNonAligned", num_pieces, piece_size, temp_dir.clone());
+        let (mut manager, cmd_tx, _res) = create_manager_harness(
+            "ReqIdentityNonAligned",
+            num_pieces,
+            piece_size,
+            temp_dir.clone(),
+        );
 
-        let (mut rx_events, _ctrl) =
-            spawn_mock_peer(&mut manager, full_bitfield(num_pieces), std::time::Duration::from_millis(0)).await;
+        let (mut rx_events, _ctrl) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(0),
+        )
+        .await;
 
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
@@ -10121,11 +10132,19 @@ mod integration_tests {
 
         let num_pieces = 2;
         let piece_size = 16_384;
-        let (mut manager, cmd_tx, _res) =
-            create_manager_harness("ReqIdentityAligned", num_pieces, piece_size, temp_dir.clone());
+        let (mut manager, cmd_tx, _res) = create_manager_harness(
+            "ReqIdentityAligned",
+            num_pieces,
+            piece_size,
+            temp_dir.clone(),
+        );
 
-        let (mut rx_events, _ctrl) =
-            spawn_mock_peer(&mut manager, full_bitfield(num_pieces), std::time::Duration::from_millis(0)).await;
+        let (mut rx_events, _ctrl) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(0),
+        )
+        .await;
 
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
@@ -10164,13 +10183,25 @@ mod integration_tests {
 
         let num_pieces = 1;
         let piece_size = 20_000;
-        let (mut manager, cmd_tx, _res) =
-            create_manager_harness("CancelIdentityNonAligned", num_pieces, piece_size, temp_dir.clone());
+        let (mut manager, cmd_tx, _res) = create_manager_harness(
+            "CancelIdentityNonAligned",
+            num_pieces,
+            piece_size,
+            temp_dir.clone(),
+        );
 
-        let (_rx_fast, _ctrl_fast) =
-            spawn_mock_peer(&mut manager, full_bitfield(num_pieces), std::time::Duration::from_millis(0)).await;
-        let (mut rx_slow, _ctrl_slow) =
-            spawn_mock_peer(&mut manager, full_bitfield(num_pieces), std::time::Duration::from_millis(50)).await;
+        let (_rx_fast, _ctrl_fast) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(0),
+        )
+        .await;
+        let (mut rx_slow, _ctrl_slow) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(50),
+        )
+        .await;
 
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
@@ -10218,13 +10249,25 @@ mod integration_tests {
 
         let num_pieces = 1;
         let piece_size = 16_384;
-        let (mut manager, cmd_tx, _res) =
-            create_manager_harness("CancelIdentityAligned", num_pieces, piece_size, temp_dir.clone());
+        let (mut manager, cmd_tx, _res) = create_manager_harness(
+            "CancelIdentityAligned",
+            num_pieces,
+            piece_size,
+            temp_dir.clone(),
+        );
 
-        let (_rx_fast, _ctrl_fast) =
-            spawn_mock_peer(&mut manager, full_bitfield(num_pieces), std::time::Duration::from_millis(0)).await;
-        let (mut rx_slow, _ctrl_slow) =
-            spawn_mock_peer(&mut manager, full_bitfield(num_pieces), std::time::Duration::from_millis(50)).await;
+        let (_rx_fast, _ctrl_fast) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(0),
+        )
+        .await;
+        let (mut rx_slow, _ctrl_slow) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(50),
+        )
+        .await;
 
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;

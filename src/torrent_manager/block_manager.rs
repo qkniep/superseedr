@@ -263,8 +263,7 @@ impl BlockManager {
             if length == 0 {
                 continue;
             }
-            if let Some(addr) =
-                self.inflate_address_from_overlay(piece_index, byte_offset, length)
+            if let Some(addr) = self.inflate_address_from_overlay(piece_index, byte_offset, length)
             {
                 out.push(addr);
             }
