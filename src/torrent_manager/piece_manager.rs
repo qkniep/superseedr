@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::torrent_manager::block_manager::BlockManager;
+use crate::torrent_manager::block_manager::{BlockAddress, BlockManager};
 
 #[cfg(test)]
 use crate::torrent_manager::state::TorrentStatus;
@@ -329,6 +329,44 @@ impl PieceManager {
 
     pub fn get_piece_availability(&self, piece_index: u32) -> u32 {
         self.piece_rarity.get(&piece_index).copied().unwrap_or(0) as u32
+    }
+
+    pub fn requestable_block_addresses_for_piece(&self, piece_index: u32) -> Vec<BlockAddress> {
+        let use_global_have = !self.block_manager.is_non_aligned_piece_grid();
+        let assembler_mask = self
+            .block_manager
+            .legacy_buffers
+            .get(&piece_index)
+            .map(|a| a.mask.clone());
+
+        self.block_manager
+            .piece_block_addresses(piece_index)
+            .into_iter()
+            .filter(|addr| {
+                if let Some(mask) = &assembler_mask {
+                    if mask.get(addr.block_index as usize) == Some(&true) {
+                        return false;
+                    }
+                }
+
+                if use_global_have {
+                    let global_idx = self.block_manager.flatten_address(*addr);
+                    if self.block_manager.block_bitfield.get(global_idx as usize) == Some(&true) {
+                        return false;
+                    }
+                }
+
+                true
+            })
+            .collect()
+    }
+
+    pub fn cancel_tuples_for_piece(&self, piece_index: u32) -> Vec<(u32, u32, u32)> {
+        self.block_manager
+            .piece_block_addresses(piece_index)
+            .into_iter()
+            .map(|addr| (addr.piece_index, addr.byte_offset, addr.length))
+            .collect()
     }
 }
 
@@ -925,5 +963,64 @@ mod tests {
             choice, None,
             "Should choose nothing if all pieces are skipped"
         );
+    }
+
+    #[test]
+    fn test_requestable_block_addresses_for_piece_aligned_filters_completed() {
+        let mut pm = PieceManager::new();
+        pm.set_initial_fields(2, false);
+        pm.set_geometry(16384, 32768, HashMap::new(), false);
+
+        pm.mark_as_complete(0);
+
+        let req_piece_0 = pm.requestable_block_addresses_for_piece(0);
+        assert!(
+            req_piece_0.is_empty(),
+            "Aligned completed piece should have no requestable blocks"
+        );
+
+        let req_piece_1 = pm.requestable_block_addresses_for_piece(1);
+        let tuples: Vec<(u32, u32, u32)> = req_piece_1
+            .iter()
+            .map(|a| (a.piece_index, a.byte_offset, a.length))
+            .collect();
+        assert_eq!(tuples, vec![(1, 0, 16384)]);
+    }
+
+    #[test]
+    fn test_requestable_block_addresses_for_piece_non_aligned_not_suppressed() {
+        let mut pm = PieceManager::new();
+        pm.set_initial_fields(2, false);
+        pm.set_geometry(20000, 40000, HashMap::new(), false);
+
+        // Piece 0 completion marks shared global slot, piece 1 should still request offset 0.
+        pm.mark_as_complete(0);
+
+        let req_piece_1 = pm.requestable_block_addresses_for_piece(1);
+        let mut tuples: Vec<(u32, u32, u32)> = req_piece_1
+            .iter()
+            .map(|a| (a.piece_index, a.byte_offset, a.length))
+            .collect();
+        tuples.sort_unstable_by_key(|(_, off, _)| *off);
+
+        assert_eq!(tuples, vec![(1, 0, 16384), (1, 16384, 3616)]);
+    }
+
+    #[test]
+    fn test_requestable_block_addresses_for_piece_respects_assembler_mask() {
+        let mut pm = PieceManager::new();
+        pm.set_initial_fields(1, false);
+        pm.set_geometry(20000, 20000, HashMap::new(), false);
+
+        let block = vec![0u8; 16384];
+        let _ = pm.handle_block(0, 0, &block, 20000);
+
+        let req = pm.requestable_block_addresses_for_piece(0);
+        let tuples: Vec<(u32, u32, u32)> = req
+            .iter()
+            .map(|a| (a.piece_index, a.byte_offset, a.length))
+            .collect();
+
+        assert_eq!(tuples, vec![(0, 16384, 3616)]);
     }
 }

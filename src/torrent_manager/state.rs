@@ -843,37 +843,11 @@ impl TorrentState {
                     }
                     let block_addrs = self
                         .piece_manager
-                        .block_manager
-                        .piece_block_addresses(piece_index);
-                    let assembler_mask = self
-                        .piece_manager
-                        .block_manager
-                        .legacy_buffers
-                        .get(&piece_index)
-                        .map(|a| a.mask.clone());
+                        .requestable_block_addresses_for_piece(piece_index);
 
                     for addr in block_addrs {
                         if available_slots == 0 {
                             break;
-                        }
-
-                        let global_block_idx =
-                            self.piece_manager.block_manager.flatten_address(addr);
-                        if self
-                            .piece_manager
-                            .block_manager
-                            .block_bitfield
-                            .get(global_block_idx as usize)
-                            == Some(&true)
-                        {
-                            continue;
-                        }
-
-                        // Is it buffered?
-                        if let Some(mask) = &assembler_mask {
-                            if mask.get(addr.block_index as usize) == Some(&true) {
-                                continue;
-                            }
                         }
 
                         let final_len = if let Some(limit) = calc_v2_limit(addr.piece_index) {
@@ -962,36 +936,11 @@ impl TorrentState {
                     // --- B. Generate Block Requests ---
                     let block_addrs = self
                         .piece_manager
-                        .block_manager
-                        .piece_block_addresses(piece_index);
-                    let assembler_mask = self
-                        .piece_manager
-                        .block_manager
-                        .legacy_buffers
-                        .get(&piece_index)
-                        .map(|a| a.mask.clone());
+                        .requestable_block_addresses_for_piece(piece_index);
 
                     for addr in block_addrs {
                         if available_slots == 0 {
                             break;
-                        }
-
-                        let global_block_idx =
-                            self.piece_manager.block_manager.flatten_address(addr);
-                        if self
-                            .piece_manager
-                            .block_manager
-                            .block_bitfield
-                            .get(global_block_idx as usize)
-                            == Some(&true)
-                        {
-                            continue;
-                        }
-
-                        if let Some(mask) = &assembler_mask {
-                            if mask.get(addr.block_index as usize) == Some(&true) {
-                                continue;
-                            }
                         }
 
                         let final_len = if let Some(limit) = calc_v2_limit(addr.piece_index) {
@@ -1567,14 +1516,7 @@ impl TorrentState {
                         if let Some(peer) = self.peers.get_mut(&other_peer) {
                             peer.pending_requests.remove(&piece_index);
                             // ... cancellation construction ...
-                            let block_addrs = self
-                                .piece_manager
-                                .block_manager
-                                .piece_block_addresses(piece_index);
-                            let mut batch = Vec::new();
-                            for addr in block_addrs {
-                                batch.push((addr.piece_index, addr.byte_offset, addr.length));
-                            }
+                            let batch = self.piece_manager.cancel_tuples_for_piece(piece_index);
                             if !batch.is_empty() {
                                 effects.push(Effect::SendToPeer {
                                     peer_id: other_peer.clone(),
