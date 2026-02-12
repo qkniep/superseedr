@@ -6,6 +6,8 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib import error as url_error
+from urllib import request as url_request
 
 from integration_tests.harness.clients.superseedr import SuperseedrAdapter
 from integration_tests.harness.config import HarnessDefaults, HarnessPaths
@@ -106,6 +108,23 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _wait_for_tracker(port: int, timeout_secs: int = 20) -> None:
+    deadline = time.monotonic() + timeout_secs
+    url = f"http://127.0.0.1:{port}/announce"
+    while time.monotonic() < deadline:
+        try:
+            with url_request.urlopen(url, timeout=1) as resp:
+                if resp.status in (200, 400):
+                    return
+        except url_error.HTTPError as exc:
+            if exc.code == 400:
+                return
+        except Exception:
+            pass
+        time.sleep(0.25)
+    raise RuntimeError(f"Tracker did not become ready within {timeout_secs}s on {url}")
+
+
 def run_mode(
     mode: str,
     timeout_secs: int,
@@ -148,8 +167,10 @@ def run_mode(
     _write_settings(mode, "leech", leech_config_root / "settings.toml", torrent_files)
 
     project_name = f"interop_{mode}_{int(time.time())}"
+    tracker_port = 16969
     compose_env = {
         "INTEROP_PROJECT_NAME": project_name,
+        "INTEROP_TRACKER_PORT": str(tracker_port),
         "INTEROP_TRACKER_SCRIPT_PATH": str(harness_paths.tracker_script.resolve()),
         "INTEROP_FIXTURES_PATH": str(staged_fixtures_root.resolve()),
         "INTEROP_SEED_DATA_PATH": str(seed_data_root.resolve()),
@@ -173,7 +194,9 @@ def run_mode(
     try:
         # Build once to avoid duplicate image-export race between two services using same tag.
         compose.run(["build", "superseedr_seed"])
-        compose.up(["tracker", "superseedr_seed", "superseedr_leech"], no_build=True)
+        compose.up(["tracker"], no_build=True)
+        _wait_for_tracker(tracker_port)
+        compose.up(["superseedr_seed", "superseedr_leech"], no_build=True)
 
         deadline = time.monotonic() + timeout_secs
         while time.monotonic() < deadline:
