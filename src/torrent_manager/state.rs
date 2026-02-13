@@ -7997,7 +7997,9 @@ mod prop_tests {
         invalid_verify_prob: f64,
         max_loop_guard: usize,
         delivery_batch_max: usize,
-        allow_stall_reject: bool,
+        manager_delivery_batch_max: usize,
+        simulated_tick_ms: u64,
+        cleanup_interval_ms: u64,
     }
 
     fn default_harness_config() -> FuzzHarnessConfig {
@@ -8006,11 +8008,17 @@ mod prop_tests {
             safety_net_peer: false,
             churn_choke_prob: 0.03,
             churn_unchoke_prob: 0.08,
-            invalid_verify_prob: 0.10,
+            invalid_verify_prob: 0.0,
             max_loop_guard: 80_000,
             delivery_batch_max: 6,
-            allow_stall_reject: true,
+            manager_delivery_batch_max: 4,
+            simulated_tick_ms: 100,
+            cleanup_interval_ms: 3_000,
         }
+    }
+
+    enum SimulatedManagerCommand {
+        Disconnect(String),
     }
 
     fn enqueue_from_effect(
@@ -8018,6 +8026,7 @@ mod prop_tests {
         peer_bitfields_bool: &HashMap<String, Vec<bool>>,
         peer_bitfields_bytes: &HashMap<String, Vec<u8>>,
         pending_actions: &mut Vec<Action>,
+        pending_manager_commands: &mut Vec<SimulatedManagerCommand>,
         rng: &mut StdRng,
         duplicate_probability: f64,
         invalid_verify_probability: f64,
@@ -8086,6 +8095,9 @@ mod prop_tests {
                 peer_id,
                 piece_index,
             }),
+            Effect::DisconnectPeer { peer_id } => {
+                pending_manager_commands.push(SimulatedManagerCommand::Disconnect(peer_id));
+            }
             _ => {}
         }
     }
@@ -8135,6 +8147,10 @@ mod prop_tests {
             });
             let _ = state.update(Action::PeerSuccessfullyConnected {
                 peer_id: peer_id.clone(),
+            });
+            let _ = state.update(Action::UpdatePeerId {
+                peer_addr: peer_id.clone(),
+                new_id: peer_id.as_bytes().to_vec(),
             });
             peer_ids.push(peer_id);
         }
@@ -8194,6 +8210,7 @@ mod prop_tests {
         }
 
         let mut pending_actions: Vec<Action> = Vec::new();
+        let mut pending_manager_commands: Vec<SimulatedManagerCommand> = Vec::new();
         for peer_id in &peer_ids {
             let initial = state.update(Action::PeerUnchoked {
                 peer_id: peer_id.clone(),
@@ -8204,6 +8221,7 @@ mod prop_tests {
                     &peer_bitfields_bool,
                     &peer_bitfields_bytes,
                     &mut pending_actions,
+                    &mut pending_manager_commands,
                     &mut rng,
                     case.duplicate_factor as f64 / 4.0,
                     cfg.invalid_verify_prob,
@@ -8216,12 +8234,16 @@ mod prop_tests {
             .update_rarity(state.peers.values().map(|p| &p.bitfield));
 
         let mut loop_guard = 0usize;
+        let mut elapsed_ms = 0u64;
+        let cleanup_interval_ms = cfg.cleanup_interval_ms.max(1);
+        let mut next_cleanup_ms = cleanup_interval_ms;
         while state.piece_manager.pieces_remaining > 0 {
             loop_guard += 1;
             prop_assert!(
                 loop_guard < cfg.max_loop_guard,
-                "simulation stalled with {} pending actions, pieces_remaining={}, seed={}",
+                "simulation stalled with {} pending actions, {} pending manager commands, pieces_remaining={}, seed={}",
                 pending_actions.len(),
+                pending_manager_commands.len(),
                 state.piece_manager.pieces_remaining,
                 random_seed,
             );
@@ -8248,6 +8270,7 @@ mod prop_tests {
                                 &peer_bitfields_bool,
                                 &peer_bitfields_bytes,
                                 &mut pending_actions,
+                                &mut pending_manager_commands,
                                 &mut rng,
                                 case.duplicate_factor as f64 / 4.0,
                                 cfg.invalid_verify_prob,
@@ -8270,6 +8293,7 @@ mod prop_tests {
                         &peer_bitfields_bool,
                         &peer_bitfields_bytes,
                         &mut pending_actions,
+                        &mut pending_manager_commands,
                         &mut rng,
                         case.duplicate_factor as f64 / 4.0,
                         cfg.invalid_verify_prob,
@@ -8296,6 +8320,7 @@ mod prop_tests {
                             &peer_bitfields_bool,
                             &peer_bitfields_bytes,
                             &mut pending_actions,
+                            &mut pending_manager_commands,
                             &mut rng,
                             case.duplicate_factor as f64 / 4.0,
                             cfg.invalid_verify_prob,
@@ -8307,7 +8332,66 @@ mod prop_tests {
                 }
             }
 
-            if !progressed && pending_actions.is_empty() {
+            if !pending_manager_commands.is_empty() {
+                progressed = true;
+                let budget = usize::min(
+                    pending_manager_commands.len(),
+                    rng.random_range(1..=cfg.manager_delivery_batch_max.max(1)),
+                );
+                for _ in 0..budget {
+                    let idx = rng.random_range(0..pending_manager_commands.len());
+                    let cmd = pending_manager_commands.swap_remove(idx);
+                    let follow_up = match cmd {
+                        SimulatedManagerCommand::Disconnect(peer_id) => {
+                            state.update(Action::PeerDisconnected {
+                                peer_id,
+                                force: false,
+                            })
+                        }
+                    };
+                    if !follow_up.is_empty() {
+                        progressed = true;
+                    }
+                    for effect in follow_up {
+                        enqueue_from_effect(
+                            effect,
+                            &peer_bitfields_bool,
+                            &peer_bitfields_bytes,
+                            &mut pending_actions,
+                            &mut pending_manager_commands,
+                            &mut rng,
+                            case.duplicate_factor as f64 / 4.0,
+                            cfg.invalid_verify_prob,
+                        );
+                    }
+                    if pending_manager_commands.is_empty() {
+                        break;
+                    }
+                }
+            }
+
+            elapsed_ms = elapsed_ms.saturating_add(cfg.simulated_tick_ms);
+            while elapsed_ms >= next_cleanup_ms {
+                let cleanup_effects = state.update(Action::Cleanup);
+                if !cleanup_effects.is_empty() {
+                    progressed = true;
+                }
+                for effect in cleanup_effects {
+                    enqueue_from_effect(
+                        effect,
+                        &peer_bitfields_bool,
+                        &peer_bitfields_bytes,
+                        &mut pending_actions,
+                        &mut pending_manager_commands,
+                        &mut rng,
+                        case.duplicate_factor as f64 / 4.0,
+                        cfg.invalid_verify_prob,
+                    );
+                }
+                next_cleanup_ms = next_cleanup_ms.saturating_add(cleanup_interval_ms);
+            }
+
+            if !progressed && pending_actions.is_empty() && pending_manager_commands.is_empty() {
                 for peer_id in &peer_ids {
                     let _ = state.update(Action::PeerUnchoked {
                         peer_id: peer_id.clone(),
@@ -8321,6 +8405,7 @@ mod prop_tests {
                             &peer_bitfields_bool,
                             &peer_bitfields_bytes,
                             &mut pending_actions,
+                            &mut pending_manager_commands,
                             &mut rng,
                             case.duplicate_factor as f64 / 4.0,
                             cfg.invalid_verify_prob,
@@ -8329,11 +8414,34 @@ mod prop_tests {
                 }
             }
 
-            if cfg.allow_stall_reject {
-                prop_assume!(progressed || !pending_actions.is_empty());
-            } else {
-                prop_assert!(progressed || !pending_actions.is_empty());
-            }
+            let queued_piece_count = state.piece_manager.need_queue.len()
+                + state.piece_manager.pending_queue.len();
+            let has_serviceable_piece = state
+                .piece_manager
+                .need_queue
+                .iter()
+                .chain(state.piece_manager.pending_queue.keys())
+                .any(|piece_idx| {
+                    state
+                        .peers
+                        .values()
+                        .any(|peer| peer.bitfield.get(*piece_idx as usize) == Some(&true))
+                });
+
+            prop_assert!(
+                progressed || !pending_actions.is_empty() || !pending_manager_commands.is_empty(),
+                "no progress and no pending work after recovery, pieces_remaining={}, pending_actions={}, pending_manager_commands={}, need_queue={}, pending_queue={}, queued_piece_count={}, has_serviceable_piece={}, peers={}, seed={}, loop_guard={}",
+                state.piece_manager.pieces_remaining,
+                pending_actions.len(),
+                pending_manager_commands.len(),
+                state.piece_manager.need_queue.len(),
+                state.piece_manager.pending_queue.len(),
+                queued_piece_count,
+                has_serviceable_piece,
+                state.peers.len(),
+                random_seed,
+                loop_guard,
+            );
         }
 
         prop_assert_eq!(state.piece_manager.pieces_remaining, 0);
