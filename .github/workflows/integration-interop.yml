@@ -1,0 +1,62 @@
+name: Integration Interop
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Mode to run (all|v1|v2|hybrid)"
+        required: false
+        default: "all"
+      timeout_secs:
+        description: "Per-run timeout in seconds"
+        required: false
+        default: "300"
+  schedule:
+    - cron: "15 3 * * *"
+
+jobs:
+  interop:
+    name: Interop (${{ matrix.mode }})
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.mode == 'all' || github.event.inputs.mode == matrix.mode
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [v1, v2, hybrid]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-integration.txt
+
+      - name: Decide mode for this matrix shard
+        id: select_mode
+        run: |
+          INPUT_MODE="${{ github.event.inputs.mode }}"
+          if [ -z "$INPUT_MODE" ] || [ "$INPUT_MODE" = "all" ]; then
+            echo "mode=${{ matrix.mode }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=$INPUT_MODE" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run interop harness
+        env:
+          INTEROP_TIMEOUT_SECS: ${{ github.event.inputs.timeout_secs || '300' }}
+        run: |
+          ./integration_tests/run_interop.sh "${{ steps.select_mode.outputs.mode }}"
+
+      - name: Upload interop artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: interop-artifacts-${{ matrix.mode }}-${{ github.run_id }}
+          path: integration_tests/artifacts/

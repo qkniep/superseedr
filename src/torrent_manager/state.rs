@@ -7819,6 +7819,7 @@ mod prop_tests {
 
     use super::*;
     use proptest::prelude::*;
+    use serde_bencode::value::Value;
     use tokio::sync::mpsc;
 
     // --- Constants for Consistent Fuzzing ---
@@ -7828,6 +7829,536 @@ mod prop_tests {
 
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
+
+    #[derive(Clone, Debug)]
+    enum TorrentVariant {
+        V1Single,
+        V1Multi,
+        Hybrid,
+        V2,
+    }
+
+    #[derive(Clone, Debug)]
+    struct TorrentFuzzCase {
+        variant: TorrentVariant,
+        piece_length: u32,
+        file_lengths: Vec<u64>,
+        duplicate_factor: u8,
+    }
+
+    fn torrent_shape_strategy() -> impl Strategy<Value = TorrentFuzzCase> {
+        (
+            0u8..4,
+            16384u32..=65536u32,
+            proptest::collection::vec(16_384u64..=400_000u64, 1..=4),
+            0u8..=2,
+        )
+            .prop_map(
+                |(variant_id, piece_length, mut file_lengths, duplicate_factor)| {
+                    let variant = match variant_id {
+                        0 => TorrentVariant::V1Single,
+                        1 => TorrentVariant::V1Multi,
+                        2 => TorrentVariant::Hybrid,
+                        _ => TorrentVariant::V2,
+                    };
+
+                    if matches!(variant, TorrentVariant::V1Single) {
+                        file_lengths.truncate(1);
+                    }
+
+                    TorrentFuzzCase {
+                        variant,
+                        piece_length,
+                        file_lengths,
+                        duplicate_factor,
+                    }
+                },
+            )
+    }
+
+    fn build_fuzz_torrent(case: &TorrentFuzzCase) -> Torrent {
+        use crate::torrent_file::{Info, InfoFile, Torrent};
+
+        let piece_len = case.piece_length as u64;
+        let total_len: u64 = case.file_lengths.iter().sum();
+        let total_piece_count = (total_len.div_ceil(piece_len)) as usize;
+
+        let mut info = Info {
+            name: "fuzz_torrent".to_string(),
+            piece_length: case.piece_length as i64,
+            pieces: vec![0xAB; total_piece_count.saturating_mul(20)],
+            length: total_len as i64,
+            files: Vec::new(),
+            private: None,
+            md5sum: None,
+            meta_version: None,
+            file_tree: None,
+        };
+
+        if matches!(
+            case.variant,
+            TorrentVariant::V1Multi | TorrentVariant::Hybrid
+        ) {
+            info.length = 0;
+            info.files = case
+                .file_lengths
+                .iter()
+                .enumerate()
+                .map(|(idx, len)| InfoFile {
+                    length: *len as i64,
+                    md5sum: None,
+                    path: vec![format!("file_{idx}.bin")],
+                    attr: None,
+                })
+                .collect();
+        }
+
+        let mut piece_layers = None;
+
+        if matches!(case.variant, TorrentVariant::V2 | TorrentVariant::Hybrid) {
+            info.meta_version = Some(2);
+
+            let mut root_node = HashMap::new();
+            let mut layers = HashMap::new();
+
+            for (idx, len) in case.file_lengths.iter().enumerate() {
+                let root_hash = vec![idx as u8 + 1; 32];
+                let file_piece_count = len.div_ceil(piece_len) as usize;
+                let mut layer_bytes = Vec::with_capacity(file_piece_count.saturating_mul(32));
+                for layer_idx in 0..file_piece_count {
+                    layer_bytes.extend_from_slice(&[(layer_idx as u8).wrapping_add(11); 32]);
+                }
+
+                layers.insert(root_hash.clone(), Value::Bytes(layer_bytes));
+
+                let mut file_meta = HashMap::new();
+                file_meta.insert("length".as_bytes().to_vec(), Value::Int(*len as i64));
+                file_meta.insert("pieces root".as_bytes().to_vec(), Value::Bytes(root_hash));
+
+                let mut file_leaf = HashMap::new();
+                file_leaf.insert("".as_bytes().to_vec(), Value::Dict(file_meta));
+                root_node.insert(
+                    format!("v2_file_{idx}").as_bytes().to_vec(),
+                    Value::Dict(file_leaf),
+                );
+            }
+
+            info.file_tree = Some(Value::Dict(root_node));
+            piece_layers = Some(Value::Dict(layers));
+        }
+
+        if matches!(case.variant, TorrentVariant::V2) {
+            info.pieces.clear();
+            info.files.clear();
+            info.length = 0;
+        }
+
+        Torrent {
+            announce: None,
+            announce_list: None,
+            url_list: None,
+            info,
+            info_dict_bencode: Vec::new(),
+            created_by: None,
+            creation_date: None,
+            encoding: None,
+            comment: None,
+            piece_layers,
+        }
+    }
+
+    fn bitfield_has_piece(bitfield: &[u8], piece_index: usize) -> bool {
+        let byte_idx = piece_index / 8;
+        let bit_idx = 7 - (piece_index % 8);
+        bitfield
+            .get(byte_idx)
+            .map(|b| (b & (1 << bit_idx)) != 0)
+            .unwrap_or(false)
+    }
+
+    fn encode_bool_bitfield(bits: &[bool]) -> Vec<u8> {
+        let mut out = vec![0u8; bits.len().div_ceil(8)];
+        for (idx, has_piece) in bits.iter().enumerate() {
+            if *has_piece {
+                let byte_idx = idx / 8;
+                let bit_idx = 7 - (idx % 8);
+                out[byte_idx] |= 1 << bit_idx;
+            }
+        }
+        out
+    }
+
+    #[derive(Clone, Copy)]
+    struct FuzzHarnessConfig {
+        peer_count_range: (usize, usize),
+        safety_net_peer: bool,
+        churn_choke_prob: f64,
+        churn_unchoke_prob: f64,
+        invalid_verify_prob: f64,
+        max_loop_guard: usize,
+        delivery_batch_max: usize,
+        allow_stall_reject: bool,
+    }
+
+    fn default_harness_config() -> FuzzHarnessConfig {
+        FuzzHarnessConfig {
+            peer_count_range: (5, 12),
+            safety_net_peer: false,
+            churn_choke_prob: 0.03,
+            churn_unchoke_prob: 0.08,
+            invalid_verify_prob: 0.10,
+            max_loop_guard: 80_000,
+            delivery_batch_max: 6,
+            allow_stall_reject: true,
+        }
+    }
+
+    fn enqueue_from_effect(
+        effect: Effect,
+        peer_bitfields_bool: &HashMap<String, Vec<bool>>,
+        peer_bitfields_bytes: &HashMap<String, Vec<u8>>,
+        pending_actions: &mut Vec<Action>,
+        rng: &mut StdRng,
+        duplicate_probability: f64,
+        invalid_verify_probability: f64,
+    ) {
+        match effect {
+            Effect::SendToPeer { peer_id, cmd } => {
+                if let TorrentCommand::BulkRequest(requests) = *cmd {
+                    for (piece_index, block_offset, length) in requests {
+                        if let Some(bits) = peer_bitfields_bool.get(&peer_id) {
+                            assert!(
+                                bits.get(piece_index as usize).copied().unwrap_or(false),
+                                "requested piece {piece_index} from peer {peer_id} that does not advertise it"
+                            );
+                        } else {
+                            let bits = peer_bitfields_bytes
+                                .get(&peer_id)
+                                .expect("peer bitfield should exist");
+                            assert!(
+                                bitfield_has_piece(bits, piece_index as usize),
+                                "requested piece {piece_index} from peer {peer_id} that does not advertise it"
+                            );
+                        }
+
+                        pending_actions.push(Action::IncomingBlock {
+                            peer_id: peer_id.clone(),
+                            piece_index,
+                            block_offset,
+                            data: vec![piece_index as u8; length as usize],
+                        });
+
+                        if rng.random_bool(duplicate_probability) {
+                            pending_actions.push(Action::IncomingBlock {
+                                peer_id: peer_id.clone(),
+                                piece_index,
+                                block_offset,
+                                data: vec![piece_index as u8; length as usize],
+                            });
+                        }
+                    }
+                }
+            }
+            Effect::VerifyPiece {
+                peer_id,
+                piece_index,
+                data,
+            }
+            | Effect::VerifyPieceV2 {
+                peer_id,
+                piece_index,
+                data,
+                ..
+            } => {
+                let valid = !rng.random_bool(invalid_verify_probability);
+                pending_actions.push(Action::PieceVerified {
+                    peer_id,
+                    piece_index,
+                    valid,
+                    data,
+                });
+            }
+            Effect::WriteToDisk {
+                peer_id,
+                piece_index,
+                ..
+            } => pending_actions.push(Action::PieceWrittenToDisk {
+                peer_id,
+                piece_index,
+            }),
+            _ => {}
+        }
+    }
+
+    fn run_piece_selection_completion_harness(
+        case: &TorrentFuzzCase,
+        random_seed: u64,
+        cfg: FuzzHarnessConfig,
+    ) -> Result<(), TestCaseError> {
+        let torrent = build_fuzz_torrent(case);
+        let mut state = TorrentState {
+            torrent_data_path: Some(std::path::PathBuf::from("/tmp")),
+            ..Default::default()
+        };
+
+        let _ = state.update(Action::MetadataReceived {
+            torrent: Box::new(torrent),
+            metadata_length: 0,
+        });
+        state.torrent_status = TorrentStatus::Standard;
+
+        let num_pieces = state.piece_manager.bitfield.len();
+        prop_assume!(num_pieces > 0);
+        prop_assume!((0..num_pieces).all(|piece_idx| {
+            !state
+                .piece_manager
+                .block_manager
+                .piece_block_addresses(piece_idx as u32)
+                .is_empty()
+        }));
+
+        state.piece_manager.need_queue.clear();
+        for piece_idx in 0..num_pieces as u32 {
+            state.piece_manager.need_queue.push(piece_idx);
+        }
+
+        let mut rng = StdRng::seed_from_u64(random_seed);
+        let peer_count = rng.random_range(cfg.peer_count_range.0..=cfg.peer_count_range.1);
+
+        let mut peer_ids = Vec::with_capacity(peer_count);
+        for i in 0..peer_count {
+            let peer_id = format!("fuzz_peer_{i}");
+            let (tx, _rx) = mpsc::channel(16);
+            let _ = state.update(Action::RegisterPeer {
+                peer_id: peer_id.clone(),
+                tx,
+            });
+            let _ = state.update(Action::PeerSuccessfullyConnected {
+                peer_id: peer_id.clone(),
+            });
+            peer_ids.push(peer_id);
+        }
+
+        let mut peer_bitfields_bool: HashMap<String, Vec<bool>> = HashMap::new();
+        for peer_id in &peer_ids {
+            peer_bitfields_bool.insert(peer_id.clone(), vec![false; num_pieces]);
+        }
+
+        if cfg.safety_net_peer {
+            for (peer_idx, peer_id) in peer_ids.iter().enumerate() {
+                if let Some(bits) = peer_bitfields_bool.get_mut(peer_id) {
+                    for has_piece in bits.iter_mut().take(num_pieces) {
+                        *has_piece = peer_idx == 0 || rng.random_bool(0.5);
+                    }
+                }
+            }
+        } else {
+            for piece_idx in 0..num_pieces {
+                let primary = rng.random_range(0..peer_count);
+                peer_bitfields_bool
+                    .get_mut(&peer_ids[primary])
+                    .expect("primary peer must exist")[piece_idx] = true;
+
+                for peer_id in peer_ids.iter().take(peer_count) {
+                    if rng.random_bool(0.2) {
+                        peer_bitfields_bool
+                            .get_mut(peer_id)
+                            .expect("peer must exist")[piece_idx] = true;
+                    }
+                }
+            }
+
+            for piece_idx in 0..num_pieces {
+                assert!(peer_ids.iter().any(|pid| {
+                    peer_bitfields_bool
+                        .get(pid)
+                        .and_then(|b| b.get(piece_idx))
+                        .copied()
+                        .unwrap_or(false)
+                }));
+            }
+        }
+
+        let mut peer_bitfields_bytes: HashMap<String, Vec<u8>> = HashMap::new();
+        for peer_id in &peer_ids {
+            let bitfield_bool = peer_bitfields_bool
+                .get(peer_id)
+                .expect("peer bitfield exists");
+            let bitfield = encode_bool_bitfield(bitfield_bool);
+            peer_bitfields_bytes.insert(peer_id.clone(), bitfield.clone());
+
+            let _ = state.update(Action::PeerBitfieldReceived {
+                peer_id: peer_id.clone(),
+                bitfield,
+            });
+        }
+
+        let mut pending_actions: Vec<Action> = Vec::new();
+        for peer_id in &peer_ids {
+            let initial = state.update(Action::PeerUnchoked {
+                peer_id: peer_id.clone(),
+            });
+            for effect in initial {
+                enqueue_from_effect(
+                    effect,
+                    &peer_bitfields_bool,
+                    &peer_bitfields_bytes,
+                    &mut pending_actions,
+                    &mut rng,
+                    case.duplicate_factor as f64 / 4.0,
+                    cfg.invalid_verify_prob,
+                );
+            }
+        }
+
+        state
+            .piece_manager
+            .update_rarity(state.peers.values().map(|p| &p.bitfield));
+
+        let mut loop_guard = 0usize;
+        while state.piece_manager.pieces_remaining > 0 {
+            loop_guard += 1;
+            prop_assert!(
+                loop_guard < cfg.max_loop_guard,
+                "simulation stalled with {} pending actions, pieces_remaining={}, seed={}",
+                pending_actions.len(),
+                state.piece_manager.pieces_remaining,
+                random_seed,
+            );
+
+            let mut progressed = false;
+
+            if cfg.churn_choke_prob > 0.0 || cfg.churn_unchoke_prob > 0.0 {
+                for peer_id in &peer_ids {
+                    if rng.random_bool(cfg.churn_choke_prob) {
+                        let _ = state.update(Action::PeerChoked {
+                            peer_id: peer_id.clone(),
+                        });
+                    }
+                    if rng.random_bool(cfg.churn_unchoke_prob) {
+                        let effects = state.update(Action::PeerUnchoked {
+                            peer_id: peer_id.clone(),
+                        });
+                        if !effects.is_empty() {
+                            progressed = true;
+                        }
+                        for effect in effects {
+                            enqueue_from_effect(
+                                effect,
+                                &peer_bitfields_bool,
+                                &peer_bitfields_bytes,
+                                &mut pending_actions,
+                                &mut rng,
+                                case.duplicate_factor as f64 / 4.0,
+                                cfg.invalid_verify_prob,
+                            );
+                        }
+                    }
+                }
+            }
+
+            for peer_id in &peer_ids {
+                let effects = state.update(Action::AssignWork {
+                    peer_id: peer_id.clone(),
+                });
+                if !effects.is_empty() {
+                    progressed = true;
+                }
+                for effect in effects {
+                    enqueue_from_effect(
+                        effect,
+                        &peer_bitfields_bool,
+                        &peer_bitfields_bytes,
+                        &mut pending_actions,
+                        &mut rng,
+                        case.duplicate_factor as f64 / 4.0,
+                        cfg.invalid_verify_prob,
+                    );
+                }
+            }
+
+            if !pending_actions.is_empty() {
+                progressed = true;
+                let budget = usize::min(
+                    pending_actions.len(),
+                    rng.random_range(1..=cfg.delivery_batch_max.max(1)),
+                );
+                for _ in 0..budget {
+                    let idx = rng.random_range(0..pending_actions.len());
+                    let action = pending_actions.swap_remove(idx);
+                    let follow_up = state.update(action);
+                    if !follow_up.is_empty() {
+                        progressed = true;
+                    }
+                    for effect in follow_up {
+                        enqueue_from_effect(
+                            effect,
+                            &peer_bitfields_bool,
+                            &peer_bitfields_bytes,
+                            &mut pending_actions,
+                            &mut rng,
+                            case.duplicate_factor as f64 / 4.0,
+                            cfg.invalid_verify_prob,
+                        );
+                    }
+                    if pending_actions.is_empty() {
+                        break;
+                    }
+                }
+            }
+
+            if !progressed && pending_actions.is_empty() {
+                for peer_id in &peer_ids {
+                    let _ = state.update(Action::PeerUnchoked {
+                        peer_id: peer_id.clone(),
+                    });
+                    let effects = state.update(Action::AssignWork {
+                        peer_id: peer_id.clone(),
+                    });
+                    for effect in effects {
+                        enqueue_from_effect(
+                            effect,
+                            &peer_bitfields_bool,
+                            &peer_bitfields_bytes,
+                            &mut pending_actions,
+                            &mut rng,
+                            case.duplicate_factor as f64 / 4.0,
+                            cfg.invalid_verify_prob,
+                        );
+                    }
+                }
+            }
+
+            if cfg.allow_stall_reject {
+                prop_assume!(progressed || !pending_actions.is_empty());
+            } else {
+                prop_assert!(progressed || !pending_actions.is_empty());
+            }
+        }
+
+        prop_assert_eq!(state.piece_manager.pieces_remaining, 0);
+        prop_assert!(state
+            .piece_manager
+            .bitfield
+            .iter()
+            .all(|status| *status == PieceStatus::Done));
+
+        Ok(())
+    }
+
+    proptest! {
+        #[test]
+        fn fuzz_piece_block_selection_and_completion(
+            case in torrent_shape_strategy(),
+            random_seed in any::<u64>(),
+        ) {
+            run_piece_selection_completion_harness(
+                &case,
+                random_seed,
+                default_harness_config(),
+            )?;
+        }
+    }
 
     #[derive(Clone, Debug)]
     enum NetworkFault {
