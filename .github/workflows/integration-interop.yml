@@ -1,21 +1,7 @@
 name: Integration Interop
 
 on:
-  push:
-    branches:
-      - develop
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: "Mode to run (all|v1|v2|hybrid)"
-        required: false
-        default: "all"
-      timeout_secs:
-        description: "Per-run timeout in seconds"
-        required: false
-        default: "300"
-  schedule:
-    - cron: "15 3 * * *"
+  pull_request:
 
 jobs:
   interop:
@@ -42,24 +28,14 @@ jobs:
 
       - name: Decide mode for this matrix shard
         id: select_mode
-        env:
-          INPUT_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode || 'all' }}
         run: |
-          if [ -z "$INPUT_MODE" ] || [ "$INPUT_MODE" = "all" ]; then
-            echo "mode=${{ matrix.mode }}" >> "$GITHUB_OUTPUT"
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          elif [ "$INPUT_MODE" = "${{ matrix.mode }}" ]; then
-            echo "mode=$INPUT_MODE" >> "$GITHUB_OUTPUT"
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "mode=${{ matrix.mode }}" >> "$GITHUB_OUTPUT"
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "mode=${{ matrix.mode }}" >> "$GITHUB_OUTPUT"
+          echo "run=true" >> "$GITHUB_OUTPUT"
 
       - name: Run interop harness
         if: steps.select_mode.outputs.run == 'true'
         env:
-          INTEROP_TIMEOUT_SECS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.timeout_secs || '300' }}
+          INTEROP_TIMEOUT_SECS: "300"
         run: |
           ./integration_tests/run_interop.sh "${{ steps.select_mode.outputs.mode }}"
 
