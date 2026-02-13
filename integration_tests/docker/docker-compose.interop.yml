@@ -1,0 +1,51 @@
+services:
+  tracker:
+    image: python:3.12-alpine
+    working_dir: /app
+    command: ["python", "tracker.py"]
+    volumes:
+      - ${INTEROP_TRACKER_SCRIPT_PATH}:/app/tracker.py:ro
+    ports:
+      - "127.0.0.1:${INTEROP_TRACKER_PORT:-16969}:6969"
+
+  superseedr_seed:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: superseedr:interop
+    container_name: ${INTEROP_PROJECT_NAME}_superseedr_seed
+    tty: true
+    stdin_open: true
+    init: true
+    environment:
+      - SUPERSEEDR_CLIENT_PORT=16881
+      - SUPERSEEDR_OUTPUT_STATUS_INTERVAL=${INTEROP_STATUS_INTERVAL:-2}
+      - SUPERSEEDR_DEFAULT_DOWNLOAD_FOLDER=/superseedr-data/seed
+    volumes:
+      - ${INTEROP_SEED_DATA_PATH}:/superseedr-data/seed
+      - ${INTEROP_SEED_CONFIG_PATH}:/root/.config/jagalite.superseedr
+      - ${INTEROP_SEED_SHARE_PATH}:/root/.local/share/jagalite.superseedr
+      - ${INTEROP_FIXTURES_PATH}:/fixtures:ro
+    depends_on:
+      - tracker
+
+  superseedr_leech:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: superseedr:interop
+    container_name: ${INTEROP_PROJECT_NAME}_superseedr_leech
+    tty: true
+    stdin_open: true
+    init: true
+    environment:
+      - SUPERSEEDR_CLIENT_PORT=16882
+      - SUPERSEEDR_OUTPUT_STATUS_INTERVAL=${INTEROP_STATUS_INTERVAL:-2}
+      - SUPERSEEDR_DEFAULT_DOWNLOAD_FOLDER=/superseedr-data/leech
+    volumes:
+      - ${INTEROP_LEECH_DATA_PATH}:/superseedr-data/leech
+      - ${INTEROP_LEECH_CONFIG_PATH}:/root/.config/jagalite.superseedr
+      - ${INTEROP_LEECH_SHARE_PATH}:/root/.local/share/jagalite.superseedr
+      - ${INTEROP_FIXTURES_PATH}:/fixtures:ro
+    depends_on:
+      - tracker
