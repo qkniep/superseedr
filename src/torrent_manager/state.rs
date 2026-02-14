@@ -7820,6 +7820,7 @@ mod prop_tests {
     use super::*;
     use proptest::prelude::*;
     use serde_bencode::value::Value;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::sync::mpsc;
 
     // --- Constants for Consistent Fuzzing ---
@@ -8021,6 +8022,7 @@ mod prop_tests {
         Disconnect(String),
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn enqueue_from_effect(
         effect: Effect,
         peer_bitfields_bool: &HashMap<String, Vec<bool>>,
@@ -8393,9 +8395,24 @@ mod prop_tests {
 
             if !progressed && pending_actions.is_empty() && pending_manager_commands.is_empty() {
                 for peer_id in &peer_ids {
-                    let _ = state.update(Action::PeerUnchoked {
+                    let unchoke_effects = state.update(Action::PeerUnchoked {
                         peer_id: peer_id.clone(),
                     });
+                    if !unchoke_effects.is_empty() {
+                        progressed = true;
+                    }
+                    for effect in unchoke_effects {
+                        enqueue_from_effect(
+                            effect,
+                            &peer_bitfields_bool,
+                            &peer_bitfields_bytes,
+                            &mut pending_actions,
+                            &mut pending_manager_commands,
+                            &mut rng,
+                            case.duplicate_factor as f64 / 4.0,
+                            cfg.invalid_verify_prob,
+                        );
+                    }
                     let effects = state.update(Action::AssignWork {
                         peer_id: peer_id.clone(),
                     });
@@ -8414,34 +8431,68 @@ mod prop_tests {
                 }
             }
 
-            let queued_piece_count = state.piece_manager.need_queue.len()
-                + state.piece_manager.pending_queue.len();
-            let has_serviceable_piece = state
-                .piece_manager
-                .need_queue
-                .iter()
-                .chain(state.piece_manager.pending_queue.keys())
-                .any(|piece_idx| {
-                    state
-                        .peers
-                        .values()
-                        .any(|peer| peer.bitfield.get(*piece_idx as usize) == Some(&true))
-                });
+            if !(progressed || !pending_actions.is_empty() || !pending_manager_commands.is_empty())
+            {
+                let queued_piece_count =
+                    state.piece_manager.need_queue.len() + state.piece_manager.pending_queue.len();
+                let has_serviceable_piece = state
+                    .piece_manager
+                    .need_queue
+                    .iter()
+                    .chain(state.piece_manager.pending_queue.keys())
+                    .any(|piece_idx| {
+                        state
+                            .peers
+                            .values()
+                            .any(|peer| peer.bitfield.get(*piece_idx as usize) == Some(&true))
+                    });
+                let pending_without_owner = state
+                    .piece_manager
+                    .pending_queue
+                    .keys()
+                    .filter(|piece_idx| {
+                        !state
+                            .peers
+                            .values()
+                            .any(|peer| peer.pending_requests.contains(piece_idx))
+                    })
+                    .count();
+                let pending_requestable_blocks: usize = state
+                    .piece_manager
+                    .pending_queue
+                    .keys()
+                    .map(|piece_idx| {
+                        state
+                            .piece_manager
+                            .requestable_block_addresses_for_piece(*piece_idx)
+                            .len()
+                    })
+                    .sum();
+                let peers_with_pending_requests = state
+                    .peers
+                    .values()
+                    .filter(|peer| !peer.pending_requests.is_empty())
+                    .count();
 
-            prop_assert!(
-                progressed || !pending_actions.is_empty() || !pending_manager_commands.is_empty(),
-                "no progress and no pending work after recovery, pieces_remaining={}, pending_actions={}, pending_manager_commands={}, need_queue={}, pending_queue={}, queued_piece_count={}, has_serviceable_piece={}, peers={}, seed={}, loop_guard={}",
-                state.piece_manager.pieces_remaining,
-                pending_actions.len(),
-                pending_manager_commands.len(),
-                state.piece_manager.need_queue.len(),
-                state.piece_manager.pending_queue.len(),
-                queued_piece_count,
-                has_serviceable_piece,
-                state.peers.len(),
-                random_seed,
-                loop_guard,
-            );
+                prop_assert!(
+                    false,
+                    "no progress and no pending work after recovery, pieces_remaining={}, pending_actions={}, pending_manager_commands={}, pending_disconnects={}, need_queue={}, pending_queue={}, queued_piece_count={}, has_serviceable_piece={}, pending_without_owner={}, pending_requestable_blocks={}, peers_with_pending_requests={}, peers={}, seed={}, loop_guard={}",
+                    state.piece_manager.pieces_remaining,
+                    pending_actions.len(),
+                    pending_manager_commands.len(),
+                    state.pending_disconnects.len(),
+                    state.piece_manager.need_queue.len(),
+                    state.piece_manager.pending_queue.len(),
+                    queued_piece_count,
+                    has_serviceable_piece,
+                    pending_without_owner,
+                    pending_requestable_blocks,
+                    peers_with_pending_requests,
+                    state.peers.len(),
+                    random_seed,
+                    loop_guard,
+                );
+            }
         }
 
         prop_assert_eq!(state.piece_manager.pieces_remaining, 0);
@@ -8454,12 +8505,18 @@ mod prop_tests {
         Ok(())
     }
 
+    static FUZZ_CASE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     proptest! {
         #[test]
         fn fuzz_piece_block_selection_and_completion(
             case in torrent_shape_strategy(),
             random_seed in any::<u64>(),
         ) {
+            let case_no = FUZZ_CASE_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+            if case_no.is_multiple_of(10_000) {
+                println!("current run {}", case_no);
+            }
             run_piece_selection_completion_harness(
                 &case,
                 random_seed,
