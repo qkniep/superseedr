@@ -1,217 +1,219 @@
+# TUI Refactor Plan: Screen-Oriented Architecture With Shared Context and Safe Phased Migration
 
-# Frontend TUI Refactor Plan
+## Summary
+Refactor `src/tui` into screen modules where each screen owns rendering and input mapping, while shared state/settings are provided through a read-only context. Keep domain logic in app core, move UI-only state into `UiState`, and route behavior through `UiAction -> reducer -> UiEffect` for testability and regression control.
 
-## Goals
-- Reduce coupling between `tui/*` and `crate::app::*`
-- Replace “god modules” (`tui/view.rs`, `tui/events.rs`) with screen/components
-- Move UI-only state out of `AppState`
-- Make rendering mostly pure (immutable inputs)
-- Enable unit tests via `UiAction` + reducer pattern
-- Keep changes incremental (no big-bang rewrite)
+This plan is incremental, parity-driven, and includes manual testing after each phase.
 
-## Guiding Principles
-- **UI is an adapter**: it should translate input → intent, and state → pixels.
-- **App core owns domain state**; UI owns selection/scroll/focus/search buffers.
-- Prefer **thin interfaces** (`AppFacade` / `AppView`) over importing the full `App`.
+## Important Interface and Type Changes
+- Add `ScreenId` enum for active/stacked screens.
+- Add `ScreenContext<'a>`:
+  - `ui: &'a UiState`
+  - `app: &'a AppViewModel`
+  - `settings: &'a Settings`
+- Add `UiState` with shared + per-screen substates:
+  - `UiSharedState` (selection, focus, search, redraw, animation clocks, etc.)
+  - `NormalScreenState`
+  - `BrowserScreenState`
+  - `ConfigScreenState`
+  - `HelpScreenState`
+  - `DeleteConfirmScreenState`
+  - `PowerScreenState`
+- Add screen trait:
+  - `fn draw(&self, f: &mut Frame, ctx: &ScreenContext)`
+  - `fn map_input(&mut self, event: CrosstermEvent, ctx: &ScreenContext) -> Vec<UiAction>`
+  - optional `fn on_enter(...)` / `fn on_exit(...)`
+- Add `UiAction` enum for intent.
+- Add `UiEffect` enum for side effects (manager commands, config writes, shutdown request, etc.).
+- Add reducer API:
+  - `fn reduce(ui: &mut UiState, action: UiAction) -> ReduceResult`
+  - `ReduceResult { redraw: bool, effects: Vec<UiEffect> }`
+- Add `AppViewModel` read-only projection for UI.
+- Transition policy:
+  - Root screen is `Normal`.
+  - `Esc` on root `Normal` is no-op.
+  - `Esc` with unsaved edits uses screen-specific policy:
+    - search: clear + exit search
+    - config/name edit: confirm discard
+    - browser: preserve existing semantics unless explicitly changed
 
----
+## Phase 0: Baseline and Parity Harness
+### Steps
+1. Add `tui/README.md` with current architecture, event flow, render flow.
+2. Create a parity checklist document for manual behavior.
+3. Add/normalize baseline tests for:
+  - transitions and key handling currently in `events.rs`
+  - layout invariants currently in `layout.rs`/`view.rs`
+  - existing tree behavior stays intact
+4. Record current transition table and state ownership matrix (current state).
 
-## Phase 0 — Baseline & Safety Nets (0–1 PRs)
-### Tasks
-- Add `tui/README.md` describing current architecture and responsibilities.
-- Add minimal smoke tests:
-  - Build test (already implicit in CI)
-  - Optional: a small unit test for `layout.rs` column selection (pure function)
-- Add `#[deny(clippy::unwrap_used)]` only if feasible; otherwise don’t tighten linting yet.
-
-### Acceptance Criteria
+### Automated Gate
+- Existing tests pass.
+- New baseline tests pass.
 - No behavior change.
-- A few low-effort tests exist for pure code paths.
 
----
+### Manual Testing
+1. Start app and verify all current screens open/close.
+2. Verify `Esc` behavior on each screen.
+3. Verify search start/edit/exit.
+4. Verify browser navigation and selection.
+5. Verify config editing entry/exit.
+6. Verify help toggle on current platform behavior.
 
-## Phase 1 — Screen Modularization (2–4 PRs)
-### Goal
-Stop growing `view.rs` and `events.rs` by introducing screen modules.
+## Phase 1: Screen Module Split (No Logic Change)
+### Steps
+1. Create `src/tui/screens/` with modules:
+  - `normal.rs`, `welcome.rs`, `config.rs`, `browser.rs`, `help.rs`, `power.rs`, `delete_confirm.rs`
+2. Move draw functions from `view.rs` into per-screen files.
+3. Move event branches from `events.rs` into per-screen input mapping functions.
+4. Keep data access unchanged for this phase (still reads from existing app state paths).
+5. Keep central dispatch thin in `view.rs`/`events.rs`.
 
-### File/Module Changes
-- Create:
-  - `tui/screens/mod.rs`
-  - `tui/screens/welcome.rs`
-  - `tui/screens/normal.rs`
-  - `tui/screens/config.rs`
-  - `tui/screens/browser.rs`
-  - `tui/screens/help.rs`
-  - `tui/screens/power.rs`
-  - `tui/screens/delete_confirm.rs`
+### Automated Gate
+- No test regressions.
+- No behavioral diff vs baseline tests.
 
-### Design
-Define a minimal screen interface:
-- `fn draw(...)`
-- `fn handle_event(...) -> EventResult`
+### Manual Testing
+1. Repeat full baseline checklist.
+2. Confirm each screen still responds to same keys.
+3. Confirm no visual regressions in major layouts.
 
-Example (conceptual):
-- `EventResult::{ConsumedRedraw, ConsumedNoRedraw, NotConsumed}`
+## Phase 2: Introduce Shared Read Context + AppViewModel
+### Steps
+1. Add `ScreenContext` and `AppViewModel`.
+2. Switch screen draw signatures to read-only `ScreenContext`.
+3. Keep input mapping per screen; reducer not introduced yet.
+4. Move animation clock ticking out of draw and into app loop; draw becomes read-only.
+5. Add borrow-first `AppViewModel` rules to avoid per-frame full clones.
 
-### Migration Steps
-- Move drawing code from `tui/view.rs` into screen modules, one screen at a time.
-- Move event branches from `tui/events.rs` into corresponding screen modules.
+### Automated Gate
+- Draw path compiles without `&mut AppState`.
+- Render/layout tests pass.
+- No new direct deep `crate::app::*` dependencies in screen modules except approved facade/view types.
 
-### Acceptance Criteria
-- `tui/view.rs` becomes mostly a dispatcher + shared widget helpers.
-- `tui/events.rs` becomes mostly a dispatcher.
-- No changes to `AppState` yet; still uses current data paths.
-- Behavior matches current UI.
+### Manual Testing
+1. Verify FPS/data-rate behavior unchanged.
+2. Verify theme/effect animation still works.
+3. Verify no stutter or noticeable latency increase.
+4. Verify power-saving redraw behavior unchanged.
 
----
+## Phase 3: Extract UI State Into `UiState` (Slice by Slice)
+### Steps
+1. Introduce `UiState` and attach to `App`.
+2. Move UI-only fields from `AppState` first:
+  - search flags/buffer
+  - selection indices/focus/header
+  - redraw and animation clocks
+3. Move per-screen UI payloads out of `AppMode`/`FileBrowserMode` into screen substates.
+4. Keep domain data in app core (`torrents`, peers, metrics, config values).
+5. Add explicit state ownership matrix in docs and keep it updated.
 
-## Phase 2 — Extract UI-only State (3–6 PRs)
-### Goal
-Move selection/focus/search/tree view state out of `AppState`.
+### Automated Gate
+- All moved fields compile and behave via `UiState`.
+- Invariant tests pass:
+  - selection clamping
+  - search reset/filter behavior
+  - browser cursor/expand/collapse behavior
 
-### Create
-- `tui/ui_state.rs` (or `tui/state.rs` if available and appropriate)
+### Manual Testing
+1. Verify search still filters and exits correctly.
+2. Verify selection remains stable after sorting/filtering.
+3. Verify browser/tree interactions parity.
+4. Verify config and delete-confirm flows parity.
 
-### Move out of `AppState` (examples)
-- Mode-related UI flags that exist solely for rendering or navigation
-- Selection indices and scroll offsets
-- Search input buffer + “search mode” state
-- File browser: `TreeViewState`, expand/collapse, filter string, focus, etc.
-- Animation/effects time state (phase time, last frame time)
-- “ui_needs_redraw” (or keep as UI-owned flag)
+## Phase 4: `UiAction` + Reducer + Effects Pipeline
+### Steps
+1. Add `UiAction`, `UiEffect`, `ReduceResult`.
+2. Implement reducer for `Normal` screen first.
+3. Convert `Normal` key handling to:
+  - `event -> UiAction` in screen
+  - `UiAction -> reduce(ui)` for state changes
+  - app loop executes `UiEffect` via facade
+4. Add `AppFacade` methods for side effects.
+5. Keep legacy branches for unmigrated screens temporarily.
 
-### Keep in `AppState` (examples)
-- Torrent list data, peers, metrics/histories, manager-derived data
-- Domain config values (not “config editor cursor position”)
+### Automated Gate
+- Reducer unit tests cover mode transitions, search editing, selection clamp, root `Esc`.
+- Effect emission tests verify expected side effects for key actions.
+- No regression in existing behavior tests.
 
-### Migration Steps
-- Introduce `UiState` and plumb it through:
-  - `App` holds `ui: UiState` + `app_state: AppState`
-  - update `view` and `events` to use `ui` instead of storing UI state in `AppState`
-- Update each screen to read/write `UiState` for UI concerns.
+### Manual Testing
+1. Focus on normal-screen hotkeys (`/`, arrows, sorting, theme, quit key, etc.).
+2. Verify root `Esc` is no-op.
+3. Verify side effects still trigger (pause/resume/config update/shutdown request).
+4. Verify errors and warnings still surface correctly.
 
-### Acceptance Criteria
-- `crate::app::AppState` shrinks and becomes domain-oriented.
-- UI behavior unchanged.
-- New unit tests can be written against `UiState` methods without `AppState`.
+## Phase 5: Migrate Remaining Screens to Action/Reducer Model
+### Steps
+1. Migrate `browser`, `config`, `help`, `power`, `delete_confirm`, `welcome`.
+2. Add transition table enforcement in reducer:
+  - `Back`, `Open`, `CloseOverlay`, `Confirm`, `Cancel`
+3. Add screen-specific unsaved-edit policies.
+4. Remove legacy event branches only when each screen reaches parity.
 
----
+### Automated Gate
+- Transition matrix tests pass for all screens.
+- Per-screen action mapping tests pass.
+- No dead code warnings from retired legacy branches.
 
-## Phase 3 — Make Rendering Mostly Pure (2–4 PRs)
-### Goal
-Rendering should not require `&mut AppState` except for explicit UI animation clocks.
+### Manual Testing
+1. Execute full transition table manually.
+2. Verify unsaved edit policies:
+  - search clears on `Esc`
+  - config/name edit prompts discard
+3. Verify browser `Esc` semantics match chosen policy.
+4. Verify all overlays return to correct previous screen.
 
-### Changes
-- Update signatures from:
-  - `draw(f, &mut AppState, &Settings)`
-  - to: `draw(f, ui: &UiState, app: &AppViewModel, settings: &Settings)`
-- Create `AppViewModel` (or `AppView`) that provides read-only data needed by UI.
+## Phase 6: Layout and Theme/Effects Cleanup + Boundary Hardening
+### Steps
+1. Split layout into `tui/layout/common.rs` + per-screen planners.
+2. Keep layout pure: `plan(area, ctx) -> LayoutPlan`.
+3. Move theme effects function out of `view.rs` to dedicated theme/effects module.
+4. Remove remaining deep coupling from `tui/screens/*`.
+5. Finalize docs: architecture, invariants, extension guide for new screens.
 
-### Migration Steps
-- Build `AppViewModel` as a struct of references or cloned slices:
-  - torrents list (already sorted/filtered)
-  - peers for selected torrent
-  - summaries, stats, config snapshot, etc.
-- Compute view model in the app loop once per frame or per change.
-- Make “effects_phase_time” and other animation clocks live in `UiState`.
+### Automated Gate
+- Layout unit tests pass per screen breakpoints.
+- Theme/effect tests/smoke checks pass.
+- `view.rs` and `events.rs` are thin dispatch layers (or consolidated dispatcher).
 
-### Acceptance Criteria
-- `tui/screens/*::draw` takes immutable state.
-- Side effects in rendering eliminated (or isolated to `UiState` clock updates outside draw).
+### Manual Testing
+1. Resize terminal across breakpoints and validate each screen layout.
+2. Verify theme switching/effects at multiple data rates.
+3. Verify power-saving behavior and redraw gating.
+4. Perform end-to-end user flow: startup -> browse -> config -> normal -> shutdown.
 
----
+## Cross-Phase Regression Controls
+- One functional slice per PR.
+- Mandatory before/after parity checklist for touched behavior.
+- Keep legacy path until migrated path is test-covered and parity-verified.
+- If parity fails, rollback only current slice, not entire refactor.
+- No formatter/lint rewrite-only churn mixed into behavior PRs.
 
-## Phase 4 — Introduce `UiAction` + Reducer (4–8 PRs)
-### Goal
-Decouple key bindings from behavior and make input handling testable.
+## Test Cases and Scenarios (Minimum Required)
+- Transition tests:
+  - `Esc` from each non-root screen returns expected screen
+  - root `Normal + Esc` is no-op
+  - overlay stack push/pop correctness
+- Search tests:
+  - enter search, edit query, backspace, `Esc`, `Enter`
+- Selection tests:
+  - clamp after filter/sort/update
+- Browser tests:
+  - tree expand/collapse/cursor/filter and pane switching
+- Config tests:
+  - edit, cancel, confirm discard, save/apply effects
+- Effect tests:
+  - expected `UiEffect` emitted for each command key path
+- Layout tests:
+  - narrow/short/wide breakpoints per screen
+- Theme/effects tests:
+  - effect enable/disable and no-mutation draw contract
 
-### Create
-- `tui/actions.rs`:
-  - `enum UiAction { ... }`
-- `tui/reducer.rs`:
-  - `fn reduce(ui: &mut UiState, app: &mut dyn AppFacade, action: UiAction) -> ReduceResult`
-
-### Create an `AppFacade`
-A narrow interface exposed to UI:
-- Torrent controls: start/stop/pause/resume/remove
-- Sorting/filtering triggers (or UI sets filter and app recomputes view model)
-- Config apply/save actions
-- Shutdown request
-
-### Migration Steps
-- Convert screen input handlers:
-  - `Event -> UiAction` mapping (keymap)
-  - then `reduce(...)`
-- Start with one screen (Normal) and migrate others gradually.
-- Keep legacy paths temporarily where needed (bridge actions to existing `app` methods).
-
-### Acceptance Criteria
-- Unit tests exist for `reduce()`:
-  - search input editing
-  - selection clamping after filtering
-  - mode transitions
-- Keymap changes no longer require touching app logic.
-
----
-
-## Phase 5 — Theme & Effects Cleanup (1–3 PRs)
-### Goal
-Make theme implementation coherent and reduce `view.rs` responsibility.
-
-### Changes
-- Move `apply_theme_effects_to_frame` out of `tui/view.rs` into:
-  - `tui/theme_fx.rs` or `tui/theme.rs`
-- Split large theme definitions:
-  - `tui/theme/mod.rs`
-  - `tui/theme/palettes.rs`
-  - `tui/theme/effects.rs`
-  - `tui/theme/registry.rs`
-
-### Optional Performance Tweaks
-- Skip effects pass if disabled (already mostly there)
-- Consider applying effects only to affected regions (later optimization)
-
-### Acceptance Criteria
-- `tui/view.rs` no longer contains theme effect logic.
-- Theme changes are localized and easier to review.
-
----
-
-## Phase 6 — Tighten Boundaries & Remove Debt (ongoing)
-### Tasks
-- Remove remaining direct `use crate::app::*` imports from deep inside widgets:
-  - screens should depend on `UiState` + `AppViewModel` only
-- Consolidate shared widgets into `tui/widgets/*`
-- Reduce duplication in layout computations
-- Document invariants:
-  - selection indices and scroll offsets rules
-  - mode transition rules
-  - view model rebuild triggers
-
-### Acceptance Criteria
-- `tui/` compiles with minimal knowledge of app internals.
-- New screens/features can be added without touching giant match statements.
-- Tests cover key UI flows.
-
----
-
-## Suggested PR Breakdown (practical order)
-1. Add screens folder + move `welcome` draw/event.
-2. Move `normal` draw/event.
-3. Move remaining screens draw/event.
-4. Introduce `UiState`, migrate search/selection first.
-5. Migrate browser tree UI state next.
-6. Make draw immutable via `AppViewModel`.
-7. Add `UiAction` + reducer for Normal screen.
-8. Migrate remaining screens to actions.
-9. Theme/effects extraction.
-
----
-
-## “Definition of Done”
-- `tui/view.rs` is a thin dispatcher + shared helpers.
-- `tui/events.rs` is a thin dispatcher or gone entirely (replaced by screen handlers).
-- UI-only state is not in `AppState`.
-- Rendering is pure (immutable app inputs), with explicit UI clock updates.
-- Input is testable through `UiAction` + `reduce()`.
-- Theme effects and theme data are clearly separated and not mixed into view rendering logic.
+## Assumptions and Defaults
+- Keep current user-visible behavior unless explicitly listed as changed.
+- Root `Esc` remains no-op.
+- Unsaved-edit `Esc` behavior is screen-specific as defined above.
+- `AppViewModel` is borrow-first; avoid full per-frame clones.
+- Side effects never run inside reducer; reducer is deterministic and testable.
+- Screen modules own input mapping and drawing; shared reducer/effects enforce consistency.
