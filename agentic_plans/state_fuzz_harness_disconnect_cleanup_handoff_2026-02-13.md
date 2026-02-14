@@ -1,5 +1,14 @@
 # State Fuzz Harness Handoff: Disconnect/Cleanup Fidelity + Remaining Liveness Bug
 
+## Owner Directive (2026-02-14)
+- **Do not modify core logic in `src/torrent_manager/state.rs` (or other production paths) for this issue unless explicitly approved by the repo owner first.**
+- Treat this effort as **harness/test-only** by default:
+  - property harness behavior
+  - test scaffolding/simulation flow
+  - assertion predicates/diagnostics
+  - proptest strategy/config only when requested
+- If investigation suggests a real production bug, stop and present evidence + a proposed core patch plan for approval before editing runtime logic.
+
 ## Context
 We were stabilizing this property test:
 - `torrent_manager::state::prop_tests::fuzz_piece_block_selection_and_completion`
@@ -93,6 +102,8 @@ cargo test -q torrent_manager::state::prop_tests::fuzz_piece_block_selection_and
 ```
 
 ## Next Steps (Implementation)
+Constraint for all steps below: **no core/runtime logic edits without explicit owner approval**.
+
 1. **Trace pending-piece lifecycle invariants around stall point**
 - Focus on transitions involving:
   - `Action::AssignWork`
@@ -105,10 +116,15 @@ cargo test -q torrent_manager::state::prop_tests::fuzz_piece_block_selection_and
 - Detect when a piece exists in `pending_queue` but no peer can actively make progress on it.
 - Confirm whether peer-local `pending_requests` and global `pending_queue` diverge.
 
-3. **Fix liveness condition in state logic**
-- Candidate fix direction:
-  - Requeue or re-eligibilize pending pieces when no active owner peer remains able to service them.
-  - Ensure `AssignWork` can always regenerate work for serviceable pending pieces in Endgame/standard paths.
+3. **Resolve via harness/test model first**
+- Candidate harness directions:
+  - Expand “pending work” predicate to include true in-flight peer work.
+  - Improve simulated delivery/queue handling so active requests are represented as pending progress.
+  - Add deterministic harness assertions that distinguish “in-flight but not queued” from true deadlock.
+- If these fail to resolve and a production bug is still indicated:
+  - collect deterministic evidence,
+  - propose core fix options,
+  - wait for explicit owner approval before code changes.
 
 4. **Add regression test(s)**
 - Add deterministic repro test (fixed case + seed) for this stall pattern.
@@ -122,3 +138,4 @@ cargo test -q torrent_manager::state::prop_tests::fuzz_piece_block_selection_and
 - Working tree currently has only this modified file from this task:
   - `src/torrent_manager/state.rs`
 - `proptest-regressions/torrent_manager/state.txt` was auto-touched during failures and then restored to avoid unrelated noise.
+- Policy reminder: future contributors should assume harness-only scope unless owner approval is recorded in-thread for core edits.
