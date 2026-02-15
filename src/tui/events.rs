@@ -20,6 +20,7 @@ use crate::tui::layout::compute_visible_torrent_columns;
 use crate::tui::layout::get_peer_columns;
 use crate::tui::layout::get_torrent_columns;
 use crate::tui::layout::LayoutContext;
+use crate::tui::screens::welcome;
 use crate::tui::tree::RawNode;
 use crate::tui::tree::TreeViewState;
 use crate::tui::tree::{TreeAction, TreeFilter, TreeMathHelper};
@@ -153,11 +154,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 
     match &mut app.app_state.mode {
         AppMode::Welcome => {
-            if let CrosstermEvent::Key(key) = event {
-                if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc {
-                    app.app_state.mode = AppMode::Normal;
-                }
-            }
+            welcome::handle_event(event, &mut app.app_state);
         }
         AppMode::Normal => match event {
             CrosstermEvent::Key(key) => {
