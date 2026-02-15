@@ -7,8 +7,8 @@ use ratatui::{prelude::*, widgets::*};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app::{AppMode, AppState};
-use crate::tui::screen_context::ScreenContext;
 use crate::tui::formatters::{centered_rect, format_limit_bps, format_speed};
+use crate::tui::screen_context::ScreenContext;
 use crate::tui::view::calculate_player_stats;
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 

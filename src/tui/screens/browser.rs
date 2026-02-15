@@ -680,7 +680,8 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 }
 
 fn handle_browser_search_key(key_code: KeyCode, app: &mut App) -> bool {
-    if let Some(action) = map_search_key_to_browser_action(key_code, app.app_state.ui.file_browser.is_searching)
+    if let Some(action) =
+        map_search_key_to_browser_action(key_code, app.app_state.ui.file_browser.is_searching)
     {
         let reduced = reduce_browser_action(
             action,
@@ -791,13 +792,15 @@ async fn handle_browser_common_key(key_code: KeyCode, app: &mut App) -> bool {
         let file_browser = &mut app.app_state.ui.file_browser;
         handle_filesystem_navigation(
             key_code,
-            &mut file_browser.state,
-            &file_browser.data,
-            &file_browser.browser_mode,
-            &mut file_browser.is_searching,
-            &mut file_browser.search_query,
-            list_height,
-            &app.app_command_tx,
+            BrowserFilesystemNavContext {
+                state: &mut file_browser.state,
+                data: &file_browser.data,
+                browser_mode: &file_browser.browser_mode,
+                is_searching: &mut file_browser.is_searching,
+                search_query: &mut file_browser.search_query,
+                list_height,
+                app_command_tx: &app.app_command_tx,
+            },
         )
     };
     if consumed_filesystem {
@@ -835,15 +838,14 @@ pub enum ConfirmDecision {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BrowserAction {
-    SearchEsc,
-    SearchEnter,
-    SearchBackspace,
-    SearchChar(char),
-    SearchNoop,
+    Esc,
+    Enter,
+    Backspace,
+    Char(char),
+    Noop,
 }
 
 pub struct BrowserReduceResult {
-    pub consumed: bool,
     pub redraw: bool,
 }
 
@@ -884,7 +886,6 @@ pub enum BrowserDialogEffect {
 }
 
 pub struct BrowserDialogReduceResult {
-    pub consumed: bool,
     pub effects: Vec<BrowserDialogEffect>,
 }
 
@@ -937,6 +938,16 @@ pub struct BrowserPreviewReduceResult {
     pub consumed: bool,
 }
 
+pub struct BrowserFilesystemNavContext<'a> {
+    pub state: &'a mut TreeViewState,
+    pub data: &'a [RawNode<FileMetadata>],
+    pub browser_mode: &'a FileBrowserMode,
+    pub is_searching: &'a mut bool,
+    pub search_query: &'a mut String,
+    pub list_height: usize,
+    pub app_command_tx: &'a mpsc::Sender<AppCommand>,
+}
+
 fn map_search_key_to_browser_action(
     key_code: KeyCode,
     is_searching: bool,
@@ -946,11 +957,11 @@ fn map_search_key_to_browser_action(
     }
 
     Some(match key_code {
-        KeyCode::Esc => BrowserAction::SearchEsc,
-        KeyCode::Enter => BrowserAction::SearchEnter,
-        KeyCode::Backspace => BrowserAction::SearchBackspace,
-        KeyCode::Char(c) => BrowserAction::SearchChar(c),
-        _ => BrowserAction::SearchNoop,
+        KeyCode::Esc => BrowserAction::Esc,
+        KeyCode::Enter => BrowserAction::Enter,
+        KeyCode::Backspace => BrowserAction::Backspace,
+        KeyCode::Char(c) => BrowserAction::Char(c),
+        _ => BrowserAction::Noop,
     })
 }
 
@@ -960,26 +971,23 @@ pub fn reduce_browser_action(
     search_query: &mut String,
 ) -> BrowserReduceResult {
     match action {
-        BrowserAction::SearchEsc => {
+        BrowserAction::Esc => {
             *is_searching = false;
             search_query.clear();
         }
-        BrowserAction::SearchEnter => {
+        BrowserAction::Enter => {
             *is_searching = false;
         }
-        BrowserAction::SearchBackspace => {
+        BrowserAction::Backspace => {
             search_query.pop();
         }
-        BrowserAction::SearchChar(c) => {
+        BrowserAction::Char(c) => {
             search_query.push(c);
         }
-        BrowserAction::SearchNoop => {}
+        BrowserAction::Noop => {}
     }
 
-    BrowserReduceResult {
-        consumed: true,
-        redraw: true,
-    }
+    BrowserReduceResult { redraw: true }
 }
 
 fn map_filesystem_key_to_action(key_code: KeyCode) -> Option<BrowserFsAction> {
@@ -1347,23 +1355,17 @@ pub fn build_filter(
 
 pub fn handle_filesystem_navigation(
     key_code: KeyCode,
-    state: &mut TreeViewState,
-    data: &[RawNode<FileMetadata>],
-    browser_mode: &FileBrowserMode,
-    is_searching: &mut bool,
-    search_query: &mut String,
-    list_height: usize,
-    app_command_tx: &mpsc::Sender<AppCommand>,
+    ctx: BrowserFilesystemNavContext<'_>,
 ) -> bool {
     if let Some(action) = map_filesystem_key_to_action(key_code) {
         let reduced = reduce_filesystem_navigation_action(
             action,
-            state,
-            data,
-            browser_mode,
-            is_searching,
-            search_query,
-            list_height,
+            ctx.state,
+            ctx.data,
+            ctx.browser_mode,
+            ctx.is_searching,
+            ctx.search_query,
+            ctx.list_height,
         );
         for effect in reduced.effects {
             match effect {
@@ -1372,7 +1374,7 @@ pub fn handle_filesystem_navigation(
                     browser_mode,
                     highlight_path,
                 } => {
-                    let _ = app_command_tx.try_send(AppCommand::FetchFileTree {
+                    let _ = ctx.app_command_tx.try_send(AppCommand::FetchFileTree {
                         path,
                         browser_mode,
                         highlight_path,
@@ -1393,7 +1395,6 @@ pub fn reduce_browser_dialog_action(
     has_pending_torrent_link: bool,
 ) -> BrowserDialogReduceResult {
     let mut result = BrowserDialogReduceResult {
-        consumed: true,
         effects: Vec::new(),
     };
 
@@ -1710,7 +1711,7 @@ mod tests {
         let action = map_search_key_to_browser_action(KeyCode::Esc, is_searching)
             .expect("expected search action");
         let out = reduce_browser_action(action, &mut is_searching, &mut query);
-        assert!(out.consumed);
+        assert!(out.redraw);
         assert!(!is_searching);
         assert!(query.is_empty());
     }
@@ -1720,13 +1721,8 @@ mod tests {
         let mut is_searching = true;
         let mut query = String::from("ab");
 
-        let out = reduce_browser_action(
-            BrowserAction::SearchChar('c'),
-            &mut is_searching,
-            &mut query,
-        );
+        let out = reduce_browser_action(BrowserAction::Char('c'), &mut is_searching, &mut query);
 
-        assert!(out.consumed);
         assert!(out.redraw);
         assert!(is_searching);
         assert_eq!(query, "abc");
@@ -1737,9 +1733,8 @@ mod tests {
         let mut is_searching = true;
         let mut query = String::from("abc");
 
-        let out = reduce_browser_action(BrowserAction::SearchNoop, &mut is_searching, &mut query);
+        let out = reduce_browser_action(BrowserAction::Noop, &mut is_searching, &mut query);
 
-        assert!(out.consumed);
         assert!(out.redraw);
         assert!(is_searching);
         assert_eq!(query, "abc");
@@ -2060,8 +2055,10 @@ mod tests {
             payload: TorrentPreviewPayload::default(),
             is_dir: true,
         }];
-        let mut state = TreeViewState::default();
-        state.cursor_path = Some(PathBuf::from("root"));
+        let mut state = TreeViewState {
+            cursor_path: Some(PathBuf::from("root")),
+            ..Default::default()
+        };
 
         let out = reduce_browser_preview_action(
             map_preview_key_to_action(KeyCode::Char(' ')),
@@ -2084,13 +2081,15 @@ mod tests {
         let mut query = String::from("abc");
         let consumed = handle_filesystem_navigation(
             KeyCode::Char('/'),
-            &mut state,
-            &data,
-            &mode,
-            &mut is_searching,
-            &mut query,
-            5,
-            &tx,
+            BrowserFilesystemNavContext {
+                state: &mut state,
+                data: &data,
+                browser_mode: &mode,
+                is_searching: &mut is_searching,
+                search_query: &mut query,
+                list_height: 5,
+                app_command_tx: &tx,
+            },
         );
         assert!(consumed);
         assert!(is_searching);
@@ -2144,7 +2143,6 @@ mod tests {
             false,
         );
 
-        assert!(out.consumed);
         assert_eq!(out.effects.len(), 2);
         assert!(matches!(
             out.effects[0],
@@ -2165,7 +2163,6 @@ mod tests {
 
         let out = reduce_browser_dialog_action(BrowserDialogAction::Escape, &state, &mode, true);
 
-        assert!(out.consumed);
         assert_eq!(out.effects.len(), 2);
         assert!(matches!(out.effects[0], BrowserDialogEffect::ClearSearch));
         assert!(matches!(
@@ -2181,7 +2178,6 @@ mod tests {
 
         let out = reduce_browser_dialog_action(BrowserDialogAction::Escape, &state, &mode, true);
 
-        assert!(out.consumed);
         assert_eq!(out.effects.len(), 2);
         assert!(matches!(out.effects[0], BrowserDialogEffect::ClearSearch));
         assert!(matches!(
@@ -2207,7 +2203,6 @@ mod tests {
 
         let out = reduce_browser_dialog_action(BrowserDialogAction::Escape, &state, &mode, true);
 
-        assert!(out.consumed);
         assert_eq!(out.effects.len(), 3);
         assert!(matches!(
             out.effects[0],
@@ -2244,7 +2239,6 @@ mod tests {
             true,
         );
 
-        assert!(out.consumed);
         assert_eq!(out.effects.len(), 3);
         assert!(matches!(
             out.effects[0],

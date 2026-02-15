@@ -72,13 +72,15 @@ async fn dispatch_mode_event(event: CrosstermEvent, app: &mut App) {
         AppMode::Config => {
             if let config::ConfigOutcome::ToNormal = config::handle_event(
                 event,
-                &mut app.app_state.ui.config.settings_edit,
-                &mut app.app_state.ui.config.selected_index,
-                app.app_state.ui.config.items.as_mut_slice(),
-                &mut app.app_state.ui.config.editing,
-                &app.app_command_tx,
-                &app.global_dl_bucket,
-                &app.global_ul_bucket,
+                config::ConfigHandleContext {
+                    settings_edit: &mut app.app_state.ui.config.settings_edit,
+                    selected_index: &mut app.app_state.ui.config.selected_index,
+                    items: app.app_state.ui.config.items.as_mut_slice(),
+                    editing: &mut app.app_state.ui.config.editing,
+                    app_command_tx: &app.app_command_tx,
+                    global_dl_bucket: &app.global_dl_bucket,
+                    global_ul_bucket: &app.global_ul_bucket,
+                },
             ) {
                 app.app_state.mode = AppMode::Normal;
             }

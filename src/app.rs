@@ -506,22 +506,12 @@ pub struct UiState {
     pub file_browser: FileBrowserUiState,
 }
 
+#[derive(Default)]
 pub struct ConfigUiState {
     pub settings_edit: Box<Settings>,
     pub selected_index: usize,
     pub items: Vec<ConfigItem>,
     pub editing: Option<(ConfigItem, String)>,
-}
-
-impl Default for ConfigUiState {
-    fn default() -> Self {
-        Self {
-            settings_edit: Box::default(),
-            selected_index: 0,
-            items: Vec::new(),
-            editing: None,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -2826,6 +2816,7 @@ mod tests {
         sort_and_filter_torrent_list_state, torrent_completion_percent,
         torrent_is_effectively_incomplete, App, AppMode, AppState, FilePriority, PeerInfo,
         SelectedHeader, SortDirection, TorrentDisplayState, TorrentMetrics, TorrentSortColumn,
+        UiState,
     };
     use std::collections::HashMap;
     fn mock_display(name: &str, peer_count: usize) -> TorrentDisplayState {
@@ -2936,11 +2927,16 @@ mod tests {
 
     #[test]
     fn sort_and_filter_applies_query_and_clamps_selection() {
-        let mut app_state = AppState::default();
-        app_state.torrent_sort = (TorrentSortColumn::Name, SortDirection::Ascending);
-        app_state.ui.selected_header = SelectedHeader::Torrent(0);
-        app_state.ui.selected_torrent_index = 5;
-        app_state.ui.search_query = "ubn".to_string();
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Name, SortDirection::Ascending),
+            ui: UiState {
+                selected_header: SelectedHeader::Torrent(0),
+                selected_torrent_index: 5,
+                search_query: "ubn".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         let hash_a = b"hash_a".to_vec();
         let hash_b = b"hash_b".to_vec();

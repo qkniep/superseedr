@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::{App, AppMode, TorrentControlState};
-use crate::tui::screen_context::ScreenContext;
 use crate::torrent_manager::ManagerCommand;
 use crate::tui::formatters::{centered_rect, sanitize_text};
+use crate::tui::screen_context::ScreenContext;
+use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode};
 use ratatui::layout::{Alignment, Constraint, Layout};
 use ratatui::prelude::{Frame, Line, Span, Style, Stylize};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
-use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DeleteConfirmAction {
@@ -208,7 +208,8 @@ pub fn handle_event(event: CrosstermEvent, app: &mut App) -> bool {
                     }
                     DeleteConfirmEffect::MarkDeleting { info_hash } => {
                         if let Some(torrent) = app.app_state.torrents.get_mut(&info_hash) {
-                            torrent.latest_state.torrent_control_state = TorrentControlState::Deleting;
+                            torrent.latest_state.torrent_control_state =
+                                TorrentControlState::Deleting;
                         }
                     }
                 }
@@ -235,10 +236,17 @@ mod tests {
 
     #[test]
     fn reducer_confirm_emits_command_and_mark_deleting() {
-        let mut app_state = AppState::default();
-        app_state.mode = AppMode::DeleteConfirm;
-        app_state.ui.delete_confirm.info_hash = b"abc".to_vec();
-        app_state.ui.delete_confirm.with_files = true;
+        let app_state = AppState {
+            mode: AppMode::DeleteConfirm,
+            ui: crate::app::UiState {
+                delete_confirm: crate::app::DeleteConfirmUiState {
+                    info_hash: b"abc".to_vec(),
+                    with_files: true,
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         let out = reduce_delete_confirm_action(&app_state, DeleteConfirmAction::Confirm);
 

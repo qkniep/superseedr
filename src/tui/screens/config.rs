@@ -9,10 +9,10 @@ use crate::token_bucket::TokenBucket;
 use crate::tui::formatters::{format_limit_bps, path_to_string};
 use crate::tui::screen_context::ScreenContext;
 use directories::UserDirs;
+use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::prelude::{Frame, Line, Span, Style};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use tokio::sync::mpsc;
 
 pub enum ConfigOutcome {
@@ -36,9 +36,19 @@ pub enum ConfigAction {
 }
 
 pub enum ConfigEffect {
-    AppCommand(AppCommand),
+    AppCommand(Box<AppCommand>),
     SetDownloadRate(u64),
     SetUploadRate(u64),
+}
+
+pub struct ConfigHandleContext<'a> {
+    pub settings_edit: &'a mut Box<Settings>,
+    pub selected_index: &'a mut usize,
+    pub items: &'a mut [ConfigItem],
+    pub editing: &'a mut Option<(ConfigItem, String)>,
+    pub app_command_tx: &'a mpsc::Sender<AppCommand>,
+    pub global_dl_bucket: &'a Arc<TokenBucket>,
+    pub global_ul_bucket: &'a Arc<TokenBucket>,
 }
 
 pub struct ConfigReduceResult {
@@ -92,11 +102,9 @@ pub fn reduce_config_action(
     match action {
         ConfigAction::SaveAndExit => {
             result.outcome = ConfigOutcome::ToNormal;
-            result
-                .effects
-                .push(ConfigEffect::AppCommand(AppCommand::UpdateConfig(
-                    *settings_edit.clone(),
-                )));
+            result.effects.push(ConfigEffect::AppCommand(Box::new(
+                AppCommand::UpdateConfig(*settings_edit.clone()),
+            )));
         }
         ConfigAction::StartEditOrBrowse => {
             let selected_item = items[*selected_index];
@@ -118,9 +126,8 @@ pub fn reduce_config_action(
                             .unwrap_or_else(|| std::path::PathBuf::from("."))
                     });
 
-                    result
-                        .effects
-                        .push(ConfigEffect::AppCommand(AppCommand::FetchFileTree {
+                    result.effects.push(ConfigEffect::AppCommand(Box::new(
+                        AppCommand::FetchFileTree {
                             path: initial_path,
                             browser_mode: FileBrowserMode::ConfigPathSelection {
                                 target_item: selected_item,
@@ -129,7 +136,8 @@ pub fn reduce_config_action(
                                 items: items.to_vec(),
                             },
                             highlight_path: None,
-                        }));
+                        },
+                    )));
                 }
             }
         }
@@ -149,7 +157,8 @@ pub fn reduce_config_action(
                     settings_edit.client_port = default_settings.client_port;
                 }
                 ConfigItem::DefaultDownloadFolder => {
-                    settings_edit.default_download_folder = default_settings.default_download_folder;
+                    settings_edit.default_download_folder =
+                        default_settings.default_download_folder;
                 }
                 ConfigItem::WatchFolder => {
                     settings_edit.watch_folder = default_settings.watch_folder;
@@ -159,7 +168,8 @@ pub fn reduce_config_action(
                         default_settings.global_download_limit_bps;
                 }
                 ConfigItem::GlobalUploadLimit => {
-                    settings_edit.global_upload_limit_bps = default_settings.global_upload_limit_bps;
+                    settings_edit.global_upload_limit_bps =
+                        default_settings.global_upload_limit_bps;
                 }
             }
         }
@@ -168,12 +178,16 @@ pub fn reduce_config_action(
             let increment = 10_000 * 8;
             match item {
                 ConfigItem::GlobalDownloadLimit => {
-                    let new_rate = settings_edit.global_download_limit_bps.saturating_add(increment);
+                    let new_rate = settings_edit
+                        .global_download_limit_bps
+                        .saturating_add(increment);
                     settings_edit.global_download_limit_bps = new_rate;
                     result.effects.push(ConfigEffect::SetDownloadRate(new_rate));
                 }
                 ConfigItem::GlobalUploadLimit => {
-                    let new_rate = settings_edit.global_upload_limit_bps.saturating_add(increment);
+                    let new_rate = settings_edit
+                        .global_upload_limit_bps
+                        .saturating_add(increment);
                     settings_edit.global_upload_limit_bps = new_rate;
                     result.effects.push(ConfigEffect::SetUploadRate(new_rate));
                 }
@@ -185,12 +199,16 @@ pub fn reduce_config_action(
             let decrement = 10_000 * 8;
             match item {
                 ConfigItem::GlobalDownloadLimit => {
-                    let new_rate = settings_edit.global_download_limit_bps.saturating_sub(decrement);
+                    let new_rate = settings_edit
+                        .global_download_limit_bps
+                        .saturating_sub(decrement);
                     settings_edit.global_download_limit_bps = new_rate;
                     result.effects.push(ConfigEffect::SetDownloadRate(new_rate));
                 }
                 ConfigItem::GlobalUploadLimit => {
-                    let new_rate = settings_edit.global_upload_limit_bps.saturating_sub(decrement);
+                    let new_rate = settings_edit
+                        .global_upload_limit_bps
+                        .saturating_sub(decrement);
                     settings_edit.global_upload_limit_bps = new_rate;
                     result.effects.push(ConfigEffect::SetUploadRate(new_rate));
                 }
@@ -325,7 +343,8 @@ pub fn draw(
 
         if let Some((_edited_item, buffer)) = editing {
             if is_highlighted {
-                let edit_p = Paragraph::new(buffer.as_str()).style(row_style.fg(ctx.state_warning()));
+                let edit_p =
+                    Paragraph::new(buffer.as_str()).style(row_style.fg(ctx.state_warning()));
                 f.set_cursor_position((columns[1].x + buffer.len() as u16, columns[1].y));
                 f.render_widget(edit_p, columns[1]);
             } else {
@@ -377,35 +396,32 @@ pub fn draw(
     f.render_widget(footer_paragraph, footer_area);
 }
 
-pub fn handle_event(
-    event: CrosstermEvent,
-    settings_edit: &mut Box<Settings>,
-    selected_index: &mut usize,
-    items: &mut [ConfigItem],
-    editing: &mut Option<(ConfigItem, String)>,
-    app_command_tx: &mpsc::Sender<AppCommand>,
-    global_dl_bucket: &Arc<TokenBucket>,
-    global_ul_bucket: &Arc<TokenBucket>,
-) -> ConfigOutcome {
+pub fn handle_event(event: CrosstermEvent, ctx: ConfigHandleContext<'_>) -> ConfigOutcome {
     if let CrosstermEvent::Key(key) = event {
         if key.kind != KeyEventKind::Press {
             return ConfigOutcome::Stay;
         }
-        if let Some(action) = map_key_to_config_action(key.code, editing) {
-            let reduced = reduce_config_action(action, settings_edit, selected_index, items, editing);
+        if let Some(action) = map_key_to_config_action(key.code, ctx.editing) {
+            let reduced = reduce_config_action(
+                action,
+                ctx.settings_edit,
+                ctx.selected_index,
+                ctx.items,
+                ctx.editing,
+            );
             for effect in reduced.effects {
                 match effect {
                     ConfigEffect::AppCommand(command) => {
-                        let _ = app_command_tx.try_send(command);
+                        let _ = ctx.app_command_tx.try_send(*command);
                     }
                     ConfigEffect::SetDownloadRate(new_rate) => {
-                        let bucket = global_dl_bucket.clone();
+                        let bucket = ctx.global_dl_bucket.clone();
                         tokio::spawn(async move {
                             bucket.set_rate(new_rate as f64);
                         });
                     }
                     ConfigEffect::SetUploadRate(new_rate) => {
-                        let bucket = global_ul_bucket.clone();
+                        let bucket = ctx.global_ul_bucket.clone();
                         tokio::spawn(async move {
                             bucket.set_rate(new_rate as f64);
                         });
@@ -491,6 +507,6 @@ mod tests {
 
         assert!(matches!(out.outcome, ConfigOutcome::ToNormal));
         assert_eq!(out.effects.len(), 1);
-        assert!(matches!(out.effects[0], ConfigEffect::AppCommand(AppCommand::UpdateConfig(_))));
+        assert!(matches!(out.effects[0], ConfigEffect::AppCommand(_)));
     }
 }

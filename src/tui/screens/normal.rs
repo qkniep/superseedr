@@ -3544,8 +3544,10 @@ mod tests {
 
     #[test]
     fn reducer_clear_system_error_clears_error() {
-        let mut app_state = AppState::default();
-        app_state.system_error = Some("boom".to_string());
+        let mut app_state = AppState {
+            system_error: Some("boom".to_string()),
+            ..Default::default()
+        };
 
         let result = reduce_ui_action(&mut app_state, UiAction::ClearSystemError);
 
@@ -3580,8 +3582,10 @@ mod tests {
 
     #[test]
     fn reducer_enter_power_saving_sets_mode() {
-        let mut app_state = AppState::default();
-        app_state.mode = AppMode::Normal;
+        let mut app_state = AppState {
+            mode: AppMode::Normal,
+            ..Default::default()
+        };
 
         reduce_ui_action(&mut app_state, UiAction::EnterPowerSaving);
 
@@ -3662,8 +3666,10 @@ mod tests {
 
     #[test]
     fn reducer_data_rate_actions_update_rate_and_emit_effect() {
-        let mut app_state = AppState::default();
-        app_state.data_rate = DataRate::Rate1s;
+        let mut app_state = AppState {
+            data_rate: DataRate::Rate1s,
+            ..Default::default()
+        };
 
         let slower = reduce_ui_action(&mut app_state, UiAction::DataRateSlower);
         assert_eq!(app_state.data_rate.as_ms(), DataRate::RateHalf.as_ms());

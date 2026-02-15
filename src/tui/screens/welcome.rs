@@ -181,14 +181,23 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
             " | ",
             ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
         ),
-        Span::styled(" [c] ", ctx.apply(Style::default().fg(ctx.state_selected()))),
-        Span::styled("Config", ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1))),
+        Span::styled(
+            " [c] ",
+            ctx.apply(Style::default().fg(ctx.state_selected())),
+        ),
+        Span::styled(
+            "Config",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
+        ),
         Span::styled(
             " | ",
             ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
         ),
         Span::styled(" [Q] ", ctx.apply(Style::default().fg(ctx.state_error()))),
-        Span::styled("Quit", ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1))),
+        Span::styled(
+            "Quit",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
+        ),
         Span::styled(
             " | ",
             ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
