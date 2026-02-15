@@ -11,6 +11,7 @@ use crate::tui::tree::{RawNode, TreeAction, TreeFilter, TreeMathHelper, TreeView
 use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
@@ -406,6 +407,25 @@ pub fn pending_link_info_hash(pending_torrent_link: &str) -> Option<Vec<u8>> {
     crate::app::parse_hybrid_hashes(pending_torrent_link).0
 }
 
+pub fn apply_priority_cycle(
+    nodes: &mut [RawNode<TorrentPreviewPayload>],
+    target_path: &Path,
+) -> bool {
+    for node in nodes {
+        let found = node.find_and_act(target_path, &mut |target_node| {
+            let new_priority = target_node.payload.priority.next();
+            target_node.apply_recursive(&|n| {
+                n.payload.priority = new_priority;
+            });
+        });
+
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,5 +588,27 @@ mod tests {
     #[test]
     fn pending_link_hash_is_none_for_empty() {
         assert!(pending_link_info_hash("").is_none());
+    }
+
+    #[test]
+    fn apply_priority_cycle_updates_target_tree() {
+        let mut nodes = vec![RawNode {
+            name: "root".to_string(),
+            full_path: PathBuf::from("root"),
+            children: vec![RawNode {
+                name: "leaf".to_string(),
+                full_path: PathBuf::from("root/leaf"),
+                children: vec![],
+                payload: TorrentPreviewPayload::default(),
+                is_dir: false,
+            }],
+            payload: TorrentPreviewPayload::default(),
+            is_dir: true,
+        }];
+
+        let changed = apply_priority_cycle(&mut nodes, &PathBuf::from("root"));
+        assert!(changed);
+        assert_eq!(nodes[0].payload.priority, FilePriority::Skip);
+        assert_eq!(nodes[0].children[0].payload.priority, FilePriority::Skip);
     }
 }

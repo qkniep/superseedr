@@ -5,7 +5,7 @@ use crate::app::AppCommand;
 use crate::app::AppState;
 use crate::app::FileBrowserMode;
 use crate::app::{App, AppMode, SelectedHeader, TorrentControlState};
-use crate::app::{BrowserPane, TorrentPreviewPayload};
+use crate::app::BrowserPane;
 use crate::torrent_manager::ManagerCommand;
 
 use crate::tui::layout::calculate_layout;
@@ -13,7 +13,6 @@ use crate::tui::layout::compute_visible_peer_columns;
 use crate::tui::layout::compute_visible_torrent_columns;
 use crate::tui::layout::LayoutContext;
 use crate::tui::screens::{browser, config, delete_confirm, normal, power, welcome};
-use crate::tui::tree::RawNode;
 use crate::tui::tree::TreeViewState;
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
@@ -26,11 +25,6 @@ use tracing::{event as tracing_event, Level};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 static GLOBAL_ESC_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Clone, Copy)]
-enum PriorityAction {
-    Cycle,
-}
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     if let CrosstermEvent::Resize(w, h) = &event {
@@ -255,7 +249,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 ) && key.code == KeyCode::Char(' ')
                                 {
                                     if let Some(t) = &preview_state.cursor_path {
-                                        apply_priority_action(preview_tree, t, PriorityAction::Cycle);
+                                        browser::apply_priority_cycle(preview_tree, t);
                                     }
                                 }
                             }
@@ -419,32 +413,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         }
     }
     app.app_state.ui_needs_redraw = true;
-}
-
-fn apply_priority_action(
-    nodes: &mut [RawNode<TorrentPreviewPayload>],
-    target_path: &Path,
-    action: PriorityAction,
-) -> bool {
-    for node in nodes {
-        // CHANGED: We explicitly pass a mutable reference (&mut |...|)
-        let found = node.find_and_act(target_path, &mut |target_node| {
-            // 1. Determine the new priority
-            let new_priority = match action {
-                PriorityAction::Cycle => target_node.payload.priority.next(),
-            };
-
-            // 2. Apply this priority to the target node AND all its children
-            target_node.apply_recursive(&|n| {
-                n.payload.priority = new_priority;
-            });
-        });
-
-        if found {
-            return true;
-        }
-    }
-    false
 }
 
 pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
@@ -863,11 +831,7 @@ mod tests {
             }],
         }];
 
-        let changed = apply_priority_action(
-            &mut nodes,
-            &PathBuf::from("root"),
-            PriorityAction::Cycle,
-        );
+        let changed = browser::apply_priority_cycle(&mut nodes, &PathBuf::from("root"));
 
         assert!(changed);
         assert_eq!(nodes[0].payload.priority, FilePriority::Skip);
@@ -884,11 +848,7 @@ mod tests {
             children: vec![],
         }];
 
-        let changed = apply_priority_action(
-            &mut nodes,
-            &PathBuf::from("missing"),
-            PriorityAction::Cycle,
-        );
+        let changed = browser::apply_priority_cycle(&mut nodes, &PathBuf::from("missing"));
 
         assert!(!changed);
         assert_eq!(nodes[0].payload.priority, FilePriority::Normal);
