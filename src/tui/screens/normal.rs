@@ -65,10 +65,14 @@ pub enum UiAction {
     RequestQuit,
     GraphNext,
     GraphPrev,
+    OpenAddTorrentBrowser,
+    OpenDeleteConfirm { with_files: bool },
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum UiEffect {}
+pub enum UiEffect {
+    OpenAddTorrentFileBrowser,
+}
 
 #[derive(Default)]
 pub struct ReduceResult {
@@ -135,6 +139,25 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                 effects: Vec::new(),
             }
         }
+        UiAction::OpenAddTorrentBrowser => ReduceResult {
+            redraw: true,
+            effects: vec![UiEffect::OpenAddTorrentFileBrowser],
+        },
+        UiAction::OpenDeleteConfirm { with_files } => {
+            if let Some(info_hash) = app_state
+                .torrent_list_order
+                .get(app_state.ui.selected_torrent_index)
+                .cloned()
+            {
+                app_state.ui.delete_confirm.info_hash = info_hash;
+                app_state.ui.delete_confirm.with_files = with_files;
+                app_state.mode = AppMode::DeleteConfirm;
+            }
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
     }
 }
 
@@ -147,6 +170,9 @@ fn map_key_to_ui_action(key_code: KeyCode) -> Option<UiAction> {
         KeyCode::Char('Q') => Some(UiAction::RequestQuit),
         KeyCode::Char('t') => Some(UiAction::GraphNext),
         KeyCode::Char('T') => Some(UiAction::GraphPrev),
+        KeyCode::Char('a') => Some(UiAction::OpenAddTorrentBrowser),
+        KeyCode::Char('d') => Some(UiAction::OpenDeleteConfirm { with_files: false }),
+        KeyCode::Char('D') => Some(UiAction::OpenDeleteConfirm { with_files: true }),
         KeyCode::Up
         | KeyCode::Char('k')
         | KeyCode::Down
@@ -3103,8 +3129,17 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                     if result.redraw {
                         app.app_state.ui.needs_redraw = true;
                     }
-                    for _effect in result.effects {
-                        // Effects pipeline starts in Phase 4; no normal-screen effects emitted yet.
+                    for effect in result.effects {
+                        match effect {
+                            UiEffect::OpenAddTorrentFileBrowser => {
+                                let initial_path = app.get_initial_source_path();
+                                let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                                    path: initial_path,
+                                    browser_mode: FileBrowserMode::File(vec![".torrent".to_string()]),
+                                    highlight_path: None,
+                                });
+                            }
+                        }
                     }
                     return;
                 }
@@ -3191,38 +3226,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     let _ = torrent_manager_command_tx_clone.send(command).await;
                                 });
                             }
-                        }
-                    }
-                    KeyCode::Char('a') => {
-                        let initial_path = app.get_initial_source_path();
-                        let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
-                            path: initial_path,
-                            browser_mode: FileBrowserMode::File(vec![".torrent".to_string()]),
-                            highlight_path: None,
-                        });
-                    }
-                    KeyCode::Char('d') => {
-                        if let Some(info_hash) = app
-                            .app_state
-                            .torrent_list_order
-                            .get(app.app_state.ui.selected_torrent_index)
-                            .cloned()
-                        {
-                            app.app_state.ui.delete_confirm.info_hash = info_hash;
-                            app.app_state.ui.delete_confirm.with_files = false;
-                            app.app_state.mode = AppMode::DeleteConfirm;
-                        }
-                    }
-                    KeyCode::Char('D') => {
-                        if let Some(info_hash) = app
-                            .app_state
-                            .torrent_list_order
-                            .get(app.app_state.ui.selected_torrent_index)
-                            .cloned()
-                        {
-                            app.app_state.ui.delete_confirm.info_hash = info_hash;
-                            app.app_state.ui.delete_confirm.with_files = true;
-                            app.app_state.mode = AppMode::DeleteConfirm;
                         }
                     }
                     KeyCode::Char('s') => {
@@ -3432,5 +3435,45 @@ mod tests {
 
         reduce_ui_action(&mut app_state, UiAction::GraphPrev);
         assert_eq!(app_state.graph_mode, initial);
+    }
+
+    #[test]
+    fn reducer_open_add_torrent_browser_emits_effect() {
+        let mut app_state = AppState::default();
+
+        let result = reduce_ui_action(&mut app_state, UiAction::OpenAddTorrentBrowser);
+
+        assert!(result.redraw);
+        assert_eq!(result.effects, vec![UiEffect::OpenAddTorrentFileBrowser]);
+    }
+
+    #[test]
+    fn reducer_open_delete_confirm_sets_mode_and_payload() {
+        let mut app_state = create_test_app_state();
+        app_state.ui.selected_torrent_index = 1;
+
+        let result = reduce_ui_action(
+            &mut app_state,
+            UiAction::OpenDeleteConfirm { with_files: true },
+        );
+
+        assert!(result.redraw);
+        assert!(matches!(app_state.mode, AppMode::DeleteConfirm));
+        assert_eq!(app_state.ui.delete_confirm.info_hash, b"hash_b".to_vec());
+        assert!(app_state.ui.delete_confirm.with_files);
+    }
+
+    #[test]
+    fn reducer_open_delete_confirm_is_noop_when_no_selection() {
+        let mut app_state = AppState::default();
+        app_state.ui.selected_torrent_index = 0;
+
+        let result = reduce_ui_action(
+            &mut app_state,
+            UiAction::OpenDeleteConfirm { with_files: false },
+        );
+
+        assert!(result.redraw);
+        assert!(matches!(app_state.mode, AppMode::Normal));
     }
 }
