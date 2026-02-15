@@ -14,7 +14,7 @@ use crate::tui::layout::calculate_layout;
 use crate::tui::layout::compute_visible_peer_columns;
 use crate::tui::layout::compute_visible_torrent_columns;
 use crate::tui::layout::LayoutContext;
-use crate::tui::screens::{config, normal, power, welcome};
+use crate::tui::screens::{config, delete_confirm, normal, power, welcome};
 use crate::tui::tree::RawNode;
 use crate::tui::tree::TreeViewState;
 use crate::tui::tree::{TreeAction, TreeFilter, TreeMathHelper};
@@ -668,29 +668,10 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
             info_hash,
             with_files,
         } => {
-            if let CrosstermEvent::Key(key) = event {
-                match key.code {
-                    KeyCode::Enter => {
-                        let command = if *with_files {
-                            crate::torrent_manager::ManagerCommand::DeleteFile
-                        } else {
-                            crate::torrent_manager::ManagerCommand::Shutdown
-                        };
-                        if let Some(manager_tx) = app.torrent_manager_command_txs.get(info_hash) {
-                            let manager_tx_clone = manager_tx.clone();
-                            tokio::spawn(async move {
-                                let _ = manager_tx_clone.send(command).await;
-                            });
-                        }
-                        if let Some(torrent) = app.app_state.torrents.get_mut(info_hash) {
-                            torrent.latest_state.torrent_control_state =
-                                TorrentControlState::Deleting;
-                        }
-                        app.app_state.mode = AppMode::Normal;
-                    }
-                    KeyCode::Esc => app.app_state.mode = AppMode::Normal,
-                    _ => {}
-                }
+            let info_hash = info_hash.clone();
+            let with_files = *with_files;
+            if delete_confirm::handle_event(event, app, info_hash, with_files) {
+                app.app_state.mode = AppMode::Normal;
             }
         }
     }
