@@ -60,6 +60,11 @@ pub enum UiAction {
     ClearSystemError,
     StartSearch,
     Navigate(KeyCode),
+    ToggleAnonymizeNames,
+    EnterPowerSaving,
+    RequestQuit,
+    GraphNext,
+    GraphPrev,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -95,6 +100,41 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                 effects: Vec::new(),
             }
         }
+        UiAction::ToggleAnonymizeNames => {
+            app_state.anonymize_torrent_names = !app_state.anonymize_torrent_names;
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+        UiAction::EnterPowerSaving => {
+            app_state.mode = AppMode::PowerSaving;
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+        UiAction::RequestQuit => {
+            app_state.should_quit = true;
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+        UiAction::GraphNext => {
+            app_state.graph_mode = app_state.graph_mode.next();
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+        UiAction::GraphPrev => {
+            app_state.graph_mode = app_state.graph_mode.prev();
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
     }
 }
 
@@ -102,6 +142,11 @@ fn map_key_to_ui_action(key_code: KeyCode) -> Option<UiAction> {
     match key_code {
         KeyCode::Esc => Some(UiAction::ClearSystemError),
         KeyCode::Char('/') => Some(UiAction::StartSearch),
+        KeyCode::Char('x') => Some(UiAction::ToggleAnonymizeNames),
+        KeyCode::Char('z') => Some(UiAction::EnterPowerSaving),
+        KeyCode::Char('Q') => Some(UiAction::RequestQuit),
+        KeyCode::Char('t') => Some(UiAction::GraphNext),
+        KeyCode::Char('T') => Some(UiAction::GraphPrev),
         KeyCode::Up
         | KeyCode::Char('k')
         | KeyCode::Down
@@ -3065,28 +3110,12 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 }
 
                 match key.code {
-                    KeyCode::Char('x') => {
-                        app.app_state.anonymize_torrent_names = !app.app_state.anonymize_torrent_names;
-                    }
-                    KeyCode::Char('z') => {
-                        app.app_state.mode = AppMode::PowerSaving;
-                        return;
-                    }
-                    KeyCode::Char('Q') => {
-                        app.app_state.should_quit = true;
-                    }
                     KeyCode::Char('c') => {
                         app.app_state.ui.config.settings_edit = Box::new(app.client_configs.clone());
                         app.app_state.ui.config.selected_index = 0;
                         app.app_state.ui.config.items = ConfigItem::iter().collect::<Vec<_>>();
                         app.app_state.ui.config.editing = None;
                         app.app_state.mode = AppMode::Config;
-                    }
-                    KeyCode::Char('t') => {
-                        app.app_state.graph_mode = app.app_state.graph_mode.next();
-                    }
-                    KeyCode::Char('T') => {
-                        app.app_state.graph_mode = app.app_state.graph_mode.prev();
                     }
                     KeyCode::Char('[') | KeyCode::Char('{') => {
                         app.app_state.data_rate = app.app_state.data_rate.next_slower();
@@ -3359,5 +3388,49 @@ mod tests {
         assert!(result.redraw);
         assert_eq!(app_state.ui.selected_torrent_index, 1);
         assert_eq!(app_state.ui.selected_peer_index, 0);
+    }
+
+    #[test]
+    fn reducer_toggle_anonymize_names_flips_flag() {
+        let mut app_state = AppState::default();
+        assert!(!app_state.anonymize_torrent_names);
+
+        reduce_ui_action(&mut app_state, UiAction::ToggleAnonymizeNames);
+        assert!(app_state.anonymize_torrent_names);
+
+        reduce_ui_action(&mut app_state, UiAction::ToggleAnonymizeNames);
+        assert!(!app_state.anonymize_torrent_names);
+    }
+
+    #[test]
+    fn reducer_enter_power_saving_sets_mode() {
+        let mut app_state = AppState::default();
+        app_state.mode = AppMode::Normal;
+
+        reduce_ui_action(&mut app_state, UiAction::EnterPowerSaving);
+
+        assert!(matches!(app_state.mode, AppMode::PowerSaving));
+    }
+
+    #[test]
+    fn reducer_request_quit_sets_flag() {
+        let mut app_state = AppState::default();
+        assert!(!app_state.should_quit);
+
+        reduce_ui_action(&mut app_state, UiAction::RequestQuit);
+
+        assert!(app_state.should_quit);
+    }
+
+    #[test]
+    fn reducer_graph_actions_cycle_mode() {
+        let mut app_state = AppState::default();
+        let initial = app_state.graph_mode;
+
+        reduce_ui_action(&mut app_state, UiAction::GraphNext);
+        assert_eq!(app_state.graph_mode, initial.next());
+
+        reduce_ui_action(&mut app_state, UiAction::GraphPrev);
+        assert_eq!(app_state.graph_mode, initial);
     }
 }
