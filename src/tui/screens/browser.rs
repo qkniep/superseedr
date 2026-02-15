@@ -59,7 +59,7 @@ pub fn draw(
 
     let area = calculate_area(f.area(), has_preview_content);
     let layout =
-        calculate_file_browser_layout(area, has_preview_content, app_state.is_searching, &focused_pane);
+        calculate_file_browser_layout(area, has_preview_content, app_state.ui.is_searching, &focused_pane);
 
     let (files_border_style, preview_border_style) =
         if let FileBrowserMode::DownloadLocSelection { focused_pane, .. } = browser_mode {
@@ -101,7 +101,7 @@ pub fn draw(
                 "/",
                 ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
             ),
-            Span::raw(&app_state.search_query),
+            Span::raw(&app_state.ui.search_query),
             Span::styled(
                 "_",
                 ctx.apply(
@@ -199,7 +199,7 @@ pub fn draw(
 
     let inner_height = layout.list.height.saturating_sub(2) as usize;
     let list_width = layout.list.width.saturating_sub(2) as usize;
-    let filter = build_filter(browser_mode, &app_state.search_query);
+    let filter = build_filter(browser_mode, &app_state.ui.search_query);
 
     let abs_path = state.current_path.to_string_lossy();
     let item_count = data.len();
@@ -665,8 +665,8 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         if key.kind == KeyEventKind::Press {
             if handle_search_interceptor(
                 key.code,
-                &mut app.app_state.is_searching,
-                &mut app.app_state.search_query,
+                &mut app.app_state.ui.is_searching,
+                &mut app.app_state.ui.search_query,
             ) {
                 return;
             }
@@ -706,7 +706,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 if let BrowserPane::TorrentPreview = focused_pane {
                     if let Some(list_height) = calculate_preview_list_height(
                         app.app_state.screen_area,
-                        app.app_state.is_searching,
+                        app.app_state.ui.is_searching,
                         focused_pane,
                         *use_container,
                     ) {
@@ -734,7 +734,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
             let list_height = calculate_list_height(
                 app.app_state.screen_area,
                 has_preview_content,
-                app.app_state.is_searching,
+                app.app_state.ui.is_searching,
                 &focused_pane,
             );
             match key.code {
@@ -744,16 +744,16 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         state,
                         data,
                         browser_mode,
-                        &mut app.app_state.is_searching,
-                        &mut app.app_state.search_query,
+                        &mut app.app_state.ui.is_searching,
+                        &mut app.app_state.ui.search_query,
                         list_height,
                         &app.app_command_tx,
                     ) => {}
                 KeyCode::Char('Y') => {
                     let decision = resolve_confirm_decision(state, browser_mode);
                     execute_confirm_decision(app, decision).await;
-                    app.app_state.is_searching = false;
-                    app.app_state.search_query.clear();
+                    app.app_state.ui.is_searching = false;
+                    app.app_state.ui.search_query.clear();
                 }
                 KeyCode::Esc => {
                     if let Some(mode) = escape_to_config_mode(browser_mode) {
@@ -773,8 +773,8 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         }
                     }
 
-                    app.app_state.is_searching = false;
-                    app.app_state.search_query.clear();
+                    app.app_state.ui.is_searching = false;
+                    app.app_state.ui.search_query.clear();
                     app.app_state.mode = AppMode::Normal;
                     app.app_state.pending_torrent_path = None;
                     app.app_state.pending_torrent_link.clear();

@@ -651,8 +651,8 @@ pub fn draw_footer(
 
 pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
     let mut table_state = TableState::default();
-    if matches!(app_state.selected_header, SelectedHeader::Torrent(_)) {
-        table_state.select(Some(app_state.selected_torrent_index));
+    if matches!(app_state.ui.selected_header, SelectedHeader::Torrent(_)) {
+        table_state.select(Some(app_state.ui.selected_torrent_index));
     }
 
     let all_cols = get_torrent_columns();
@@ -664,7 +664,7 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
         .enumerate()
         .map(|(visual_idx, &real_idx)| {
             let def = &all_cols[real_idx];
-            let is_selected = app_state.selected_header == SelectedHeader::Torrent(visual_idx);
+            let is_selected = app_state.ui.selected_header == SelectedHeader::Torrent(visual_idx);
             let is_sorting = def.sort_enum == Some(sort_col);
 
             let mut style = ctx.apply(Style::default().fg(ctx.state_warning()));
@@ -701,7 +701,7 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
             .map(|(i, info_hash)| match app_state.torrents.get(info_hash) {
                 Some(torrent) => {
                     let state = &torrent.latest_state;
-                    let is_selected = i == app_state.selected_torrent_index;
+                    let is_selected = i == app_state.ui.selected_torrent_index;
 
                     let mut row_style = match state.torrent_control_state {
                         TorrentControlState::Running => {
@@ -770,22 +770,22 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                 None => Row::new(vec![Cell::from("Error retrieving data")]),
             });
 
-    let border_style = if matches!(app_state.selected_header, SelectedHeader::Torrent(_)) {
+    let border_style = if matches!(app_state.ui.selected_header, SelectedHeader::Torrent(_)) {
         ctx.apply(Style::default().fg(ctx.state_selected()))
     } else {
         ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))
     };
 
     let mut title_spans = Vec::new();
-    if app_state.is_searching {
+    if app_state.ui.is_searching {
         title_spans.push(Span::raw("Search: /"));
         title_spans.push(Span::styled(
-            &app_state.search_query,
+            &app_state.ui.search_query,
             ctx.apply(Style::default().fg(ctx.state_warning())),
         ));
-    } else if !app_state.search_query.is_empty() {
+    } else if !app_state.ui.search_query.is_empty() {
         title_spans.push(Span::styled(
-            format!("[{}] ", app_state.search_query),
+            format!("[{}] ", app_state.ui.search_query),
             ctx.apply(
                 Style::default()
                     .fg(ctx.theme.semantic.subtext1)
@@ -794,10 +794,10 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
         ));
     }
 
-    if !app_state.is_searching {
+    if !app_state.ui.is_searching {
         if let Some(info_hash) = app_state
             .torrent_list_order
-            .get(app_state.selected_torrent_index)
+            .get(app_state.ui.selected_torrent_index)
         {
             if let Some(torrent) = app_state.torrents.get(info_hash) {
                 let path_cow;
@@ -889,7 +889,7 @@ pub fn draw_details_panel(
 
     let selected_torrent = app_state
         .torrent_list_order
-        .get(app_state.selected_torrent_index)
+        .get(app_state.ui.selected_torrent_index)
         .and_then(|h| app_state.torrents.get(h));
 
     if let Some(torrent) = selected_torrent {
@@ -1726,7 +1726,7 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
 
     let selected_torrent = app_state
         .torrent_list_order
-        .get(app_state.selected_torrent_index)
+        .get(app_state.ui.selected_torrent_index)
         .and_then(|info_hash| app_state.torrents.get(info_hash));
 
     let color_discovered = ctx.peer_discovered();
@@ -1939,7 +1939,7 @@ pub fn draw_vertical_block_stream(
     }
     let selected_torrent = app_state
         .torrent_list_order
-        .get(app_state.selected_torrent_index)
+        .get(app_state.ui.selected_torrent_index)
         .and_then(|info_hash| app_state.torrents.get(info_hash));
 
     const UP_TRIANGLE: &str = "▲";
@@ -2194,7 +2194,7 @@ fn render_sparkles<'a>(
 pub fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
     let torrent = app_state
         .torrent_list_order
-        .get(app_state.selected_torrent_index)
+        .get(app_state.ui.selected_torrent_index)
         .and_then(|info_hash| app_state.torrents.get(info_hash));
 
     let Some(torrent) = torrent else {
@@ -2360,7 +2360,7 @@ pub fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect, 
 
     if let Some(info_hash) = app_state
         .torrent_list_order
-        .get(app_state.selected_torrent_index)
+        .get(app_state.ui.selected_torrent_index)
     {
         if let Some(torrent) = app_state.torrents.get(info_hash) {
             let state = &torrent.latest_state;
@@ -2422,7 +2422,7 @@ pub fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect, 
                     compute_smart_table_layout(&smart_cols, peers_chunk.width, 1);
 
                 let peer_border_style =
-                    if matches!(app_state.selected_header, SelectedHeader::Peer(_)) {
+                    if matches!(app_state.ui.selected_header, SelectedHeader::Peer(_)) {
                         ctx.apply(Style::default().fg(ctx.state_selected()))
                     } else {
                         ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))
@@ -2444,7 +2444,7 @@ pub fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect, 
                             let def = &all_peer_cols[real_idx];
 
                             let is_selected =
-                                app_state.selected_header == SelectedHeader::Peer(visual_idx);
+                                app_state.ui.selected_header == SelectedHeader::Peer(visual_idx);
                             let is_sorting = def.sort_enum == Some(sort_by);
 
                             let mut style = ctx.apply(Style::default().fg(ctx.state_warning()));
@@ -2788,7 +2788,7 @@ fn draw_swarm_heatmap(
 pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     let selected_torrent = app_state
         .torrent_list_order
-        .get(app_state.selected_torrent_index)
+        .get(app_state.ui.selected_torrent_index)
         .and_then(|info_hash| app_state.torrents.get(info_hash));
 
     let selected_torrent_has_peers =
@@ -2805,7 +2805,7 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     let torrent_col_count = visible_torrent_columns.len();
     let peer_col_count = visible_peer_columns.len();
 
-    app_state.selected_header = match app_state.selected_header {
+    app_state.ui.selected_header = match app_state.ui.selected_header {
         SelectedHeader::Torrent(i) => {
             if torrent_col_count == 0 {
                 SelectedHeader::Torrent(0)
@@ -2823,37 +2823,37 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     };
 
     match key_code {
-        KeyCode::Up | KeyCode::Char('k') => match app_state.selected_header {
+        KeyCode::Up | KeyCode::Char('k') => match app_state.ui.selected_header {
             SelectedHeader::Torrent(_) => {
-                app_state.selected_torrent_index =
-                    app_state.selected_torrent_index.saturating_sub(1);
-                app_state.selected_peer_index = 0;
+                app_state.ui.selected_torrent_index =
+                    app_state.ui.selected_torrent_index.saturating_sub(1);
+                app_state.ui.selected_peer_index = 0;
             }
             SelectedHeader::Peer(_) => {
-                app_state.selected_peer_index = app_state.selected_peer_index.saturating_sub(1);
+                app_state.ui.selected_peer_index = app_state.ui.selected_peer_index.saturating_sub(1);
             }
         },
-        KeyCode::Down | KeyCode::Char('j') => match app_state.selected_header {
+        KeyCode::Down | KeyCode::Char('j') => match app_state.ui.selected_header {
             SelectedHeader::Torrent(_) => {
                 if !app_state.torrent_list_order.is_empty() {
-                    let new_index = app_state.selected_torrent_index.saturating_add(1);
+                    let new_index = app_state.ui.selected_torrent_index.saturating_add(1);
                     if new_index < app_state.torrent_list_order.len() {
-                        app_state.selected_torrent_index = new_index;
+                        app_state.ui.selected_torrent_index = new_index;
                     }
                 }
-                app_state.selected_peer_index = 0;
+                app_state.ui.selected_peer_index = 0;
             }
             SelectedHeader::Peer(_) => {
                 if selected_torrent_peer_count > 0 {
-                    let new_index = app_state.selected_peer_index.saturating_add(1);
+                    let new_index = app_state.ui.selected_peer_index.saturating_add(1);
                     if new_index < selected_torrent_peer_count {
-                        app_state.selected_peer_index = new_index;
+                        app_state.ui.selected_peer_index = new_index;
                     }
                 }
             }
         },
         KeyCode::Left | KeyCode::Char('h') => {
-            app_state.selected_header = match app_state.selected_header {
+            app_state.ui.selected_header = match app_state.ui.selected_header {
                 SelectedHeader::Torrent(0) => {
                     if selected_torrent_has_peers && peer_col_count > 0 {
                         SelectedHeader::Peer(peer_col_count - 1)
@@ -2869,7 +2869,7 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
             };
         }
         KeyCode::Right | KeyCode::Char('l') => {
-            app_state.selected_header = match app_state.selected_header {
+            app_state.ui.selected_header = match app_state.ui.selected_header {
                 SelectedHeader::Torrent(i) => {
                     if i < torrent_col_count.saturating_sub(1) {
                         SelectedHeader::Torrent(i + 1)
@@ -2893,29 +2893,29 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
 }
 
 pub fn handle_search_key(key: ratatui::crossterm::event::KeyEvent, app: &mut App) -> bool {
-    if !matches!(app.app_state.mode, AppMode::Normal) || !app.app_state.is_searching {
+    if !matches!(app.app_state.mode, AppMode::Normal) || !app.app_state.ui.is_searching {
         return false;
     }
 
     match key.code {
         KeyCode::Esc => {
-            app.app_state.is_searching = false;
-            app.app_state.search_query.clear();
+            app.app_state.ui.is_searching = false;
+            app.app_state.ui.search_query.clear();
             app.sort_and_filter_torrent_list();
-            app.app_state.selected_torrent_index = 0;
+            app.app_state.ui.selected_torrent_index = 0;
         }
         KeyCode::Enter => {
-            app.app_state.is_searching = false;
+            app.app_state.ui.is_searching = false;
         }
         KeyCode::Backspace => {
-            app.app_state.search_query.pop();
+            app.app_state.ui.search_query.pop();
             app.sort_and_filter_torrent_list();
-            app.app_state.selected_torrent_index = 0;
+            app.app_state.ui.selected_torrent_index = 0;
         }
         KeyCode::Char(c) => {
-            app.app_state.search_query.push(c);
+            app.app_state.ui.search_query.push(c);
             app.sort_and_filter_torrent_list();
-            app.app_state.selected_torrent_index = 0;
+            app.app_state.ui.selected_torrent_index = 0;
         }
         _ => {}
     }
@@ -2999,8 +2999,8 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         app.app_state.system_error = None;
                     }
                     KeyCode::Char('/') => {
-                        app.app_state.is_searching = true;
-                        app.app_state.selected_torrent_index = 0;
+                        app.app_state.ui.is_searching = true;
+                        app.app_state.ui.selected_torrent_index = 0;
                     }
                     KeyCode::Char('x') => {
                         app.app_state.anonymize_torrent_names = !app.app_state.anonymize_torrent_names;
@@ -3077,7 +3077,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         if let Some(info_hash) = app
                             .app_state
                             .torrent_list_order
-                            .get(app.app_state.selected_torrent_index)
+                            .get(app.app_state.ui.selected_torrent_index)
                         {
                             if let (Some(torrent_display), Some(torrent_manager_command_tx)) = (
                                 app.app_state.torrents.get_mut(info_hash),
@@ -3115,7 +3115,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         if let Some(info_hash) = app
                             .app_state
                             .torrent_list_order
-                            .get(app.app_state.selected_torrent_index)
+                            .get(app.app_state.ui.selected_torrent_index)
                             .cloned()
                         {
                             app.app_state.mode = AppMode::DeleteConfirm {
@@ -3128,7 +3128,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                         if let Some(info_hash) = app
                             .app_state
                             .torrent_list_order
-                            .get(app.app_state.selected_torrent_index)
+                            .get(app.app_state.ui.selected_torrent_index)
                             .cloned()
                         {
                             app.app_state.mode = AppMode::DeleteConfirm {
@@ -3144,7 +3144,7 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                             compute_visible_torrent_columns(&app.app_state, layout_plan.list.width);
                         let (_, visible_peer_columns) =
                             compute_visible_peer_columns(layout_plan.peers.width);
-                        match app.app_state.selected_header {
+                        match app.app_state.ui.selected_header {
                             SelectedHeader::Torrent(i) => {
                                 let cols = get_torrent_columns();
 

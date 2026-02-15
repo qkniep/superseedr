@@ -506,6 +506,11 @@ pub struct UiState {
     pub effects_phase_time: f64,
     pub effects_last_wall_time: f64,
     pub effects_speed_multiplier: f64,
+    pub selected_header: SelectedHeader,
+    pub selected_torrent_index: usize,
+    pub selected_peer_index: usize,
+    pub is_searching: bool,
+    pub search_query: String,
 }
 
 #[derive(Default)]
@@ -574,14 +579,8 @@ pub struct AppState {
     pub data_rate: DataRate,
     pub theme: Theme,
 
-    pub selected_header: SelectedHeader,
     pub torrent_sort: (TorrentSortColumn, SortDirection),
     pub peer_sort: (PeerSortColumn, SortDirection),
-    pub selected_torrent_index: usize,
-    pub selected_peer_index: usize,
-
-    pub is_searching: bool,
-    pub search_query: String,
 
     pub graph_mode: GraphDisplayMode,
     pub minute_avg_dl_history: Vec<u64>,
@@ -1598,10 +1597,10 @@ impl App {
                     .torrent_list_order
                     .retain(|ih| *ih != info_hash);
 
-                if self.app_state.selected_torrent_index >= self.app_state.torrent_list_order.len()
+                if self.app_state.ui.selected_torrent_index >= self.app_state.torrent_list_order.len()
                     && !self.app_state.torrent_list_order.is_empty()
                 {
-                    self.app_state.selected_torrent_index =
+                    self.app_state.ui.selected_torrent_index =
                         self.app_state.torrent_list_order.len() - 1;
                 }
 
@@ -1993,29 +1992,29 @@ impl App {
         let torrent_count = self.app_state.torrent_list_order.len();
 
         if torrent_count == 0 {
-            self.app_state.selected_torrent_index = 0;
-        } else if self.app_state.selected_torrent_index >= torrent_count {
-            self.app_state.selected_torrent_index = torrent_count - 1;
+            self.app_state.ui.selected_torrent_index = 0;
+        } else if self.app_state.ui.selected_torrent_index >= torrent_count {
+            self.app_state.ui.selected_torrent_index = torrent_count - 1;
         }
 
         let peer_count = self
             .app_state
             .torrent_list_order
-            .get(self.app_state.selected_torrent_index)
+            .get(self.app_state.ui.selected_torrent_index)
             .and_then(|info_hash| self.app_state.torrents.get(info_hash))
             .map_or(0, |torrent| torrent.latest_state.peers.len());
 
         if peer_count == 0 {
-            self.app_state.selected_peer_index = 0;
-        } else if self.app_state.selected_peer_index >= peer_count {
-            self.app_state.selected_peer_index = peer_count - 1;
+            self.app_state.ui.selected_peer_index = 0;
+        } else if self.app_state.ui.selected_peer_index >= peer_count {
+            self.app_state.ui.selected_peer_index = peer_count - 1;
         }
     }
 
     pub fn sort_and_filter_torrent_list(&mut self) {
         let torrents_map = &self.app_state.torrents;
         let (sort_by, sort_direction) = self.app_state.torrent_sort;
-        let search_query = &self.app_state.search_query;
+        let search_query = &self.app_state.ui.search_query;
 
         let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
 
