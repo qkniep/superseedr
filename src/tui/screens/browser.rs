@@ -846,6 +846,33 @@ pub struct BrowserDialogReduceResult {
     pub effects: Vec<BrowserDialogEffect>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BrowserDownloadEditAction {
+    Commit,
+    Cancel,
+    MoveLeft,
+    MoveRight,
+    Backspace,
+    Delete,
+    Insert(char),
+    Noop,
+}
+
+pub struct BrowserDownloadEditReduceResult {
+    pub consumed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BrowserDownloadShortcutAction {
+    ToggleUseContainer,
+    StartRename,
+    TogglePane,
+}
+
+pub struct BrowserDownloadShortcutReduceResult {
+    pub consumed: bool,
+}
+
 fn map_search_key_to_browser_action(
     key_code: KeyCode,
     is_searching: bool,
@@ -968,6 +995,106 @@ pub fn handle_search_interceptor(
     }
 }
 
+fn map_download_name_edit_key_to_action(key_code: KeyCode) -> BrowserDownloadEditAction {
+    match key_code {
+        KeyCode::Enter => BrowserDownloadEditAction::Commit,
+        KeyCode::Esc => BrowserDownloadEditAction::Cancel,
+        KeyCode::Left => BrowserDownloadEditAction::MoveLeft,
+        KeyCode::Right => BrowserDownloadEditAction::MoveRight,
+        KeyCode::Backspace => BrowserDownloadEditAction::Backspace,
+        KeyCode::Delete => BrowserDownloadEditAction::Delete,
+        KeyCode::Char(c) => BrowserDownloadEditAction::Insert(c),
+        _ => BrowserDownloadEditAction::Noop,
+    }
+}
+
+pub fn reduce_download_name_edit_action(
+    action: BrowserDownloadEditAction,
+    container_name: &mut String,
+    is_editing_name: &mut bool,
+    cursor_pos: &mut usize,
+    original_name_backup: &str,
+) -> BrowserDownloadEditReduceResult {
+    match action {
+        BrowserDownloadEditAction::Commit => {
+            *is_editing_name = false;
+        }
+        BrowserDownloadEditAction::Cancel => {
+            *container_name = original_name_backup.to_string();
+            *is_editing_name = false;
+            *cursor_pos = container_name.len();
+        }
+        BrowserDownloadEditAction::MoveLeft => {
+            *cursor_pos = cursor_pos.saturating_sub(1);
+        }
+        BrowserDownloadEditAction::MoveRight => {
+            if *cursor_pos < container_name.len() {
+                *cursor_pos += 1;
+            }
+        }
+        BrowserDownloadEditAction::Backspace => {
+            if *cursor_pos > 0 {
+                container_name.remove(*cursor_pos - 1);
+                *cursor_pos -= 1;
+            }
+        }
+        BrowserDownloadEditAction::Delete => {
+            if *cursor_pos < container_name.len() {
+                container_name.remove(*cursor_pos);
+            }
+        }
+        BrowserDownloadEditAction::Insert(c) => {
+            container_name.insert(*cursor_pos, c);
+            *cursor_pos += 1;
+        }
+        BrowserDownloadEditAction::Noop => {}
+    }
+
+    BrowserDownloadEditReduceResult { consumed: true }
+}
+
+fn map_download_shortcut_key_to_action(
+    key_code: KeyCode,
+    use_container: bool,
+) -> Option<BrowserDownloadShortcutAction> {
+    match key_code {
+        KeyCode::Char('x') => Some(BrowserDownloadShortcutAction::ToggleUseContainer),
+        KeyCode::Char('r') if use_container => Some(BrowserDownloadShortcutAction::StartRename),
+        KeyCode::Tab => Some(BrowserDownloadShortcutAction::TogglePane),
+        _ => None,
+    }
+}
+
+pub fn reduce_download_shortcut_action(
+    action: BrowserDownloadShortcutAction,
+    container_name: &str,
+    use_container: &mut bool,
+    is_editing_name: &mut bool,
+    focused_pane: &mut BrowserPane,
+    cursor_pos: &mut usize,
+    original_name_backup: &mut String,
+) -> BrowserDownloadShortcutReduceResult {
+    match action {
+        BrowserDownloadShortcutAction::ToggleUseContainer => {
+            *use_container = !*use_container;
+        }
+        BrowserDownloadShortcutAction::StartRename => {
+            *is_editing_name = true;
+            *original_name_backup = container_name.to_string();
+            *cursor_pos = container_name.len();
+            *focused_pane = BrowserPane::TorrentPreview;
+        }
+        BrowserDownloadShortcutAction::TogglePane => {
+            *focused_pane = match focused_pane {
+                BrowserPane::FileSystem => BrowserPane::TorrentPreview,
+                BrowserPane::TorrentPreview => BrowserPane::FileSystem,
+            };
+        }
+    }
+
+    BrowserDownloadShortcutReduceResult { consumed: true }
+}
+
 pub fn handle_download_name_edit_guard(
     key_code: KeyCode,
     browser_mode: &mut FileBrowserMode,
@@ -984,42 +1111,15 @@ pub fn handle_download_name_edit_guard(
             return false;
         }
 
-        match key_code {
-            KeyCode::Enter => {
-                *is_editing_name = false;
-            }
-            KeyCode::Esc => {
-                *container_name = original_name_backup.clone();
-                *is_editing_name = false;
-                *cursor_pos = container_name.len();
-            }
-            KeyCode::Left => {
-                *cursor_pos = cursor_pos.saturating_sub(1);
-            }
-            KeyCode::Right => {
-                if *cursor_pos < container_name.len() {
-                    *cursor_pos += 1;
-                }
-            }
-            KeyCode::Backspace => {
-                if *cursor_pos > 0 {
-                    container_name.remove(*cursor_pos - 1);
-                    *cursor_pos -= 1;
-                }
-            }
-            KeyCode::Delete => {
-                if *cursor_pos < container_name.len() {
-                    container_name.remove(*cursor_pos);
-                }
-            }
-            KeyCode::Char(c) => {
-                container_name.insert(*cursor_pos, c);
-                *cursor_pos += 1;
-            }
-            _ => {}
-        }
-
-        return true;
+        let action = map_download_name_edit_key_to_action(key_code);
+        let reduced = reduce_download_name_edit_action(
+            action,
+            container_name,
+            is_editing_name,
+            cursor_pos,
+            original_name_backup,
+        );
+        return reduced.consumed;
     }
 
     false
@@ -1036,26 +1136,19 @@ pub fn handle_download_shortcuts(key_code: KeyCode, browser_mode: &mut FileBrows
         ..
     } = browser_mode
     {
-        match key_code {
-            KeyCode::Char('x') => {
-                *use_container = !*use_container;
-                true
-            }
-            KeyCode::Char('r') if *use_container => {
-                *is_editing_name = true;
-                *original_name_backup = container_name.clone();
-                *cursor_pos = container_name.len();
-                *focused_pane = BrowserPane::TorrentPreview;
-                true
-            }
-            KeyCode::Tab => {
-                *focused_pane = match focused_pane {
-                    BrowserPane::FileSystem => BrowserPane::TorrentPreview,
-                    BrowserPane::TorrentPreview => BrowserPane::FileSystem,
-                };
-                true
-            }
-            _ => false,
+        if let Some(action) = map_download_shortcut_key_to_action(key_code, *use_container) {
+            let reduced = reduce_download_shortcut_action(
+                action,
+                container_name,
+                use_container,
+                is_editing_name,
+                focused_pane,
+                cursor_pos,
+                original_name_backup,
+            );
+            reduced.consumed
+        } else {
+            false
         }
     } else {
         false
@@ -1662,6 +1755,59 @@ mod tests {
             }
             _ => panic!("expected DownloadLocSelection"),
         }
+    }
+
+    #[test]
+    fn reducer_download_edit_cancel_restores_backup() {
+        let mut name = String::from("abc");
+        let mut is_editing_name = true;
+        let mut cursor_pos = 3;
+        let backup = String::from("orig");
+
+        let out = reduce_download_name_edit_action(
+            BrowserDownloadEditAction::Cancel,
+            &mut name,
+            &mut is_editing_name,
+            &mut cursor_pos,
+            &backup,
+        );
+
+        assert!(out.consumed);
+        assert_eq!(name, "orig");
+        assert!(!is_editing_name);
+        assert_eq!(cursor_pos, 4);
+    }
+
+    #[test]
+    fn reducer_download_shortcut_start_rename_sets_editing_state() {
+        let mut use_container = true;
+        let mut is_editing_name = false;
+        let mut focused_pane = BrowserPane::FileSystem;
+        let mut cursor_pos = 0;
+        let mut original_name_backup = String::new();
+        let container_name = String::from("seed");
+
+        let out = reduce_download_shortcut_action(
+            BrowserDownloadShortcutAction::StartRename,
+            &container_name,
+            &mut use_container,
+            &mut is_editing_name,
+            &mut focused_pane,
+            &mut cursor_pos,
+            &mut original_name_backup,
+        );
+
+        assert!(out.consumed);
+        assert!(is_editing_name);
+        assert_eq!(original_name_backup, "seed");
+        assert_eq!(cursor_pos, 4);
+        assert_eq!(focused_pane, BrowserPane::TorrentPreview);
+    }
+
+    #[test]
+    fn map_download_shortcut_requires_container_for_rename() {
+        let action = map_download_shortcut_key_to_action(KeyCode::Char('r'), false);
+        assert!(action.is_none());
     }
 
     #[test]
