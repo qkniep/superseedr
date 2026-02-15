@@ -158,7 +158,7 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         let right_v = Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).split(top_h[1]);
 
         let header_h =
-            Layout::horizontal([Constraint::Length(25), Constraint::Min(0)]).split(right_v[0]);
+            Layout::horizontal([Constraint::Length(30), Constraint::Min(0)]).split(right_v[0]);
 
         plan.details = header_h[0];
         plan.peer_stream = Some(header_h[1]);
