@@ -9,7 +9,10 @@ use crate::config::SortDirection;
 use crate::theme::ThemeContext;
 use crate::torrent_manager::ManagerCommand;
 use crate::tui::events::{handle_navigation, handle_pasted_text};
-use crate::tui::formatters::{sanitize_text, speed_to_style, truncate_with_ellipsis, format_speed};
+use crate::tui::formatters::{
+    format_bytes, format_countdown, format_duration, format_speed, sanitize_text, speed_to_style,
+    truncate_with_ellipsis,
+};
 use crate::tui::layout::calculate_layout;
 use crate::tui::layout::compute_visible_peer_columns;
 use crate::tui::layout::compute_visible_torrent_columns;
@@ -21,8 +24,12 @@ use crate::app::torrent_completion_percent;
 #[cfg(windows)]
 use clipboard::{ClipboardContext, ClipboardProvider};
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
-use ratatui::prelude::{Alignment, Constraint, Direction, Frame, Line, Span, Style, Stylize, Rect, Modifier};
-use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap, Cell, Row, Table, TableState};
+use ratatui::prelude::{
+    symbols, Alignment, Constraint, Direction, Frame, Line, Modifier, Rect, Span, Style, Stylize,
+};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, Gauge, LineGauge, Paragraph, Row, Table, TableState, Wrap,
+};
 use strum::IntoEnumIterator;
 #[cfg(windows)]
 use tracing::{event as tracing_event, Level};
@@ -802,6 +809,261 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
         f.render_widget(
             Paragraph::new(empty_msg).alignment(Alignment::Center),
             text_area,
+        );
+    }
+}
+
+pub fn draw_details_panel(
+    f: &mut Frame,
+    app_state: &AppState,
+    details_text_chunk: Rect,
+    ctx: &ThemeContext,
+) {
+    let details_block = Block::default()
+        .title(Span::styled(
+            "Details",
+            ctx.apply(Style::default().fg(ctx.state_selected())),
+        ))
+        .borders(Borders::ALL)
+        .borders(Borders::ALL)
+        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
+    let details_inner_chunk = details_block.inner(details_text_chunk);
+    f.render_widget(details_block, details_text_chunk);
+
+    let detail_rows = ratatui::layout::Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(details_inner_chunk);
+
+    let selected_torrent = app_state
+        .torrent_list_order
+        .get(app_state.selected_torrent_index)
+        .and_then(|h| app_state.torrents.get(h));
+
+    if let Some(torrent) = selected_torrent {
+        let state = &torrent.latest_state;
+
+        let progress_chunks =
+            ratatui::layout::Layout::horizontal([Constraint::Length(11), Constraint::Min(0)])
+                .split(detail_rows[0]);
+
+        f.render_widget(Paragraph::new("Progress: "), progress_chunks[0]);
+
+        let (progress_ratio, progress_label_text) = if state.number_of_pieces_total > 0 {
+            if state.torrent_control_state != TorrentControlState::Running
+                || state.activity_message.contains("Seeding")
+                || state.activity_message.contains("Finished")
+            {
+                (1.0, "100.0%".to_string())
+            } else {
+                let ratio =
+                    state.number_of_pieces_completed as f64 / state.number_of_pieces_total as f64;
+                (ratio, format!("{:.1}%", ratio * 100.0))
+            }
+        } else {
+            (0.0, "0.0%".to_string())
+        };
+        let custom_line_set = symbols::line::Set {
+            horizontal: "⣿",
+            ..symbols::line::THICK
+        };
+        let line_gauge = LineGauge::default()
+            .ratio(progress_ratio)
+            .label(progress_label_text)
+            .line_set(custom_line_set)
+            .filled_style(ctx.apply(Style::default().fg(ctx.state_success())));
+        f.render_widget(line_gauge, progress_chunks[1]);
+
+        let status_text = if state.activity_message.is_empty() {
+            "Waiting..."
+        } else {
+            state.activity_message.as_str()
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "Status:   ",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+                ),
+                Span::raw(status_text),
+            ])),
+            detail_rows[1],
+        );
+
+        let total_pieces = state.number_of_pieces_total as usize;
+        let (seeds, leeches) = state
+            .peers
+            .iter()
+            .filter(|p| p.last_action != "Connecting...")
+            .fold((0, 0), |(s, l), peer| {
+                if total_pieces > 0 {
+                    let pieces_have = peer
+                        .bitfield
+                        .iter()
+                        .take(total_pieces)
+                        .filter(|&&b| b)
+                        .count();
+                    if pieces_have == total_pieces {
+                        (s + 1, l)
+                    } else {
+                        (s, l + 1)
+                    }
+                } else {
+                    (s, l + 1)
+                }
+            });
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "Peers:    ",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+                ),
+                Span::raw(format!(
+                    "{} (",
+                    state.number_of_successfully_connected_peers
+                )),
+                Span::styled(
+                    format!("{}", seeds),
+                    ctx.apply(Style::default().fg(ctx.state_success())),
+                ),
+                Span::raw(" / "),
+                Span::styled(
+                    format!("{}", leeches),
+                    ctx.apply(Style::default().fg(ctx.state_error())),
+                ),
+                Span::raw(")"),
+            ])),
+            detail_rows[2],
+        );
+
+        let written_size_spans = if state.number_of_pieces_completed < state.number_of_pieces_total
+        {
+            vec![
+                Span::styled(
+                    "Written:  ",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+                ),
+                Span::raw(format_bytes(state.bytes_written)),
+                Span::raw(format!(" / {}", format_bytes(state.total_size))),
+            ]
+        } else {
+            vec![
+                Span::styled(
+                    "Size:     ",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+                ),
+                Span::raw(format_bytes(state.total_size)),
+            ]
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(written_size_spans)),
+            detail_rows[3],
+        );
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "Pieces:   ",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+                ),
+                Span::raw(format!(
+                    "{}/{}",
+                    state.number_of_pieces_completed, state.number_of_pieces_total
+                )),
+            ])),
+            detail_rows[4],
+        );
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "ETA:      ",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+                ),
+                Span::raw(format_duration(state.eta)),
+            ])),
+            detail_rows[5],
+        );
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "Announce: ",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+                ),
+                Span::raw(format_countdown(state.next_announce_in)),
+            ])),
+            detail_rows[6],
+        );
+    } else {
+        let placeholder_style = ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0));
+        let label_style = ctx.apply(Style::default().fg(ctx.theme.semantic.surface2));
+
+        let progress_chunks =
+            ratatui::layout::Layout::horizontal([Constraint::Length(11), Constraint::Min(0)])
+                .split(detail_rows[0]);
+        f.render_widget(
+            Paragraph::new("Progress: ").style(label_style),
+            progress_chunks[0],
+        );
+        let line_gauge = LineGauge::default()
+            .ratio(0.0)
+            .label(" --.--%")
+            .style(placeholder_style);
+        f.render_widget(line_gauge, progress_chunks[1]);
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Status:   ", label_style),
+                Span::styled("No Selection", placeholder_style),
+            ])),
+            detail_rows[1],
+        );
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Peers:    ", label_style),
+                Span::styled("- (- / -)", placeholder_style),
+            ])),
+            detail_rows[2],
+        );
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Size:     ", label_style),
+                Span::styled("- / -", placeholder_style),
+            ])),
+            detail_rows[3],
+        );
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Pieces:   ", label_style),
+                Span::styled("- / -", placeholder_style),
+            ])),
+            detail_rows[4],
+        );
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("ETA:      ", label_style),
+                Span::styled("--:--:--", placeholder_style),
+            ])),
+            detail_rows[5],
+        );
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Announce: ", label_style),
+                Span::styled("--s", placeholder_style),
+            ])),
+            detail_rows[6],
         );
     }
 }
