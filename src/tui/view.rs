@@ -7,7 +7,7 @@ use ratatui::{prelude::*, symbols, widgets::*};
 use crate::tui::formatters::*;
 use crate::tui::layout::compute_visible_torrent_columns;
 use crate::tui::layout::{get_torrent_columns, ColumnId};
-use crate::tui::screens::{browser, config, delete_confirm, help, power, welcome};
+use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, welcome};
 
 use crate::app::torrent_completion_percent;
 use crate::app::GraphDisplayMode;
@@ -128,10 +128,10 @@ pub fn draw(f: &mut Frame, app_state: &mut AppState, settings: &Settings) {
         );
     }
     if let Some(error_text) = &app_state.system_error {
-        draw_status_error_popup(f, error_text, &ctx);
+        normal::draw_status_error_popup(f, error_text, &ctx);
     }
     if app_state.should_quit {
-        draw_shutdown_screen(f, app_state, &ctx);
+        normal::draw_shutdown_screen(f, app_state, &ctx);
     }
 
     apply_theme_effects_to_frame(f, &ctx);
@@ -2353,98 +2353,6 @@ fn draw_torrent_sparklines(f: &mut Frame, app_state: &AppState, area: Rect, ctx:
             .style(ctx.apply(Style::default().fg(ctx.state_success())));
         f.render_widget(ul_sparkline, ul_sparkline_chunk);
     }
-}
-
-fn draw_status_error_popup(f: &mut Frame, error_text: &str, ctx: &ThemeContext) {
-    let popup_width_percent: u16 = 50;
-    let popup_height: u16 = 8;
-    let vertical_chunks = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(popup_height),
-        Constraint::Min(0),
-    ])
-    .split(f.area());
-    let area = Layout::horizontal([
-        Constraint::Percentage((100 - popup_width_percent) / 2),
-        Constraint::Percentage(popup_width_percent),
-        Constraint::Percentage((100 - popup_width_percent) / 2),
-    ])
-    .split(vertical_chunks[1])[1];
-
-    f.render_widget(Clear, area);
-    let text = vec![
-        Line::from(Span::styled(
-            "Error",
-            ctx.apply(Style::default().fg(ctx.state_error()).bold()),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            error_text,
-            ctx.apply(Style::default().fg(ctx.state_warning())),
-        )),
-        Line::from(""),
-        Line::from(""),
-        Line::from(Span::styled(
-            "[Press Esc to dismiss]",
-            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
-        )),
-    ];
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(ctx.apply(Style::default().fg(ctx.state_error())));
-    let paragraph = Paragraph::new(text)
-        .block(block)
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true });
-    f.render_widget(paragraph, area);
-}
-
-fn draw_shutdown_screen(f: &mut Frame, app_state: &AppState, ctx: &ThemeContext) {
-    const POPUP_WIDTH: u16 = 40;
-    const POPUP_HEIGHT: u16 = 3;
-    let area = f.area();
-    let width = POPUP_WIDTH.min(area.width);
-    let height = POPUP_HEIGHT.min(area.height);
-    let vertical_chunks = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(height),
-        Constraint::Min(0),
-    ])
-    .split(area);
-    let area = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(width),
-        Constraint::Min(0),
-    ])
-    .split(vertical_chunks[1])[1];
-
-    f.render_widget(Clear, area);
-    let container_block = Block::default()
-        .title(Span::styled(
-            " Exiting ",
-            ctx.apply(Style::default().fg(ctx.accent_peach())),
-        ))
-        .borders(Borders::ALL)
-        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
-    let inner_area = container_block.inner(area);
-    f.render_widget(container_block, area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1)])
-        .split(inner_area);
-    let progress_label = format!("{:.0}%", (app_state.shutdown_progress * 100.0).min(100.0));
-    let progress_bar = Gauge::default()
-        .ratio(app_state.shutdown_progress)
-        .label(progress_label)
-        .gauge_style(
-            ctx.apply(
-                Style::default()
-                    .fg(ctx.state_selected())
-                    .bg(ctx.theme.semantic.surface0),
-            ),
-        );
-    f.render_widget(progress_bar, chunks[0]);
 }
 
 fn draw_peers_table(f: &mut Frame, app_state: &AppState, peers_chunk: Rect, ctx: &ThemeContext) {

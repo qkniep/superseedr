@@ -3,8 +3,9 @@
 
 use crate::app::AppCommand;
 use crate::app::FileBrowserMode;
-use crate::app::{App, AppMode, ConfigItem, SelectedHeader, TorrentControlState};
+use crate::app::{App, AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState};
 use crate::config::SortDirection;
+use crate::theme::ThemeContext;
 use crate::torrent_manager::ManagerCommand;
 use crate::tui::events::{handle_navigation, handle_pasted_text};
 use crate::tui::layout::calculate_layout;
@@ -17,9 +18,103 @@ use crate::tui::layout::LayoutContext;
 #[cfg(windows)]
 use clipboard::{ClipboardContext, ClipboardProvider};
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
+use ratatui::prelude::{Alignment, Constraint, Direction, Frame, Line, Span, Style, Stylize};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap};
 use strum::IntoEnumIterator;
 #[cfg(windows)]
 use tracing::{event as tracing_event, Level};
+
+pub fn draw_status_error_popup(f: &mut Frame, error_text: &str, ctx: &ThemeContext) {
+    let popup_width_percent: u16 = 50;
+    let popup_height: u16 = 8;
+    let vertical_chunks = ratatui::layout::Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(popup_height),
+        Constraint::Min(0),
+    ])
+    .split(f.area());
+    let area = ratatui::layout::Layout::horizontal([
+        Constraint::Percentage((100 - popup_width_percent) / 2),
+        Constraint::Percentage(popup_width_percent),
+        Constraint::Percentage((100 - popup_width_percent) / 2),
+    ])
+    .split(vertical_chunks[1])[1];
+
+    f.render_widget(Clear, area);
+    let text = vec![
+        Line::from(Span::styled(
+            "Error",
+            ctx.apply(Style::default().fg(ctx.state_error()).bold()),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            error_text,
+            ctx.apply(Style::default().fg(ctx.state_warning())),
+        )),
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[Press Esc to dismiss]",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
+        )),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(ctx.apply(Style::default().fg(ctx.state_error())));
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+    f.render_widget(paragraph, area);
+}
+
+pub fn draw_shutdown_screen(f: &mut Frame, app_state: &AppState, ctx: &ThemeContext) {
+    const POPUP_WIDTH: u16 = 40;
+    const POPUP_HEIGHT: u16 = 3;
+    let area = f.area();
+    let width = POPUP_WIDTH.min(area.width);
+    let height = POPUP_HEIGHT.min(area.height);
+    let vertical_chunks = ratatui::layout::Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(height),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    let area = ratatui::layout::Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(width),
+        Constraint::Min(0),
+    ])
+    .split(vertical_chunks[1])[1];
+
+    f.render_widget(Clear, area);
+    let container_block = Block::default()
+        .title(Span::styled(
+            " Exiting ",
+            ctx.apply(Style::default().fg(ctx.accent_peach())),
+        ))
+        .borders(Borders::ALL)
+        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
+    let inner_area = container_block.inner(area);
+    f.render_widget(container_block, area);
+
+    let chunks = ratatui::layout::Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1)])
+        .split(inner_area);
+    let progress_label = format!("{:.0}%", (app_state.shutdown_progress * 100.0).min(100.0));
+    let progress_bar = Gauge::default()
+        .ratio(app_state.shutdown_progress)
+        .label(progress_label)
+        .gauge_style(
+            ctx.apply(
+                Style::default()
+                    .fg(ctx.state_selected())
+                    .bg(ctx.theme.semantic.surface0),
+            ),
+        );
+    f.render_widget(progress_bar, chunks[0]);
+}
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     match event {
