@@ -14,7 +14,7 @@ use crate::tui::layout::calculate_layout;
 use crate::tui::layout::compute_visible_peer_columns;
 use crate::tui::layout::compute_visible_torrent_columns;
 use crate::tui::layout::LayoutContext;
-use crate::tui::screens::{normal, power, welcome};
+use crate::tui::screens::{config, normal, power, welcome};
 use crate::tui::tree::RawNode;
 use crate::tui::tree::TreeViewState;
 use crate::tui::tree::{TreeAction, TreeFilter, TreeMathHelper};
@@ -25,8 +25,6 @@ use ratatui::prelude::Rect;
 use std::collections::HashMap;
 use std::path::Path;
 use tracing::{event as tracing_event, Level};
-
-use directories::UserDirs;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -155,196 +153,17 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
             items,
             editing,
         } => {
-            if let Some((item, buffer)) = editing {
-                if let CrosstermEvent::Key(key) = event {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Char(c) => {
-                                if c.is_ascii_digit() {
-                                    buffer.push(c);
-                                }
-                            }
-                            KeyCode::Backspace => {
-                                buffer.pop();
-                            }
-                            KeyCode::Esc => *editing = None,
-                            KeyCode::Enter => {
-                                match item {
-                                    ConfigItem::ClientPort => {
-                                        if let Ok(new_port) = buffer.parse::<u16>() {
-                                            if new_port > 0 {
-                                                settings_edit.client_port = new_port;
-                                            }
-                                        }
-                                    }
-                                    ConfigItem::GlobalDownloadLimit => {
-                                        if let Ok(new_rate) = buffer.parse::<u64>() {
-                                            settings_edit.global_download_limit_bps = new_rate;
-                                            let bucket = app.global_dl_bucket.clone();
-                                            tokio::spawn(async move {
-                                                bucket.set_rate(new_rate as f64);
-                                            });
-                                        }
-                                    }
-                                    ConfigItem::GlobalUploadLimit => {
-                                        if let Ok(new_rate) = buffer.parse::<u64>() {
-                                            settings_edit.global_upload_limit_bps = new_rate;
-                                            let bucket = app.global_ul_bucket.clone();
-                                            tokio::spawn(async move {
-                                                bucket.set_rate(new_rate as f64);
-                                            });
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                *editing = None;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            } else if let CrosstermEvent::Key(key) = event {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('Q') => {
-                            let _ = app
-                                .app_command_tx
-                                .try_send(AppCommand::UpdateConfig(*settings_edit.clone()));
-                            app.app_state.mode = AppMode::Normal;
-                        }
-                        KeyCode::Enter => {
-                            let selected_item = items[*selected_index];
-                            match selected_item {
-                                ConfigItem::GlobalDownloadLimit
-                                | ConfigItem::GlobalUploadLimit
-                                | ConfigItem::ClientPort => {
-                                    *editing = Some((selected_item, String::new()));
-                                }
-                                ConfigItem::DefaultDownloadFolder | ConfigItem::WatchFolder => {
-                                    let initial_path =
-                                        if selected_item == ConfigItem::WatchFolder {
-                                            settings_edit.watch_folder.clone()
-                                        } else {
-                                            settings_edit.default_download_folder.clone()
-                                        }
-                                        .unwrap_or_else(
-                                            || {
-                                                UserDirs::new()
-                                                    .and_then(|ud| {
-                                                        ud.download_dir().map(|p| p.to_path_buf())
-                                                    })
-                                                    .unwrap_or_else(|| {
-                                                        std::path::PathBuf::from(".")
-                                                    })
-                                            },
-                                        );
-
-                                    // Send command to switch mode, PASSING the current state
-                                    let _ =
-                                        app.app_command_tx.try_send(AppCommand::FetchFileTree {
-                                            path: initial_path,
-                                            // Carry the state into the browser
-                                            browser_mode: FileBrowserMode::ConfigPathSelection {
-                                                target_item: selected_item,
-                                                current_settings: settings_edit.clone(), // Clone the edits so far
-                                                selected_index: *selected_index,
-                                                items: items.clone(),
-                                            },
-                                            highlight_path: None,
-                                        });
-                                }
-                            }
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            *selected_index = selected_index.saturating_sub(1)
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if *selected_index < items.len() - 1 {
-                                *selected_index += 1;
-                            }
-                        }
-                        KeyCode::Char('r') => {
-                            let default_settings = crate::config::Settings::default();
-                            let selected_item = items[*selected_index];
-                            match selected_item {
-                                ConfigItem::ClientPort => {
-                                    settings_edit.client_port = default_settings.client_port;
-                                }
-                                ConfigItem::DefaultDownloadFolder => {
-                                    settings_edit.default_download_folder =
-                                        default_settings.default_download_folder;
-                                }
-                                ConfigItem::WatchFolder => {
-                                    settings_edit.watch_folder = default_settings.watch_folder;
-                                }
-                                ConfigItem::GlobalDownloadLimit => {
-                                    settings_edit.global_download_limit_bps =
-                                        default_settings.global_download_limit_bps;
-                                }
-                                ConfigItem::GlobalUploadLimit => {
-                                    settings_edit.global_upload_limit_bps =
-                                        default_settings.global_upload_limit_bps;
-                                }
-                            }
-                        }
-                        KeyCode::Right | KeyCode::Char('l') => {
-                            let item = items[*selected_index];
-                            let increment = 10_000 * 8;
-                            match item {
-                                ConfigItem::GlobalDownloadLimit => {
-                                    let new_rate = settings_edit
-                                        .global_download_limit_bps
-                                        .saturating_add(increment);
-                                    settings_edit.global_download_limit_bps = new_rate;
-                                    let bucket = app.global_dl_bucket.clone();
-                                    tokio::spawn(async move {
-                                        bucket.set_rate(new_rate as f64);
-                                    });
-                                }
-                                ConfigItem::GlobalUploadLimit => {
-                                    let new_rate = settings_edit
-                                        .global_upload_limit_bps
-                                        .saturating_add(increment);
-                                    settings_edit.global_upload_limit_bps = new_rate;
-                                    let bucket = app.global_ul_bucket.clone();
-                                    tokio::spawn(async move {
-                                        bucket.set_rate(new_rate as f64);
-                                    });
-                                }
-                                _ => {}
-                            }
-                        }
-                        KeyCode::Left | KeyCode::Char('h') => {
-                            let item = items[*selected_index];
-                            let decrement = 10_000 * 8;
-                            match item {
-                                ConfigItem::ClientPort => {}
-                                ConfigItem::GlobalDownloadLimit => {
-                                    let new_rate = settings_edit
-                                        .global_download_limit_bps
-                                        .saturating_sub(decrement);
-                                    settings_edit.global_download_limit_bps = new_rate;
-                                    let bucket = app.global_dl_bucket.clone();
-                                    tokio::spawn(async move {
-                                        bucket.set_rate(new_rate as f64);
-                                    });
-                                }
-                                ConfigItem::GlobalUploadLimit => {
-                                    let new_rate = settings_edit
-                                        .global_upload_limit_bps
-                                        .saturating_sub(decrement);
-                                    settings_edit.global_upload_limit_bps = new_rate;
-                                    let bucket = app.global_ul_bucket.clone();
-                                    tokio::spawn(async move {
-                                        bucket.set_rate(new_rate as f64);
-                                    });
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+            if let config::ConfigOutcome::ToNormal = config::handle_event(
+                event,
+                settings_edit,
+                selected_index,
+                items.as_mut_slice(),
+                editing,
+                &app.app_command_tx,
+                &app.global_dl_bucket,
+                &app.global_ul_bucket,
+            ) {
+                app.app_state.mode = AppMode::Normal;
             }
         }
 
