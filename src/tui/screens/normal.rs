@@ -68,12 +68,22 @@ pub enum UiAction {
     OpenAddTorrentBrowser,
     OpenDeleteConfirm { with_files: bool },
     OpenConfig,
+    DataRateSlower,
+    DataRateFaster,
+    ThemePrev,
+    ThemeNext,
+    TogglePauseSelected,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiEffect {
     OpenAddTorrentFileBrowser,
     OpenConfigScreen,
+    BroadcastManagerDataRate(u64),
+    ApplyThemePrev,
+    ApplyThemeNext,
+    SendPause(Vec<u8>),
+    SendResume(Vec<u8>),
 }
 
 #[derive(Default)]
@@ -166,6 +176,61 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                 effects: vec![UiEffect::OpenConfigScreen],
             }
         }
+        UiAction::DataRateSlower => {
+            app_state.data_rate = app_state.data_rate.next_slower();
+            ReduceResult {
+                redraw: true,
+                effects: vec![UiEffect::BroadcastManagerDataRate(app_state.data_rate.as_ms())],
+            }
+        }
+        UiAction::DataRateFaster => {
+            app_state.data_rate = app_state.data_rate.next_faster();
+            ReduceResult {
+                redraw: true,
+                effects: vec![UiEffect::BroadcastManagerDataRate(app_state.data_rate.as_ms())],
+            }
+        }
+        UiAction::ThemePrev => ReduceResult {
+            redraw: true,
+            effects: vec![UiEffect::ApplyThemePrev],
+        },
+        UiAction::ThemeNext => ReduceResult {
+            redraw: true,
+            effects: vec![UiEffect::ApplyThemeNext],
+        },
+        UiAction::TogglePauseSelected => {
+            let selected_hash = app_state
+                .torrent_list_order
+                .get(app_state.ui.selected_torrent_index)
+                .cloned();
+            if let Some(info_hash) = selected_hash {
+                if let Some(torrent_display) = app_state.torrents.get_mut(&info_hash) {
+                    match torrent_display.latest_state.torrent_control_state {
+                        TorrentControlState::Running => {
+                            torrent_display.latest_state.torrent_control_state =
+                                TorrentControlState::Paused;
+                            return ReduceResult {
+                                redraw: true,
+                                effects: vec![UiEffect::SendPause(info_hash)],
+                            };
+                        }
+                        TorrentControlState::Paused => {
+                            torrent_display.latest_state.torrent_control_state =
+                                TorrentControlState::Running;
+                            return ReduceResult {
+                                redraw: true,
+                                effects: vec![UiEffect::SendResume(info_hash)],
+                            };
+                        }
+                        TorrentControlState::Deleting => {}
+                    }
+                }
+            }
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
     }
 }
 
@@ -182,6 +247,11 @@ fn map_key_to_ui_action(key_code: KeyCode) -> Option<UiAction> {
         KeyCode::Char('d') => Some(UiAction::OpenDeleteConfirm { with_files: false }),
         KeyCode::Char('D') => Some(UiAction::OpenDeleteConfirm { with_files: true }),
         KeyCode::Char('c') => Some(UiAction::OpenConfig),
+        KeyCode::Char('[') | KeyCode::Char('{') => Some(UiAction::DataRateSlower),
+        KeyCode::Char(']') | KeyCode::Char('}') => Some(UiAction::DataRateFaster),
+        KeyCode::Char('<') => Some(UiAction::ThemePrev),
+        KeyCode::Char('>') => Some(UiAction::ThemeNext),
+        KeyCode::Char('p') => Some(UiAction::TogglePauseSelected),
         KeyCode::Up
         | KeyCode::Char('k')
         | KeyCode::Down
@@ -3156,88 +3226,73 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 app.app_state.ui.config.editing = None;
                                 app.app_state.mode = AppMode::Config;
                             }
+                            UiEffect::BroadcastManagerDataRate(new_rate) => {
+                                for manager_tx in app.torrent_manager_command_txs.values() {
+                                    let _ = manager_tx.try_send(ManagerCommand::SetDataRate(new_rate));
+                                }
+                            }
+                            UiEffect::ApplyThemePrev => {
+                                let themes = crate::theme::ThemeName::sorted_for_ui();
+                                let current_idx = themes
+                                    .iter()
+                                    .position(|&t| t == app.client_configs.ui_theme)
+                                    .unwrap_or(0);
+                                let new_idx = if current_idx == 0 {
+                                    themes.len() - 1
+                                } else {
+                                    current_idx - 1
+                                };
+                                app.client_configs.ui_theme = themes[new_idx];
+                                app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
+                                let _ = app
+                                    .app_command_tx
+                                    .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
+                            }
+                            UiEffect::ApplyThemeNext => {
+                                let themes = crate::theme::ThemeName::sorted_for_ui();
+                                let current_idx = themes
+                                    .iter()
+                                    .position(|&t| t == app.client_configs.ui_theme)
+                                    .unwrap_or(0);
+                                let new_idx = (current_idx + 1) % themes.len();
+                                app.client_configs.ui_theme = themes[new_idx];
+                                app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
+                                let _ = app
+                                    .app_command_tx
+                                    .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
+                            }
+                            UiEffect::SendPause(info_hash) => {
+                                if let Some(torrent_manager_command_tx) =
+                                    app.torrent_manager_command_txs.get(&info_hash)
+                                {
+                                    let torrent_manager_command_tx_clone =
+                                        torrent_manager_command_tx.clone();
+                                    tokio::spawn(async move {
+                                        let _ = torrent_manager_command_tx_clone
+                                            .send(crate::torrent_manager::ManagerCommand::Pause)
+                                            .await;
+                                    });
+                                }
+                            }
+                            UiEffect::SendResume(info_hash) => {
+                                if let Some(torrent_manager_command_tx) =
+                                    app.torrent_manager_command_txs.get(&info_hash)
+                                {
+                                    let torrent_manager_command_tx_clone =
+                                        torrent_manager_command_tx.clone();
+                                    tokio::spawn(async move {
+                                        let _ = torrent_manager_command_tx_clone
+                                            .send(crate::torrent_manager::ManagerCommand::Resume)
+                                            .await;
+                                    });
+                                }
+                            }
                         }
                     }
                     return;
                 }
 
                 match key.code {
-                    KeyCode::Char('[') | KeyCode::Char('{') => {
-                        app.app_state.data_rate = app.app_state.data_rate.next_slower();
-                        let new_rate = app.app_state.data_rate.as_ms();
-
-                        for manager_tx in app.torrent_manager_command_txs.values() {
-                            let _ = manager_tx.try_send(ManagerCommand::SetDataRate(new_rate));
-                        }
-                    }
-                    KeyCode::Char(']') | KeyCode::Char('}') => {
-                        app.app_state.data_rate = app.app_state.data_rate.next_faster();
-                        let new_rate = app.app_state.data_rate.as_ms();
-
-                        for manager_tx in app.torrent_manager_command_txs.values() {
-                            let _ = manager_tx.try_send(ManagerCommand::SetDataRate(new_rate));
-                        }
-                    }
-                    KeyCode::Char('<') => {
-                        let themes = crate::theme::ThemeName::sorted_for_ui();
-                        let current_idx = themes
-                            .iter()
-                            .position(|&t| t == app.client_configs.ui_theme)
-                            .unwrap_or(0);
-                        let new_idx = if current_idx == 0 {
-                            themes.len() - 1
-                        } else {
-                            current_idx - 1
-                        };
-                        app.client_configs.ui_theme = themes[new_idx];
-                        app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
-                        let _ = app
-                            .app_command_tx
-                            .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
-                    }
-                    KeyCode::Char('>') => {
-                        let themes = crate::theme::ThemeName::sorted_for_ui();
-                        let current_idx = themes
-                            .iter()
-                            .position(|&t| t == app.client_configs.ui_theme)
-                            .unwrap_or(0);
-                        let new_idx = (current_idx + 1) % themes.len();
-                        app.client_configs.ui_theme = themes[new_idx];
-                        app.app_state.theme = crate::theme::Theme::builtin(themes[new_idx]);
-                        let _ = app
-                            .app_command_tx
-                            .try_send(AppCommand::UpdateConfig(app.client_configs.clone()));
-                    }
-                    KeyCode::Char('p') => {
-                        if let Some(info_hash) = app
-                            .app_state
-                            .torrent_list_order
-                            .get(app.app_state.ui.selected_torrent_index)
-                        {
-                            if let (Some(torrent_display), Some(torrent_manager_command_tx)) = (
-                                app.app_state.torrents.get_mut(info_hash),
-                                app.torrent_manager_command_txs.get(info_hash),
-                            ) {
-                                let (new_state, command) =
-                                    match torrent_display.latest_state.torrent_control_state {
-                                        TorrentControlState::Running => (
-                                            TorrentControlState::Paused,
-                                            crate::torrent_manager::ManagerCommand::Pause,
-                                        ),
-                                        TorrentControlState::Paused => (
-                                            TorrentControlState::Running,
-                                            crate::torrent_manager::ManagerCommand::Resume,
-                                        ),
-                                        TorrentControlState::Deleting => return,
-                                    };
-                                torrent_display.latest_state.torrent_control_state = new_state;
-                                let torrent_manager_command_tx_clone = torrent_manager_command_tx.clone();
-                                tokio::spawn(async move {
-                                    let _ = torrent_manager_command_tx_clone.send(command).await;
-                                });
-                            }
-                        }
-                    }
                     KeyCode::Char('s') => {
                         let layout_ctx = LayoutContext::new(app.app_state.screen_area, &app.app_state, 35);
                         let layout_plan = calculate_layout(app.app_state.screen_area, &layout_ctx);
@@ -3323,7 +3378,10 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{AppState, PeerInfo, SelectedHeader, TorrentDisplayState, TorrentMetrics};
+    use crate::app::{
+        AppState, DataRate, PeerInfo, SelectedHeader, TorrentControlState, TorrentDisplayState,
+        TorrentMetrics,
+    };
 
     fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
         let mut metrics = TorrentMetrics::default();
@@ -3495,5 +3553,71 @@ mod tests {
 
         assert!(result.redraw);
         assert_eq!(result.effects, vec![UiEffect::OpenConfigScreen]);
+    }
+
+    #[test]
+    fn reducer_data_rate_actions_update_rate_and_emit_effect() {
+        let mut app_state = AppState::default();
+        app_state.data_rate = DataRate::Rate1s;
+
+        let slower = reduce_ui_action(&mut app_state, UiAction::DataRateSlower);
+        assert_eq!(app_state.data_rate.as_ms(), DataRate::RateHalf.as_ms());
+        assert_eq!(
+            slower.effects,
+            vec![UiEffect::BroadcastManagerDataRate(DataRate::RateHalf.as_ms())]
+        );
+
+        let faster = reduce_ui_action(&mut app_state, UiAction::DataRateFaster);
+        assert_eq!(app_state.data_rate.as_ms(), DataRate::Rate1s.as_ms());
+        assert_eq!(
+            faster.effects,
+            vec![UiEffect::BroadcastManagerDataRate(DataRate::Rate1s.as_ms())]
+        );
+    }
+
+    #[test]
+    fn reducer_theme_actions_emit_effects() {
+        let mut app_state = AppState::default();
+
+        let prev = reduce_ui_action(&mut app_state, UiAction::ThemePrev);
+        let next = reduce_ui_action(&mut app_state, UiAction::ThemeNext);
+
+        assert_eq!(prev.effects, vec![UiEffect::ApplyThemePrev]);
+        assert_eq!(next.effects, vec![UiEffect::ApplyThemeNext]);
+    }
+
+    #[test]
+    fn reducer_toggle_pause_selected_toggles_state_and_emits_command_effect() {
+        let mut app_state = create_test_app_state();
+        app_state.ui.selected_torrent_index = 0;
+        let hash = b"hash_a".to_vec();
+
+        if let Some(t) = app_state.torrents.get_mut(&hash) {
+            t.latest_state.torrent_control_state = TorrentControlState::Running;
+        }
+
+        let paused = reduce_ui_action(&mut app_state, UiAction::TogglePauseSelected);
+        assert_eq!(paused.effects, vec![UiEffect::SendPause(hash.clone())]);
+        assert_eq!(
+            app_state
+                .torrents
+                .get(&hash)
+                .expect("selected torrent exists")
+                .latest_state
+                .torrent_control_state,
+            TorrentControlState::Paused
+        );
+
+        let resumed = reduce_ui_action(&mut app_state, UiAction::TogglePauseSelected);
+        assert_eq!(resumed.effects, vec![UiEffect::SendResume(hash.clone())]);
+        assert_eq!(
+            app_state
+                .torrents
+                .get(&hash)
+                .expect("selected torrent exists")
+                .latest_state
+                .torrent_control_state,
+            TorrentControlState::Running
+        );
     }
 }

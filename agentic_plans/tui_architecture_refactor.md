@@ -133,8 +133,8 @@ This plan is incremental, parity-driven, and includes manual testing after each 
 ### Status
 - In progress:
   - Normal screen has initial `UiAction`/`UiEffect`/`ReduceResult` scaffold.
-  - Reducer path currently handles: `Esc`, `/`, arrow/vim navigation, `x`, `z`, `Q`, `t`, `T`, `a`, `c`, `d`, `D`.
-  - Reducer unit tests cover search start, error clear, navigation, anonymize toggle, power-saving transition, quit flag, graph mode cycling, and delete-confirm/config/open-browser actions.
+  - Reducer path currently handles: `Esc`, `/`, arrow/vim navigation, `x`, `z`, `Q`, `t`, `T`, `a`, `c`, `d`, `D`, `[`, `]`, `<`, `>`, `p`.
+  - Reducer unit tests cover search start, error clear, navigation, anonymize toggle, power-saving transition, quit flag, graph mode cycling, delete-confirm/config/open-browser actions, data-rate actions, theme actions, and pause/resume toggles.
 
 ### Steps
 1. Add `UiAction`, `UiEffect`, `ReduceResult`.
