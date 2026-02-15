@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::{
-    AppCommand, AppMode, BrowserPane, ConfigItem, FileBrowserMode, FileMetadata, FilePriority,
-    TorrentDisplayState, TorrentPreviewPayload,
+    App, AppCommand, AppMode, BrowserPane, ConfigItem, FileBrowserMode, FileMetadata,
+    FilePriority, TorrentControlState, TorrentDisplayState, TorrentPreviewPayload,
 };
 use crate::torrent_manager::ManagerCommand;
 use crate::tui::formatters::centered_rect;
@@ -387,6 +387,54 @@ pub fn resolve_confirm_decision(state: &TreeViewState, browser_mode: &FileBrowse
         return ConfirmDecision::File(path);
     }
     ConfirmDecision::None
+}
+
+pub async fn execute_confirm_decision(app: &mut App, decision: ConfirmDecision) {
+    match decision {
+        ConfirmDecision::ToConfig(mode) => {
+            tracing::info!(target: "superseedr", "Confirming Config Path Selection");
+            app.app_state.mode = mode;
+        }
+        ConfirmDecision::Download(payload) => {
+            if let Some(pending_path) = app.app_state.pending_torrent_path.take() {
+                app.add_torrent_from_file(
+                    pending_path,
+                    Some(payload.base_path.clone()),
+                    false,
+                    TorrentControlState::Running,
+                    payload.file_priorities.clone(),
+                    payload.container_name_to_use.clone(),
+                )
+                .await;
+            } else if !app.app_state.pending_torrent_link.is_empty() {
+                app.add_magnet_torrent(
+                    "Fetching name...".to_string(),
+                    app.app_state.pending_torrent_link.clone(),
+                    Some(payload.base_path),
+                    false,
+                    TorrentControlState::Running,
+                    payload.file_priorities,
+                    payload.container_name_to_use,
+                )
+                .await;
+                app.app_state.pending_torrent_link.clear();
+            } else {
+                tracing::warn!(target: "superseedr", "SHIFT+Y pressed but no pending content was found");
+            }
+            app.app_state.mode = AppMode::Normal;
+        }
+        ConfirmDecision::File(path) => {
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.ends_with(".torrent"))
+            {
+                let _ = app.app_command_tx.send(AppCommand::AddTorrentFromFile(path)).await;
+            }
+            app.app_state.mode = AppMode::Normal;
+        }
+        ConfirmDecision::None => {}
+    }
 }
 
 pub fn build_download_confirm_payload(
