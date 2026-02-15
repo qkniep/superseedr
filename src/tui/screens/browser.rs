@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::app::{AppCommand, BrowserPane, FileBrowserMode, FileMetadata};
+use crate::app::{AppCommand, AppMode, BrowserPane, ConfigItem, FileBrowserMode, FileMetadata};
 use crate::tui::formatters::centered_rect;
 use crate::tui::layout::calculate_file_browser_layout;
 use crate::app::TorrentPreviewPayload;
@@ -294,6 +294,69 @@ pub fn handle_filesystem_navigation(
     }
 }
 
+pub fn confirm_config_path_selection(
+    state: &TreeViewState,
+    browser_mode: &FileBrowserMode,
+) -> Option<AppMode> {
+    if let FileBrowserMode::ConfigPathSelection {
+        target_item,
+        current_settings,
+        selected_index,
+        items,
+    } = browser_mode
+    {
+        let mut new_settings = current_settings.clone();
+        let selected_path = state.current_path.clone();
+
+        match target_item {
+            ConfigItem::DefaultDownloadFolder => new_settings.default_download_folder = Some(selected_path),
+            ConfigItem::WatchFolder => new_settings.watch_folder = Some(selected_path),
+            _ => {}
+        }
+
+        return Some(AppMode::Config {
+            settings_edit: new_settings,
+            selected_index: *selected_index,
+            items: items.clone(),
+            editing: None,
+        });
+    }
+    None
+}
+
+pub fn escape_to_config_mode(browser_mode: &FileBrowserMode) -> Option<AppMode> {
+    if let FileBrowserMode::ConfigPathSelection {
+        current_settings,
+        selected_index,
+        items,
+        ..
+    } = browser_mode
+    {
+        return Some(AppMode::Config {
+            settings_edit: current_settings.clone(),
+            selected_index: *selected_index,
+            items: items.clone(),
+            editing: None,
+        });
+    }
+    None
+}
+
+pub fn selected_torrent_file_for_confirm(
+    state: &TreeViewState,
+    browser_mode: &FileBrowserMode,
+) -> Option<std::path::PathBuf> {
+    if let FileBrowserMode::File(extensions) = browser_mode {
+        if let Some(path) = state.cursor_path.clone() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if extensions.iter().any(|ext| name.ends_with(ext)) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +498,21 @@ mod tests {
         assert!(consumed);
         assert!(is_searching);
         assert!(query.is_empty());
+    }
+
+    #[test]
+    fn confirm_config_path_selection_returns_config_mode() {
+        let mode = FileBrowserMode::ConfigPathSelection {
+            target_item: ConfigItem::WatchFolder,
+            current_settings: Box::default(),
+            selected_index: 2,
+            items: vec![ConfigItem::WatchFolder],
+        };
+        let state = TreeViewState {
+            current_path: PathBuf::from("/tmp"),
+            ..Default::default()
+        };
+        let out = confirm_config_path_selection(&state, &mode);
+        assert!(matches!(out, Some(AppMode::Config { .. })));
     }
 }

@@ -4,7 +4,7 @@
 use crate::app::AppCommand;
 use crate::app::AppState;
 use crate::app::FileBrowserMode;
-use crate::app::{App, AppMode, ConfigItem, SelectedHeader, TorrentControlState};
+use crate::app::{App, AppMode, SelectedHeader, TorrentControlState};
 use crate::app::{BrowserPane, TorrentPreviewPayload};
 use crate::torrent_manager::ManagerCommand;
 
@@ -294,42 +294,17 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                 &app.app_command_tx,
                             ) => {}
                         KeyCode::Char('Y') => {
-                            match browser_mode {
-                                FileBrowserMode::ConfigPathSelection {
-                                    target_item,
-                                    current_settings,
-                                    selected_index,
-                                    items,
-                                } => {
-                                    tracing::info!(target: "superseedr", "Confirming Config Path Selection");
-                                    let mut new_settings = current_settings.clone();
-                                    let selected_path = state.current_path.clone();
-
-                                    match target_item {
-                                        ConfigItem::DefaultDownloadFolder => {
-                                            new_settings.default_download_folder =
-                                                Some(selected_path)
-                                        }
-                                        ConfigItem::WatchFolder => {
-                                            new_settings.watch_folder = Some(selected_path)
-                                        }
-                                        _ => {}
-                                    }
-
-                                    app.app_state.mode = AppMode::Config {
-                                        settings_edit: new_settings,
-                                        selected_index: *selected_index,
-                                        items: items.clone(),
-                                        editing: None,
-                                    };
-                                }
-
-                                FileBrowserMode::DownloadLocSelection {
+                            if let Some(mode) = browser::confirm_config_path_selection(state, browser_mode) {
+                                tracing::info!(target: "superseedr", "Confirming Config Path Selection");
+                                app.app_state.mode = mode;
+                            } else {
+                                match browser_mode {
+                                    FileBrowserMode::DownloadLocSelection {
                                     container_name,
                                     use_container,
                                     preview_tree,
                                     ..
-                                } => {
+                                    } => {
                                     let base_path = state.current_path.clone();
                                     let container_name_to_use = if *use_container {
                                         Some(container_name.clone())
@@ -371,14 +346,17 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                     }
 
                                     app.app_state.mode = AppMode::Normal;
-                                }
+                                    }
 
-                                FileBrowserMode::File(extensions) => {
-                                    if let Some(path) = state.cursor_path.clone() {
-                                        let name =
-                                            path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                                        if extensions.iter().any(|ext| name.ends_with(ext)) {
-                                            if name.ends_with(".torrent") {
+                                    FileBrowserMode::File(_) => {
+                                        if let Some(path) =
+                                            browser::selected_torrent_file_for_confirm(state, browser_mode)
+                                        {
+                                            if path
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .is_some_and(|name| name.ends_with(".torrent"))
+                                            {
                                                 let _ = app
                                                     .app_command_tx
                                                     .send(AppCommand::AddTorrentFromFile(path))
@@ -387,28 +365,17 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                                             app.app_state.mode = AppMode::Normal;
                                         }
                                     }
-                                }
 
-                                _ => {}
+                                    _ => {}
+                                }
                             }
                             app.app_state.is_searching = false;
                             app.app_state.search_query.clear();
                         }
 
                         KeyCode::Esc => {
-                            if let FileBrowserMode::ConfigPathSelection {
-                                current_settings,
-                                selected_index,
-                                items,
-                                ..
-                            } = browser_mode
-                            {
-                                app.app_state.mode = AppMode::Config {
-                                    settings_edit: current_settings.clone(),
-                                    selected_index: *selected_index,
-                                    items: items.clone(),
-                                    editing: None,
-                                };
+                            if let Some(mode) = browser::escape_to_config_mode(browser_mode) {
+                                app.app_state.mode = mode;
                                 app.app_state.ui_needs_redraw = true;
                                 return;
                             }
