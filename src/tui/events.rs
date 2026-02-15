@@ -13,43 +13,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static GLOBAL_ESC_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
-    if let CrosstermEvent::Resize(w, h) = &event {
-        app.app_state.screen_area = Rect::new(0, 0, *w, *h);
-        app.app_state.ui.needs_redraw = true;
+    if handle_resize_event(&event, app) {
         return;
     }
 
-    if let CrosstermEvent::Key(key) = event {
-        if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-
-            let last = GLOBAL_ESC_TIMESTAMP.load(Ordering::Relaxed);
-
-            // If the last Esc was less than 200ms ago, ignore this one
-            if now.saturating_sub(last) < 200 {
-                return;
-            }
-
-            GLOBAL_ESC_TIMESTAMP.store(now, Ordering::Relaxed);
-        }
+    if should_debounce_escape(&event) {
+        return;
     }
 
-    if let CrosstermEvent::Key(key) = event {
-        if key.kind == KeyEventKind::Press && normal::handle_search_key(key, app) {
-            app.app_state.ui.needs_redraw = true;
-            return;
-        }
-
-        if let help::HelpKeyResult::Consumed { redraw } = help::handle_key(key, &mut app.app_state)
-        {
-            if redraw {
-                app.app_state.ui.needs_redraw = true;
-            }
-            return;
-        }
+    if handle_global_key_hooks(&event, app) {
+        return;
     }
 
     if matches!(app.app_state.mode, AppMode::FileBrowser) {
@@ -58,7 +31,58 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         return;
     }
 
-    match &mut app.app_state.mode {
+    dispatch_mode_event(event, app).await;
+    app.app_state.ui.needs_redraw = true;
+}
+
+fn handle_resize_event(event: &CrosstermEvent, app: &mut App) -> bool {
+    if let CrosstermEvent::Resize(w, h) = event {
+        app.app_state.screen_area = Rect::new(0, 0, *w, *h);
+        app.app_state.ui.needs_redraw = true;
+        return true;
+    }
+    false
+}
+
+fn should_debounce_escape(event: &CrosstermEvent) -> bool {
+    if let CrosstermEvent::Key(key) = event {
+        if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
+            let last = GLOBAL_ESC_TIMESTAMP.load(Ordering::Relaxed);
+            if now.saturating_sub(last) < 200 {
+                return true;
+            }
+
+            GLOBAL_ESC_TIMESTAMP.store(now, Ordering::Relaxed);
+        }
+    }
+    false
+}
+
+fn handle_global_key_hooks(event: &CrosstermEvent, app: &mut App) -> bool {
+    if let CrosstermEvent::Key(key) = event {
+        if key.kind == KeyEventKind::Press && normal::handle_search_key(*key, app) {
+            app.app_state.ui.needs_redraw = true;
+            return true;
+        }
+
+        if let help::HelpKeyResult::Consumed { redraw } = help::handle_key(*key, &mut app.app_state)
+        {
+            if redraw {
+                app.app_state.ui.needs_redraw = true;
+            }
+            return true;
+        }
+    }
+    false
+}
+
+async fn dispatch_mode_event(event: CrosstermEvent, app: &mut App) {
+    match app.app_state.mode {
         AppMode::Welcome => {
             welcome::handle_event(event, &mut app.app_state);
         }
@@ -78,7 +102,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 app.app_state.mode = AppMode::Normal;
             }
         }
-
         AppMode::DeleteConfirm => {
             if delete_confirm::handle_event(event, app) {
                 app.app_state.mode = AppMode::Normal;
@@ -86,7 +109,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
         }
         AppMode::FileBrowser => {}
     }
-    app.app_state.ui.needs_redraw = true;
 }
 
 #[cfg(test)]
