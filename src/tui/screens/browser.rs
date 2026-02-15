@@ -1408,6 +1408,7 @@ pub fn reduce_browser_dialog_action(
         }
         BrowserDialogAction::Escape => {
             if let Some(config_ui) = escape_to_config_mode(browser_mode) {
+                result.effects.push(BrowserDialogEffect::ClearSearch);
                 result
                     .effects
                     .push(BrowserDialogEffect::SwitchToConfig(config_ui));
@@ -1435,6 +1436,7 @@ pub fn reduce_browser_dialog_action(
                     .effects
                     .push(BrowserDialogEffect::CleanupPendingLink { async_delete: true });
             }
+            result.effects.push(BrowserDialogEffect::ClearSearch);
             result
                 .effects
                 .push(BrowserDialogEffect::ExitToNormalAndClearPending);
@@ -2164,9 +2166,10 @@ mod tests {
         let out = reduce_browser_dialog_action(BrowserDialogAction::Escape, &state, &mode, true);
 
         assert!(out.consumed);
-        assert_eq!(out.effects.len(), 1);
+        assert_eq!(out.effects.len(), 2);
+        assert!(matches!(out.effects[0], BrowserDialogEffect::ClearSearch));
         assert!(matches!(
-            out.effects[0],
+            out.effects[1],
             BrowserDialogEffect::SwitchToConfig(ConfigUiState { .. })
         ));
     }
@@ -2194,13 +2197,14 @@ mod tests {
         );
 
         assert!(out.consumed);
-        assert_eq!(out.effects.len(), 2);
+        assert_eq!(out.effects.len(), 3);
         assert!(matches!(
             out.effects[0],
             BrowserDialogEffect::CleanupPendingLink { async_delete: true }
         ));
+        assert!(matches!(out.effects[1], BrowserDialogEffect::ClearSearch));
         assert!(matches!(
-            out.effects[1],
+            out.effects[2],
             BrowserDialogEffect::ExitToNormalAndClearPending
         ));
     }
