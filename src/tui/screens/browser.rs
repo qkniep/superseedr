@@ -684,11 +684,11 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
                 return;
             }
 
-            if handle_download_name_edit_guard(key.code, browser_mode) {
-                return;
-            }
-            if handle_download_shortcuts(key.code, browser_mode) {
-                return;
+            if let Some(action) = map_download_key_to_action(key.code, browser_mode) {
+                let reduced = reduce_browser_download_action(action, browser_mode);
+                if reduced.consumed {
+                    return;
+                }
             }
 
             if let FileBrowserMode::DownloadLocSelection {
@@ -873,6 +873,16 @@ pub struct BrowserDownloadShortcutReduceResult {
     pub consumed: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BrowserDownloadAction {
+    Edit(BrowserDownloadEditAction),
+    Shortcut(BrowserDownloadShortcutAction),
+}
+
+pub struct BrowserDownloadReduceResult {
+    pub consumed: bool,
+}
+
 fn map_search_key_to_browser_action(
     key_code: KeyCode,
     is_searching: bool,
@@ -1008,6 +1018,29 @@ fn map_download_name_edit_key_to_action(key_code: KeyCode) -> BrowserDownloadEdi
     }
 }
 
+pub fn map_download_key_to_action(
+    key_code: KeyCode,
+    browser_mode: &FileBrowserMode,
+) -> Option<BrowserDownloadAction> {
+    if let FileBrowserMode::DownloadLocSelection {
+        is_editing_name,
+        use_container,
+        ..
+    } = browser_mode
+    {
+        if *is_editing_name {
+            return Some(BrowserDownloadAction::Edit(
+                map_download_name_edit_key_to_action(key_code),
+            ));
+        }
+
+        if let Some(action) = map_download_shortcut_key_to_action(key_code, *use_container) {
+            return Some(BrowserDownloadAction::Shortcut(action));
+        }
+    }
+    None
+}
+
 pub fn reduce_download_name_edit_action(
     action: BrowserDownloadEditAction,
     container_name: &mut String,
@@ -1093,6 +1126,51 @@ pub fn reduce_download_shortcut_action(
     }
 
     BrowserDownloadShortcutReduceResult { consumed: true }
+}
+
+pub fn reduce_browser_download_action(
+    action: BrowserDownloadAction,
+    browser_mode: &mut FileBrowserMode,
+) -> BrowserDownloadReduceResult {
+    if let FileBrowserMode::DownloadLocSelection {
+        container_name,
+        use_container,
+        is_editing_name,
+        focused_pane,
+        cursor_pos,
+        original_name_backup,
+        ..
+    } = browser_mode
+    {
+        let consumed = match action {
+            BrowserDownloadAction::Edit(edit_action) => {
+                reduce_download_name_edit_action(
+                    edit_action,
+                    container_name,
+                    is_editing_name,
+                    cursor_pos,
+                    original_name_backup,
+                )
+                .consumed
+            }
+            BrowserDownloadAction::Shortcut(shortcut_action) => {
+                reduce_download_shortcut_action(
+                    shortcut_action,
+                    container_name,
+                    use_container,
+                    is_editing_name,
+                    focused_pane,
+                    cursor_pos,
+                    original_name_backup,
+                )
+                .consumed
+            }
+        };
+
+        return BrowserDownloadReduceResult { consumed };
+    }
+
+    BrowserDownloadReduceResult { consumed: false }
 }
 
 pub fn handle_download_name_edit_guard(
@@ -1808,6 +1886,63 @@ mod tests {
     fn map_download_shortcut_requires_container_for_rename() {
         let action = map_download_shortcut_key_to_action(KeyCode::Char('r'), false);
         assert!(action.is_none());
+    }
+
+    #[test]
+    fn map_download_key_prefers_edit_action_while_editing() {
+        let mode = FileBrowserMode::DownloadLocSelection {
+            torrent_files: vec![],
+            container_name: "x".to_string(),
+            use_container: true,
+            is_editing_name: true,
+            focused_pane: BrowserPane::FileSystem,
+            preview_tree: vec![],
+            preview_state: TreeViewState::default(),
+            cursor_pos: 1,
+            original_name_backup: "x".to_string(),
+        };
+
+        let action = map_download_key_to_action(KeyCode::Tab, &mode);
+
+        assert!(matches!(
+            action,
+            Some(BrowserDownloadAction::Edit(BrowserDownloadEditAction::Noop))
+        ));
+    }
+
+    #[test]
+    fn reduce_browser_download_shortcut_updates_mode() {
+        let mut mode = FileBrowserMode::DownloadLocSelection {
+            torrent_files: vec![],
+            container_name: "seed".to_string(),
+            use_container: true,
+            is_editing_name: false,
+            focused_pane: BrowserPane::FileSystem,
+            preview_tree: vec![],
+            preview_state: TreeViewState::default(),
+            cursor_pos: 4,
+            original_name_backup: String::new(),
+        };
+
+        let out = reduce_browser_download_action(
+            BrowserDownloadAction::Shortcut(BrowserDownloadShortcutAction::StartRename),
+            &mut mode,
+        );
+
+        assert!(out.consumed);
+        match mode {
+            FileBrowserMode::DownloadLocSelection {
+                is_editing_name,
+                focused_pane,
+                original_name_backup,
+                ..
+            } => {
+                assert!(is_editing_name);
+                assert_eq!(focused_pane, BrowserPane::TorrentPreview);
+                assert_eq!(original_name_backup, "seed");
+            }
+            _ => panic!("expected DownloadLocSelection"),
+        }
     }
 
     #[test]
