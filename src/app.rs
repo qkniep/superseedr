@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::fs;
-use std::io::Stdout;
+use std::io::{ErrorKind, Stdout};
 
 use std::collections::VecDeque;
 
@@ -19,6 +19,7 @@ use crate::config::{PeerSortColumn, Settings, SortDirection, TorrentSettings, To
 
 use crate::token_bucket::TokenBucket;
 
+use crate::tui::effects::compute_effects_activity_speed_multiplier;
 use crate::tui::events;
 use crate::tui::tree;
 use crate::tui::tree::RawNode;
@@ -48,7 +49,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "dht")]
 use mainline::{async_dht::AsyncDht, Dht};
@@ -391,22 +392,11 @@ pub enum AppMode {
     Welcome,
     #[default]
     Normal,
+    Help,
     PowerSaving,
-    DeleteConfirm {
-        info_hash: Vec<u8>,
-        with_files: bool,
-    },
-    Config {
-        settings_edit: Box<Settings>,
-        selected_index: usize,
-        items: Vec<ConfigItem>,
-        editing: Option<(ConfigItem, String)>,
-    },
-    FileBrowser {
-        state: TreeViewState,
-        data: Vec<RawNode<FileMetadata>>,
-        browser_mode: FileBrowserMode,
-    },
+    DeleteConfirm,
+    Config,
+    FileBrowser,
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -501,6 +491,45 @@ pub struct TorrentDisplayState {
 }
 
 #[derive(Default)]
+pub struct UiState {
+    pub needs_redraw: bool,
+    pub effects_phase_time: f64,
+    pub effects_last_wall_time: f64,
+    pub effects_speed_multiplier: f64,
+    pub selected_header: SelectedHeader,
+    pub selected_torrent_index: usize,
+    pub selected_peer_index: usize,
+    pub is_searching: bool,
+    pub search_query: String,
+    pub config: ConfigUiState,
+    pub delete_confirm: DeleteConfirmUiState,
+    pub file_browser: FileBrowserUiState,
+}
+
+#[derive(Default)]
+pub struct ConfigUiState {
+    pub settings_edit: Box<Settings>,
+    pub selected_index: usize,
+    pub items: Vec<ConfigItem>,
+    pub editing: Option<(ConfigItem, String)>,
+}
+
+#[derive(Default)]
+pub struct DeleteConfirmUiState {
+    pub info_hash: Vec<u8>,
+    pub with_files: bool,
+}
+
+#[derive(Default)]
+pub struct FileBrowserUiState {
+    pub state: TreeViewState,
+    pub data: Vec<RawNode<FileMetadata>>,
+    pub browser_mode: FileBrowserMode,
+    pub is_searching: bool,
+    pub search_query: String,
+}
+
+#[derive(Default)]
 pub struct AppState {
     pub update_available: Option<String>,
     pub should_quit: bool,
@@ -511,7 +540,6 @@ pub struct AppState {
 
     pub screen_area: Rect,
     pub mode: AppMode,
-    pub show_help: bool,
     pub externally_accessable_port: bool,
     pub anonymize_torrent_names: bool,
 
@@ -562,21 +590,12 @@ pub struct AppState {
     pub read_iops: u32,
     pub write_iops: u32,
 
-    pub ui_needs_redraw: bool,
+    pub ui: UiState,
     pub data_rate: DataRate,
     pub theme: Theme,
-    pub effects_phase_time: f64,
-    pub effects_last_wall_time: f64,
-    pub effects_speed_multiplier: f64,
 
-    pub selected_header: SelectedHeader,
     pub torrent_sort: (TorrentSortColumn, SortDirection),
     pub peer_sort: (PeerSortColumn, SortDirection),
-    pub selected_torrent_index: usize,
-    pub selected_peer_index: usize,
-
-    pub is_searching: bool,
-    pub search_query: String,
 
     pub graph_mode: GraphDisplayMode,
     pub minute_avg_dl_history: Vec<u64>,
@@ -686,7 +705,10 @@ impl App {
             system_warning,
             system_error: None,
             limits: limits.clone(),
-            ui_needs_redraw: true,
+            ui: UiState {
+                needs_redraw: true,
+                ..Default::default()
+            },
             theme: Theme::builtin(client_configs.ui_theme),
             torrent_sort: (
                 client_configs.torrent_sort_column,
@@ -817,7 +839,7 @@ impl App {
                 }
                 Some(event) = self.manager_event_rx.recv() => {
                     self.handle_manager_event(event);
-                    self.app_state.ui_needs_redraw = true;
+                    self.app_state.ui.needs_redraw = true;
                 }
 
                 Some(command) = self.app_command_rx.recv() => {
@@ -836,7 +858,7 @@ impl App {
 
                 _ = stats_interval.tick() => {
                     self.calculate_stats(&mut sys);
-                    self.app_state.ui_needs_redraw = true;
+                    self.app_state.ui.needs_redraw = true;
                 }
 
                 _ = tuning_interval.tick() => {
@@ -850,11 +872,12 @@ impl App {
                 _ = time::sleep_until(next_draw_time.into()) => {
                     next_draw_time = Instant::now() + current_target_framerate;
                     self.drain_latest_torrent_metrics();
-                    if Self::should_draw_this_frame(&self.app_state.mode, self.app_state.ui_needs_redraw) {
+                    if Self::should_draw_this_frame(&self.app_state.mode, self.app_state.ui.needs_redraw) {
+                        self.tick_ui_effects_clock();
                         terminal.draw(|f| {
-                            draw(f, &mut self.app_state, &self.client_configs);
+                            draw(f, &self.app_state, &self.client_configs);
                         })?;
-                        self.app_state.ui_needs_redraw = false;
+                        self.app_state.ui.needs_redraw = false;
                     }
                 }
                 _ = version_interval.tick() => {
@@ -897,6 +920,25 @@ impl App {
         } else {
             true
         }
+    }
+
+    fn tick_ui_effects_clock(&mut self) {
+        let frame_wall_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let activity_speed_multiplier =
+            compute_effects_activity_speed_multiplier(&self.app_state, &self.client_configs);
+
+        if self.app_state.ui.effects_last_wall_time <= 0.0 {
+            self.app_state.ui.effects_last_wall_time = frame_wall_time;
+        }
+
+        let frame_dt =
+            (frame_wall_time - self.app_state.ui.effects_last_wall_time).clamp(0.0, 0.25);
+        self.app_state.ui.effects_last_wall_time = frame_wall_time;
+        self.app_state.ui.effects_speed_multiplier = activity_speed_multiplier;
+        self.app_state.ui.effects_phase_time += frame_dt * activity_speed_multiplier;
     }
 
     fn startup_crossterm_event_listener(&mut self) {
@@ -979,8 +1021,9 @@ impl App {
         loop {
             self.app_state.shutdown_progress =
                 managers_shut_down as f64 / total_managers_to_shut_down as f64;
+            self.tick_ui_effects_clock();
             let _ = terminal.draw(|f| {
-                draw(f, &mut self.app_state, &self.client_configs);
+                draw(f, &self.app_state, &self.client_configs);
             });
 
             tokio::select! {
@@ -1358,18 +1401,18 @@ impl App {
                 let highlight_clone = highlight_path.clone();
 
                 // 1. Update or Initialize the UI state immediately
-                if let AppMode::FileBrowser { state, .. } = &mut self.app_state.mode {
+                if matches!(self.app_state.mode, AppMode::FileBrowser) {
                     // If already in browser, just update the path we are viewing
-                    state.current_path = path.clone();
+                    self.app_state.ui.file_browser.state.current_path = path.clone();
+                    self.app_state.ui.file_browser.browser_mode = browser_mode;
                 } else {
                     // Otherwise, initialize the mode
                     let mut tree_state = crate::tui::tree::TreeViewState::new();
                     tree_state.current_path = path.clone();
-                    self.app_state.mode = AppMode::FileBrowser {
-                        state: tree_state,
-                        data: Vec::new(),
-                        browser_mode,
-                    };
+                    self.app_state.ui.file_browser.state = tree_state;
+                    self.app_state.ui.file_browser.data = Vec::new();
+                    self.app_state.ui.file_browser.browser_mode = browser_mode;
+                    self.app_state.mode = AppMode::FileBrowser;
                 }
 
                 // 2. Spawn the background crawl
@@ -1395,12 +1438,10 @@ impl App {
                 mut data,
                 highlight_path,
             } => {
-                if let AppMode::FileBrowser {
-                    state,
-                    data: existing_data,
-                    browser_mode,
-                } = &mut self.app_state.mode
-                {
+                if matches!(self.app_state.mode, AppMode::FileBrowser) {
+                    let state = &mut self.app_state.ui.file_browser.state;
+                    let existing_data = &mut self.app_state.ui.file_browser.data;
+                    let browser_mode = &mut self.app_state.ui.file_browser.browser_mode;
                     // --- 1. Apply Dynamic Sorting ---
                     if let FileBrowserMode::File(extensions) = browser_mode {
                         let target_exts: Vec<String> =
@@ -1472,7 +1513,7 @@ impl App {
                             existing_data.first().map(|node| node.full_path.clone());
                     }
 
-                    self.app_state.ui_needs_redraw = true;
+                    self.app_state.ui.needs_redraw = true;
                 }
             }
             AppCommand::UpdateConfig(new_settings) => {
@@ -1522,7 +1563,7 @@ impl App {
                 self.save_state_to_disk();
 
                 // 4. Force Redraw
-                self.app_state.ui_needs_redraw = true;
+                self.app_state.ui.needs_redraw = true;
             }
 
             AppCommand::UpdateVersionAvailable(latest_version) => {
@@ -1569,30 +1610,27 @@ impl App {
                     .torrent_list_order
                     .retain(|ih| *ih != info_hash);
 
-                if self.app_state.selected_torrent_index >= self.app_state.torrent_list_order.len()
+                if self.app_state.ui.selected_torrent_index
+                    >= self.app_state.torrent_list_order.len()
                     && !self.app_state.torrent_list_order.is_empty()
                 {
-                    self.app_state.selected_torrent_index =
+                    self.app_state.ui.selected_torrent_index =
                         self.app_state.torrent_list_order.len() - 1;
                 }
 
                 self.save_state_to_disk();
 
-                self.app_state.ui_needs_redraw = true;
+                self.app_state.ui.needs_redraw = true;
             }
             ManagerEvent::MetadataLoaded { info_hash, torrent } => {
-                if let AppMode::FileBrowser {
-                    browser_mode:
-                        FileBrowserMode::DownloadLocSelection {
-                            preview_tree,
-                            preview_state,
-                            container_name,
-                            original_name_backup,
-                            use_container,
-                            ..
-                        },
+                if let FileBrowserMode::DownloadLocSelection {
+                    preview_tree,
+                    preview_state,
+                    container_name,
+                    original_name_backup,
+                    use_container,
                     ..
-                } = &mut self.app_state.mode
+                } = &mut self.app_state.ui.file_browser.browser_mode
                 {
                     // 1. REDUNDANCY GUARD: Check if metadata was already processed
                     // If the tree is already populated, ignore subsequent peer metadata arrivals
@@ -1640,7 +1678,7 @@ impl App {
                     }
 
                     // 7. Force UI redraw
-                    self.app_state.ui_needs_redraw = true;
+                    self.app_state.ui.needs_redraw = true;
                     tracing::info!(target: "superseedr", "Magnet preview tree hydrated (first arrival)");
                 }
             }
@@ -1831,7 +1869,7 @@ impl App {
 
         if changed {
             self.sort_and_filter_torrent_list();
-            self.app_state.ui_needs_redraw = true;
+            self.app_state.ui.needs_redraw = true;
         }
     }
 
@@ -1961,137 +1999,11 @@ impl App {
 
     // Constantly ensures all table selected indices are in-bounds
     fn clamp_selected_indices(&mut self) {
-        let torrent_count = self.app_state.torrent_list_order.len();
-
-        if torrent_count == 0 {
-            self.app_state.selected_torrent_index = 0;
-        } else if self.app_state.selected_torrent_index >= torrent_count {
-            self.app_state.selected_torrent_index = torrent_count - 1;
-        }
-
-        let peer_count = self
-            .app_state
-            .torrent_list_order
-            .get(self.app_state.selected_torrent_index)
-            .and_then(|info_hash| self.app_state.torrents.get(info_hash))
-            .map_or(0, |torrent| torrent.latest_state.peers.len());
-
-        if peer_count == 0 {
-            self.app_state.selected_peer_index = 0;
-        } else if self.app_state.selected_peer_index >= peer_count {
-            self.app_state.selected_peer_index = peer_count - 1;
-        }
+        clamp_selected_indices_in_state(&mut self.app_state);
     }
 
     pub fn sort_and_filter_torrent_list(&mut self) {
-        let torrents_map = &self.app_state.torrents;
-        let (sort_by, sort_direction) = self.app_state.torrent_sort;
-        let search_query = &self.app_state.search_query;
-
-        let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
-
-        let mut torrent_list: Vec<Vec<u8>> = torrents_map.keys().cloned().collect();
-
-        if !search_query.is_empty() {
-            torrent_list.retain(|info_hash| {
-                let torrent_name = torrents_map
-                    .get(info_hash)
-                    .map_or("", |t| &t.latest_state.torrent_name);
-
-                matcher.fuzzy_match(torrent_name, search_query).is_some()
-            });
-        }
-
-        torrent_list.sort_by(|a_info_hash, b_info_hash| {
-            let Some(a_torrent) = torrents_map.get(a_info_hash) else {
-                return std::cmp::Ordering::Equal;
-            };
-            let Some(b_torrent) = torrents_map.get(b_info_hash) else {
-                return std::cmp::Ordering::Equal;
-            };
-
-            let ordering = match sort_by {
-                TorrentSortColumn::Name => a_torrent
-                    .latest_state
-                    .torrent_name
-                    .cmp(&b_torrent.latest_state.torrent_name),
-                TorrentSortColumn::Down => b_torrent
-                    .smoothed_download_speed_bps
-                    .cmp(&a_torrent.smoothed_download_speed_bps),
-                TorrentSortColumn::Up => b_torrent
-                    .smoothed_upload_speed_bps
-                    .cmp(&a_torrent.smoothed_upload_speed_bps),
-                TorrentSortColumn::Progress => {
-                    let calc_progress = |t: &TorrentDisplayState| -> f64 {
-                        if t.latest_state.number_of_pieces_total == 0 {
-                            0.0
-                        } else {
-                            t.latest_state.number_of_pieces_completed as f64
-                                / t.latest_state.number_of_pieces_total as f64
-                        }
-                    };
-
-                    let a_prog = calc_progress(a_torrent);
-                    let b_prog = calc_progress(b_torrent);
-
-                    // Standard float comparison
-                    a_prog.total_cmp(&b_prog)
-                }
-            };
-
-            let default_direction = match sort_by {
-                TorrentSortColumn::Name => SortDirection::Ascending,
-                _ => SortDirection::Descending,
-            };
-
-            let primary_ordering = if sort_direction != default_direction {
-                ordering.reverse()
-            } else {
-                ordering
-            };
-
-            // If primary sort is equal (e.g. both 0 DL), use activity score.
-            primary_ordering.then_with(|| {
-                let calculate_weighted_activity = |t: &TorrentDisplayState| -> u64 {
-                    // Still look at 60s window to break ties if last 5s are quiet
-                    let window = 60;
-                    let mut score = 0;
-
-                    let mut sum_vec = |history: &Vec<u64>| {
-                        // iter().rev() means index 0 is the most recent second
-                        for (i, &count) in history.iter().rev().take(window).enumerate() {
-                            if count > 0 {
-                                // WEIGHTING LOGIC:
-                                // If within the last 5 seconds (indices 0-4), apply heavy weight.
-                                // Otherwise, apply a nominal weight of 1.
-                                let weight = if i < 5 {
-                                    // Example: 0s ago = 50, 1s ago = 40, ... 4s ago = 10
-                                    (5 - i) as u64 * 10
-                                } else {
-                                    1
-                                };
-                                score += count * weight;
-                            }
-                        }
-                    };
-
-                    sum_vec(&t.peer_discovery_history);
-                    sum_vec(&t.peer_connection_history);
-                    sum_vec(&t.peer_disconnect_history);
-
-                    score
-                };
-
-                let a_activity = calculate_weighted_activity(a_torrent);
-                let b_activity = calculate_weighted_activity(b_torrent);
-
-                // Sort Descending
-                b_activity.cmp(&a_activity)
-            })
-        });
-
-        self.app_state.torrent_list_order = torrent_list;
-        self.clamp_selected_indices();
+        sort_and_filter_torrent_list_state(&mut self.app_state);
     }
 
     pub fn find_most_common_download_path(&mut self) -> Option<PathBuf> {
@@ -2150,11 +2062,25 @@ impl App {
         let torrent = match from_bytes(&buffer) {
             Ok(t) => t,
             Err(e) => {
+                let file_size = buffer.len();
+                let head_len = file_size.min(24);
+                let tail_len = file_size.min(24);
+                let head_hex = hex::encode(&buffer[..head_len]);
+                let tail_hex = hex::encode(&buffer[file_size.saturating_sub(tail_len)..]);
+                let likely_cause = if e.to_string().contains("End of stream") {
+                    "likely truncated/incomplete .torrent file"
+                } else {
+                    "malformed or unsupported bencode payload"
+                };
                 tracing_event!(
                     Level::ERROR,
-                    "Failed to parse torrent file {:?}: {}",
+                    "Failed to parse torrent file {:?}: {} | size={} bytes | head={} | tail={} | hint={}",
                     &path,
-                    e
+                    e,
+                    file_size,
+                    head_hex,
+                    tail_hex,
+                    likely_cause
                 );
                 return;
             }
@@ -2223,13 +2149,53 @@ impl App {
         }
         let permanent_torrent_path =
             torrent_files_dir.join(format!("{}.torrent", hex::encode(&info_hash)));
-        if let Err(e) = fs::copy(&path, &permanent_torrent_path) {
+        // Persist from in-memory bytes via temp+rename to avoid self-copy corruption
+        // when `path` already points at `permanent_torrent_path` during startup reload.
+        let temp_torrent_path = torrent_files_dir.join(format!(
+            "{}.{}.tmp",
+            hex::encode(&info_hash),
+            std::process::id()
+        ));
+        if let Err(e) = fs::write(&temp_torrent_path, &buffer) {
             tracing_event!(
                 Level::ERROR,
-                "Failed to copy torrent to data directory: {}",
+                "Failed to write temp torrent in data directory: {}",
                 e
             );
             return;
+        }
+        if let Err(e) = fs::rename(&temp_torrent_path, &permanent_torrent_path) {
+            if e.kind() == ErrorKind::AlreadyExists {
+                if let Err(remove_err) = fs::remove_file(&permanent_torrent_path) {
+                    if remove_err.kind() != ErrorKind::NotFound {
+                        let _ = fs::remove_file(&temp_torrent_path);
+                        tracing_event!(
+                            Level::ERROR,
+                            "Failed to replace existing torrent file in data directory: {}",
+                            remove_err
+                        );
+                        return;
+                    }
+                }
+
+                if let Err(retry_err) = fs::rename(&temp_torrent_path, &permanent_torrent_path) {
+                    let _ = fs::remove_file(&temp_torrent_path);
+                    tracing_event!(
+                        Level::ERROR,
+                        "Failed to finalize torrent copy in data directory after replace: {}",
+                        retry_err
+                    );
+                    return;
+                }
+            } else {
+                let _ = fs::remove_file(&temp_torrent_path);
+                tracing_event!(
+                    Level::ERROR,
+                    "Failed to finalize torrent copy in data directory: {}",
+                    e
+                );
+                return;
+            }
         }
 
         let number_of_pieces_total = if !torrent.info.pieces.is_empty() {
@@ -2567,8 +2533,18 @@ fn activity_marks_torrent_complete(activity_message: &str) -> bool {
     activity_message.contains("Seeding") || activity_message.contains("Finished")
 }
 
+fn torrent_has_skipped_files(metrics: &TorrentMetrics) -> bool {
+    metrics
+        .file_priorities
+        .values()
+        .any(|p| matches!(p, FilePriority::Skip))
+}
+
 pub fn torrent_is_effectively_incomplete(metrics: &TorrentMetrics) -> bool {
     if activity_marks_torrent_complete(&metrics.activity_message) {
+        return false;
+    }
+    if torrent_has_skipped_files(metrics) {
         return false;
     }
     metrics.number_of_pieces_total > 0
@@ -2577,6 +2553,9 @@ pub fn torrent_is_effectively_incomplete(metrics: &TorrentMetrics) -> bool {
 
 pub fn torrent_completion_percent(metrics: &TorrentMetrics) -> f64 {
     if activity_marks_torrent_complete(&metrics.activity_message) {
+        return 100.0;
+    }
+    if torrent_has_skipped_files(metrics) {
         return 100.0;
     }
     if metrics.number_of_pieces_total == 0 {
@@ -2785,13 +2764,139 @@ pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8
     (v1, v2)
 }
 
+pub(crate) fn clamp_selected_indices_in_state(app_state: &mut AppState) {
+    let torrent_count = app_state.torrent_list_order.len();
+
+    if torrent_count == 0 {
+        app_state.ui.selected_torrent_index = 0;
+    } else if app_state.ui.selected_torrent_index >= torrent_count {
+        app_state.ui.selected_torrent_index = torrent_count - 1;
+    }
+
+    let peer_count = app_state
+        .torrent_list_order
+        .get(app_state.ui.selected_torrent_index)
+        .and_then(|info_hash| app_state.torrents.get(info_hash))
+        .map_or(0, |torrent| torrent.latest_state.peers.len());
+
+    if peer_count == 0 {
+        app_state.ui.selected_peer_index = 0;
+    } else if app_state.ui.selected_peer_index >= peer_count {
+        app_state.ui.selected_peer_index = peer_count - 1;
+    }
+}
+
+pub(crate) fn sort_and_filter_torrent_list_state(app_state: &mut AppState) {
+    let torrents_map = &app_state.torrents;
+    let (sort_by, sort_direction) = app_state.torrent_sort;
+    let search_query = &app_state.ui.search_query;
+
+    let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+    let mut torrent_list: Vec<Vec<u8>> = torrents_map.keys().cloned().collect();
+
+    if !search_query.is_empty() {
+        torrent_list.retain(|info_hash| {
+            let torrent_name = torrents_map
+                .get(info_hash)
+                .map_or("", |t| &t.latest_state.torrent_name);
+            matcher.fuzzy_match(torrent_name, search_query).is_some()
+        });
+    }
+
+    torrent_list.sort_by(|a_info_hash, b_info_hash| {
+        let Some(a_torrent) = torrents_map.get(a_info_hash) else {
+            return std::cmp::Ordering::Equal;
+        };
+        let Some(b_torrent) = torrents_map.get(b_info_hash) else {
+            return std::cmp::Ordering::Equal;
+        };
+
+        let ordering = match sort_by {
+            TorrentSortColumn::Name => a_torrent
+                .latest_state
+                .torrent_name
+                .cmp(&b_torrent.latest_state.torrent_name),
+            TorrentSortColumn::Down => b_torrent
+                .smoothed_download_speed_bps
+                .cmp(&a_torrent.smoothed_download_speed_bps),
+            TorrentSortColumn::Up => b_torrent
+                .smoothed_upload_speed_bps
+                .cmp(&a_torrent.smoothed_upload_speed_bps),
+            TorrentSortColumn::Progress => {
+                let calc_progress = |t: &TorrentDisplayState| -> f64 {
+                    if t.latest_state.number_of_pieces_total == 0 {
+                        0.0
+                    } else {
+                        t.latest_state.number_of_pieces_completed as f64
+                            / t.latest_state.number_of_pieces_total as f64
+                    }
+                };
+
+                let a_prog = calc_progress(a_torrent);
+                let b_prog = calc_progress(b_torrent);
+                a_prog.total_cmp(&b_prog)
+            }
+        };
+
+        let default_direction = match sort_by {
+            TorrentSortColumn::Name => SortDirection::Ascending,
+            _ => SortDirection::Descending,
+        };
+        let primary_ordering = if sort_direction != default_direction {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+
+        primary_ordering.then_with(|| {
+            let calculate_weighted_activity = |t: &TorrentDisplayState| -> u64 {
+                let window = 60;
+                let mut score = 0;
+                let mut sum_vec = |history: &Vec<u64>| {
+                    for (i, &count) in history.iter().rev().take(window).enumerate() {
+                        if count > 0 {
+                            let weight = if i < 5 { (5 - i) as u64 * 10 } else { 1 };
+                            score += count * weight;
+                        }
+                    }
+                };
+                sum_vec(&t.peer_discovery_history);
+                sum_vec(&t.peer_connection_history);
+                sum_vec(&t.peer_disconnect_history);
+                score
+            };
+
+            let a_activity = calculate_weighted_activity(a_torrent);
+            let b_activity = calculate_weighted_activity(b_torrent);
+            b_activity.cmp(&a_activity)
+        })
+    });
+
+    app_state.torrent_list_order = torrent_list;
+    clamp_selected_indices_in_state(app_state);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        persisted_validation_status_from_piece_completion, torrent_completion_percent,
-        torrent_is_effectively_incomplete, App, AppMode, FilePriority, TorrentMetrics,
+        clamp_selected_indices_in_state, persisted_validation_status_from_piece_completion,
+        sort_and_filter_torrent_list_state, torrent_completion_percent,
+        torrent_is_effectively_incomplete, App, AppMode, AppState, FilePriority, PeerInfo,
+        SelectedHeader, SortDirection, TorrentDisplayState, TorrentMetrics, TorrentSortColumn,
+        UiState,
     };
     use std::collections::HashMap;
+    fn mock_display(name: &str, peer_count: usize) -> TorrentDisplayState {
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.torrent_name = name.to_string();
+        display.latest_state.peers = (0..peer_count)
+            .map(|i| PeerInfo {
+                address: format!("127.0.0.1:{}", 6000 + i),
+                ..Default::default()
+            })
+            .collect();
+        display
+    }
 
     #[test]
     fn persisted_validation_status_is_true_only_when_complete() {
@@ -2854,7 +2959,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_helper_uses_piece_progress_without_skip_piece_guessing() {
+    fn completion_helper_marks_skipped_files_complete() {
         let metrics = TorrentMetrics {
             number_of_pieces_total: 8,
             number_of_pieces_completed: 2,
@@ -2862,7 +2967,56 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(torrent_is_effectively_incomplete(&metrics));
-        assert_eq!(torrent_completion_percent(&metrics), 25.0);
+        assert!(!torrent_is_effectively_incomplete(&metrics));
+        assert_eq!(torrent_completion_percent(&metrics), 100.0);
+    }
+
+    #[test]
+    fn clamp_selected_indices_clamps_torrent_and_peer_to_bounds() {
+        let mut app_state = AppState::default();
+        let hash_a = b"hash_a".to_vec();
+        let hash_b = b"hash_b".to_vec();
+        app_state
+            .torrents
+            .insert(hash_a.clone(), mock_display("alpha", 0));
+        app_state
+            .torrents
+            .insert(hash_b.clone(), mock_display("beta", 2));
+        app_state.torrent_list_order = vec![hash_a, hash_b];
+        app_state.ui.selected_torrent_index = 99;
+        app_state.ui.selected_peer_index = 99;
+
+        clamp_selected_indices_in_state(&mut app_state);
+
+        assert_eq!(app_state.ui.selected_torrent_index, 1);
+        assert_eq!(app_state.ui.selected_peer_index, 1);
+    }
+
+    #[test]
+    fn sort_and_filter_applies_query_and_clamps_selection() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Name, SortDirection::Ascending),
+            ui: UiState {
+                selected_header: SelectedHeader::Torrent(0),
+                selected_torrent_index: 5,
+                search_query: "ubn".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let hash_a = b"hash_a".to_vec();
+        let hash_b = b"hash_b".to_vec();
+        app_state
+            .torrents
+            .insert(hash_a.clone(), mock_display("ubuntu-24.04.iso", 0));
+        app_state
+            .torrents
+            .insert(hash_b.clone(), mock_display("archlinux.iso", 0));
+
+        sort_and_filter_torrent_list_state(&mut app_state);
+
+        assert_eq!(app_state.torrent_list_order, vec![hash_a]);
+        assert_eq!(app_state.ui.selected_torrent_index, 0);
     }
 }
