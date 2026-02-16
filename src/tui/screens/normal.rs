@@ -810,7 +810,7 @@ pub fn draw_footer(
     };
 
     push_if_fits(
-        "Arrows",
+        "[arrows]",
         " nav",
         ctx.apply(Style::default().fg(ctx.state_info())),
     );
