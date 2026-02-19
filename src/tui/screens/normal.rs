@@ -2364,7 +2364,7 @@ fn draw_disk_health_panel(f: &mut Frame, app_state: &AppState, area: Rect, ctx: 
     if area.width < 2 || area.height < 2 {
         return;
     }
-    let disk_theme_color = ctx.theme.scale.categorical.pink;
+    let disk_theme_color = ctx.ui_disk_blob();
     let disk_state_word = match app_state.disk_health_state_level {
         0 => "Stable",
         1 => "Busy",
@@ -2412,7 +2412,7 @@ fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
     let gap = compute_throughput_gap(app_state);
     let phase = app_state.disk_health_phase;
 
-    let orb_color = ctx.theme.scale.categorical.pink;
+    let orb_color = ctx.ui_disk_blob();
     let orb_style = if health > 0.70 {
         ctx.apply(Style::default().fg(orb_color).bold())
     } else if health > 0.35 {

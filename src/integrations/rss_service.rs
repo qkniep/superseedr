@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::{AppCommand, RssPreviewItem};
-use crate::config::{RssAddedVia, RssHistoryEntry, Settings};
+use crate::config::{RssAddedVia, RssFilterMode, RssHistoryEntry, Settings};
 use crate::integrations::rss_ingest;
 use chrono::{Duration as ChronoDuration, Utc};
 use feed_rs::parser;
@@ -294,25 +294,36 @@ async fn run_sync(
         .await;
 }
 
-fn enabled_filters(settings: &Settings) -> Vec<String> {
+fn enabled_filters(settings: &Settings) -> Vec<(String, RssFilterMode)> {
     settings
         .rss
         .filters
         .iter()
         .filter(|f| f.enabled)
-        .map(|f| f.query.trim().to_lowercase())
-        .filter(|s| !s.is_empty())
+        .map(|f| (f.query.trim().to_string(), f.mode))
+        .filter(|(q, _)| !q.is_empty())
         .collect()
 }
 
-fn title_matches_filters(title: &str, filters: &[String], matcher: &SkimMatcherV2) -> bool {
+fn title_matches_filters(
+    title: &str,
+    filters: &[(String, RssFilterMode)],
+    matcher: &SkimMatcherV2,
+) -> bool {
     if filters.is_empty() {
         return false;
     }
     let title_lc = title.to_lowercase();
-    filters
-        .iter()
-        .any(|filter| matcher.fuzzy_match(&title_lc, filter).is_some())
+    filters.iter().any(|(filter, mode)| match mode {
+        RssFilterMode::Fuzzy => matcher
+            .fuzzy_match(&title_lc, &filter.to_lowercase())
+            .is_some(),
+        RssFilterMode::Regex => regex::RegexBuilder::new(filter)
+            .case_insensitive(true)
+            .build()
+            .map(|re| re.is_match(title))
+            .unwrap_or(false),
+    })
 }
 
 async fn fetch_and_parse_feed(

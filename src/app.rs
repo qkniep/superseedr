@@ -16,8 +16,8 @@ use crate::torrent_manager::DiskIoOperation;
 
 use crate::config::{get_app_paths, save_settings};
 use crate::config::{
-    FeedSyncError, PeerSortColumn, RssHistoryEntry, Settings, SortDirection, TorrentSettings,
-    TorrentSortColumn,
+    FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SortDirection,
+    TorrentSettings, TorrentSortColumn,
 };
 use crate::persistence::rss::{load_rss_state, save_rss_state, RssPersistedState};
 
@@ -580,6 +580,7 @@ pub struct RssUiState {
     pub filter_draft: String,
     pub add_feed_buffer: String,
     pub add_filter_buffer: String,
+    pub add_filter_mode: RssFilterMode,
     pub status_message: Option<String>,
     pub last_sync_request_at: Option<Instant>,
 }
@@ -3670,6 +3671,7 @@ mod tests {
         let mut new = old.clone();
         new.rss.filters.push(crate::config::RssFilter {
             query: "samplealpha".to_string(),
+            mode: crate::config::RssFilterMode::Fuzzy,
             enabled: true,
         });
 

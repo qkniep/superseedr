@@ -80,6 +80,7 @@ impl Default for RssFeed {
 pub struct RssFilter {
     #[serde(alias = "regex")]
     pub query: String,
+    pub mode: RssFilterMode,
     pub enabled: bool,
 }
 
@@ -87,9 +88,18 @@ impl Default for RssFilter {
     fn default() -> Self {
         Self {
             query: String::new(),
+            mode: RssFilterMode::Fuzzy,
             enabled: true,
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RssFilterMode {
+    #[default]
+    Fuzzy,
+    Regex,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -615,7 +625,29 @@ mod tests {
 
         assert_eq!(settings.rss.filters.len(), 1);
         assert_eq!(settings.rss.filters[0].query, "ubuntu");
+        assert!(matches!(settings.rss.filters[0].mode, RssFilterMode::Fuzzy));
         assert!(settings.rss.filters[0].enabled);
+    }
+
+    #[test]
+    fn test_rss_filter_mode_regex_is_parsed() {
+        let toml_str = r#"
+            [rss]
+            enabled = true
+
+            [[rss.filters]]
+            query = "series\\s+alpha"
+            mode = "regex"
+            enabled = true
+        "#;
+
+        let settings: Settings = Figment::new()
+            .merge(Toml::string(toml_str))
+            .extract()
+            .expect("Settings parsing should accept rss.filters.mode");
+
+        assert_eq!(settings.rss.filters.len(), 1);
+        assert!(matches!(settings.rss.filters[0].mode, RssFilterMode::Regex));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::{AppCommand, AppMode, AppState, RssScreen, RssSectionFocus};
+use crate::config::RssFilterMode;
 use crate::tui::formatters::centered_rect;
 use crate::tui::screen_context::ScreenContext;
 use chrono::{DateTime, Local, Utc};
@@ -32,6 +33,7 @@ pub enum RssAction {
     ToggleFeedEnabled,
     StartSearch,
     DownloadSelectedExplorer,
+    ToggleFilterMode,
 }
 
 #[derive(Default)]
@@ -53,6 +55,12 @@ fn map_key_to_rss_action(
             KeyCode::Esc => Some(RssAction::CancelInput),
             KeyCode::Enter => Some(RssAction::CommitInput),
             KeyCode::Backspace => Some(RssAction::Backspace),
+            KeyCode::Tab
+                if app_state.ui.rss.is_editing
+                    && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters) =>
+            {
+                Some(RssAction::ToggleFilterMode)
+            }
             KeyCode::Char(c) => Some(RssAction::InsertChar(c)),
             _ => None,
         };
@@ -156,15 +164,47 @@ fn selected_filter_actual_idx(
         .copied()
 }
 
-fn enabled_filter_queries(settings: &crate::config::Settings) -> Vec<String> {
+#[derive(Clone)]
+struct FilterSpec {
+    query: String,
+    mode: RssFilterMode,
+}
+
+fn enabled_filters(settings: &crate::config::Settings) -> Vec<FilterSpec> {
     settings
         .rss
         .filters
         .iter()
         .filter(|f| f.enabled)
-        .map(|f| f.query.trim().to_lowercase())
-        .filter(|q| !q.is_empty())
+        .map(|f| FilterSpec {
+            query: f.query.trim().to_string(),
+            mode: f.mode,
+        })
+        .filter(|f| !f.query.is_empty())
         .collect()
+}
+
+fn filter_matches_title(
+    title: &str,
+    filter_query: &str,
+    mode: RssFilterMode,
+    matcher: &SkimMatcherV2,
+) -> bool {
+    let query = filter_query.trim();
+    if query.is_empty() {
+        return false;
+    }
+
+    match mode {
+        RssFilterMode::Fuzzy => matcher
+            .fuzzy_match(&title.to_lowercase(), &query.to_lowercase())
+            .is_some(),
+        RssFilterMode::Regex => regex::RegexBuilder::new(query)
+            .case_insensitive(true)
+            .build()
+            .map(|re| re.is_match(title))
+            .unwrap_or(false),
+    }
 }
 
 fn explorer_should_be_greyed_out(settings: &crate::config::Settings) -> bool {
@@ -278,6 +318,16 @@ fn execute_rss_effects(
                     app_state.ui.rss.focused_section = next_focus(app_state.ui.rss.focused_section);
                 }
             }
+            RssAction::ToggleFilterMode => {
+                if app_state.ui.rss.is_editing
+                    && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters)
+                {
+                    app_state.ui.rss.add_filter_mode = match app_state.ui.rss.add_filter_mode {
+                        RssFilterMode::Fuzzy => RssFilterMode::Regex,
+                        RssFilterMode::Regex => RssFilterMode::Fuzzy,
+                    };
+                }
+            }
             RssAction::MoveUp => {
                 let len = current_list_len(app_state, settings);
                 let index = selected_index_mut(app_state);
@@ -359,8 +409,15 @@ fn execute_rss_effects(
                                 });
                             }
                             RssSectionFocus::Filters => {
+                                if matches!(app_state.ui.rss.add_filter_mode, RssFilterMode::Regex)
+                                    && regex::Regex::new(&value).is_err()
+                                {
+                                    set_rss_status(app_state, "Invalid regex pattern");
+                                    continue;
+                                }
                                 new_settings.rss.filters.push(crate::config::RssFilter {
                                     query: value,
+                                    mode: app_state.ui.rss.add_filter_mode,
                                     enabled: true,
                                 });
                                 app_state.ui.rss.filter_draft.clear();
@@ -381,6 +438,7 @@ fn execute_rss_effects(
                     }
                     app_state.ui.rss.is_editing = false;
                     app_state.ui.rss.edit_buffer.clear();
+                    app_state.ui.rss.add_filter_mode = RssFilterMode::Fuzzy;
                 } else if app_state.ui.rss.is_searching {
                     if app_state.ui.rss.search_query.trim().is_empty() {
                         app_state.ui.rss.is_searching = false;
@@ -395,6 +453,7 @@ fn execute_rss_effects(
                     app_state.ui.rss.is_editing = false;
                     app_state.ui.rss.edit_buffer.clear();
                     app_state.ui.rss.filter_draft.clear();
+                    app_state.ui.rss.add_filter_mode = RssFilterMode::Fuzzy;
                     set_rss_status(app_state, "Edit cancelled");
                 } else if app_state.ui.rss.is_searching {
                     app_state.ui.rss.is_searching = false;
@@ -413,6 +472,9 @@ fn execute_rss_effects(
                 {
                     app_state.ui.rss.is_editing = true;
                     app_state.ui.rss.edit_buffer.clear();
+                    if matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters) {
+                        app_state.ui.rss.add_filter_mode = RssFilterMode::Fuzzy;
+                    }
                     set_rss_status(app_state, "Editing new entry");
                 }
             }
@@ -521,15 +583,24 @@ fn execute_rss_effects(
                 if matches!(app_state.ui.rss.active_screen, RssScreen::Unified)
                     && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer)
                 {
-                    let enabled_filters = enabled_filter_queries(settings);
+                    let enabled_filters = enabled_filters(settings);
                     let is_creating_filter = app_state.ui.rss.is_editing
                         && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters);
-                    let filter_query = active_filter_query(app_state, settings);
+                    let active_filter = active_filter_spec(app_state, settings);
+                    let active_filter_query = active_filter
+                        .as_ref()
+                        .map(|f| f.query.as_str())
+                        .unwrap_or("");
+                    let active_filter_mode = active_filter
+                        .as_ref()
+                        .map(|f| f.mode)
+                        .unwrap_or(RssFilterMode::Fuzzy);
                     let (items, _, _) = compute_explorer_items(
                         &app_state.rss_runtime.preview_items,
                         &app_state.ui.rss.search_query,
                         &enabled_filters,
-                        &filter_query,
+                        active_filter_query,
+                        active_filter_mode,
                         is_creating_filter,
                     );
 
@@ -621,14 +692,33 @@ fn draw_input_panel(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         )
     };
 
-    let line = Line::from(vec![
+    let mut line_spans = vec![
         Span::styled(
             "> ",
             ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
         ),
         Span::raw(value),
         Span::styled("_", ctx.apply(Style::default().fg(ctx.state_warning()))),
-    ]);
+    ];
+    if app_state.ui.rss.is_editing
+        && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters)
+    {
+        let (fuzzy_style, regex_style) = match app_state.ui.rss.add_filter_mode {
+            RssFilterMode::Fuzzy => (
+                ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
+                ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0)),
+            ),
+            RssFilterMode::Regex => (
+                ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0)),
+                ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
+            ),
+        };
+        line_spans.push(Span::raw("  "));
+        line_spans.push(Span::styled("Fuzzy", fuzzy_style));
+        line_spans.push(Span::raw(" / "));
+        line_spans.push(Span::styled("Regex", regex_style));
+    }
+    let line = Line::from(line_spans);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -660,6 +750,9 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     if app_state.ui.rss.is_editing {
         push_action("Enter", "save", ctx.state_success());
         push_action("Esc", "cancel", ctx.state_error());
+        if matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters) {
+            push_action("Tab", "mode", ctx.state_selected());
+        }
     } else if app_state.ui.rss.is_searching {
         push_action("Enter", "apply", ctx.state_success());
         push_action("Esc", "clear", ctx.state_error());
@@ -818,13 +911,22 @@ fn draw_links(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: boo
     let selected_explorer_item = if matches!(app_state.ui.rss.active_screen, RssScreen::Unified)
         && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer)
     {
-        let enabled_filters = enabled_filter_queries(settings);
-        let filter_query = active_filter_query(app_state, settings);
+        let enabled_filters = enabled_filters(settings);
+        let active_filter = active_filter_spec(app_state, settings);
+        let active_filter_query = active_filter
+            .as_ref()
+            .map(|f| f.query.as_str())
+            .unwrap_or("");
+        let active_filter_mode = active_filter
+            .as_ref()
+            .map(|f| f.mode)
+            .unwrap_or(RssFilterMode::Fuzzy);
         let (items, _, _) = compute_explorer_items(
             &app_state.rss_runtime.preview_items,
             &app_state.ui.rss.search_query,
             &enabled_filters,
-            &filter_query,
+            active_filter_query,
+            active_filter_mode,
             false,
         );
         if items.is_empty() {
@@ -930,11 +1032,17 @@ fn draw_links(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: boo
     );
 }
 
-fn active_filter_query(app_state: &AppState, settings: &crate::config::Settings) -> String {
+fn active_filter_spec(
+    app_state: &AppState,
+    settings: &crate::config::Settings,
+) -> Option<FilterSpec> {
     if app_state.ui.rss.is_editing
         && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters)
     {
-        return app_state.ui.rss.edit_buffer.clone();
+        return Some(FilterSpec {
+            query: app_state.ui.rss.edit_buffer.clone(),
+            mode: app_state.ui.rss.add_filter_mode,
+        });
     }
 
     settings
@@ -945,14 +1053,16 @@ fn active_filter_query(app_state: &AppState, settings: &crate::config::Settings)
                 .unwrap_or(app_state.ui.rss.selected_filter_index),
         )
         .filter(|f| f.enabled)
-        .map(|f| f.query.clone())
-        .unwrap_or_default()
+        .map(|f| FilterSpec {
+            query: f.query.clone(),
+            mode: f.mode,
+        })
 }
 
 fn focused_filter_query(
     app_state: &AppState,
     settings: &crate::config::Settings,
-) -> Option<String> {
+) -> Option<FilterSpec> {
     if !matches!(app_state.ui.rss.active_screen, RssScreen::Unified)
         || !matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters)
         || app_state.ui.rss.is_editing
@@ -968,8 +1078,11 @@ fn focused_filter_query(
                 .unwrap_or(app_state.ui.rss.selected_filter_index),
         )
         .filter(|f| f.enabled)
-        .map(|f| f.query.trim().to_lowercase())
-        .filter(|q| !q.is_empty())
+        .map(|f| FilterSpec {
+            query: f.query.trim().to_string(),
+            mode: f.mode,
+        })
+        .filter(|f| !f.query.is_empty())
 }
 
 #[cfg(test)]
@@ -1006,10 +1119,11 @@ fn compute_filter_preview_items(
 fn compute_filter_match_counts(
     app_state: &AppState,
     filter_text: &str,
+    filter_mode: RssFilterMode,
     matcher: &SkimMatcherV2,
 ) -> (usize, usize) {
-    let filter_lc = filter_text.trim().to_lowercase();
-    if filter_lc.is_empty() {
+    let filter = filter_text.trim();
+    if filter.is_empty() {
         return (0, 0);
     }
 
@@ -1017,11 +1131,7 @@ fn compute_filter_match_counts(
         .rss_runtime
         .preview_items
         .iter()
-        .filter(|item| {
-            matcher
-                .fuzzy_match(&item.title.to_lowercase(), &filter_lc)
-                .is_some()
-        })
+        .filter(|item| filter_matches_title(&item.title, filter, filter_mode, matcher))
         .collect();
 
     let feed_matches = matched_items.len();
@@ -1030,12 +1140,12 @@ fn compute_filter_match_counts(
         .torrents
         .values()
         .filter(|torrent| {
-            matcher
-                .fuzzy_match(
-                    &torrent.latest_state.torrent_name.to_lowercase(),
-                    &filter_lc,
-                )
-                .is_some()
+            filter_matches_title(
+                &torrent.latest_state.torrent_name,
+                filter,
+                filter_mode,
+                matcher,
+            )
         })
         .count();
     let app_hashes: HashSet<Vec<u8>> = app_state.torrents.keys().cloned().collect();
@@ -1049,11 +1159,7 @@ fn compute_filter_match_counts(
         .rss_runtime
         .history
         .iter()
-        .filter(|entry| {
-            matcher
-                .fuzzy_match(&entry.title.to_lowercase(), &filter_lc)
-                .is_some()
-        })
+        .filter(|entry| filter_matches_title(&entry.title, filter, filter_mode, matcher))
         .filter(|entry| {
             let hash_in_app = entry
                 .info_hash
@@ -1068,6 +1174,37 @@ fn compute_filter_match_counts(
     let downloaded_matches = downloaded_from_torrents + history_missing_from_app;
 
     (feed_matches, downloaded_matches)
+}
+
+fn filter_history_age_label(
+    app_state: &AppState,
+    filter_text: &str,
+    filter_mode: RssFilterMode,
+    matcher: &SkimMatcherV2,
+) -> String {
+    let latest = app_state
+        .rss_runtime
+        .history
+        .iter()
+        .filter(|entry| filter_matches_title(&entry.title, filter_text, filter_mode, matcher))
+        .filter_map(|entry| DateTime::parse_from_rfc3339(&entry.date_iso).ok())
+        .max();
+
+    let Some(latest) = latest else {
+        return "today".to_string();
+    };
+
+    let now = Utc::now();
+    let days = now
+        .signed_duration_since(latest.with_timezone(&Utc))
+        .num_days();
+    if days <= 0 {
+        "today".to_string()
+    } else if days == 1 {
+        "1 day ago".to_string()
+    } else {
+        format!("{} days ago", days)
+    }
 }
 
 fn normalize_title(input: &str) -> String {
@@ -1090,13 +1227,22 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: b
     let explorer_selected_title_lc = if matches!(app_state.ui.rss.active_screen, RssScreen::Unified)
         && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Explorer)
     {
-        let enabled_filters = enabled_filter_queries(settings);
-        let filter_query = active_filter_query(app_state, settings);
+        let enabled_filters = enabled_filters(settings);
+        let active_filter = active_filter_spec(app_state, settings);
+        let active_filter_query = active_filter
+            .as_ref()
+            .map(|f| f.query.as_str())
+            .unwrap_or("");
+        let active_filter_mode = active_filter
+            .as_ref()
+            .map(|f| f.mode)
+            .unwrap_or(RssFilterMode::Fuzzy);
         let (items, _, _) = compute_explorer_items(
             &app_state.rss_runtime.preview_items,
             &app_state.ui.rss.search_query,
             &enabled_filters,
-            &filter_query,
+            active_filter_query,
+            active_filter_mode,
             false,
         );
         if items.is_empty() {
@@ -1129,14 +1275,14 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: b
             let filter = &settings.rss.filters[*idx];
             let filter_text = filter.query.clone();
             let filter_lc = filter_text.trim().to_lowercase();
-            let is_matching_existing =
-                is_creating_filter && !draft_lc.is_empty() && filter_lc.contains(&draft_lc);
+            let is_matching_existing = is_creating_filter
+                && !draft_lc.is_empty()
+                && matches!(app_state.ui.rss.add_filter_mode, RssFilterMode::Fuzzy)
+                && filter_lc.contains(&draft_lc);
             let matches_explorer_selection = filter.enabled
                 && !filter_lc.is_empty()
                 && explorer_selected_title_lc.as_ref().is_some_and(|title| {
-                    title.contains(&filter_lc)
-                        || filter_lc.contains(title)
-                        || matcher.fuzzy_match(title, &filter_lc).is_some()
+                    filter_matches_title(title, &filter_text, filter.mode, &matcher)
                 });
             let style = if !filter.enabled {
                 ctx.apply(
@@ -1151,13 +1297,22 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: b
             } else {
                 ctx.apply(Style::default().fg(ctx.theme.semantic.text))
             };
-            let (feed_matches, downloaded_matches) =
-                compute_filter_match_counts(app_state, &filter_text, &matcher);
+            let (_, downloaded_matches) =
+                compute_filter_match_counts(app_state, &filter_text, filter.mode, &matcher);
+            let history_age =
+                filter_history_age_label(app_state, &filter_text, filter.mode, &matcher);
+            let mode_label = match filter.mode {
+                RssFilterMode::Fuzzy => "[fuzzy]",
+                RssFilterMode::Regex => "[regex]",
+            };
 
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{}  ({} feed) ", filter_text, feed_matches), style),
-                Span::styled(format!("({} downloaded)", downloaded_matches), style),
-            ]))
+            ListItem::new(Line::from(vec![Span::styled(
+                format!(
+                    "{} [downloaded {}] \"{}\" - {}",
+                    mode_label, downloaded_matches, filter_text, history_age
+                ),
+                style,
+            )]))
         })
         .collect();
     let mut state = ListState::default();
@@ -1183,8 +1338,9 @@ fn draw_filters(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: b
 fn compute_explorer_items(
     preview_items: &[crate::app::RssPreviewItem],
     search_query: &str,
-    enabled_filters: &[String],
+    enabled_filters: &[FilterSpec],
     draft_filter_query: &str,
+    draft_filter_mode: RssFilterMode,
     prefer_draft_sort: bool,
 ) -> (Vec<crate::app::RssPreviewItem>, Vec<bool>, bool) {
     let search = search_query.to_lowercase();
@@ -1201,12 +1357,11 @@ fn compute_explorer_items(
         .iter()
         .map(|item| {
             let search_hit = has_search && item.title.to_lowercase().contains(&search);
-            let item_title_lc = item.title.to_lowercase();
             let enabled_filter_hit = enabled_filters
                 .iter()
-                .any(|q| matcher.fuzzy_match(&item_title_lc, q).is_some());
-            let draft_hit =
-                has_draft_query && matcher.fuzzy_match(&item_title_lc, &draft_q).is_some();
+                .any(|f| filter_matches_title(&item.title, &f.query, f.mode, &matcher));
+            let draft_hit = has_draft_query
+                && filter_matches_title(&item.title, &draft_q, draft_filter_mode, &matcher);
             enabled_filter_hit || search_hit || draft_hit
         })
         .collect();
@@ -1224,24 +1379,29 @@ fn compute_explorer_items(
         return (items, combined_match, prioritise_matches);
     }
 
-    let mut paired: Vec<(crate::app::RssPreviewItem, bool, Option<i64>)> = items
+    let mut paired: Vec<(crate::app::RssPreviewItem, bool, bool, Option<i64>)> = items
         .into_iter()
         .zip(combined_match)
         .map(|(item, is_match)| {
+            let draft_hit = has_draft_query
+                && filter_matches_title(&item.title, &draft_q, draft_filter_mode, &matcher);
             let draft_score = if has_draft_query {
-                matcher.fuzzy_match(&item.title.to_lowercase(), &draft_q)
+                if matches!(draft_filter_mode, RssFilterMode::Fuzzy) {
+                    matcher.fuzzy_match(&item.title.to_lowercase(), &draft_q)
+                } else {
+                    None
+                }
             } else {
                 None
             };
-            (item, is_match, draft_score)
+            (item, is_match, draft_hit, draft_score)
         })
         .collect();
     if prioritise_matches {
         if prefer_draft_sort && has_draft_query {
             paired.sort_by(|a, b| {
-                b.2.is_some()
-                    .cmp(&a.2.is_some())
-                    .then_with(|| b.2.unwrap_or(0).cmp(&a.2.unwrap_or(0)))
+                b.2.cmp(&a.2)
+                    .then_with(|| b.3.unwrap_or(0).cmp(&a.3.unwrap_or(0)))
                     .then_with(|| b.1.cmp(&a.1))
                     .then_with(|| a.0.title.to_lowercase().cmp(&b.0.title.to_lowercase()))
             });
@@ -1276,6 +1436,22 @@ fn rss_item_completion_percent(
             }
         }
     }
+
+    if let Some(history_hash) = app_state
+        .rss_runtime
+        .history
+        .iter()
+        .find(|entry| entry.dedupe_key == item.dedupe_key)
+        .and_then(|entry| entry.info_hash.as_deref())
+        .and_then(|hash| hex::decode(hash).ok())
+    {
+        if let Some(torrent) = app_state.torrents.get(&history_hash) {
+            return Some(crate::app::torrent_completion_percent(
+                &torrent.latest_state,
+            ));
+        }
+    }
+
     None
 }
 
@@ -1290,17 +1466,26 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: 
         .selected_explorer_index
         .min(app_state.rss_runtime.preview_items.len().saturating_sub(1));
 
-    let enabled_filters = enabled_filter_queries(settings);
+    let enabled_filters = enabled_filters(settings);
     let explorer_greyed_out = explorer_should_be_greyed_out(settings);
     let is_creating_filter = app_state.ui.rss.is_editing
         && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters);
     let focused_filter_query = focused_filter_query(app_state, settings);
-    let filter_query = active_filter_query(app_state, settings);
+    let active_filter = active_filter_spec(app_state, settings);
+    let active_filter_query = active_filter
+        .as_ref()
+        .map(|f| f.query.as_str())
+        .unwrap_or("");
+    let active_filter_mode = active_filter
+        .as_ref()
+        .map(|f| f.mode)
+        .unwrap_or(RssFilterMode::Fuzzy);
     let (items, combined_match, prioritise_matches) = compute_explorer_items(
         &app_state.rss_runtime.preview_items,
         &app_state.ui.rss.search_query,
         &enabled_filters,
-        &filter_query,
+        active_filter_query,
+        active_filter_mode,
         is_creating_filter,
     );
 
@@ -1309,21 +1494,23 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: 
         .enumerate()
         .map(|(i, item)| {
             let is_combined_match = combined_match.get(i).copied().unwrap_or(item.is_match);
-            let item_title_lc = item.title.to_lowercase();
             let draft_lc = app_state.ui.rss.edit_buffer.trim().to_lowercase();
-            let draft_hit =
-                !draft_lc.is_empty() && matcher.fuzzy_match(&item_title_lc, &draft_lc).is_some();
+            let draft_hit = !draft_lc.is_empty()
+                && filter_matches_title(
+                    &item.title,
+                    &draft_lc,
+                    app_state.ui.rss.add_filter_mode,
+                    &matcher,
+                );
             let existing_filter_hit = settings
                 .rss
                 .filters
                 .iter()
                 .filter(|f| f.enabled)
-                .map(|f| f.query.trim().to_lowercase())
-                .filter(|q| !q.is_empty())
-                .any(|q| matcher.fuzzy_match(&item_title_lc, &q).is_some());
+                .any(|f| filter_matches_title(&item.title, &f.query, f.mode, &matcher));
             let focused_filter_hit = focused_filter_query
                 .as_ref()
-                .is_none_or(|q| matcher.fuzzy_match(&item_title_lc, q).is_some());
+                .is_none_or(|f| filter_matches_title(&item.title, &f.query, f.mode, &matcher));
 
             let dim_as_other_filter_match = is_creating_filter && existing_filter_hit && !draft_hit;
             let style = if explorer_greyed_out || dim_as_other_filter_match {
@@ -1340,8 +1527,8 @@ fn draw_explorer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, active: 
             if let Some(pct) = completion_pct {
                 let completion_style = style.patch(Style::default().fg(ctx.state_success()));
                 ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:.1}% ", pct), completion_style),
                     Span::styled(item.title.clone(), style),
-                    Span::styled(format!(" ({:.1}%)", pct), completion_style),
                 ]))
             } else {
                 ListItem::new(Line::from(vec![Span::styled(item.title.clone(), style)]))
@@ -1439,7 +1626,7 @@ fn draw_unified_body(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, show
 
         let right_rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(cols[1]);
 
         if show_history {
@@ -1469,8 +1656,8 @@ fn draw_unified_body(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>, show
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Percentage(50),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
+                Constraint::Percentage(20),
+                Constraint::Percentage(30),
             ])
             .split(area);
 
@@ -2051,6 +2238,7 @@ mod tests {
         let mut settings = crate::config::Settings::default();
         settings.rss.filters.push(crate::config::RssFilter {
             query: "samplealpha".to_string(),
+            mode: RssFilterMode::Fuzzy,
             enabled: true,
         });
         let (tx, mut rx) = mpsc::channel(8);
@@ -2070,6 +2258,104 @@ mod tests {
             AppCommand::UpdateConfig(s) => assert!(!s.rss.filters[0].enabled),
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn tab_toggles_filter_mode_while_editing_filter() {
+        let mut app_state = base_state();
+        app_state.ui.rss.focused_section = RssSectionFocus::Filters;
+        let settings = crate::config::Settings::default();
+        let (tx, _rx) = mpsc::channel(8);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('a'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+        assert!(app_state.ui.rss.is_editing);
+        assert!(matches!(
+            app_state.ui.rss.add_filter_mode,
+            RssFilterMode::Fuzzy
+        ));
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Tab,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+        assert!(matches!(
+            app_state.ui.rss.add_filter_mode,
+            RssFilterMode::Regex
+        ));
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Tab,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+        assert!(matches!(
+            app_state.ui.rss.add_filter_mode,
+            RssFilterMode::Fuzzy
+        ));
+    }
+
+    #[test]
+    fn add_filter_rejects_invalid_regex_pattern() {
+        let mut app_state = base_state();
+        app_state.ui.rss.focused_section = RssSectionFocus::Filters;
+        let settings = crate::config::Settings::default();
+        let (tx, mut rx) = mpsc::channel(8);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('a'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+        app_state.ui.rss.add_filter_mode = RssFilterMode::Regex;
+
+        for c in "(invalid".chars() {
+            handle_event(
+                CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                    KeyCode::Char(c),
+                    ratatui::crossterm::event::KeyModifiers::NONE,
+                )),
+                &mut app_state,
+                &settings,
+                &tx,
+            );
+        }
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        assert!(rx.try_recv().is_err());
+        assert!(app_state.ui.rss.is_editing);
+        assert_eq!(
+            app_state.ui.rss.status_message.as_deref(),
+            Some("Invalid regex pattern")
+        );
     }
 
     #[test]
@@ -2270,7 +2556,7 @@ mod tests {
         ];
 
         let (sorted, combined, prioritise) =
-            compute_explorer_items(&items, "samplealpha", &[], "", false);
+            compute_explorer_items(&items, "samplealpha", &[], "", RssFilterMode::Fuzzy, false);
         assert!(prioritise);
         assert_eq!(sorted.len(), 1);
         assert_eq!(combined.len(), 1);
@@ -2333,13 +2619,16 @@ mod tests {
         ];
 
         let (inactive_sorted, _, inactive_prioritise) =
-            compute_explorer_items(&items, "", &[], "", false);
+            compute_explorer_items(&items, "", &[], "", RssFilterMode::Fuzzy, false);
         assert!(!inactive_prioritise);
         assert_eq!(inactive_sorted[0].title, "Match");
 
-        let enabled = vec!["match".to_string()];
+        let enabled = vec![FilterSpec {
+            query: "match".to_string(),
+            mode: RssFilterMode::Fuzzy,
+        }];
         let (active_sorted, _, active_prioritise) =
-            compute_explorer_items(&items, "", &enabled, "", false);
+            compute_explorer_items(&items, "", &enabled, "", RssFilterMode::Fuzzy, false);
         assert!(active_prioritise);
         assert_eq!(active_sorted[0].title, "Match");
     }
@@ -2357,8 +2646,66 @@ mod tests {
             },
         ];
 
-        let enabled = vec!["series beta".to_string()];
-        let (sorted, _, prioritise) = compute_explorer_items(&items, "", &enabled, "alpha", true);
+        let enabled = vec![FilterSpec {
+            query: "series beta".to_string(),
+            mode: RssFilterMode::Fuzzy,
+        }];
+        let (sorted, _, prioritise) =
+            compute_explorer_items(&items, "", &enabled, "alpha", RssFilterMode::Fuzzy, true);
+        assert!(prioritise);
+        assert_eq!(sorted[0].title, "Series Alpha");
+    }
+
+    #[test]
+    fn explorer_compute_supports_regex_draft_matching() {
+        let items = vec![
+            RssPreviewItem {
+                title: "Series Beta".to_string(),
+                ..Default::default()
+            },
+            RssPreviewItem {
+                title: "Series Alpha".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let (sorted, _, prioritise) = compute_explorer_items(
+            &items,
+            "",
+            &[],
+            "series\\s+alpha",
+            RssFilterMode::Regex,
+            true,
+        );
+        assert!(prioritise);
+        assert_eq!(sorted[0].title, "Series Alpha");
+    }
+
+    #[test]
+    fn explorer_compute_prefers_regex_draft_matches_over_existing_filter_matches() {
+        let items = vec![
+            RssPreviewItem {
+                title: "Series Beta".to_string(),
+                ..Default::default()
+            },
+            RssPreviewItem {
+                title: "Series Alpha".to_string(),
+                ..Default::default()
+            },
+        ];
+        let enabled = vec![FilterSpec {
+            query: "series beta".to_string(),
+            mode: RssFilterMode::Fuzzy,
+        }];
+
+        let (sorted, _, prioritise) = compute_explorer_items(
+            &items,
+            "",
+            &enabled,
+            "series\\s+alpha",
+            RssFilterMode::Regex,
+            true,
+        );
         assert!(prioritise);
         assert_eq!(sorted[0].title, "Series Alpha");
     }
@@ -2420,7 +2767,8 @@ mod tests {
         app_state.torrents.insert(vec![0xaa; 20], torrent);
 
         let matcher = SkimMatcherV2::default();
-        let (feed, downloaded) = compute_filter_match_counts(&app_state, "alpha", &matcher);
+        let (feed, downloaded) =
+            compute_filter_match_counts(&app_state, "alpha", RssFilterMode::Fuzzy, &matcher);
         assert_eq!(feed, 1);
         assert_eq!(downloaded, 1);
     }
@@ -2444,7 +2792,8 @@ mod tests {
             });
 
         let matcher = SkimMatcherV2::default();
-        let (feed, downloaded) = compute_filter_match_counts(&app_state, "alpha", &matcher);
+        let (feed, downloaded) =
+            compute_filter_match_counts(&app_state, "alpha", RssFilterMode::Fuzzy, &matcher);
         assert_eq!(feed, 1);
         assert_eq!(downloaded, 1);
     }
@@ -2470,7 +2819,8 @@ mod tests {
             });
 
         let matcher = SkimMatcherV2::default();
-        let (feed, downloaded) = compute_filter_match_counts(&app_state, "seriessigma", &matcher);
+        let (feed, downloaded) =
+            compute_filter_match_counts(&app_state, "seriessigma", RssFilterMode::Fuzzy, &matcher);
         assert_eq!(feed, 0);
         assert_eq!(downloaded, 2);
     }
@@ -2514,13 +2864,14 @@ mod tests {
             });
 
         let matcher = SkimMatcherV2::default();
-        let (feed, downloaded) = compute_filter_match_counts(&app_state, "seriessigma", &matcher);
+        let (feed, downloaded) =
+            compute_filter_match_counts(&app_state, "seriessigma", RssFilterMode::Fuzzy, &matcher);
         assert_eq!(feed, 0);
         assert_eq!(downloaded, 3);
     }
 
     #[test]
-    fn active_filter_query_uses_selected_filter_in_nav_mode() {
+    fn active_filter_spec_uses_selected_filter_in_nav_mode() {
         let mut app_state = base_state();
         app_state.ui.rss.active_screen = RssScreen::Unified;
         app_state.ui.rss.focused_section = RssSectionFocus::Filters;
@@ -2531,19 +2882,22 @@ mod tests {
         let mut settings = crate::config::Settings::default();
         settings.rss.filters.push(crate::config::RssFilter {
             query: "samplealpha".to_string(),
+            mode: RssFilterMode::Fuzzy,
             enabled: true,
         });
         settings.rss.filters.push(crate::config::RssFilter {
             query: "samplebeta".to_string(),
+            mode: RssFilterMode::Regex,
             enabled: true,
         });
 
-        let query = active_filter_query(&app_state, &settings);
-        assert_eq!(query, "samplebeta");
+        let spec = active_filter_spec(&app_state, &settings).expect("expected active filter");
+        assert_eq!(spec.query, "samplebeta");
+        assert!(matches!(spec.mode, RssFilterMode::Regex));
     }
 
     #[test]
-    fn active_filter_query_ignores_disabled_selected_filter() {
+    fn active_filter_spec_ignores_disabled_selected_filter() {
         let mut app_state = base_state();
         app_state.ui.rss.active_screen = RssScreen::Unified;
         app_state.ui.rss.focused_section = RssSectionFocus::Filters;
@@ -2554,15 +2908,15 @@ mod tests {
         let mut settings = crate::config::Settings::default();
         settings.rss.filters.push(crate::config::RssFilter {
             query: "seriesdelta".to_string(),
+            mode: RssFilterMode::Fuzzy,
             enabled: false,
         });
 
-        let query = active_filter_query(&app_state, &settings);
-        assert_eq!(query, "");
+        assert!(active_filter_spec(&app_state, &settings).is_none());
     }
 
     #[test]
-    fn active_filter_query_ignores_stale_draft_when_not_editing() {
+    fn active_filter_spec_ignores_stale_draft_when_not_editing() {
         let mut app_state = base_state();
         app_state.ui.rss.active_screen = RssScreen::Unified;
         app_state.ui.rss.focused_section = RssSectionFocus::Explorer;
@@ -2571,8 +2925,7 @@ mod tests {
         app_state.ui.rss.filter_draft = "seriesomega".to_string();
 
         let settings = crate::config::Settings::default();
-        let query = active_filter_query(&app_state, &settings);
-        assert_eq!(query, "");
+        assert!(active_filter_spec(&app_state, &settings).is_none());
     }
 
     #[test]
@@ -2585,13 +2938,13 @@ mod tests {
         let mut settings = crate::config::Settings::default();
         settings.rss.filters.push(crate::config::RssFilter {
             query: "series alpha".to_string(),
+            mode: RssFilterMode::Fuzzy,
             enabled: true,
         });
 
-        assert_eq!(
-            focused_filter_query(&app_state, &settings).as_deref(),
-            Some("series alpha")
-        );
+        let focused = focused_filter_query(&app_state, &settings).expect("focused filter");
+        assert_eq!(focused.query, "series alpha");
+        assert!(matches!(focused.mode, RssFilterMode::Fuzzy));
     }
 
     #[test]
@@ -2604,6 +2957,7 @@ mod tests {
         let mut settings = crate::config::Settings::default();
         settings.rss.filters.push(crate::config::RssFilter {
             query: "series alpha".to_string(),
+            mode: RssFilterMode::Fuzzy,
             enabled: true,
         });
 
@@ -2621,10 +2975,12 @@ mod tests {
         let mut settings = crate::config::Settings::default();
         settings.rss.filters.push(crate::config::RssFilter {
             query: "samplealpha".to_string(),
+            mode: RssFilterMode::Fuzzy,
             enabled: false,
         });
         settings.rss.filters.push(crate::config::RssFilter {
             query: "samplebeta".to_string(),
+            mode: RssFilterMode::Fuzzy,
             enabled: false,
         });
         assert!(explorer_should_be_greyed_out(&settings));
@@ -2635,10 +2991,12 @@ mod tests {
         let mut settings = crate::config::Settings::default();
         settings.rss.filters.push(crate::config::RssFilter {
             query: "samplealpha".to_string(),
+            mode: RssFilterMode::Fuzzy,
             enabled: false,
         });
         settings.rss.filters.push(crate::config::RssFilter {
             query: "samplebeta".to_string(),
+            mode: RssFilterMode::Fuzzy,
             enabled: true,
         });
         assert!(!explorer_should_be_greyed_out(&settings));
@@ -2739,6 +3097,37 @@ mod tests {
         };
 
         assert!(rss_item_completion_percent(&item, &app_state).is_none());
+    }
+
+    #[test]
+    fn rss_item_completion_percent_uses_history_info_hash_fallback() {
+        let mut app_state = base_state();
+        let info_hash = vec![0xaa; 20];
+
+        let mut torrent = crate::app::TorrentDisplayState::default();
+        torrent.latest_state.number_of_pieces_total = 10;
+        torrent.latest_state.number_of_pieces_completed = 10;
+        app_state.torrents.insert(info_hash.clone(), torrent);
+
+        app_state
+            .rss_runtime
+            .history
+            .push(crate::config::RssHistoryEntry {
+                dedupe_key: "guid:series-alpha".to_string(),
+                info_hash: Some(hex::encode(&info_hash)),
+                title: "Series Alpha".to_string(),
+                ..Default::default()
+            });
+
+        let item = RssPreviewItem {
+            dedupe_key: "guid:series-alpha".to_string(),
+            title: "Series Alpha".to_string(),
+            link: Some("https://example.test/series-alpha.torrent".to_string()),
+            is_downloaded: true,
+            ..Default::default()
+        };
+
+        assert_eq!(rss_item_completion_percent(&item, &app_state), Some(100.0));
     }
 
     #[test]
