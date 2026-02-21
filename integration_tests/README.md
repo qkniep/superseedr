@@ -154,13 +154,12 @@ As of February 21, 2026:
 - `superseedr -> qbittorrent` passes for `v1`, `v2`, and `hybrid`, with manifest/hash validation.
 - `qbittorrent -> superseedr` now runs ungated in pytest and passes for `v1`, `v2`, and `hybrid` in local validation.
 - qBittorrent container/auth/add/polling/log collection are implemented in `integration_tests/harness/clients/qbittorrent.py`.
-- CI interop matrix now enforces both stable scenarios (`superseedr_to_superseedr`, `superseedr_to_qbittorrent`) across all three modes.
+- CI interop matrix now enforces all three scenarios (`superseedr_to_superseedr`, `superseedr_to_qbittorrent`, `qbittorrent_to_superseedr`) across all three modes.
 - qBittorrent and tracker host ports are dynamically allocated in qBittorrent scenarios/tests to reduce local port-collision flakes.
 - Transmission adapter remains a stub (`integration_tests/harness/clients/transmission.py`).
 
 ## Plan / Next Tasks
 
-1. Add `qbittorrent -> superseedr` to CI matrix once runtime/cost impact is accepted.
-2. Add focused diagnostics for reverse failures (piece-level mapping/torrent-level correlation) to shorten triage loops.
-3. Implement Transmission adapter (`integration_tests/harness/clients/transmission.py`) with auth/session, add torrent, status polling, and log collection.
-4. Add `superseedr <-> transmission` scenarios and extend CI once they are stable.
+1. Add focused diagnostics for reverse failures (piece-level mapping/torrent-level correlation) to shorten triage loops.
+2. Implement Transmission adapter (`integration_tests/harness/clients/transmission.py`) with auth/session, add torrent, status polling, and log collection.
+3. Add `superseedr <-> transmission` scenarios and extend CI once they are stable.

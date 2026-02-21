@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [superseedr_to_superseedr, superseedr_to_qbittorrent]
+        scenario: [superseedr_to_superseedr, superseedr_to_qbittorrent, qbittorrent_to_superseedr]
         mode: [v1, v2, hybrid]
 
     steps:
