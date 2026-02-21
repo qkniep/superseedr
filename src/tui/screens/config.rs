@@ -281,12 +281,19 @@ pub fn draw(
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(2)])
-        .split(inner_area);
-    let settings_area = chunks[0];
-    let footer_area = chunks[1];
+    let settings_area = inner_area;
+    let footer_y = area.y.saturating_add(area.height);
+    let footer_area = if footer_y < f.area().y.saturating_add(f.area().height) {
+        ratatui::layout::Rect::new(area.x, footer_y, area.width, 1)
+    } else {
+        // Fallback for very short terminals: keep commands visible at panel bottom.
+        ratatui::layout::Rect::new(
+            inner_area.x,
+            inner_area.y + inner_area.height.saturating_sub(1),
+            inner_area.width,
+            1,
+        )
+    };
     let rows_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints(

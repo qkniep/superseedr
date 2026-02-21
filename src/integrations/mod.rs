@@ -2,5 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 pub mod cli;
+pub mod rss_ingest;
+pub mod rss_service;
+pub mod rss_url_safety;
 pub mod status;
 pub mod watcher;

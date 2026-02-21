@@ -120,7 +120,7 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         } else {
             let info_cols = Layout::horizontal([
                 Constraint::Fill(1),
-                Constraint::Length(14),
+                Constraint::Length(17),
                 Constraint::Fill(1),
             ])
             .split(v_chunks[2]);
@@ -176,7 +176,7 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
 
         if show_block_stream {
             let stats_h =
-                Layout::horizontal([Constraint::Length(14), Constraint::Min(0)]).split(stats_area);
+                Layout::horizontal([Constraint::Length(17), Constraint::Min(0)]).split(stats_area);
 
             plan.block_stream = Some(stats_h[0]);
             plan.stats = Some(stats_h[1]);

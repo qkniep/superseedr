@@ -231,6 +231,12 @@ Set this variable in your Docker config to change the update frequency (in secon
 # Update the status file every 5 seconds
 SUPERSEEDR_OUTPUT_STATUS_INTERVAL=5
 ```
+
+### 4. RSS History Retention
+RSS download history is persisted for deduplication and UI metadata, but it is capped at **1000 entries**.
+
+* When the history grows past 1000, the **oldest entries are pruned** first.
+* This limit applies to persisted runtime history in `persistence/rss.toml`.
 </details>
 
 ## 🧠 Advanced: Architecture & Engineering

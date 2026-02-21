@@ -15,7 +15,11 @@ use strum_macros::EnumIter;
 use crate::torrent_manager::DiskIoOperation;
 
 use crate::config::{get_app_paths, save_settings};
-use crate::config::{PeerSortColumn, Settings, SortDirection, TorrentSettings, TorrentSortColumn};
+use crate::config::{
+    FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SortDirection,
+    TorrentSettings, TorrentSortColumn,
+};
+use crate::persistence::rss::{load_rss_state, save_rss_state, RssPersistedState};
 
 use crate::token_bucket::TokenBucket;
 
@@ -33,8 +37,9 @@ use crate::resource_manager::ResourceType;
 use crate::telemetry::ui_telemetry::UiTelemetry;
 use crate::theme::Theme;
 
+use crate::integrations::rss_url_safety::is_safe_rss_item_url;
 use crate::integrations::status::AppOutputState;
-use crate::integrations::{status, watcher};
+use crate::integrations::{rss_ingest, rss_service, status, watcher};
 use crate::torrent_file::parser::from_bytes;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
@@ -93,6 +98,8 @@ use rlimit::Resource;
 
 const FILE_HANDLE_MINIMUM: usize = 64;
 const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
+pub const RSS_MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
+const RSS_MANUAL_DOWNLOAD_TIMEOUT_SECS: u64 = 20;
 
 #[derive(serde::Deserialize)]
 struct CratesResponse {
@@ -373,6 +380,18 @@ pub enum AppCommand {
         data: Vec<tree::RawNode<FileMetadata>>,
         highlight_path: Option<PathBuf>,
     },
+    RssSyncNow,
+    RssPreviewUpdated(Vec<RssPreviewItem>),
+    RssSyncStatusUpdated {
+        last_sync_at: Option<String>,
+        next_sync_at: Option<String>,
+    },
+    RssFeedErrorUpdated {
+        feed_url: String,
+        error: Option<FeedSyncError>,
+    },
+    RssDownloadSelected(RssHistoryEntry),
+    RssDownloadPreview(RssPreviewItem),
     UpdateConfig(Settings),
     UpdateVersionAvailable(String),
 }
@@ -397,6 +416,22 @@ pub enum AppMode {
     DeleteConfirm,
     Config,
     FileBrowser,
+    Rss,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RssScreen {
+    #[default]
+    Unified,
+    History,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RssSectionFocus {
+    Links,
+    Filters,
+    #[default]
+    Explorer,
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -504,6 +539,8 @@ pub struct UiState {
     pub config: ConfigUiState,
     pub delete_confirm: DeleteConfirmUiState,
     pub file_browser: FileBrowserUiState,
+    #[allow(dead_code)]
+    pub rss: RssUiState,
 }
 
 #[derive(Default)]
@@ -527,6 +564,65 @@ pub struct FileBrowserUiState {
     pub browser_mode: FileBrowserMode,
     pub is_searching: bool,
     pub search_query: String,
+}
+
+#[derive(Default)]
+#[allow(dead_code)]
+pub struct RssUiState {
+    pub active_screen: RssScreen,
+    pub focused_section: RssSectionFocus,
+    pub selected_feed_index: usize,
+    pub selected_filter_index: usize,
+    pub selected_explorer_index: usize,
+    pub selected_history_index: usize,
+    pub is_searching: bool,
+    pub search_query: String,
+    pub is_editing: bool,
+    pub edit_buffer: String,
+    pub filter_draft: String,
+    pub add_feed_buffer: String,
+    pub add_filter_buffer: String,
+    pub add_filter_mode: RssFilterMode,
+    pub delete_confirm_armed: bool,
+    pub status_message: Option<String>,
+    pub last_sync_request_at: Option<Instant>,
+}
+
+#[derive(Default, Clone)]
+pub struct RssRuntimeState {
+    pub history: Vec<RssHistoryEntry>,
+    pub preview_items: Vec<RssPreviewItem>,
+    pub last_sync_at: Option<String>,
+    pub next_sync_at: Option<String>,
+    pub feed_errors: HashMap<String, FeedSyncError>,
+}
+
+#[derive(Default, Clone)]
+pub struct RssFilterRuntimeStat {
+    pub downloaded_matches: usize,
+    pub history_age: String,
+}
+
+#[derive(Default, Clone)]
+pub struct RssDerivedState {
+    pub explorer_items: Vec<RssPreviewItem>,
+    pub explorer_combined_match: Vec<bool>,
+    pub explorer_prioritise_matches: bool,
+    pub history_hash_by_dedupe: HashMap<String, Vec<u8>>,
+    pub filter_runtime_stats: HashMap<usize, RssFilterRuntimeStat>,
+}
+
+#[derive(Default, Clone)]
+#[allow(dead_code)]
+pub struct RssPreviewItem {
+    pub dedupe_key: String,
+    pub title: String,
+    pub link: Option<String>,
+    pub guid: Option<String>,
+    pub source: Option<String>,
+    pub date_iso: Option<String>,
+    pub is_match: bool,
+    pub is_downloaded: bool,
 }
 
 #[derive(Default)]
@@ -591,6 +687,8 @@ pub struct AppState {
     pub write_iops: u32,
 
     pub ui: UiState,
+    pub rss_runtime: RssRuntimeState,
+    pub rss_derived: RssDerivedState,
     pub data_rate: DataRate,
     pub theme: Theme,
 
@@ -610,6 +708,10 @@ pub struct AppState {
     pub global_disk_thrash_score: f64,
     pub adaptive_max_scpb: f64,
     pub global_seek_cost_per_byte_history: Vec<f64>,
+    pub disk_health_ema: f64,
+    pub disk_health_phase: f64,
+    pub disk_health_peak_hold: f64,
+    pub disk_health_state_level: u8,
 
     pub recently_processed_files: HashMap<PathBuf, Instant>,
 
@@ -634,12 +736,23 @@ pub struct App {
     pub manager_event_rx: mpsc::Receiver<ManagerEvent>,
     pub app_command_tx: mpsc::Sender<AppCommand>,
     pub app_command_rx: mpsc::Receiver<AppCommand>,
+    pub rss_sync_tx: mpsc::Sender<()>,
+    pub rss_downloaded_entry_tx: mpsc::Sender<RssHistoryEntry>,
+    pub rss_settings_tx: watch::Sender<Settings>,
     pub tui_event_tx: mpsc::Sender<CrosstermEvent>,
     pub tui_event_rx: mpsc::Receiver<CrosstermEvent>,
     pub shutdown_tx: broadcast::Sender<()>,
+    pub persistence_tx: Option<watch::Sender<Option<PersistPayload>>>,
+    pub persistence_task: Option<tokio::task::JoinHandle<()>>,
     pub tui_task: Option<tokio::task::JoinHandle<()>>,
     pub notify_rx: mpsc::Receiver<Result<Event, NotifyError>>,
     pub watcher: RecommendedWatcher,
+}
+
+#[derive(Clone)]
+pub struct PersistPayload {
+    pub settings: Settings,
+    pub rss_state: RssPersistedState,
 }
 impl App {
     pub async fn new(client_configs: Settings) -> Result<Self, Box<dyn std::error::Error>> {
@@ -649,8 +762,36 @@ impl App {
 
         let (manager_event_tx, manager_event_rx) = mpsc::channel::<ManagerEvent>(1000);
         let (app_command_tx, app_command_rx) = mpsc::channel::<AppCommand>(10);
+        let (rss_sync_tx, rss_sync_rx) = mpsc::channel::<()>(8);
+        let (rss_downloaded_entry_tx, rss_downloaded_entry_rx) =
+            mpsc::channel::<RssHistoryEntry>(64);
+        let (rss_settings_tx, rss_settings_rx) = watch::channel(client_configs.clone());
         let (tui_event_tx, tui_event_rx) = mpsc::channel::<CrosstermEvent>(100);
         let (shutdown_tx, _) = broadcast::channel(1);
+        let (persistence_tx, mut persistence_rx) = watch::channel::<Option<PersistPayload>>(None);
+        let persistence_task = tokio::spawn(async move {
+            while persistence_rx.changed().await.is_ok() {
+                let Some(payload) = persistence_rx.borrow().clone() else {
+                    continue;
+                };
+                let write_result = tokio::task::spawn_blocking(move || {
+                    save_settings(&payload.settings)
+                        .map_err(|e| format!("Failed to auto-save settings: {}", e))?;
+                    save_rss_state(&payload.rss_state)
+                        .map_err(|e| format!("Failed to auto-save RSS state: {}", e))?;
+                    Ok::<(), String>(())
+                })
+                .await;
+
+                match write_result {
+                    Ok(Ok(())) => {
+                        tracing_event!(Level::DEBUG, "Settings/RSS state auto-saved successfully.");
+                    }
+                    Ok(Err(e)) => tracing_event!(Level::ERROR, "{}", e),
+                    Err(e) => tracing_event!(Level::ERROR, "Persistence writer join failed: {}", e),
+                }
+            }
+        });
 
         let (limits, system_warning) = calculate_adaptive_limits(&client_configs);
         tracing_event!(
@@ -700,6 +841,7 @@ impl App {
         let ul_limit = client_configs.global_upload_limit_bps as f64;
         let global_dl_bucket = Arc::new(TokenBucket::new(dl_limit, dl_limit));
         let global_ul_bucket = Arc::new(TokenBucket::new(ul_limit, ul_limit));
+        let persisted_rss_state = load_rss_state();
 
         let app_state = AppState {
             system_warning,
@@ -718,6 +860,13 @@ impl App {
                 client_configs.peer_sort_column,
                 client_configs.peer_sort_direction,
             ),
+            rss_runtime: RssRuntimeState {
+                history: persisted_rss_state.history,
+                preview_items: Vec::new(),
+                last_sync_at: persisted_rss_state.last_sync_at,
+                next_sync_at: None,
+                feed_errors: persisted_rss_state.feed_errors,
+            },
             lifetime_downloaded_from_config: client_configs.lifetime_downloaded,
             lifetime_uploaded_from_config: client_configs.lifetime_uploaded,
             minute_disk_backoff_history_ms: VecDeque::with_capacity(24 * 60),
@@ -748,13 +897,28 @@ impl App {
             manager_event_rx,
             app_command_tx,
             app_command_rx,
+            rss_sync_tx,
+            rss_downloaded_entry_tx,
+            rss_settings_tx,
             tui_event_tx,
             tui_event_rx,
             shutdown_tx,
+            persistence_tx: Some(persistence_tx),
+            persistence_task: Some(persistence_task),
             tui_task: None,
             watcher,
             notify_rx,
         };
+
+        let _rss_service_task = rss_service::spawn_rss_service(
+            app.client_configs.clone(),
+            app.app_state.rss_runtime.history.clone(),
+            app.app_command_tx.clone(),
+            rss_sync_rx,
+            rss_downloaded_entry_rx,
+            rss_settings_rx,
+            app.shutdown_tx.clone(),
+        );
 
         let mut torrents_to_load = app.client_configs.torrents.clone();
         torrents_to_load.sort_by_key(|t| !t.validation_status);
@@ -791,6 +955,7 @@ impl App {
             t.latest_state.number_of_pieces_completed < t.latest_state.number_of_pieces_total
         });
         app.app_state.is_seeding = !is_leeching;
+        app.refresh_rss_derived();
 
         Ok(app)
     }
@@ -910,6 +1075,7 @@ impl App {
         self.save_state_to_disk();
 
         self.shutdown_sequence(terminal).await;
+        self.flush_persistence_writer().await;
 
         Ok(())
     }
@@ -939,6 +1105,16 @@ impl App {
         self.app_state.ui.effects_last_wall_time = frame_wall_time;
         self.app_state.ui.effects_speed_multiplier = activity_speed_multiplier;
         self.app_state.ui.effects_phase_time += frame_dt * activity_speed_multiplier;
+
+        let disk_activity = self
+            .app_state
+            .disk_health_ema
+            .max(self.app_state.disk_health_peak_hold)
+            .clamp(0.0, 1.0);
+        let disk_phase_speed = 1.6 + 5.0 * disk_activity;
+        self.app_state.disk_health_phase = (self.app_state.disk_health_phase
+            + frame_dt * disk_phase_speed)
+            .rem_euclid(std::f64::consts::TAU);
     }
 
     fn startup_crossterm_event_listener(&mut self) {
@@ -985,6 +1161,15 @@ impl App {
                 }
             }
         }));
+    }
+
+    async fn flush_persistence_writer(&mut self) {
+        self.persistence_tx = None;
+        if let Some(handle) = self.persistence_task.take() {
+            if let Err(e) = handle.await {
+                tracing_event!(Level::ERROR, "Error joining persistence task: {}", e);
+            }
+        }
     }
 
     async fn shutdown_sequence(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
@@ -1098,6 +1283,10 @@ impl App {
                 }
             }
         });
+    }
+
+    fn refresh_rss_derived(&mut self) {
+        crate::tui::screens::rss::recompute_rss_derived(&mut self.app_state, &self.client_configs);
     }
 
     async fn handle_app_command(&mut self, command: AppCommand) {
@@ -1516,9 +1705,64 @@ impl App {
                     self.app_state.ui.needs_redraw = true;
                 }
             }
+            AppCommand::RssSyncNow => {
+                let _ = self.rss_sync_tx.try_send(());
+                self.app_state.ui.needs_redraw = true;
+            }
+            AppCommand::RssPreviewUpdated(preview_items) => {
+                self.app_state.rss_runtime.preview_items = preview_items;
+                self.refresh_rss_derived();
+                self.app_state.ui.needs_redraw = true;
+            }
+            AppCommand::RssSyncStatusUpdated {
+                last_sync_at,
+                next_sync_at,
+            } => {
+                self.app_state.rss_runtime.last_sync_at = last_sync_at;
+                self.app_state.rss_runtime.next_sync_at = next_sync_at;
+                self.save_state_to_disk();
+                self.app_state.ui.needs_redraw = true;
+            }
+            AppCommand::RssFeedErrorUpdated { feed_url, error } => {
+                if let Some(err) = error {
+                    self.app_state.rss_runtime.feed_errors.insert(feed_url, err);
+                } else {
+                    self.app_state.rss_runtime.feed_errors.remove(&feed_url);
+                }
+                self.save_state_to_disk();
+                self.app_state.ui.needs_redraw = true;
+            }
+            AppCommand::RssDownloadSelected(entry) => {
+                let existing_idx = self
+                    .app_state
+                    .rss_runtime
+                    .history
+                    .iter()
+                    .position(|existing| existing.dedupe_key == entry.dedupe_key);
+                if let Some(idx) = existing_idx {
+                    if self.app_state.rss_runtime.history[idx].info_hash.is_none()
+                        && entry.info_hash.is_some()
+                    {
+                        self.app_state.rss_runtime.history[idx].info_hash = entry.info_hash.clone();
+                        self.save_state_to_disk();
+                    }
+                } else {
+                    self.app_state.rss_runtime.history.push(entry);
+                    self.save_state_to_disk();
+                }
+                self.refresh_rss_derived();
+                self.app_state.ui.needs_redraw = true;
+            }
+            AppCommand::RssDownloadPreview(item) => {
+                self.download_rss_preview_item(item).await;
+                self.refresh_rss_derived();
+                self.app_state.ui.needs_redraw = true;
+            }
             AppCommand::UpdateConfig(new_settings) => {
                 let old_settings = self.client_configs.clone();
                 self.client_configs = new_settings.clone();
+                let _ = self.rss_settings_tx.send(self.client_configs.clone());
+                let rss_changed = rss_settings_changed(&old_settings, &new_settings);
 
                 if new_settings.ui_theme != old_settings.ui_theme {
                     self.app_state.theme = Theme::builtin(new_settings.ui_theme);
@@ -1557,6 +1801,16 @@ impl App {
                             tracing::error!("Failed to watch new folder: {}", e);
                         }
                     }
+                }
+
+                // Refresh RSS preview immediately when feed/filter config changes.
+                if rss_changed {
+                    prune_rss_feed_errors(
+                        &mut self.app_state.rss_runtime.feed_errors,
+                        &self.client_configs,
+                    );
+                    self.refresh_rss_derived();
+                    let _ = self.rss_sync_tx.try_send(());
                 }
 
                 // 3. Persist to Disk
@@ -1619,6 +1873,7 @@ impl App {
                 }
 
                 self.save_state_to_disk();
+                self.refresh_rss_derived();
 
                 self.app_state.ui.needs_redraw = true;
             }
@@ -1869,6 +2124,8 @@ impl App {
 
         if changed {
             self.sort_and_filter_torrent_list();
+            // Keep RSS derived recomputation off the hot metrics path.
+            // Full recompute is done on structural RSS changes (preview/filter/history/add/remove/search/edit).
             self.app_state.ui.needs_redraw = true;
         }
     }
@@ -1990,10 +2247,31 @@ impl App {
             })
             .collect();
 
-        if let Err(e) = save_settings(&self.client_configs) {
-            tracing_event!(Level::ERROR, "Failed to auto-save settings: {}", e);
-        } else {
-            tracing_event!(Level::DEBUG, "Settings auto-saved successfully.");
+        const RSS_HISTORY_LIMIT: usize = 1000;
+        if self.app_state.rss_runtime.history.len() > RSS_HISTORY_LIMIT {
+            let overflow = self.app_state.rss_runtime.history.len() - RSS_HISTORY_LIMIT;
+            self.app_state.rss_runtime.history.drain(0..overflow);
+        }
+
+        let rss_state = RssPersistedState {
+            history: self.app_state.rss_runtime.history.clone(),
+            last_sync_at: self.app_state.rss_runtime.last_sync_at.clone(),
+            feed_errors: self.app_state.rss_runtime.feed_errors.clone(),
+        };
+
+        let payload = PersistPayload {
+            settings: self.client_configs.clone(),
+            rss_state,
+        };
+
+        if let Some(tx) = &self.persistence_tx {
+            tx.send_replace(Some(payload));
+            if tx.is_closed() {
+                tracing_event!(
+                    Level::ERROR,
+                    "Failed to queue persistence payload: persistence task unavailable"
+                );
+            }
         }
     }
 
@@ -2229,6 +2507,7 @@ impl App {
             .torrents
             .insert(info_hash.clone(), placeholder_state);
         self.app_state.torrent_list_order.push(info_hash.clone());
+        self.refresh_rss_derived();
 
         if matches!(self.app_state.mode, AppMode::Welcome) {
             self.app_state.mode = AppMode::Normal;
@@ -2289,6 +2568,7 @@ impl App {
                     .torrent_list_order
                     .retain(|ih| *ih != info_hash);
                 self.torrent_metric_watch_rxs.remove(&info_hash);
+                self.refresh_rss_derived();
             }
         }
     }
@@ -2350,6 +2630,7 @@ impl App {
             .torrents
             .insert(info_hash.clone(), placeholder_state);
         self.app_state.torrent_list_order.push(info_hash.clone());
+        self.refresh_rss_derived();
 
         if matches!(self.app_state.mode, AppMode::Welcome) {
             self.app_state.mode = AppMode::Normal;
@@ -2405,6 +2686,7 @@ impl App {
                     .torrent_list_order
                     .retain(|ih| *ih != info_hash);
                 self.torrent_metric_watch_rxs.remove(&info_hash);
+                self.refresh_rss_derived();
             }
         }
     }
@@ -2479,6 +2761,213 @@ impl App {
                     e
                 );
             }
+        }
+    }
+
+    async fn download_rss_preview_item(&mut self, item: RssPreviewItem) {
+        if item.is_downloaded {
+            return;
+        }
+
+        let Some(link) = item.link.clone() else {
+            tracing_event!(
+                Level::INFO,
+                "Skipping RSS manual download: item has no link"
+            );
+            return;
+        };
+
+        let (added, info_hash) = if link.starts_with("magnet:") {
+            let added = rss_ingest::write_magnet(&self.client_configs, link.as_str())
+                .await
+                .is_ok();
+            let (v1_hash, v2_hash) = parse_hybrid_hashes(link.as_str());
+            (added, v1_hash.or(v2_hash))
+        } else if link.starts_with("http://") || link.starts_with("https://") {
+            self.download_rss_torrent_from_url(link.as_str()).await
+        } else {
+            tracing_event!(
+                Level::INFO,
+                "Skipping RSS manual download: unsupported link scheme '{}'",
+                link
+            );
+            (false, None)
+        };
+
+        if !added {
+            return;
+        }
+
+        for preview in &mut self.app_state.rss_runtime.preview_items {
+            if preview.dedupe_key == item.dedupe_key {
+                preview.is_downloaded = true;
+            }
+        }
+
+        let entry = RssHistoryEntry {
+            dedupe_key: item.dedupe_key.clone(),
+            info_hash: info_hash.map(hex::encode),
+            guid: item.guid.clone(),
+            link: item.link.clone(),
+            title: item.title.clone(),
+            source: item.source.clone(),
+            date_iso: item
+                .date_iso
+                .clone()
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            added_via: crate::config::RssAddedVia::Manual,
+        };
+        let existing_idx = self
+            .app_state
+            .rss_runtime
+            .history
+            .iter()
+            .position(|existing| existing.dedupe_key == entry.dedupe_key);
+        if let Some(idx) = existing_idx {
+            if self.app_state.rss_runtime.history[idx].info_hash.is_none()
+                && entry.info_hash.is_some()
+            {
+                self.app_state.rss_runtime.history[idx].info_hash = entry.info_hash.clone();
+                self.save_state_to_disk();
+            }
+        } else {
+            self.app_state.rss_runtime.history.push(entry);
+            self.save_state_to_disk();
+        }
+
+        if let Some(history_entry) = self
+            .app_state
+            .rss_runtime
+            .history
+            .iter()
+            .find(|h| h.dedupe_key == item.dedupe_key)
+            .cloned()
+        {
+            let _ = self.rss_downloaded_entry_tx.try_send(history_entry);
+        }
+
+        self.refresh_rss_derived();
+    }
+
+    async fn download_rss_torrent_from_url(&mut self, url: &str) -> (bool, Option<Vec<u8>>) {
+        if !is_safe_rss_item_url(url).await {
+            tracing_event!(
+                Level::WARN,
+                "RSS manual download blocked URL by network safety policy: {}",
+                url
+            );
+            return (false, None);
+        }
+
+        let client = match reqwest::Client::builder()
+            .user_agent("superseedr (https://github.com/Jagalite/superseedr)")
+            .timeout(Duration::from_secs(RSS_MANUAL_DOWNLOAD_TIMEOUT_SECS))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing_event!(
+                    Level::ERROR,
+                    "RSS manual download failed to build HTTP client: {}",
+                    e
+                );
+                return (false, None);
+            }
+        };
+
+        let response = match client.get(url).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing_event!(
+                    Level::ERROR,
+                    "RSS manual download request failed for {}: {}",
+                    url,
+                    e
+                );
+                return (false, None);
+            }
+        };
+        if !response.status().is_success() {
+            tracing_event!(
+                Level::ERROR,
+                "RSS manual download HTTP status {} for {}",
+                response.status(),
+                url
+            );
+            return (false, None);
+        }
+
+        let bytes = match response.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing_event!(
+                    Level::ERROR,
+                    "RSS manual download body read failed for {}: {}",
+                    url,
+                    e
+                );
+                return (false, None);
+            }
+        };
+        if bytes.len() > RSS_MAX_TORRENT_DOWNLOAD_BYTES {
+            tracing_event!(
+                Level::ERROR,
+                "RSS manual download exceeded max size for {} ({} bytes)",
+                url,
+                bytes.len()
+            );
+            return (false, None);
+        }
+        let Some(info_hash) = info_hash_from_torrent_bytes(bytes.as_ref()) else {
+            tracing_event!(
+                Level::ERROR,
+                "RSS manual download produced invalid torrent payload for {}",
+                url
+            );
+            return (false, None);
+        };
+
+        let file_hash = hex::encode(sha1::Sha1::digest(url.as_bytes()));
+        let temp_path = std::env::temp_dir().join(format!("superseedr-rss-{}.torrent", file_hash));
+        if let Err(e) = fs::write(&temp_path, bytes.as_ref()) {
+            tracing_event!(
+                Level::ERROR,
+                "RSS manual download failed to write temp file {:?}: {}",
+                temp_path,
+                e
+            );
+            return (false, None);
+        }
+
+        let existed_before = self.app_state.torrents.contains_key(&info_hash);
+        self.add_torrent_from_file(
+            temp_path.clone(),
+            self.client_configs.default_download_folder.clone(),
+            false,
+            TorrentControlState::Running,
+            HashMap::new(),
+            None,
+        )
+        .await;
+        let exists_after = self.app_state.torrents.contains_key(&info_hash);
+
+        if let Err(e) = fs::remove_file(&temp_path) {
+            tracing_event!(
+                Level::DEBUG,
+                "RSS manual download temp cleanup skipped for {:?}: {}",
+                temp_path,
+                e
+            );
+        }
+        if existed_before || exists_after {
+            (true, Some(info_hash))
+        } else {
+            tracing_event!(
+                Level::ERROR,
+                "RSS manual download did not register torrent {} after add_torrent_from_file",
+                hex::encode(&info_hash)
+            );
+            (false, None)
         }
     }
 
@@ -2750,19 +3239,64 @@ pub fn decode_info_hash(hash_string: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
-    let v1 = magnet_link
-        .split('&')
-        .find(|part| part.contains("xt=urn:btih:"))
-        .and_then(|part| part.split(':').next_back())
-        .and_then(|h| decode_info_hash(h).ok());
+    let query = magnet_link
+        .split_once('?')
+        .map(|(_, q)| q)
+        .unwrap_or(magnet_link);
+    let mut v1: Option<Vec<u8>> = None;
+    let mut v2: Option<Vec<u8>> = None;
 
-    let v2 = magnet_link
-        .split('&')
-        .find(|part| part.contains("xt=urn:btmh:"))
-        .and_then(|part| part.split(':').next_back())
-        .and_then(|h| decode_info_hash(h).ok());
+    for part in query.split('&') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        if !key.eq_ignore_ascii_case("xt") {
+            continue;
+        }
 
+        const BTIH_PREFIX: &str = "urn:btih:";
+        const BTMH_PREFIX: &str = "urn:btmh:";
+        if value.len() > BTIH_PREFIX.len()
+            && value
+                .get(..BTIH_PREFIX.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(BTIH_PREFIX))
+        {
+            v1 = value
+                .get(BTIH_PREFIX.len()..)
+                .and_then(|h| decode_info_hash(h).ok());
+        } else if value.len() > BTMH_PREFIX.len()
+            && value
+                .get(..BTMH_PREFIX.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(BTMH_PREFIX))
+        {
+            v2 = value
+                .get(BTMH_PREFIX.len()..)
+                .and_then(|h| decode_info_hash(h).ok());
+        }
+    }
     (v1, v2)
+}
+
+pub fn info_hash_from_torrent_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    let torrent = from_bytes(bytes).ok()?;
+
+    let hash = if torrent.info.meta_version == Some(2) {
+        if !torrent.info.pieces.is_empty() {
+            let mut hasher = sha1::Sha1::new();
+            hasher.update(&torrent.info_dict_bencode);
+            hasher.finalize().to_vec()
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(&torrent.info_dict_bencode);
+            hasher.finalize()[0..20].to_vec()
+        }
+    } else {
+        let mut hasher = sha1::Sha1::new();
+        hasher.update(&torrent.info_dict_bencode);
+        hasher.finalize().to_vec()
+    };
+
+    Some(hash)
 }
 
 fn resolve_magnet_torrent_name(
@@ -2910,15 +3444,34 @@ pub(crate) fn sort_and_filter_torrent_list_state(app_state: &mut AppState) {
     clamp_selected_indices_in_state(app_state);
 }
 
+fn rss_settings_changed(old_settings: &Settings, new_settings: &Settings) -> bool {
+    new_settings.rss != old_settings.rss
+}
+
+fn prune_rss_feed_errors(
+    feed_errors: &mut HashMap<String, FeedSyncError>,
+    settings: &Settings,
+) -> bool {
+    let configured_feed_urls: std::collections::HashSet<&str> = settings
+        .rss
+        .feeds
+        .iter()
+        .map(|feed| feed.url.as_str())
+        .collect();
+    let before = feed_errors.len();
+    feed_errors.retain(|feed_url, _| configured_feed_urls.contains(feed_url.as_str()));
+    feed_errors.len() != before
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_selected_indices_in_state, extract_magnet_display_name,
-        persisted_validation_status_from_piece_completion, resolve_magnet_torrent_name,
-        sort_and_filter_torrent_list_state, torrent_completion_percent,
-        torrent_is_effectively_incomplete, App, AppMode, AppState, FilePriority, PeerInfo,
-        SelectedHeader, SortDirection, TorrentDisplayState, TorrentMetrics, TorrentSortColumn,
-        UiState,
+        clamp_selected_indices_in_state, extract_magnet_display_name, parse_hybrid_hashes,
+        persisted_validation_status_from_piece_completion, prune_rss_feed_errors,
+        resolve_magnet_torrent_name, rss_settings_changed, sort_and_filter_torrent_list_state,
+        torrent_completion_percent, torrent_is_effectively_incomplete, App, AppMode, AppState,
+        FilePriority, PeerInfo, SelectedHeader, SortDirection, TorrentDisplayState, TorrentMetrics,
+        TorrentSortColumn, UiState,
     };
     use std::collections::HashMap;
     fn mock_display(name: &str, peer_count: usize) -> TorrentDisplayState {
@@ -3034,7 +3587,7 @@ mod tests {
             ui: UiState {
                 selected_header: SelectedHeader::Torrent(0),
                 selected_torrent_index: 5,
-                search_query: "ubn".to_string(),
+                search_query: "spha".to_string(),
                 ..Default::default()
             },
             ..Default::default()
@@ -3044,10 +3597,10 @@ mod tests {
         let hash_b = b"hash_b".to_vec();
         app_state
             .torrents
-            .insert(hash_a.clone(), mock_display("ubuntu-24.04.iso", 0));
+            .insert(hash_a.clone(), mock_display("samplealpha-24.04.iso", 0));
         app_state
             .torrents
-            .insert(hash_b.clone(), mock_display("archlinux.iso", 0));
+            .insert(hash_b.clone(), mock_display("samplelinux.iso", 0));
 
         sort_and_filter_torrent_list_state(&mut app_state);
 
@@ -3058,20 +3611,20 @@ mod tests {
     #[test]
     fn extract_magnet_display_name_decodes_dn() {
         let magnet =
-            "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=Ubuntu+24.04+ISO";
+            "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=SampleAlpha+24.04+ISO";
         assert_eq!(
             extract_magnet_display_name(magnet),
-            Some("Ubuntu 24.04 ISO".to_string())
+            Some("SampleAlpha 24.04 ISO".to_string())
         );
     }
 
     #[test]
     fn resolve_magnet_name_uses_dn_for_placeholder() {
         let info_hash = vec![0x11; 20];
-        let magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=Fedora";
+        let magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=SampleBeta";
         assert_eq!(
             resolve_magnet_torrent_name("Fetching name...", magnet, &info_hash),
-            "Fedora".to_string()
+            "SampleBeta".to_string()
         );
     }
 
@@ -3087,10 +3640,92 @@ mod tests {
 
     #[test]
     fn extract_magnet_display_name_skips_malformed_segments() {
-        let magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&badsegment&dn=Debian+Netinst";
+        let magnet = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&badsegment&dn=SampleGamma+Netinst";
         assert_eq!(
             extract_magnet_display_name(magnet),
-            Some("Debian Netinst".to_string())
+            Some("SampleGamma Netinst".to_string())
         );
+    }
+
+    #[test]
+    fn parse_hybrid_hashes_handles_case_insensitive_xt_and_urn_prefixes() {
+        let magnet = "magnet:?XT=URN:BTIH:1111111111111111111111111111111111111111&xT=urn:BTMH:12201111111111111111111111111111111111111111111111111111111111111111";
+        let (v1, v2) = parse_hybrid_hashes(magnet);
+        assert_eq!(v1, Some(vec![0x11; 20]));
+        assert_eq!(v2, Some(vec![0x11; 20]));
+    }
+
+    #[test]
+    fn rss_settings_changed_detects_filter_updates() {
+        let old = crate::config::Settings::default();
+        let mut new = old.clone();
+        new.rss.filters.push(crate::config::RssFilter {
+            query: "samplealpha".to_string(),
+            mode: crate::config::RssFilterMode::Fuzzy,
+            enabled: true,
+        });
+
+        assert!(rss_settings_changed(&old, &new));
+    }
+
+    #[test]
+    fn rss_settings_changed_ignores_non_rss_updates() {
+        let old = crate::config::Settings::default();
+        let mut new = old.clone();
+        new.global_download_limit_bps += 1;
+
+        assert!(!rss_settings_changed(&old, &new));
+    }
+
+    #[test]
+    fn prune_rss_feed_errors_removes_deleted_feed_urls() {
+        let mut settings = crate::config::Settings::default();
+        settings.rss.feeds.push(crate::config::RssFeed {
+            url: "https://active.example/rss.xml".to_string(),
+            enabled: true,
+        });
+
+        let mut feed_errors = HashMap::new();
+        feed_errors.insert(
+            "https://active.example/rss.xml".to_string(),
+            crate::config::FeedSyncError {
+                message: "timeout".to_string(),
+                occurred_at_iso: "2026-02-18T10:00:00Z".to_string(),
+            },
+        );
+        feed_errors.insert(
+            "https://removed.example/rss.xml".to_string(),
+            crate::config::FeedSyncError {
+                message: "403".to_string(),
+                occurred_at_iso: "2026-02-18T10:01:00Z".to_string(),
+            },
+        );
+
+        let changed = prune_rss_feed_errors(&mut feed_errors, &settings);
+        assert!(changed);
+        assert_eq!(feed_errors.len(), 1);
+        assert!(feed_errors.contains_key("https://active.example/rss.xml"));
+    }
+
+    #[test]
+    fn prune_rss_feed_errors_is_noop_when_all_urls_still_configured() {
+        let mut settings = crate::config::Settings::default();
+        settings.rss.feeds.push(crate::config::RssFeed {
+            url: "https://active.example/rss.xml".to_string(),
+            enabled: true,
+        });
+
+        let mut feed_errors = HashMap::new();
+        feed_errors.insert(
+            "https://active.example/rss.xml".to_string(),
+            crate::config::FeedSyncError {
+                message: "timeout".to_string(),
+                occurred_at_iso: "2026-02-18T10:00:00Z".to_string(),
+            },
+        );
+
+        let changed = prune_rss_feed_errors(&mut feed_errors, &settings);
+        assert!(!changed);
+        assert_eq!(feed_errors.len(), 1);
     }
 }

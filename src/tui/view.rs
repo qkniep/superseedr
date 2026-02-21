@@ -4,7 +4,7 @@
 use ratatui::{prelude::*, widgets::*};
 
 use crate::tui::screen_context::ScreenContext;
-use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, welcome};
+use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, rss, welcome};
 
 use crate::app::{AppMode, AppState};
 use crate::theme::ThemeContext;
@@ -61,6 +61,11 @@ pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
                 &app_state.ui.file_browser.data,
                 &app_state.ui.file_browser.browser_mode,
             );
+            apply_theme_effects_to_frame(f, &ctx);
+            return;
+        }
+        AppMode::Rss => {
+            rss::draw(f, &screen);
             apply_theme_effects_to_frame(f, &ctx);
             return;
         }
@@ -301,8 +306,8 @@ mod tests {
         // Ensure stats and block stream are splitting the bottom area
         if let Some(bs) = plan.block_stream {
             assert_eq!(
-                bs.width, 14,
-                "Block stream has fixed width of 14 in wide mode"
+                bs.width, 17,
+                "Block stream has fixed width of 17 in wide mode"
             );
         }
     }

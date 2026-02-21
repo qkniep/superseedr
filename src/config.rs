@@ -52,6 +52,98 @@ pub enum SortDirection {
     Descending,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RssAddedVia {
+    Auto,
+    #[default]
+    Manual,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct RssFeed {
+    pub url: String,
+    pub enabled: bool,
+}
+
+impl Default for RssFeed {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct RssFilter {
+    #[serde(alias = "regex")]
+    pub query: String,
+    pub mode: RssFilterMode,
+    pub enabled: bool,
+}
+
+impl Default for RssFilter {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            mode: RssFilterMode::Fuzzy,
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RssFilterMode {
+    #[default]
+    Fuzzy,
+    Regex,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct RssSettings {
+    pub enabled: bool,
+    pub poll_interval_secs: u64,
+    pub max_preview_items: usize,
+    pub feeds: Vec<RssFeed>,
+    pub filters: Vec<RssFilter>,
+}
+
+impl Default for RssSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_secs: 900,
+            max_preview_items: 500,
+            feeds: Vec::new(),
+            filters: Vec::new(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct RssHistoryEntry {
+    pub dedupe_key: String,
+    pub info_hash: Option<String>,
+    pub guid: Option<String>,
+    pub link: Option<String>,
+    pub title: String,
+    pub source: Option<String>,
+    pub date_iso: String,
+    pub added_via: RssAddedVia,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct FeedSyncError {
+    pub message: String,
+    pub occurred_at_iso: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -93,6 +185,9 @@ pub struct Settings {
     pub tracker_fallback_interval_secs: u64,
     pub client_leeching_fallback_interval_secs: u64,
     pub output_status_interval: u64,
+
+    // RSS
+    pub rss: RssSettings,
 }
 
 impl Default for Settings {
@@ -129,6 +224,7 @@ impl Default for Settings {
             tracker_fallback_interval_secs: 1800,
             client_leeching_fallback_interval_secs: 60,
             output_status_interval: 0,
+            rss: RssSettings::default(),
         }
     }
 }
@@ -507,6 +603,51 @@ mod tests {
             ThemeName::default(),
             "Invalid ui_theme type should safely fallback to default"
         );
+    }
+
+    #[test]
+    fn test_rss_filter_legacy_regex_key_is_accepted() {
+        let toml_str = r#"
+            [rss]
+            enabled = true
+            poll_interval_secs = 300
+            max_preview_items = 50
+
+            [[rss.filters]]
+            regex = "ubuntu"
+            enabled = true
+        "#;
+
+        let settings: Settings = Figment::new()
+            .merge(Toml::string(toml_str))
+            .extract()
+            .expect("Settings parsing should accept legacy rss.filters.regex key");
+
+        assert_eq!(settings.rss.filters.len(), 1);
+        assert_eq!(settings.rss.filters[0].query, "ubuntu");
+        assert!(matches!(settings.rss.filters[0].mode, RssFilterMode::Fuzzy));
+        assert!(settings.rss.filters[0].enabled);
+    }
+
+    #[test]
+    fn test_rss_filter_mode_regex_is_parsed() {
+        let toml_str = r#"
+            [rss]
+            enabled = true
+
+            [[rss.filters]]
+            query = "series\\s+alpha"
+            mode = "regex"
+            enabled = true
+        "#;
+
+        let settings: Settings = Figment::new()
+            .merge(Toml::string(toml_str))
+            .extract()
+            .expect("Settings parsing should accept rss.filters.mode");
+
+        assert_eq!(settings.rss.filters.len(), 1);
+        assert!(matches!(settings.rss.filters[0].mode, RssFilterMode::Regex));
     }
 
     #[test]

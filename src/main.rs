@@ -7,6 +7,7 @@ mod config;
 mod errors;
 mod integrations;
 mod networking;
+mod persistence;
 mod resource_manager;
 mod storage;
 mod telemetry;

@@ -8,7 +8,9 @@ use crate::app::BrowserPane;
 use crate::app::FileBrowserMode;
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
-use crate::app::{App, AppMode, AppState, ConfigItem, SelectedHeader, TorrentControlState};
+use crate::app::{
+    App, AppMode, AppState, ConfigItem, RssScreen, SelectedHeader, TorrentControlState,
+};
 use crate::config::Settings;
 use crate::config::SortDirection;
 use crate::theme::ThemeContext;
@@ -32,6 +34,7 @@ use crate::tui::layout::normal::LayoutPlan;
 use crate::tui::layout::normal::DEFAULT_SIDEBAR_PERCENT;
 use crate::tui::screen_context::ScreenContext;
 use crate::tui::tree::TreeViewState;
+use chrono::{DateTime, Utc};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -72,6 +75,7 @@ pub enum UiAction {
         with_files: bool,
     },
     OpenConfig,
+    OpenRss,
     DataRateSlower,
     DataRateFaster,
     ThemePrev,
@@ -90,6 +94,7 @@ pub enum UiEffect {
     ToDeleteConfirm,
     OpenAddTorrentFileBrowser,
     OpenConfigScreen,
+    OpenRssScreen,
     BroadcastManagerDataRate(u64),
     ApplyThemePrev,
     ApplyThemeNext,
@@ -311,6 +316,10 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
             redraw: true,
             effects: vec![UiEffect::OpenHelpScreen],
         },
+        UiAction::OpenRss => ReduceResult {
+            redraw: true,
+            effects: vec![UiEffect::OpenRssScreen],
+        },
         UiAction::PasteText(text) => ReduceResult {
             redraw: true,
             effects: vec![UiEffect::HandlePastedText(text)],
@@ -336,6 +345,7 @@ fn map_key_to_ui_action(key_code: KeyCode) -> Option<UiAction> {
         KeyCode::Char('d') => Some(UiAction::OpenDeleteConfirm { with_files: false }),
         KeyCode::Char('D') => Some(UiAction::OpenDeleteConfirm { with_files: true }),
         KeyCode::Char('c') => Some(UiAction::OpenConfig),
+        KeyCode::Char('r') => Some(UiAction::OpenRss),
         KeyCode::Char('m') => Some(UiAction::OpenHelp),
         #[cfg(windows)]
         KeyCode::Char('v') => Some(UiAction::PasteFromClipboard),
@@ -377,7 +387,7 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
         draw_peer_stream(f, app_state, r, ctx);
     }
     if let Some(r) = plan.block_stream {
-        draw_vertical_block_stream(f, app_state, r, ctx);
+        draw_block_stream_and_disk_orb(f, app_state, r, ctx);
     }
     if let Some(r) = plan.stats {
         draw_stats_panel(f, app_state, settings, r, ctx);
@@ -865,6 +875,11 @@ pub fn draw_footer(
         "[c]",
         "onfig",
         ctx.apply(Style::default().fg(ctx.state_complete())),
+    );
+    push_if_fits(
+        "[r]",
+        "ss",
+        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
     );
     push_if_fits(
         "[d]",
@@ -1751,6 +1766,21 @@ pub fn draw_stats_panel(
         ]),
         Line::from(vec![
             Span::styled(
+                "RSS Sync: ",
+                ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+            ),
+            Span::styled(
+                app_state
+                    .rss_runtime
+                    .next_sync_at
+                    .as_deref()
+                    .and_then(rss_sync_countdown_label)
+                    .unwrap_or_else(|| "-".to_string()),
+                ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
                 "Torrents: ",
                 ctx.apply(Style::default().fg(ctx.accent_peach())),
             ),
@@ -1822,18 +1852,12 @@ pub fn draw_stats_panel(
         Line::from(vec![
             Span::styled("RAM: ", ctx.apply(Style::default().fg(ctx.state_warning()))),
             Span::styled(
-                format!("{:.1}%", app_state.ram_usage_percent),
+                format!(
+                    "{:.1}% ({})",
+                    app_state.ram_usage_percent,
+                    format_memory(app_state.app_ram_usage)
+                ),
                 ctx.apply(Style::default().fg(ctx.state_warning())),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "App RAM: ",
-                ctx.apply(Style::default().fg(ctx.accent_flamingo())),
-            ),
-            Span::styled(
-                format_memory(app_state.app_ram_usage),
-                ctx.apply(Style::default().fg(ctx.accent_flamingo())),
             ),
         ]),
         Line::from(vec![
@@ -2023,6 +2047,47 @@ pub fn draw_stats_panel(
     f.render_widget(stats_paragraph, stats_chunk);
 }
 
+fn rss_sync_countdown_label(next_sync_at: &str) -> Option<String> {
+    let next_sync = DateTime::parse_from_rfc3339(next_sync_at).ok()?;
+    let remaining_secs = next_sync
+        .with_timezone(&Utc)
+        .signed_duration_since(Utc::now())
+        .num_seconds();
+    if remaining_secs <= 0 {
+        return None;
+    }
+
+    let hours = remaining_secs / 3600;
+    let minutes = (remaining_secs % 3600) / 60;
+    let seconds = remaining_secs % 60;
+    let label = if hours > 0 {
+        format!("{}h {}m {}s", hours, minutes, seconds)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, seconds)
+    } else {
+        format!("{}s", seconds)
+    };
+    Some(label)
+}
+
+fn peer_stream_smoothed_activity(data_slice: &[u64], i: usize) -> f64 {
+    let current = data_slice.get(i).copied().unwrap_or(0) as f64;
+    let prev = if i > 0 {
+        data_slice.get(i - 1).copied().unwrap_or(0) as f64
+    } else {
+        current
+    };
+    let next = data_slice.get(i + 1).copied().unwrap_or(0) as f64;
+    (prev * 0.25) + (current * 0.5) + (next * 0.25)
+}
+
+fn peer_stream_wave_amplitude(smoothed_activity: f64) -> f64 {
+    let min_amp = 0.10;
+    let max_amp = 0.28;
+    let normalized = (smoothed_activity / 10.0).clamp(0.0, 1.0);
+    min_amp + (max_amp - min_amp) * normalized
+}
+
 pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
     if area.height < 3 || area.width < 10 {
         return;
@@ -2114,28 +2179,42 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
     let mut generate_points = |data_slice: &[u64],
                                small_points: &mut Vec<(f64, f64)>,
                                large_points: &mut Vec<(f64, f64)>,
-                               base_y: f64| {
+                               base_y: f64,
+                               lane_phase: f64| {
+        let wave_frequency = 0.45;
         for (i, &val) in data_slice.iter().enumerate() {
             if val == 0 {
                 continue;
             }
             let val_f = val as f64;
             let is_heavy = val > 3;
+            let smoothed_activity = peer_stream_smoothed_activity(data_slice, i);
+            let wave_amp = peer_stream_wave_amplitude(smoothed_activity);
+            let wave_center = base_y + wave_amp * ((i as f64 * wave_frequency) + lane_phase).sin();
 
             let small_dot_count = (val_f.sqrt().ceil() as usize).clamp(1, 6);
             let activity_spread = (val_f * 0.08).min(0.6);
             let base_jitter = 0.05;
             let intensity = base_jitter + activity_spread;
+            let x_intensity = (intensity * 0.90).max(0.02);
+            let y_intensity = (intensity * 0.65).max(0.015);
 
             for _ in 0..small_dot_count {
-                let x_jitter = rng.random_range(-intensity..intensity);
-                let y_jitter = rng.random_range(-intensity..intensity);
-                small_points.push((i as f64 + x_jitter, base_y + y_jitter));
+                let x_jitter = rng.random_range(-x_intensity..x_intensity);
+                let y_jitter = rng.random_range(-y_intensity..y_intensity);
+                small_points.push((
+                    i as f64 + x_jitter,
+                    (wave_center + y_jitter).clamp(0.6, 3.4),
+                ));
             }
 
             if is_heavy {
-                let heavy_jitter = rng.random_range(-0.1..0.1);
-                large_points.push((i as f64 + heavy_jitter, base_y + heavy_jitter));
+                let heavy_x_jitter = rng.random_range(-0.08..0.08);
+                let heavy_y_jitter = rng.random_range(-0.05..0.05);
+                large_points.push((
+                    i as f64 + heavy_x_jitter,
+                    (wave_center + heavy_y_jitter).clamp(0.6, 3.4),
+                ));
             }
         }
     };
@@ -2145,18 +2224,21 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
         &mut conn_points_small,
         &mut conn_points_large,
         3.0,
+        0.0,
     );
     generate_points(
         disc_slice,
         &mut disc_points_small,
         &mut disc_points_large,
         2.0,
+        1.7,
     );
     generate_points(
         disconn_slice,
         &mut disconn_points_small,
         &mut disconn_points_large,
         1.0,
+        3.4,
     );
 
     let datasets = vec![
@@ -2232,13 +2314,183 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
     f.render_widget(chart, area);
 }
 
-pub fn draw_vertical_block_stream(
+pub fn draw_block_stream_and_disk_orb(
     f: &mut Frame,
     app_state: &AppState,
     area: Rect,
     ctx: &ThemeContext,
 ) {
-    if area.width < 2 {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+
+    let is_vertical_mode = app_state.screen_area.width < 100
+        || (app_state.screen_area.height as f32 > app_state.screen_area.width as f32 * 0.6);
+    if is_vertical_mode {
+        let split = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
+        draw_disk_health_panel(f, app_state, split[1], ctx);
+    } else {
+        let split =
+            Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(area);
+        draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
+        draw_disk_health_panel(f, app_state, split[1], ctx);
+    }
+}
+
+fn draw_vertical_block_stream_panel(
+    f: &mut Frame,
+    app_state: &AppState,
+    area: Rect,
+    ctx: &ThemeContext,
+) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let block = Block::default()
+        .title(Span::styled(
+            "Blocks",
+            ctx.apply(Style::default().fg(ctx.theme.scale.stream.inflow)),
+        ))
+        .borders(Borders::ALL)
+        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    draw_vertical_block_stream_content(f, app_state, inner, ctx);
+}
+
+fn draw_disk_health_panel(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let disk_theme_color = ctx.ui_disk_blob();
+    let disk_state_word = match app_state.disk_health_state_level {
+        0 => "Stable",
+        1 => "Busy",
+        2 => "Strain",
+        _ => "Chaos",
+    };
+    let block = Block::default()
+        .title_top(Span::styled(
+            "Disk",
+            ctx.apply(Style::default().fg(disk_theme_color).bold()),
+        ))
+        .title_top(
+            Line::from(Span::styled(
+                disk_state_word,
+                ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+            ))
+            .alignment(Alignment::Right),
+        )
+        .borders(Borders::ALL)
+        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    draw_disk_health_orb(f, app_state, inner, ctx);
+}
+
+fn compute_throughput_gap(app_state: &AppState) -> f64 {
+    let net_total_bps = app_state.avg_download_history.last().copied().unwrap_or(0)
+        + app_state.avg_upload_history.last().copied().unwrap_or(0);
+    if net_total_bps == 0 {
+        return 0.0;
+    }
+    let disk_total_bps = app_state.avg_disk_read_bps + app_state.avg_disk_write_bps;
+    (net_total_bps.saturating_sub(disk_total_bps) as f64 / net_total_bps as f64).clamp(0.0, 1.0)
+}
+
+fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+
+    let health = app_state
+        .disk_health_ema
+        .max(app_state.disk_health_peak_hold)
+        .clamp(0.0, 1.0);
+    let gap = compute_throughput_gap(app_state);
+    let phase = app_state.disk_health_phase;
+
+    let orb_color = ctx.ui_disk_blob();
+    let orb_style = if health > 0.70 {
+        ctx.apply(Style::default().fg(orb_color).bold())
+    } else if health > 0.35 {
+        ctx.apply(Style::default().fg(orb_color))
+    } else {
+        ctx.apply(Style::default().fg(orb_color).dim())
+    };
+
+    let max_square = area.width.min(area.height);
+    if max_square < 3 {
+        return;
+    }
+    let side = ((max_square as f32) * 1.0).round() as u16;
+    let side = side.clamp(3, max_square);
+    let orb_area = Rect::new(
+        area.x + (area.width.saturating_sub(side)) / 2,
+        area.y + (area.height.saturating_sub(side)) / 2,
+        side,
+        side,
+    );
+
+    let cells_w = orb_area.width as usize;
+    let cells_h = orb_area.height as usize;
+    let mut lines: Vec<Line> = Vec::with_capacity(cells_h);
+
+    const BRAILLE_BITS: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+
+    for cy in 0..cells_h {
+        let mut row = String::with_capacity(cells_w);
+        for cx in 0..cells_w {
+            let mut bits: u8 = 0;
+            for (sy, braille_row) in BRAILLE_BITS.iter().enumerate() {
+                for (sx, &bit) in braille_row.iter().enumerate() {
+                    let px = cx as f64 + (sx as f64 + 0.5) / 2.0;
+                    let py = cy as f64 + (sy as f64 + 0.5) / 4.0;
+
+                    let nx = ((px / cells_w as f64) - 0.5) * 2.0;
+                    let ny = ((py / cells_h as f64) - 0.5) * 2.0;
+
+                    let squeeze = if nx > 0.0 { 1.0 - (0.35 * gap) } else { 1.0 };
+                    let x = nx / squeeze.max(0.35);
+                    // Terminal cells are usually taller than they are wide; compensate to keep a round shape.
+                    let y = ny * (cells_w as f64 / cells_h as f64).clamp(0.6, 1.8) * 2.0;
+                    let theta = y.atan2(x);
+                    let dist = (x * x + y * y).sqrt();
+
+                    let deform = (0.04 + 0.18 * health) * f64::sin(2.0 * theta + phase)
+                        + (0.02 + 0.10 * health) * f64::sin(3.0 * theta - 0.7 * phase);
+                    let edge = 0.96 + deform;
+
+                    // Render as a solid blob (no hollow shell look).
+                    let fill_factor = (1.02 - 0.04 * health).clamp(0.94, 1.02);
+                    let in_blob = dist <= edge * fill_factor;
+
+                    if in_blob {
+                        bits |= bit;
+                    }
+                }
+            }
+            row.push(if bits == 0 {
+                ' '
+            } else {
+                char::from_u32(0x2800 + bits as u32).unwrap_or(' ')
+            });
+        }
+        lines.push(Line::from(Span::styled(row, orb_style)));
+    }
+
+    f.render_widget(Paragraph::new(lines), orb_area);
+}
+
+fn draw_vertical_block_stream_content(
+    f: &mut Frame,
+    app_state: &AppState,
+    area: Rect,
+    ctx: &ThemeContext,
+) {
+    if area.width < 1 || area.height < 1 {
         return;
     }
     let selected_torrent = app_state
@@ -2246,66 +2498,20 @@ pub fn draw_vertical_block_stream(
         .get(app_state.ui.selected_torrent_index)
         .and_then(|info_hash| app_state.torrents.get(info_hash));
 
+    let Some(torrent) = selected_torrent else {
+        return;
+    };
+
     const UP_TRIANGLE: &str = "▲";
     const DOWN_TRIANGLE: &str = "▼";
     const SEPARATOR: &str = "·";
 
     let color_inflow = ctx.theme.scale.stream.inflow;
     let color_outflow = ctx.theme.scale.stream.outflow;
-    let color_border = ctx.theme.semantic.border;
     let color_empty = ctx.theme.semantic.surface0;
 
-    let (total_in, total_out) = if let Some(t) = selected_torrent {
-        let in_sum: u64 = t.latest_state.blocks_in_history.iter().sum();
-        let out_sum: u64 = t.latest_state.blocks_out_history.iter().sum();
-        (in_sum, out_sum)
-    } else {
-        (0, 0)
-    };
-
-    let title_str = "Blocks";
-    let title_len = title_str.len();
-    let total_ops = total_in + total_out;
-
-    let title_spans: Vec<Span> = if total_ops == 0 {
-        vec![Span::styled(
-            title_str,
-            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-        )]
-    } else {
-        let blue_ratio = total_in as f64 / total_ops as f64;
-        let blue_chars = (blue_ratio * title_len as f64).round() as usize;
-        let (blue_part, green_part) = title_str.split_at(blue_chars.min(title_len));
-        let mut spans = Vec::new();
-        if !blue_part.is_empty() {
-            spans.push(Span::styled(
-                blue_part,
-                ctx.apply(Style::default().fg(color_inflow)),
-            ));
-        }
-        if !green_part.is_empty() {
-            spans.push(Span::styled(
-                green_part,
-                ctx.apply(Style::default().fg(color_outflow)),
-            ));
-        }
-        spans
-    };
-    let block = Block::default()
-        .title(Line::from(title_spans))
-        .borders(Borders::ALL)
-        .border_style(ctx.apply(Style::default().fg(color_border)));
-
-    let Some(torrent) = selected_torrent else {
-        f.render_widget(block, area);
-        return;
-    };
-
-    let inner_area = block.inner(area);
-    f.render_widget(block, area);
-
-    let history_len = inner_area.height as usize;
-    let content_width = inner_area.width as usize;
+    let history_len = area.height as usize;
+    let content_width = area.width as usize;
 
     if history_len == 0 || content_width == 0 {
         return;
@@ -2471,8 +2677,8 @@ pub fn draw_vertical_block_stream(
         }
         lines.push(Line::from(spans));
     }
-    let paragraph = Paragraph::new(lines);
-    f.render_widget(paragraph, inner_area);
+
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_sparkles<'a>(
@@ -3444,6 +3650,10 @@ async fn execute_ui_effect(app: &mut App, effect: UiEffect) {
         UiEffect::OpenHelpScreen => {
             app.app_state.mode = AppMode::Help;
         }
+        UiEffect::OpenRssScreen => {
+            app.app_state.ui.rss.active_screen = RssScreen::Unified;
+            app.app_state.mode = AppMode::Rss;
+        }
         UiEffect::HandlePastedText(text) => {
             handle_pasted_text(app, &text).await;
         }
@@ -3668,6 +3878,16 @@ mod tests {
     }
 
     #[test]
+    fn reducer_open_rss_emits_open_rss_effect() {
+        let mut app_state = AppState::default();
+
+        let result = reduce_ui_action(&mut app_state, UiAction::OpenRss);
+
+        assert!(result.redraw);
+        assert_eq!(result.effects, vec![UiEffect::OpenRssScreen]);
+    }
+
+    #[test]
     fn reducer_data_rate_actions_update_rate_and_emit_effect() {
         let mut app_state = AppState {
             data_rate: DataRate::Rate1s,
@@ -3799,5 +4019,41 @@ mod tests {
                 "magnet:?xt=urn:btih:test".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn peer_stream_wave_amplitude_scales_with_activity() {
+        let low = peer_stream_wave_amplitude(0.0);
+        let mid = peer_stream_wave_amplitude(5.0);
+        let high = peer_stream_wave_amplitude(20.0);
+
+        assert!(low < mid);
+        assert!(mid < high);
+        assert!((low - 0.10).abs() < f64::EPSILON);
+        assert!((high - 0.28).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn peer_stream_smoothed_activity_blends_neighbors() {
+        let data = [0_u64, 10, 0];
+        let smoothed = peer_stream_smoothed_activity(&data, 1);
+        assert!((smoothed - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn apply_open_rss_screen_sets_rss_mode_and_unified_screen() {
+        let mut app = App::new(crate::config::Settings::default())
+            .await
+            .expect("build app");
+        app.app_state.ui.rss.active_screen = RssScreen::History;
+
+        execute_ui_effect(&mut app, UiEffect::OpenRssScreen).await;
+
+        assert!(matches!(app.app_state.mode, AppMode::Rss));
+        assert!(matches!(
+            app.app_state.ui.rss.active_screen,
+            RssScreen::Unified
+        ));
+        let _ = app.shutdown_tx.send(());
     }
 }

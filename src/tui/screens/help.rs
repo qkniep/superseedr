@@ -283,6 +283,13 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
+                        "r",
+                        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+                    )),
+                    Cell::from("Open RSS screen"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
                         "z",
                         ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                     )),
@@ -568,6 +575,76 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         level_text,
                         Style::default().fg(ctx.state_warning()).bold(),
                     )),
+                ]),
+            ],
+        ),
+        AppMode::Rss => (
+            " Help / RSS ",
+            vec![
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Esc / q",
+                        ctx.apply(Style::default().fg(ctx.state_error())),
+                    )),
+                    Cell::from("Exit RSS mode"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Tab / h",
+                        ctx.apply(Style::default().fg(ctx.state_selected())),
+                    )),
+                    Cell::from("Next pane focus (Tab) / swap Explorer with History (h)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "s",
+                        ctx.apply(Style::default().fg(ctx.state_warning())),
+                    )),
+                    Cell::from("Sync now"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "↑ / ↓ / k / j",
+                        ctx.apply(Style::default().fg(ctx.state_info())),
+                    )),
+                    Cell::from("Move selection in active RSS sub-screen"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "a / d / Space",
+                        ctx.apply(Style::default().fg(ctx.state_complete())),
+                    )),
+                    Cell::from(
+                        "Focused pane actions: Links add/delete/toggle; Filters add/delete/toggle",
+                    ),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Enter",
+                        ctx.apply(Style::default().fg(ctx.state_warning())),
+                    )),
+                    Cell::from("Confirm add/search input"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "/",
+                        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+                    )),
+                    Cell::from("Start Explorer search mode (when Explorer pane is focused)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Y",
+                        ctx.apply(Style::default().fg(ctx.state_success())),
+                    )),
+                    Cell::from("Download selected Explorer item (if not downloaded)"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "j / k / ↑ / ↓",
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                    )),
+                    Cell::from("Move selection in the focused pane"),
                 ]),
             ],
         ),

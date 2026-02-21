@@ -137,7 +137,7 @@ pub fn draw(
             ));
             footer_spans.push(Span::raw(" Down | "));
             footer_spans.push(Span::styled(
-                "[Shift+Y]",
+                "[Y]",
                 ctx.apply(Style::default().fg(ctx.state_success())),
             ));
             footer_spans.push(Span::raw(" Confirm Selection | "));
@@ -176,14 +176,14 @@ pub fn draw(
             }
 
             footer_spans.push(Span::styled(
-                "[Shift+Y]",
+                "[Y]",
                 ctx.apply(Style::default().fg(ctx.state_success())),
             ));
             footer_spans.push(Span::raw(" Confirm"));
         }
         FileBrowserMode::File(_) => {
             footer_spans.push(Span::styled(
-                "[Shift+Y]",
+                "[Y]",
                 ctx.apply(Style::default().fg(ctx.state_success())),
             ));
             footer_spans.push(Span::raw(" Confirm File | "));

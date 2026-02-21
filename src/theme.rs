@@ -464,6 +464,7 @@ pub struct ThemeScale {
     pub ip_hash: [Color; 14],
     pub heatmap: ThemeHeatmap,
     pub stream: ThemeStream,
+    pub disk_blob: Color,
     pub categorical: ThemeCategorical,
 }
 
@@ -497,7 +498,11 @@ pub struct ThemeAccentSlots {
     pub peach: Color,
     pub sapphire: Color,
     pub maroon: Color,
-    pub flamingo: Color,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ThemeUiSlots {
+    pub disk_blob: Color,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -506,6 +511,7 @@ pub struct ThemeRoleSlots {
     pub metric: ThemeMetricSlots,
     pub peer: ThemePeerSlots,
     pub accent: ThemeAccentSlots,
+    pub ui: ThemeUiSlots,
 }
 
 pub fn color_to_rgb(color: Color) -> (u8, u8, u8) {
@@ -619,8 +625,8 @@ impl ThemeContext {
         self.theme.role_slots().accent.maroon
     }
 
-    pub fn accent_flamingo(&self) -> Color {
-        self.theme.role_slots().accent.flamingo
+    pub fn ui_disk_blob(&self) -> Color {
+        self.theme.role_slots().ui.disk_blob
     }
 
     pub fn apply_effects_to_color_at(
@@ -709,7 +715,11 @@ impl ThemeContext {
             let wave = phase.sin();
 
             let (rr, gg, bb) = color_to_rgb(out);
-            out = if wave > 0.0 {
+            out = if self.theme.name == ThemeName::BlackHole {
+                // Black Hole uses a true dark sweep across all text instead of a brighten/darken cycle.
+                let factor = ((wave + 1.0) * 0.5) * intensity;
+                blend_colors((rr, gg, bb), (0, 0, 0), factor)
+            } else if wave > 0.0 {
                 let factor = wave * intensity;
                 blend_colors((rr, gg, bb), (255, 255, 255), factor)
             } else {
@@ -756,7 +766,9 @@ impl Theme {
                 peach: self.scale.categorical.peach,
                 sapphire: self.scale.categorical.sapphire,
                 maroon: self.scale.categorical.maroon,
-                flamingo: self.scale.categorical.flamingo,
+            },
+            ui: ThemeUiSlots {
+                disk_blob: self.scale.disk_blob,
             },
         }
     }
@@ -860,7 +872,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-
+                disk_blob: categorical.teal,
                 categorical,
             },
         }
@@ -929,7 +941,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
-
+                disk_blob: categorical.sapphire,
                 categorical,
             },
         }
@@ -943,14 +955,14 @@ impl Theme {
             mauve: Color::Rgb(213, 126, 203),
             red: Color::Rgb(236, 92, 149),
             maroon: Color::Rgb(191, 79, 128),
-            peach: Color::Rgb(255, 178, 170),
-            yellow: Color::Rgb(255, 224, 158),
-            green: Color::Rgb(126, 214, 171),
-            teal: Color::Rgb(122, 201, 207),
-            sky: Color::Rgb(157, 196, 247),
-            sapphire: Color::Rgb(126, 173, 235),
-            blue: Color::Rgb(98, 145, 221),
-            lavender: Color::Rgb(189, 162, 244),
+            peach: Color::Rgb(255, 172, 194),
+            yellow: Color::Rgb(255, 198, 216),
+            green: Color::Rgb(229, 160, 207),
+            teal: Color::Rgb(217, 149, 212),
+            sky: Color::Rgb(205, 141, 224),
+            sapphire: Color::Rgb(193, 132, 217),
+            blue: Color::Rgb(181, 122, 206),
+            lavender: Color::Rgb(210, 172, 238),
         };
 
         Self {
@@ -995,23 +1007,23 @@ impl Theme {
                     categorical.peach,
                     categorical.yellow,
                     categorical.lavender,
+                    categorical.teal,
+                    categorical.green,
                     categorical.sky,
                     categorical.sapphire,
                     categorical.blue,
-                    categorical.teal,
-                    categorical.green,
                 ],
                 heatmap: ThemeHeatmap {
-                    low: categorical.rosewater,
+                    low: categorical.flamingo,
                     medium: categorical.pink,
-                    high: categorical.mauve,
+                    high: categorical.red,
                     empty: Color::Rgb(255, 130, 205),
                 },
                 stream: ThemeStream {
-                    inflow: categorical.sky,
+                    inflow: categorical.mauve,
                     outflow: categorical.pink,
                 },
-
+                disk_blob: categorical.pink,
                 categorical,
             },
         }
@@ -1079,6 +1091,7 @@ impl Theme {
                     inflow: categorical.sapphire,
                     outflow: categorical.sky,
                 },
+                disk_blob: categorical.sapphire,
                 categorical,
             },
         }
@@ -1146,6 +1159,7 @@ impl Theme {
                     inflow: categorical.sapphire,
                     outflow: categorical.sky,
                 },
+                disk_blob: categorical.sky,
                 categorical,
             },
         }
@@ -1219,6 +1233,7 @@ impl Theme {
                     inflow: categorical.peach,
                     outflow: categorical.flamingo,
                 },
+                disk_blob: categorical.yellow,
                 categorical,
             },
         }
@@ -1278,6 +1293,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.pink,
                 categorical,
             },
         }
@@ -1337,6 +1353,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.sapphire,
                 categorical,
             },
         }
@@ -1396,6 +1413,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.yellow,
                 categorical,
             },
         }
@@ -1455,6 +1473,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.sapphire,
                 categorical,
             },
         }
@@ -1514,6 +1533,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.sapphire,
                 categorical,
             },
         }
@@ -1573,6 +1593,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.teal,
                 categorical,
             },
         }
@@ -1632,6 +1653,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.yellow,
                 categorical,
             },
         }
@@ -1691,6 +1713,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.green,
                 categorical,
             },
         }
@@ -1750,6 +1773,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.sapphire,
                 categorical,
             },
         }
@@ -1809,6 +1833,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.blue,
                 categorical,
             },
         }
@@ -1868,6 +1893,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.teal,
                 categorical,
             },
         }
@@ -1947,6 +1973,7 @@ impl Theme {
                     inflow: Color::Rgb(0, 255, 65),
                     outflow: Color::Rgb(0, 143, 17),
                 },
+                disk_blob: categorical.green,
                 categorical,
             },
         }
@@ -2006,6 +2033,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.teal,
                 categorical,
             },
         }
@@ -2070,6 +2098,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.sapphire,
                 categorical,
             },
         }
@@ -2129,6 +2158,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.yellow,
                 categorical,
             },
         }
@@ -2188,6 +2218,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.green,
                 categorical,
             },
         }
@@ -2254,6 +2285,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.pink,
                 categorical,
             },
         }
@@ -2313,6 +2345,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.blue,
                 categorical,
             },
         }
@@ -2387,6 +2420,7 @@ impl Theme {
                     inflow: Color::Rgb(255, 175, 0),
                     outflow: Color::Rgb(255, 128, 0),
                 },
+                disk_blob: categorical.teal,
                 categorical,
             },
         }
@@ -2446,6 +2480,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.teal,
                 categorical,
             },
         }
@@ -2505,6 +2540,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.yellow,
                 categorical,
             },
         }
@@ -2564,6 +2600,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.sky,
                 categorical,
             },
         }
@@ -2628,6 +2665,7 @@ impl Theme {
                     inflow: Color::Rgb(0, 255, 255),
                     outflow: Color::Rgb(255, 0, 255),
                 },
+                disk_blob: categorical.lavender,
                 categorical,
             },
         }
@@ -2692,6 +2730,7 @@ impl Theme {
                     inflow: Color::Rgb(255, 255, 0),
                     outflow: Color::Rgb(255, 50, 0),
                 },
+                disk_blob: categorical.peach,
                 categorical,
             },
         }
@@ -2761,6 +2800,7 @@ impl Theme {
                     inflow: Color::Rgb(0, 255, 255),
                     outflow: Color::Rgb(200, 150, 255),
                 },
+                disk_blob: categorical.teal,
                 categorical,
             },
         }
@@ -2820,6 +2860,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.mauve,
                 categorical,
             },
         }
@@ -2879,6 +2920,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.lavender,
                 categorical,
             },
         }
@@ -2938,6 +2980,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.teal,
                 categorical,
             },
         }
@@ -2997,6 +3040,7 @@ impl Theme {
                     inflow: categorical.blue,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.blue,
                 categorical,
             },
         }
@@ -3004,48 +3048,48 @@ impl Theme {
 
     pub fn black_hole() -> Self {
         let categorical = ThemeCategorical {
-            rosewater: Color::Rgb(235, 240, 255),
-            flamingo: Color::Rgb(255, 163, 193),
-            pink: Color::Rgb(233, 148, 255),
-            mauve: Color::Rgb(180, 149, 255),
-            red: Color::Rgb(255, 97, 130),
-            maroon: Color::Rgb(217, 89, 118),
-            peach: Color::Rgb(255, 182, 128),
-            yellow: Color::Rgb(245, 210, 110),
-            green: Color::Rgb(98, 220, 180),
-            teal: Color::Rgb(90, 214, 229),
-            sky: Color::Rgb(128, 190, 255),
-            sapphire: Color::Rgb(110, 168, 247),
-            blue: Color::Rgb(95, 148, 240),
-            lavender: Color::Rgb(165, 146, 250),
+            rosewater: Color::Rgb(245, 245, 245),
+            flamingo: Color::Rgb(224, 224, 224),
+            pink: Color::Rgb(204, 204, 204),
+            mauve: Color::Rgb(184, 184, 184),
+            red: Color::Rgb(164, 164, 164),
+            maroon: Color::Rgb(144, 144, 144),
+            peach: Color::Rgb(124, 124, 124),
+            yellow: Color::Rgb(104, 104, 104),
+            green: Color::Rgb(84, 84, 84),
+            teal: Color::Rgb(72, 72, 72),
+            sky: Color::Rgb(60, 60, 60),
+            sapphire: Color::Rgb(48, 48, 48),
+            blue: Color::Rgb(36, 36, 36),
+            lavender: Color::Rgb(172, 172, 172),
         };
 
         Self {
             name: ThemeName::BlackHole,
             effects: ThemeEffects {
                 local_enabled: true,
-                flicker_hz: 4.8,
-                flicker_intensity: 0.12,
-                local_burst_duty: 0.12,
-                local_burst_hz: 0.6,
-                local_idle_intensity: 0.05,
-                local_burst_boost: 1.15,
+                flicker_hz: 5.2,
+                flicker_intensity: 0.18,
+                local_burst_duty: 0.16,
+                local_burst_hz: 0.75,
+                local_idle_intensity: 0.07,
+                local_burst_boost: 1.28,
                 wave_enabled: true,
-                wave_hz: 0.24,
-                wave_intensity: 0.13,
-                wave_wavelength: 72.0,
-                wave_angle_degrees: -40.0,
+                wave_hz: 0.28,
+                wave_intensity: 0.16,
+                wave_wavelength: 64.0,
+                wave_angle_degrees: -34.0,
                 wave_mode: WaveMode::Linear,
             },
             semantic: ThemeSemantic {
-                text: Color::Rgb(222, 230, 255),
-                subtext1: Color::Rgb(176, 190, 232),
-                subtext0: Color::Rgb(136, 152, 204),
-                overlay0: Color::Rgb(74, 84, 120),
-                surface2: Color::Rgb(34, 40, 60),
-                surface1: Color::Rgb(21, 25, 40),
-                surface0: Color::Rgb(8, 10, 18),
-                border: Color::Rgb(100, 115, 168),
+                text: Color::Rgb(234, 234, 234),
+                subtext1: Color::Rgb(188, 188, 188),
+                subtext0: Color::Rgb(144, 144, 144),
+                overlay0: Color::Rgb(98, 98, 98),
+                surface2: Color::Rgb(26, 26, 26),
+                surface1: Color::Rgb(12, 12, 12),
+                surface0: Color::Rgb(0, 0, 0),
+                border: Color::Rgb(116, 116, 116),
                 white: Color::White,
             },
             scale: ThemeScale {
@@ -3061,15 +3105,16 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.mauve,
-                    high: categorical.red,
-                    empty: Color::Rgb(21, 25, 40),
+                    low: categorical.sapphire,
+                    medium: categorical.peach,
+                    high: categorical.pink,
+                    empty: Color::Rgb(6, 8, 14),
                 },
                 stream: ThemeStream {
-                    inflow: categorical.sapphire,
-                    outflow: categorical.green,
+                    inflow: categorical.lavender,
+                    outflow: categorical.teal,
                 },
+                disk_blob: categorical.mauve,
                 categorical,
             },
         }
@@ -3139,6 +3184,7 @@ impl Theme {
                     inflow: categorical.sky,
                     outflow: categorical.peach,
                 },
+                disk_blob: categorical.peach,
                 categorical,
             },
         }
@@ -3212,6 +3258,7 @@ impl Theme {
                     inflow: categorical.sapphire,
                     outflow: categorical.teal,
                 },
+                disk_blob: categorical.sapphire,
                 categorical,
             },
         }
@@ -3239,18 +3286,17 @@ impl Theme {
             name: ThemeName::Diamond,
             effects: ThemeEffects {
                 local_enabled: true,
-                flicker_hz: 6.0,
-                flicker_intensity: 0.12,
-                local_burst_duty: 0.14,
-                local_burst_hz: 0.8,
-                local_idle_intensity: 0.05,
-                local_burst_boost: 1.18,
+                flicker_hz: 7.4,
+                flicker_intensity: 0.16,
+                local_burst_duty: 0.08,
+                local_burst_hz: 0.9,
+                local_idle_intensity: 0.02,
+                local_burst_boost: 1.35,
                 wave_enabled: true,
-                wave_hz: 0.34,
-                wave_intensity: 0.09,
-                wave_wavelength: 58.0,
-                // 90deg gives a vertical sweep (up/down axis).
-                wave_angle_degrees: 90.0,
+                wave_hz: 0.44,
+                wave_intensity: 0.11,
+                wave_wavelength: 52.0,
+                wave_angle_degrees: 74.0,
                 wave_mode: WaveMode::Linear,
             },
             semantic: ThemeSemantic {
@@ -3266,16 +3312,31 @@ impl Theme {
             },
             scale: ThemeScale {
                 speed: [
+                    categorical.red,
+                    categorical.peach,
+                    categorical.yellow,
+                    categorical.green,
+                    categorical.teal,
+                    categorical.sky,
+                    categorical.blue,
+                    categorical.mauve,
+                ],
+                ip_hash: [
+                    categorical.rosewater,
                     categorical.sky,
                     categorical.sapphire,
+                    categorical.blue,
                     categorical.teal,
                     categorical.green,
                     categorical.yellow,
                     categorical.peach,
+                    categorical.pink,
                     categorical.mauve,
                     categorical.lavender,
+                    categorical.flamingo,
+                    categorical.red,
+                    categorical.maroon,
                 ],
-                ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
                     medium: categorical.sky,
@@ -3286,6 +3347,7 @@ impl Theme {
                     inflow: categorical.sky,
                     outflow: categorical.teal,
                 },
+                disk_blob: categorical.sapphire,
                 categorical,
             },
         }
@@ -3359,6 +3421,7 @@ impl Theme {
                     inflow: categorical.sky,
                     outflow: categorical.green,
                 },
+                disk_blob: categorical.teal,
                 categorical,
             },
         }

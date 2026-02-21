@@ -3,7 +3,7 @@
 
 use crate::app::{App, AppMode};
 
-use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, welcome};
+use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, rss, welcome};
 
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::prelude::Rect;
@@ -104,6 +104,14 @@ async fn dispatch_mode_event(event: CrosstermEvent, app: &mut App) {
         }
         AppMode::DeleteConfirm => {
             let _ = delete_confirm::handle_event(event, app);
+        }
+        AppMode::Rss => {
+            rss::handle_event(
+                event,
+                &mut app.app_state,
+                &app.client_configs,
+                &app.app_command_tx,
+            );
         }
         AppMode::FileBrowser => {}
     }

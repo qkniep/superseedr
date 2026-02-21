@@ -36,7 +36,7 @@ pub struct DeleteConfirmReduceResult {
 
 fn map_key_to_delete_confirm_action(key_code: KeyCode) -> Option<DeleteConfirmAction> {
     match key_code {
-        KeyCode::Enter => Some(DeleteConfirmAction::Confirm),
+        KeyCode::Char('Y') => Some(DeleteConfirmAction::Confirm),
         KeyCode::Esc => Some(DeleteConfirmAction::Cancel),
         _ => None,
     }
@@ -171,7 +171,7 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
 
         let actions = Line::from(vec![
             Span::styled(
-                "[Enter]",
+                "[Y]",
                 ctx.apply(Style::default().fg(ctx.state_success()).bold()),
             ),
             Span::raw(" Confirm  "),
@@ -230,6 +230,15 @@ pub fn handle_event(event: CrosstermEvent, app: &mut App) -> bool {
 mod tests {
     use super::*;
     use crate::app::{AppMode, AppState};
+
+    #[test]
+    fn keymap_uses_shift_y_for_confirm() {
+        assert_eq!(
+            map_key_to_delete_confirm_action(KeyCode::Char('Y')),
+            Some(DeleteConfirmAction::Confirm)
+        );
+        assert_eq!(map_key_to_delete_confirm_action(KeyCode::Enter), None);
+    }
 
     #[test]
     fn reducer_cancel_closes_without_effects() {
