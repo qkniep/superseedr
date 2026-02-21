@@ -68,3 +68,24 @@ services:
       - "127.0.0.1:${INTEROP_QBIT_WEBUI_PORT:-18080}:${INTEROP_QBIT_WEBUI_PORT:-18080}"
     depends_on:
       - tracker
+
+  transmission:
+    image: lscr.io/linuxserver/transmission:latest
+    container_name: ${INTEROP_PROJECT_NAME}_transmission
+    tty: true
+    stdin_open: true
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - USER=${INTEROP_TRANSMISSION_USER:-interop}
+      - PASS=${INTEROP_TRANSMISSION_PASS:-interop}
+      - PEERPORT=51413
+    volumes:
+      - ${INTEROP_TRANSMISSION_CONFIG_PATH:-/tmp/interop_transmission_config}:/config
+      - ${INTEROP_TRANSMISSION_DOWNLOADS_PATH:-/tmp/interop_transmission_downloads}:/downloads
+      - ${INTEROP_FIXTURES_PATH}:/fixtures:ro
+    ports:
+      - "127.0.0.1:${INTEROP_TRANSMISSION_RPC_PORT:-19091}:9091"
+    depends_on:
+      - tracker

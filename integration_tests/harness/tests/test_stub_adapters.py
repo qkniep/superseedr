@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -29,7 +30,11 @@ def test_qbittorrent_authenticate_falls_back_to_temp_password(monkeypatch: pytes
             _ = tail
             return "temporary password is provided for this session: temp-pass"
 
-    adapter = QBittorrentAdapter(compose=_ComposeStub(), password="wrong-pass", auth_timeout_secs=3)
+    adapter = QBittorrentAdapter(
+        compose=cast(Any, _ComposeStub()),
+        password="wrong-pass",
+        auth_timeout_secs=3,
+    )
     attempts: list[str] = []
 
     def _fake_login(password: str) -> bool:
@@ -105,7 +110,45 @@ def test_qbittorrent_wait_for_download_error_state(monkeypatch: pytest.MonkeyPat
     assert adapter.wait_for_download(expected_manifest={}, timeout_secs=2) is False
 
 
-def test_transmission_stub_is_explicit() -> None:
+def test_transmission_add_torrent_sends_metainfo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    torrent = tmp_path / "sample.torrent"
+    torrent.write_bytes(b"fake-transmission-torrent")
     adapter = TransmissionAdapter()
-    with pytest.raises(NotImplementedError, match="planned but not implemented"):
-        adapter.start()
+
+    captured: dict[str, object] = {}
+
+    def _fake_rpc(method: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
+        captured["method"] = method
+        captured["arguments"] = arguments or {}
+        return {}
+
+    monkeypatch.setattr(adapter, "_rpc", _fake_rpc)
+    adapter.add_torrent(str(torrent), "/downloads/v1")
+
+    assert captured["method"] == "torrent-add"
+    args = captured["arguments"]
+    assert isinstance(args, dict)
+    assert args["download-dir"] == "/downloads/v1"
+    assert args["paused"] is False
+    assert isinstance(args["metainfo"], str)
+
+
+def test_transmission_wait_for_download_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = TransmissionAdapter()
+    snapshots = [
+        [{"error": 0, "leftUntilDone": 100}],
+        [{"error": 0, "leftUntilDone": 0}],
+    ]
+
+    def _fake_list_torrents() -> list[dict[str, int]]:
+        return snapshots.pop(0) if snapshots else [{"error": 0, "leftUntilDone": 0}]
+
+    monkeypatch.setattr(adapter, "_list_torrents", _fake_list_torrents)
+    monkeypatch.setattr("integration_tests.harness.clients.transmission.time.sleep", lambda _secs: None)
+    assert adapter.wait_for_download(expected_manifest={}, timeout_secs=2) is True
+
+
+def test_transmission_wait_for_download_error_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = TransmissionAdapter()
+    monkeypatch.setattr(adapter, "_list_torrents", lambda: [{"error": 3, "leftUntilDone": 500}])
+    assert adapter.wait_for_download(expected_manifest={}, timeout_secs=2) is False

@@ -9,6 +9,7 @@ from pathlib import Path
 from integration_tests.harness.config import HarnessDefaults, resolve_paths
 from integration_tests.harness.scenarios import (
     qbittorrent_to_superseedr,
+    superseedr_to_transmission,
     superseedr_to_qbittorrent,
     superseedr_to_superseedr,
 )
@@ -18,6 +19,7 @@ SCENARIOS = {
     "superseedr_to_superseedr": superseedr_to_superseedr,
     "superseedr_to_qbittorrent": superseedr_to_qbittorrent,
     "qbittorrent_to_superseedr": qbittorrent_to_superseedr,
+    "superseedr_to_transmission": superseedr_to_transmission,
 }
 
 

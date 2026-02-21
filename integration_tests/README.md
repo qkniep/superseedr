@@ -7,6 +7,9 @@ Current stable scope:
 - `superseedr -> qbittorrent` (seed + leech)
 - `qbittorrent -> superseedr` (seed + leech)
 
+Experimental scope:
+- `superseedr -> transmission` (seed + leech, currently `v1` only)
+
 ## Purpose
 
 This harness exists to validate real interoperability behavior, not just unit-level correctness.
@@ -93,7 +96,8 @@ Accepted arguments:
 - `--scenario`: one of:
   - `superseedr_to_superseedr`
   - `superseedr_to_qbittorrent`
-  - `qbittorrent_to_superseedr` (experimental; reverse path)
+  - `qbittorrent_to_superseedr`
+  - `superseedr_to_transmission` (experimental)
 - `--mode`: `all`, `v1`, `v2`, `hybrid`
 - `--timeout-secs`: timeout per mode in seconds
 - `--run-id`: optional explicit run id
@@ -156,10 +160,11 @@ As of February 21, 2026:
 - qBittorrent container/auth/add/polling/log collection are implemented in `integration_tests/harness/clients/qbittorrent.py`.
 - CI interop matrix now enforces all three scenarios (`superseedr_to_superseedr`, `superseedr_to_qbittorrent`, `qbittorrent_to_superseedr`) across all three modes.
 - qBittorrent and tracker host ports are dynamically allocated in qBittorrent scenarios/tests to reduce local port-collision flakes.
-- Transmission adapter remains a stub (`integration_tests/harness/clients/transmission.py`).
+- Transmission adapter now supports auth/session handshake, torrent add, status polling, and log collection.
+- `superseedr -> transmission` scenario/test scaffolding has been added (currently validated on `v1`) but is not yet in CI matrix.
 
 ## Plan / Next Tasks
 
-1. Add focused diagnostics for reverse failures (piece-level mapping/torrent-level correlation) to shorten triage loops.
-2. Implement Transmission adapter (`integration_tests/harness/clients/transmission.py`) with auth/session, add torrent, status polling, and log collection.
-3. Add `superseedr <-> transmission` scenarios and extend CI once they are stable.
+1. Validate and stabilize `superseedr -> transmission` for `v2` and `hybrid` compatibility.
+2. Add focused diagnostics for reverse failures (piece-level mapping/torrent-level correlation) to shorten triage loops.
+3. Add `transmission -> superseedr` scenario and extend CI once transmission scenarios are stable.
