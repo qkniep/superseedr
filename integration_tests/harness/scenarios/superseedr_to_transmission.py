@@ -16,6 +16,8 @@ from integration_tests.harness.config import HarnessDefaults, HarnessPaths
 from integration_tests.harness.docker_ctl import DockerCompose
 from integration_tests.harness.manifest import build_expected_manifest, validate_output
 
+SUPPORTED_MODES = ("v1",)
+
 
 @dataclass(frozen=True)
 class ScenarioResult:

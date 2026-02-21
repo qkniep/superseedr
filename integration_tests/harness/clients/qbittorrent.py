@@ -64,10 +64,21 @@ class QBittorrentAdapter(ClientAdapter):
     def authenticate(self) -> None:
         deadline = time.monotonic() + self.auth_timeout_secs
         attempts: list[str] = [self.password]
-        temp_password_tried = False
+        temp_password: str | None = None
         last_error: Exception | None = None
 
         while time.monotonic() < deadline:
+            if not attempts:
+                if self.compose is not None:
+                    discovered_temp = self._extract_temporary_password(self.compose.logs(self.service_name, tail=200))
+                    if discovered_temp:
+                        temp_password = discovered_temp
+
+                # Try configured password and known temporary password until timeout.
+                attempts.append(self.password)
+                if temp_password and temp_password != self.password:
+                    attempts.append(temp_password)
+
             current_password = attempts.pop(0)
             try:
                 if self._login_once(current_password):
@@ -76,18 +87,7 @@ class QBittorrentAdapter(ClientAdapter):
             except Exception as exc:
                 last_error = exc
 
-            if attempts:
-                continue
-
-            if self.compose is not None and not temp_password_tried:
-                temp_password = self._extract_temporary_password(self.compose.logs(self.service_name, tail=200))
-                if temp_password and temp_password != current_password:
-                    temp_password_tried = True
-                    attempts.append(temp_password)
-                    continue
-
             time.sleep(1)
-            attempts.append(self.password)
 
         raise RuntimeError(
             f"Failed to authenticate to qBittorrent at {self.base_url} as {self.username}"

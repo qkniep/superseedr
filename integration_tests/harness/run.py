@@ -53,7 +53,15 @@ def main() -> int:
     if not args.skip_generation:
         torrents_root = scenario_mod.generate_fixtures_and_torrents(paths.root, defaults.announce_url)
 
-    modes = list(ALL_MODES) if args.mode == "all" else [args.mode]
+    scenario_supported_modes = tuple(getattr(scenario_mod, "SUPPORTED_MODES", ALL_MODES))
+    modes = list(scenario_supported_modes) if args.mode == "all" else [args.mode]
+
+    if args.mode != "all" and args.mode not in scenario_supported_modes:
+        supported = ",".join(scenario_supported_modes)
+        raise SystemExit(
+            f"Scenario {args.scenario} does not support mode={args.mode}. "
+            f"Supported modes: {supported}"
+        )
     results = []
 
     for mode in modes:

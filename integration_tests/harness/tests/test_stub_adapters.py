@@ -47,6 +47,35 @@ def test_qbittorrent_authenticate_falls_back_to_temp_password(monkeypatch: pytes
     assert "temp-pass" in attempts
 
 
+def test_qbittorrent_authenticate_retries_temp_password_until_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _ComposeStub:
+        def logs(self, _service: str, tail: int = 200) -> str:
+            _ = tail
+            return "temporary password is provided for this session: temp-pass"
+
+    adapter = QBittorrentAdapter(
+        compose=cast(Any, _ComposeStub()),
+        password="wrong-pass",
+        auth_timeout_secs=5,
+    )
+    attempts: list[str] = []
+    temp_attempts = 0
+
+    def _fake_login(password: str) -> bool:
+        nonlocal temp_attempts
+        attempts.append(password)
+        if password == "temp-pass":
+            temp_attempts += 1
+            return temp_attempts >= 2
+        return False
+
+    monkeypatch.setattr(adapter, "_login_once", _fake_login)
+    monkeypatch.setattr("integration_tests.harness.clients.qbittorrent.time.sleep", lambda _secs: None)
+    adapter.authenticate()
+    assert temp_attempts >= 2
+    assert attempts.count("temp-pass") >= 2
+
+
 def test_qbittorrent_build_multipart_form_includes_file_and_fields() -> None:
     payload, content_type = QBittorrentAdapter._build_multipart_form(
         fields={"savepath": "/downloads/leech", "paused": "false"},
