@@ -5,12 +5,13 @@ on:
 
 jobs:
   interop:
-    name: Interop (${{ matrix.mode }})
+    name: Interop (${{ matrix.scenario }} / ${{ matrix.mode }})
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        scenario: [superseedr_to_superseedr, superseedr_to_qbittorrent]
         mode: [v1, v2, hybrid]
 
     steps:
@@ -29,6 +30,7 @@ jobs:
       - name: Decide mode for this matrix shard
         id: select_mode
         run: |
+          echo "scenario=${{ matrix.scenario }}" >> "$GITHUB_OUTPUT"
           echo "mode=${{ matrix.mode }}" >> "$GITHUB_OUTPUT"
           echo "run=true" >> "$GITHUB_OUTPUT"
 
@@ -37,11 +39,11 @@ jobs:
         env:
           INTEROP_TIMEOUT_SECS: "300"
         run: |
-          ./integration_tests/run_interop.sh "${{ steps.select_mode.outputs.mode }}"
+          ./integration_tests/run_interop.sh "${{ steps.select_mode.outputs.mode }}" "${{ steps.select_mode.outputs.scenario }}"
 
       - name: Upload interop artifacts
         if: always() && steps.select_mode.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: interop-artifacts-${{ matrix.mode }}-${{ github.run_id }}
+          name: interop-artifacts-${{ matrix.scenario }}-${{ matrix.mode }}-${{ github.run_id }}
           path: integration_tests/artifacts/

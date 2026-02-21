@@ -201,6 +201,29 @@ class QBittorrentAdapter(ClientAdapter):
                 f"Failed to add torrent to qBittorrent: status={status} body={response_text!r}"
             )
 
+    def set_force_start(self, info_hash: str, enabled: bool = True) -> None:
+        if not self._authenticated:
+            self.authenticate()
+
+        payload = urllib.parse.urlencode(
+            {
+                "hashes": info_hash,
+                "value": "true" if enabled else "false",
+            }
+        ).encode("utf-8")
+        status, body = self._request(
+            "/api/v2/torrents/setForceStart",
+            method="POST",
+            body=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        response_text = body.decode("utf-8", errors="replace").strip()
+        if status != 200 or response_text:
+            raise RuntimeError(
+                f"Failed to set force-start on qBittorrent torrent {info_hash}: "
+                f"status={status} body={response_text!r}"
+            )
+
     def wait_for_download(self, expected_manifest: dict, timeout_secs: int) -> bool:
         _ = expected_manifest
         if not self._authenticated:
