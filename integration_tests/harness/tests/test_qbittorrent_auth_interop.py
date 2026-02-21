@@ -55,6 +55,8 @@ def test_qbittorrent_container_and_auth() -> None:
         project_name,
         {
             "INTEROP_PROJECT_NAME": project_name,
+            "INTEROP_UID": str(os.getuid()),
+            "INTEROP_GID": str(os.getgid()),
             "INTEROP_TRACKER_PORT": str(tracker_port),
             "INTEROP_TRACKER_SCRIPT_PATH": str(paths.tracker_script.resolve()),
             "INTEROP_FIXTURES_PATH": str(paths.fixtures_root.resolve()),

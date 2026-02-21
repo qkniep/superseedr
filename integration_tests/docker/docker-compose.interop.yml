@@ -56,8 +56,8 @@ services:
     tty: true
     stdin_open: true
     environment:
-      - PUID=1000
-      - PGID=1000
+      - PUID=${INTEROP_UID:-1000}
+      - PGID=${INTEROP_GID:-1000}
       - TZ=UTC
       - WEBUI_PORT=${INTEROP_QBIT_WEBUI_PORT:-18080}
     volumes:

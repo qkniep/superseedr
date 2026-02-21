@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import shutil
 import subprocess
@@ -189,6 +190,8 @@ def run_mode(
     qbit_web_port = _reserve_local_port()
     compose_env = {
         "INTEROP_PROJECT_NAME": project_name,
+        "INTEROP_UID": str(os.getuid()),
+        "INTEROP_GID": str(os.getgid()),
         "INTEROP_TRACKER_PORT": str(tracker_port),
         "INTEROP_TRACKER_SCRIPT_PATH": str(harness_paths.tracker_script.resolve()),
         "INTEROP_FIXTURES_PATH": str(staged_fixtures_root.resolve()),
