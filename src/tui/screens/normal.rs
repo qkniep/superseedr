@@ -2553,6 +2553,8 @@ fn draw_vertical_block_stream_content(
 
     let in_slice = &in_history[in_history.len().saturating_sub(history_len)..];
     let out_slice = &out_history[out_history.len().saturating_sub(history_len)..];
+    let has_activity = in_slice.iter().any(|&v| v > 0) || out_slice.iter().any(|&v| v > 0);
+    let idle_slow_probability = if has_activity { 0.0 } else { 0.20 };
 
     let slice_len = in_slice.len();
     let mut lines: Vec<Line> = Vec::with_capacity(history_len);
@@ -2671,6 +2673,22 @@ fn draw_vertical_block_stream_content(
             let total_scaled_blocks_f64 = (larger_stream_count + smaller_stream_count) as f64;
             let ratio_smaller = smaller_stream_count as f64 / total_scaled_blocks_f64;
             let smaller_first: bool = order_rng.random_bool(1.0 - ratio_smaller);
+            let mut slow_rng = StdRng::seed_from_u64(
+                frame_seed
+                    ^ (dl_slice_index as u64).rotate_left(7)
+                    ^ (ul_slice_index as u64).rotate_right(11)
+                    ^ 0xAC71_4D2F,
+            );
+            let smaller_seed = if slow_rng.random_bool(idle_slow_probability) {
+                smaller_seed_salt
+            } else {
+                frame_seed ^ smaller_seed_salt
+            };
+            let larger_seed = if slow_rng.random_bool(idle_slow_probability) {
+                larger_seed_salt
+            } else {
+                frame_seed ^ larger_seed_salt
+            };
 
             spans.push(Span::raw(" ".repeat(padding)));
             if smaller_first {
@@ -2679,14 +2697,14 @@ fn draw_vertical_block_stream_content(
                     smaller_symbol,
                     smaller_stream_count,
                     smaller_color,
-                    frame_seed ^ smaller_seed_salt,
+                    smaller_seed,
                 );
                 render_sparkles(
                     &mut spans,
                     larger_symbol,
                     larger_stream_count,
                     larger_color,
-                    frame_seed ^ larger_seed_salt,
+                    larger_seed,
                 );
             } else {
                 render_sparkles(
@@ -2694,14 +2712,14 @@ fn draw_vertical_block_stream_content(
                     larger_symbol,
                     larger_stream_count,
                     larger_color,
-                    frame_seed ^ larger_seed_salt,
+                    larger_seed,
                 );
                 render_sparkles(
                     &mut spans,
                     smaller_symbol,
                     smaller_stream_count,
                     smaller_color,
-                    frame_seed ^ smaller_seed_salt,
+                    smaller_seed,
                 );
             }
             spans.push(Span::raw(" ".repeat(trailing_padding)));
