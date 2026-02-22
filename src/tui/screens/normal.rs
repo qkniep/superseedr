@@ -2449,7 +2449,7 @@ fn disk_health_state_word(state_level: u8) -> &'static str {
 
 fn disk_health_status_color(ctx: &ThemeContext, state_level: u8) -> Color {
     match state_level {
-        0 => Color::Reset,
+        0 => ctx.theme.semantic.subtext0,
         1 => ctx.state_info(),
         2 => ctx.state_warning(),
         _ => ctx.state_error(),
@@ -2457,10 +2457,7 @@ fn disk_health_status_color(ctx: &ThemeContext, state_level: u8) -> Color {
 }
 
 fn disk_health_title_color(ctx: &ThemeContext, state_level: u8) -> Color {
-    match state_level {
-        0 => Color::Reset,
-        _ => disk_health_status_color(ctx, state_level),
-    }
+    disk_health_status_color(ctx, state_level)
 }
 
 fn disk_health_border_color(ctx: &ThemeContext, state_level: u8) -> Color {
@@ -4287,7 +4284,7 @@ mod tests {
     fn disk_health_status_color_uses_state_slots_across_themes() {
         for theme_name in ThemeName::sorted_for_ui() {
             let ctx = ThemeContext::new(Theme::builtin(theme_name), 0.0);
-            assert_eq!(disk_health_status_color(&ctx, 0), Color::Reset);
+            assert_eq!(disk_health_status_color(&ctx, 0), ctx.theme.semantic.subtext0);
             assert_eq!(disk_health_status_color(&ctx, 1), ctx.state_info());
             assert_eq!(disk_health_status_color(&ctx, 2), ctx.state_warning());
             assert_eq!(disk_health_status_color(&ctx, 3), ctx.state_error());
@@ -4299,7 +4296,7 @@ mod tests {
     fn disk_health_title_color_keeps_stable_readable_and_maps_alerts() {
         for theme_name in ThemeName::sorted_for_ui() {
             let ctx = ThemeContext::new(Theme::builtin(theme_name), 0.0);
-            assert_eq!(disk_health_title_color(&ctx, 0), Color::Reset);
+            assert_eq!(disk_health_title_color(&ctx, 0), ctx.theme.semantic.subtext0);
             assert_eq!(disk_health_title_color(&ctx, 1), ctx.state_info());
             assert_eq!(disk_health_title_color(&ctx, 2), ctx.state_warning());
             assert_eq!(disk_health_title_color(&ctx, 3), ctx.state_error());
