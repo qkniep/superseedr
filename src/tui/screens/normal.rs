@@ -2131,10 +2131,27 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
             ctx.apply(Style::default().fg(ctx.theme.semantic.surface1))
         }
     };
+    let use_compact_legend = should_use_compact_peer_activity_legend(
+        area.width.saturating_sub(2) as usize,
+        connected_count,
+        discovered_count,
+        disconnected_count,
+    );
+    let connected_label = if use_compact_legend { "C" } else { "Connected" };
+    let discovered_label = if use_compact_legend {
+        "D"
+    } else {
+        "Discovered"
+    };
+    let disconnected_label = if use_compact_legend {
+        "X"
+    } else {
+        "Disconnected"
+    };
 
     let legend_line = Line::from(vec![
         Span::styled(
-            "Connected:",
+            format!("{}:", connected_label),
             legend_style_fn(connected_count, color_connected),
         ),
         Span::styled(
@@ -2143,7 +2160,7 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
         ),
         Span::raw(" "),
         Span::styled(
-            "Discovered:",
+            format!("{}:", discovered_label),
             legend_style_fn(discovered_count, color_discovered),
         ),
         Span::styled(
@@ -2152,7 +2169,7 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
         ),
         Span::raw(" "),
         Span::styled(
-            "Disconnected:",
+            format!("{}:", disconnected_label),
             legend_style_fn(disconnected_count, color_disconnected),
         ),
         Span::styled(
@@ -2312,6 +2329,19 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
         .y_axis(ratatui::widgets::Axis::default().bounds([0.5, 3.5]));
 
     f.render_widget(chart, area);
+}
+
+fn should_use_compact_peer_activity_legend(
+    available_width: usize,
+    connected: u64,
+    discovered: u64,
+    disconnected: u64,
+) -> bool {
+    let full = format!(
+        "Connected: {}  Discovered: {}  Disconnected: {}",
+        connected, discovered, disconnected
+    );
+    full.len() > available_width
 }
 
 pub fn draw_block_stream_and_disk_orb(
@@ -2519,6 +2549,7 @@ fn draw_vertical_block_stream_content(
 
     let in_history = &torrent.latest_state.blocks_in_history;
     let out_history = &torrent.latest_state.blocks_out_history;
+    let allow_download_inflow = should_render_download_inflow(&torrent.latest_state);
 
     let in_slice = &in_history[in_history.len().saturating_sub(history_len)..];
     let out_slice = &out_history[out_history.len().saturating_sub(history_len)..];
@@ -2533,7 +2564,7 @@ fn draw_vertical_block_stream_content(
     for i in 0..history_len {
         let mut spans = Vec::new();
         let dl_slice_index = slice_len.saturating_sub(1).saturating_sub(i);
-        let raw_blocks_in = if i < slice_len {
+        let raw_blocks_in = if allow_download_inflow && i < slice_len {
             *in_slice.get(dl_slice_index).unwrap_or(&0)
         } else {
             0
@@ -2639,23 +2670,53 @@ fn draw_vertical_block_stream_content(
             );
             let total_scaled_blocks_f64 = (larger_stream_count + smaller_stream_count) as f64;
             let ratio_smaller = smaller_stream_count as f64 / total_scaled_blocks_f64;
+            let larger_activity =
+                (larger_stream_count as f64 / content_width.max(1) as f64).clamp(0.0, 1.0);
+            let smaller_activity =
+                (smaller_stream_count as f64 / content_width.max(1) as f64).clamp(0.0, 1.0);
             let smaller_first: bool = order_rng.random_bool(1.0 - ratio_smaller);
 
             spans.push(Span::raw(" ".repeat(padding)));
+            let both_directions_present = larger_stream_count > 0 && smaller_stream_count > 0;
+            let smaller_still_probability = if both_directions_present {
+                smaller_stream_still_probability(larger_stream_count, smaller_stream_count)
+            } else {
+                0.0
+            };
+            let mut still_rng = StdRng::seed_from_u64(
+                frame_seed
+                    ^ (dl_slice_index as u64).rotate_left(13)
+                    ^ (ul_slice_index as u64).rotate_right(7)
+                    ^ 0x91D1_5A7E,
+            );
+            let smaller_stays_still = both_directions_present
+                && still_rng.random_bool(smaller_still_probability.clamp(0.0, 1.0));
+            let larger_stays_still =
+                both_directions_present && still_rng.random_bool(0.18_f64.clamp(0.0, 1.0));
             if smaller_first {
                 render_sparkles(
                     &mut spans,
                     smaller_symbol,
                     smaller_stream_count,
                     smaller_color,
-                    frame_seed ^ smaller_seed_salt,
+                    smaller_activity,
+                    if smaller_stays_still {
+                        smaller_seed_salt ^ 0x5EED_C0DE
+                    } else {
+                        frame_seed ^ smaller_seed_salt
+                    },
                 );
                 render_sparkles(
                     &mut spans,
                     larger_symbol,
                     larger_stream_count,
                     larger_color,
-                    frame_seed ^ larger_seed_salt,
+                    larger_activity,
+                    if larger_stays_still {
+                        larger_seed_salt ^ 0x5EED_C0DE
+                    } else {
+                        frame_seed ^ larger_seed_salt
+                    },
                 );
             } else {
                 render_sparkles(
@@ -2663,14 +2724,24 @@ fn draw_vertical_block_stream_content(
                     larger_symbol,
                     larger_stream_count,
                     larger_color,
-                    frame_seed ^ larger_seed_salt,
+                    larger_activity,
+                    if larger_stays_still {
+                        larger_seed_salt ^ 0x5EED_C0DE
+                    } else {
+                        frame_seed ^ larger_seed_salt
+                    },
                 );
                 render_sparkles(
                     &mut spans,
                     smaller_symbol,
                     smaller_stream_count,
                     smaller_color,
-                    frame_seed ^ smaller_seed_salt,
+                    smaller_activity,
+                    if smaller_stays_still {
+                        smaller_seed_salt ^ 0x5EED_C0DE
+                    } else {
+                        frame_seed ^ smaller_seed_salt
+                    },
                 );
             }
             spans.push(Span::raw(" ".repeat(trailing_padding)));
@@ -2681,24 +2752,49 @@ fn draw_vertical_block_stream_content(
     f.render_widget(Paragraph::new(lines), area);
 }
 
+fn should_render_download_inflow(metrics: &crate::app::TorrentMetrics) -> bool {
+    let total = metrics.number_of_pieces_total;
+    total == 0 || metrics.number_of_pieces_completed < total
+}
+
 fn render_sparkles<'a>(
     spans: &mut Vec<Span<'a>>,
     symbol: &'a str,
     count: u64,
     color: Color,
+    activity_level: f64,
     seed: u64,
 ) {
     let mut rng = StdRng::seed_from_u64(seed);
+    let bold_probability = sparkle_bold_probability(activity_level);
+    let dim_probability = sparkle_dim_probability(activity_level);
     for _ in 0..count {
-        let is_bold: bool = rng.random();
         let mut style = Style::default().fg(color);
-        style = if is_bold {
+        style = if rng.random_bool(bold_probability) {
             style.add_modifier(Modifier::BOLD)
-        } else {
+        } else if rng.random_bool(dim_probability) {
             style.add_modifier(Modifier::DIM)
+        } else {
+            style
         };
         spans.push(Span::styled(symbol, style));
     }
+}
+
+fn sparkle_bold_probability(activity_level: f64) -> f64 {
+    (0.18 + 0.68 * activity_level.clamp(0.0, 1.0)).clamp(0.18, 0.86)
+}
+
+fn sparkle_dim_probability(activity_level: f64) -> f64 {
+    (0.78 - 0.58 * activity_level.clamp(0.0, 1.0)).clamp(0.20, 0.78)
+}
+
+fn smaller_stream_still_probability(larger_count: u64, smaller_count: u64) -> f64 {
+    if larger_count == 0 || smaller_count == 0 {
+        return 0.0;
+    }
+    let imbalance = (larger_count.saturating_sub(smaller_count)) as f64 / larger_count as f64;
+    (0.58 + imbalance * 0.30).clamp(0.58, 0.88)
 }
 
 pub fn draw_torrent_sparklines(
@@ -4038,6 +4134,56 @@ mod tests {
         let data = [0_u64, 10, 0];
         let smoothed = peer_stream_smoothed_activity(&data, 1);
         assert!((smoothed - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn block_stream_download_inflow_hidden_when_download_is_complete() {
+        let mut metrics = TorrentMetrics::default();
+        metrics.number_of_pieces_total = 10;
+        metrics.number_of_pieces_completed = 10;
+        assert!(!should_render_download_inflow(&metrics));
+    }
+
+    #[test]
+    fn block_stream_download_inflow_visible_when_download_is_incomplete() {
+        let mut metrics = TorrentMetrics::default();
+        metrics.number_of_pieces_total = 10;
+        metrics.number_of_pieces_completed = 9;
+        assert!(should_render_download_inflow(&metrics));
+    }
+
+    #[test]
+    fn smaller_stream_still_probability_prefers_imbalanced_streams() {
+        let balanced = smaller_stream_still_probability(10, 10);
+        let imbalanced = smaller_stream_still_probability(20, 3);
+        assert!(imbalanced > balanced);
+    }
+
+    #[test]
+    fn smaller_stream_still_probability_is_zero_when_not_meeting() {
+        assert_eq!(smaller_stream_still_probability(0, 5), 0.0);
+        assert_eq!(smaller_stream_still_probability(5, 0), 0.0);
+    }
+
+    #[test]
+    fn sparkle_probabilities_track_activity() {
+        let low_bold = sparkle_bold_probability(0.0);
+        let high_bold = sparkle_bold_probability(1.0);
+        let low_dim = sparkle_dim_probability(0.0);
+        let high_dim = sparkle_dim_probability(1.0);
+
+        assert!(high_bold > low_bold);
+        assert!(low_dim > high_dim);
+    }
+
+    #[test]
+    fn peer_activity_legend_compacts_when_width_is_tight() {
+        assert!(should_use_compact_peer_activity_legend(32, 5, 182, 104));
+    }
+
+    #[test]
+    fn peer_activity_legend_stays_verbose_when_width_allows() {
+        assert!(!should_use_compact_peer_activity_legend(90, 5, 182, 104));
     }
 
     #[tokio::test]

@@ -686,9 +686,7 @@ fn execute_rss_effects(
                         .selected_explorer_index
                         .min(app_state.rss_derived.explorer_items.len().saturating_sub(1));
                     if let Some(item) = app_state.rss_derived.explorer_items.get(idx) {
-                        if item.is_downloaded {
-                            set_rss_status(app_state, "Already downloaded");
-                        } else if app_command_tx
+                        if app_command_tx
                             .try_send(AppCommand::RssDownloadPreview(item.clone()))
                             .is_err()
                         {
@@ -2803,7 +2801,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_y_ignores_selected_explorer_item_when_already_downloaded() {
+    fn shift_y_allows_selected_explorer_item_when_already_downloaded() {
         let mut app_state = base_state();
         app_state.ui.rss.focused_section = RssSectionFocus::Explorer;
         app_state.rss_runtime.preview_items.push(RssPreviewItem {
@@ -2827,10 +2825,17 @@ mod tests {
             &tx,
         );
 
-        assert!(rx.try_recv().is_err());
+        let cmd = rx.try_recv().expect("expected RSS download command");
+        match cmd {
+            AppCommand::RssDownloadPreview(item) => {
+                assert_eq!(item.title, "SampleAlpha ISO");
+                assert_eq!(item.dedupe_key, "guid:samplealpha");
+            }
+            _ => panic!("unexpected command"),
+        }
         assert_eq!(
             app_state.ui.rss.status_message.as_deref(),
-            Some("Already downloaded")
+            Some("RSS download requested")
         );
     }
 

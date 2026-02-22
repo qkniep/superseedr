@@ -2879,10 +2879,6 @@ impl App {
     }
 
     async fn download_rss_preview_item(&mut self, item: RssPreviewItem) {
-        if item.is_downloaded {
-            return;
-        }
-
         let Some(link) = item.link.clone() else {
             tracing_event!(
                 Level::INFO,
