@@ -2464,6 +2464,36 @@ mod tests {
     }
 
     #[test]
+    fn add_entry_from_filters_starts_editing() {
+        let mut app_state = base_state();
+        app_state.ui.rss.focused_section = RssSectionFocus::Filters;
+        app_state.ui.rss.add_filter_mode = RssFilterMode::Regex;
+        let settings = crate::config::Settings::default();
+        let (tx, _rx) = mpsc::channel(8);
+
+        handle_event(
+            CrosstermEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('a'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )),
+            &mut app_state,
+            &settings,
+            &tx,
+        );
+
+        assert!(app_state.ui.rss.is_editing);
+        assert!(app_state.ui.rss.edit_buffer.is_empty());
+        assert!(matches!(
+            app_state.ui.rss.add_filter_mode,
+            RssFilterMode::Fuzzy
+        ));
+        assert_eq!(
+            app_state.ui.rss.status_message.as_deref(),
+            Some("Editing new entry")
+        );
+    }
+
+    #[test]
     fn add_link_reports_failure_when_update_config_enqueue_fails() {
         let mut app_state = base_state();
         app_state.ui.rss.focused_section = RssSectionFocus::Links;
