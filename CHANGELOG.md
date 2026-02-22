@@ -1,5 +1,18 @@
 # Changelog
 
+## Release v1.0.1
+### 🚀 New Features
+- **Duplicate Filter Guardrails**: RSS filter creation now blocks duplicates for the same mode using normalized matching (trim + case-insensitive), with a clear in-app status message.
+
+### ✨ Improvements
+- **First-Filter Draft Highlighting**: While creating the first RSS filter, Explorer match highlighting now remains visible instead of being fully greyed out.
+- **History Row Readability**: RSS History rows now render source at the end of each line for better title-first scanning.
+- **RSS Add-Entry Shortcut Consistency**: Restored `[a]` add-entry behavior for Links and Filters panes to match expected key-hint behavior.
+
+### 🐛 Bug Fixes
+- **Filter List Selection Safety**: Fixed filter-pane selection clamping to use rendered item count, preventing stale-index edge cases.
+- **RSS Interaction Regressions Covered**: Added/updated RSS tests for link/filter add-entry keyflow, duplicate filter rejection, and first-filter draft highlighting behavior.
+
 ## Release v1.0.0
 ### 🚀 New Features
 - **Integrated RSS Workspace**: Added a full RSS experience in-app, including feed management, preview browsing, and streamlined ingest so you can discover and add downloads without leaving the terminal.
