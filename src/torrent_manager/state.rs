@@ -1116,11 +1116,6 @@ impl TorrentState {
 
                     let pieces_to_requeue = std::mem::take(&mut peer.pending_requests);
                     for piece_index in pieces_to_requeue {
-                        // TODO: ARCHITECTURAL DEBT: This fix does not address block-level resumption for partial pieces.
-                        // When this reclaimed piece is re-requested, the Manager currently instructs the Session
-                        // to start downloading the piece from offset 0, potentially re-requesting already downloaded
-                        // blocks (up to 16KB per piece). This must be refactored by having the Manager pass the
-                        // correct begin_offset (from PieceAssembler) to the Session's RequestDownload command.
                         if self.piece_manager.bitfield.get(piece_index as usize)
                             != Some(&PieceStatus::Done)
                         {

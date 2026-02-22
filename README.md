@@ -54,7 +54,7 @@ superseedr
 | Key | Action |
 | :--- | :--- |
 | `m` | **Open full manual / help** |
-| `q` | Quit |
+| `Q` | Quit |
 | `↑` `↓` `←` `→` | Navigate |
 | `c` | Configure Settings |
 
