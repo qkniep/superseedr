@@ -3414,6 +3414,60 @@ mod tests {
     }
 
     #[test]
+    fn new_filter_placeholder_label_is_none_when_not_editing() {
+        let mut app_state = base_state();
+        app_state.ui.rss.active_screen = RssScreen::Unified;
+        app_state.ui.rss.focused_section = RssSectionFocus::Filters;
+        app_state.ui.rss.is_editing = false;
+        app_state.ui.rss.edit_buffer = "sample draft".to_string();
+
+        let settings = crate::config::Settings::default();
+        assert!(new_filter_placeholder_label(&app_state, &settings).is_none());
+    }
+
+    #[test]
+    fn new_filter_placeholder_label_is_none_when_not_focused_on_filters() {
+        let mut app_state = base_state();
+        app_state.ui.rss.active_screen = RssScreen::Unified;
+        app_state.ui.rss.focused_section = RssSectionFocus::Explorer;
+        app_state.ui.rss.is_editing = true;
+        app_state.ui.rss.edit_buffer = "sample draft".to_string();
+
+        let settings = crate::config::Settings::default();
+        assert!(new_filter_placeholder_label(&app_state, &settings).is_none());
+    }
+
+    #[test]
+    fn new_filter_placeholder_label_is_none_when_filters_exist() {
+        let mut app_state = base_state();
+        app_state.ui.rss.active_screen = RssScreen::Unified;
+        app_state.ui.rss.focused_section = RssSectionFocus::Filters;
+        app_state.ui.rss.is_editing = true;
+        app_state.ui.rss.edit_buffer = "sample draft".to_string();
+
+        let mut settings = crate::config::Settings::default();
+        settings.rss.filters.push(crate::config::RssFilter {
+            query: "series alpha".to_string(),
+            mode: RssFilterMode::Fuzzy,
+            enabled: true,
+        });
+
+        assert!(new_filter_placeholder_label(&app_state, &settings).is_none());
+    }
+
+    #[test]
+    fn new_filter_placeholder_label_is_none_for_whitespace_draft() {
+        let mut app_state = base_state();
+        app_state.ui.rss.active_screen = RssScreen::Unified;
+        app_state.ui.rss.focused_section = RssSectionFocus::Filters;
+        app_state.ui.rss.is_editing = true;
+        app_state.ui.rss.edit_buffer = "   \t  ".to_string();
+
+        let settings = crate::config::Settings::default();
+        assert!(new_filter_placeholder_label(&app_state, &settings).is_none());
+    }
+
+    #[test]
     fn explorer_greyed_out_when_no_filters_exist() {
         let settings = crate::config::Settings::default();
         assert!(explorer_should_be_greyed_out(&settings));
