@@ -2401,15 +2401,34 @@ fn block_stream_title_color(app_state: &AppState, ctx: &ThemeContext) -> Color {
         return ctx.theme.semantic.border;
     };
 
-    let dl = torrent.latest_state.blocks_in_this_tick;
-    let ul = torrent.latest_state.blocks_out_this_tick;
-    if dl == 0 && ul == 0 {
-        ctx.theme.semantic.border
-    } else if dl >= ul {
-        ctx.theme.scale.stream.inflow
-    } else {
-        ctx.theme.scale.stream.outflow
+    let dl_tick = torrent.latest_state.blocks_in_this_tick;
+    let ul_tick = torrent.latest_state.blocks_out_this_tick;
+    if dl_tick > 0 || ul_tick > 0 {
+        return if dl_tick >= ul_tick {
+            ctx.theme.scale.stream.inflow
+        } else {
+            ctx.theme.scale.stream.outflow
+        };
     }
+
+    // Prevent title flicker by falling back to recent stream direction.
+    let in_history = &torrent.latest_state.blocks_in_history;
+    let out_history = &torrent.latest_state.blocks_out_history;
+    let history_len = in_history.len().min(out_history.len());
+    for i in (0..history_len).rev() {
+        let dl = in_history[i];
+        let ul = out_history[i];
+        if dl == 0 && ul == 0 {
+            continue;
+        }
+        return if dl >= ul {
+            ctx.theme.scale.stream.inflow
+        } else {
+            ctx.theme.scale.stream.outflow
+        };
+    }
+
+    ctx.theme.semantic.border
 }
 
 fn draw_disk_health_panel(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
@@ -4261,6 +4280,40 @@ mod tests {
     }
 
     #[test]
+    fn block_stream_title_color_uses_recent_download_history_when_tick_is_zero() {
+        let mut app_state = create_test_app_state();
+        let selected = app_state.torrent_list_order[app_state.ui.selected_torrent_index].clone();
+        if let Some(torrent) = app_state.torrents.get_mut(&selected) {
+            torrent.latest_state.blocks_in_history.push(8);
+            torrent.latest_state.blocks_out_history.push(2);
+            torrent.latest_state.blocks_in_this_tick = 0;
+            torrent.latest_state.blocks_out_this_tick = 0;
+        }
+        let ctx = ThemeContext::new(app_state.theme, 0.0);
+        assert_eq!(
+            block_stream_title_color(&app_state, &ctx),
+            ctx.theme.scale.stream.inflow
+        );
+    }
+
+    #[test]
+    fn block_stream_title_color_uses_recent_upload_history_when_tick_is_zero() {
+        let mut app_state = create_test_app_state();
+        let selected = app_state.torrent_list_order[app_state.ui.selected_torrent_index].clone();
+        if let Some(torrent) = app_state.torrents.get_mut(&selected) {
+            torrent.latest_state.blocks_in_history.push(1);
+            torrent.latest_state.blocks_out_history.push(6);
+            torrent.latest_state.blocks_in_this_tick = 0;
+            torrent.latest_state.blocks_out_this_tick = 0;
+        }
+        let ctx = ThemeContext::new(app_state.theme, 0.0);
+        assert_eq!(
+            block_stream_title_color(&app_state, &ctx),
+            ctx.theme.scale.stream.outflow
+        );
+    }
+
+    #[test]
     fn block_stream_download_inflow_hidden_when_download_is_complete() {
         let metrics = TorrentMetrics {
             number_of_pieces_total: 10,
@@ -4284,7 +4337,10 @@ mod tests {
     fn disk_health_status_color_uses_state_slots_across_themes() {
         for theme_name in ThemeName::sorted_for_ui() {
             let ctx = ThemeContext::new(Theme::builtin(theme_name), 0.0);
-            assert_eq!(disk_health_status_color(&ctx, 0), ctx.theme.semantic.subtext0);
+            assert_eq!(
+                disk_health_status_color(&ctx, 0),
+                ctx.theme.semantic.subtext0
+            );
             assert_eq!(disk_health_status_color(&ctx, 1), ctx.state_info());
             assert_eq!(disk_health_status_color(&ctx, 2), ctx.state_warning());
             assert_eq!(disk_health_status_color(&ctx, 3), ctx.state_error());
@@ -4296,7 +4352,10 @@ mod tests {
     fn disk_health_title_color_keeps_stable_readable_and_maps_alerts() {
         for theme_name in ThemeName::sorted_for_ui() {
             let ctx = ThemeContext::new(Theme::builtin(theme_name), 0.0);
-            assert_eq!(disk_health_title_color(&ctx, 0), ctx.theme.semantic.subtext0);
+            assert_eq!(
+                disk_health_title_color(&ctx, 0),
+                ctx.theme.semantic.subtext0
+            );
             assert_eq!(disk_health_title_color(&ctx, 1), ctx.state_info());
             assert_eq!(disk_health_title_color(&ctx, 2), ctx.state_warning());
             assert_eq!(disk_health_title_color(&ctx, 3), ctx.state_error());
