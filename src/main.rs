@@ -12,6 +12,7 @@ mod resource_manager;
 mod storage;
 mod telemetry;
 mod theme;
+mod tuning;
 mod token_bucket;
 mod torrent_file;
 mod torrent_manager;

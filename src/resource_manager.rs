@@ -261,6 +261,8 @@ impl ResourceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::time::{sleep, timeout};
 
@@ -286,6 +288,82 @@ mod tests {
         let (actor, client) = ResourceManager::new(limits, shutdown_tx);
         let handle = tokio::spawn(actor.run());
         (client, handle)
+    }
+
+    fn create_trial_limits(resource: ResourceType, limit: usize, queue: usize) -> HashMap<ResourceType, (usize, usize)> {
+        let mut limits = create_limits((1, 0), (1, 0), (1, 0));
+        match resource {
+            ResourceType::PeerConnection => {
+                limits.insert(ResourceType::PeerConnection, (limit, queue));
+            }
+            ResourceType::DiskRead => {
+                limits.insert(ResourceType::DiskRead, (limit, queue));
+            }
+            ResourceType::DiskWrite => {
+                limits.insert(ResourceType::DiskWrite, (limit, queue));
+            }
+            ResourceType::Reserve => {}
+        }
+        limits
+    }
+
+    async fn measure_throughput_for_resource(resource: ResourceType, limit: usize) -> usize {
+        let queue_size = 20_000;
+        let worker_count = 64;
+        let work_time = Duration::from_millis(10);
+        let run_time = Duration::from_millis(1_200);
+
+        let limits = create_trial_limits(resource, limit, queue_size);
+        let (client, manager_handle) = setup_manager(limits);
+        let completed = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let mut workers = Vec::new();
+        for _ in 0..worker_count {
+            let worker_client = client.clone();
+            let worker_completed = completed.clone();
+            let worker_stop = stop.clone();
+            workers.push(tokio::spawn(async move {
+                loop {
+                    if worker_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    let permit_result = match resource {
+                        ResourceType::PeerConnection => worker_client.acquire_peer_connection().await,
+                        ResourceType::DiskRead => worker_client.acquire_disk_read().await,
+                        ResourceType::DiskWrite => worker_client.acquire_disk_write().await,
+                        ResourceType::Reserve => unreachable!("Reserve is not acquirable"),
+                    };
+
+                    let permit = match permit_result {
+                        Ok(permit) => permit,
+                        Err(ResourceManagerError::QueueFull) => {
+                            tokio::task::yield_now().await;
+                            continue;
+                        }
+                        Err(ResourceManagerError::ManagerShutdown) => break,
+                    };
+
+                    sleep(work_time).await;
+                    drop(permit);
+                    worker_completed.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+
+        sleep(run_time).await;
+        stop.store(true, Ordering::Relaxed);
+        sleep(Duration::from_millis(50)).await;
+
+        for worker in workers {
+            worker.abort();
+            let _ = worker.await;
+        }
+        manager_handle.abort();
+        let _ = manager_handle.await;
+
+        completed.load(Ordering::Relaxed)
     }
 
     #[tokio::test]
@@ -589,5 +667,54 @@ mod tests {
             "Permit leaked! The aborted waiter consumed a slot."
         );
         assert!(result.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_disk_permit_throughput_roughly_halves_when_limit_halves() {
+        let baseline_limit = 16;
+        let half_limit = baseline_limit / 2;
+
+        let read_baseline = measure_throughput_for_resource(ResourceType::DiskRead, baseline_limit).await;
+        let read_half = measure_throughput_for_resource(ResourceType::DiskRead, half_limit).await;
+        assert!(read_baseline > 0, "Read baseline throughput should be non-zero");
+        let read_ratio = read_half as f64 / read_baseline as f64;
+        assert!(
+            (0.35..=0.75).contains(&read_ratio),
+            "DiskRead throughput did not scale as expected: baseline={}, half={}, ratio={:.3}",
+            read_baseline,
+            read_half,
+            read_ratio
+        );
+
+        let write_baseline = measure_throughput_for_resource(ResourceType::DiskWrite, baseline_limit).await;
+        let write_half = measure_throughput_for_resource(ResourceType::DiskWrite, half_limit).await;
+        assert!(write_baseline > 0, "Write baseline throughput should be non-zero");
+        let write_ratio = write_half as f64 / write_baseline as f64;
+        assert!(
+            (0.35..=0.75).contains(&write_ratio),
+            "DiskWrite throughput did not scale as expected: baseline={}, half={}, ratio={:.3}",
+            write_baseline,
+            write_half,
+            write_ratio
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peer_limit_throughput_roughly_halves_when_limit_halves() {
+        let baseline_limit = 16;
+        let half_limit = baseline_limit / 2;
+
+        let baseline = measure_throughput_for_resource(ResourceType::PeerConnection, baseline_limit).await;
+        let half = measure_throughput_for_resource(ResourceType::PeerConnection, half_limit).await;
+        assert!(baseline > 0, "Peer baseline throughput should be non-zero");
+
+        let ratio = half as f64 / baseline as f64;
+        assert!(
+            (0.35..=0.75).contains(&ratio),
+            "Peer throughput did not scale as expected: baseline={}, half={}, ratio={:.3}",
+            baseline,
+            half,
+            ratio
+        );
     }
 }

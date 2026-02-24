@@ -41,6 +41,7 @@ use crate::resource_manager::ResourceType;
 use crate::telemetry::network_history_telemetry::NetworkHistoryTelemetry;
 use crate::telemetry::ui_telemetry::UiTelemetry;
 use crate::theme::Theme;
+use crate::tuning::{evaluate_tuning_cycle, make_random_adjustment};
 
 use crate::integrations::rss_url_safety::is_safe_rss_item_url;
 use crate::integrations::status::AppOutputState;
@@ -95,9 +96,6 @@ use tokio::time::MissedTickBehavior;
 use directories::UserDirs;
 
 use ratatui::crossterm::event::{self, Event as CrosstermEvent};
-
-use rand::seq::SliceRandom;
-use rand::Rng;
 
 #[cfg(unix)]
 use rlimit::Resource;
@@ -275,7 +273,7 @@ impl DataRate {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct CalculatedLimits {
     pub reserve_permits: usize,
     pub max_connected_peers: usize,
@@ -292,6 +290,7 @@ impl CalculatedLimits {
         map
     }
 }
+
 
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
 pub enum GraphDisplayMode {
@@ -2300,50 +2299,35 @@ impl App {
         };
 
         let relevant_history = &history[history.len().saturating_sub(60)..];
-        let new_raw_score = if relevant_history.is_empty() {
-            0
-        } else {
-            relevant_history.iter().sum::<u64>() / relevant_history.len() as u64
-        };
-        let current_scpb = self.app_state.global_disk_thrash_score;
-        let scpb_max = self.app_state.adaptive_max_scpb;
-        let penalty_factor = (current_scpb / scpb_max - 1.0).max(0.0);
-        let new_score = (new_raw_score as f64 / (1.0 + penalty_factor)) as u64;
-        self.app_state.current_tuning_score = new_score;
+        let evaluation = evaluate_tuning_cycle(
+            &self.app_state.limits,
+            &self.app_state.last_tuning_limits,
+            self.app_state.last_tuning_score,
+            self.app_state.baseline_speed_ema,
+            relevant_history,
+            self.app_state.global_disk_thrash_score,
+            self.app_state.adaptive_max_scpb,
+        );
 
-        const BASELINE_ALPHA: f64 = 0.1; // Slower-moving average
-        let new_score_f64 = new_score as f64;
-        if self.app_state.baseline_speed_ema == 0.0 {
-            self.app_state.baseline_speed_ema = new_score_f64;
-        } else {
-            self.app_state.baseline_speed_ema = (new_score_f64 * BASELINE_ALPHA)
-                + (self.app_state.baseline_speed_ema * (1.0 - BASELINE_ALPHA));
-        }
+        self.app_state.current_tuning_score = evaluation.new_score;
+        self.app_state.baseline_speed_ema = evaluation.updated_baseline_speed_ema;
+        self.app_state.last_tuning_score = evaluation.updated_last_tuning_score;
+        self.app_state.last_tuning_limits = evaluation.updated_last_tuning_limits.clone();
 
-        let best_score = self.app_state.last_tuning_score;
-        if new_score > best_score {
-            self.app_state.last_tuning_score = new_score;
-            self.app_state.last_tuning_limits = self.app_state.limits.clone();
+        if evaluation.accepted_improvement {
             tracing_event!(
                 Level::DEBUG,
                 "Self-Tune: SUCCESS. New best score: {} (raw: {}, penalty: {:.2}x)",
-                new_score,
-                new_raw_score,
-                penalty_factor
+                evaluation.new_score,
+                evaluation.new_raw_score,
+                evaluation.penalty_factor
             );
         } else {
-            self.app_state.limits = self.app_state.last_tuning_limits.clone();
-
-            let baseline_u64 = self.app_state.baseline_speed_ema as u64;
-
-            const REALITY_CHECK_FACTOR: f64 = 2.0;
-            if best_score > 10_000
-                && best_score > (self.app_state.baseline_speed_ema * REALITY_CHECK_FACTOR) as u64
-            {
-                self.app_state.last_tuning_score = baseline_u64;
-                tracing_event!(Level::DEBUG, "Self-Tune: REALITY CHECK. Score {} (raw: {}) failed. Old best {} is stale vs. baseline {}. Resetting best to baseline.", new_score, new_raw_score, best_score, baseline_u64);
+            self.app_state.limits = evaluation.effective_limits.clone();
+            if evaluation.reality_check_applied {
+                tracing_event!(Level::DEBUG, "Self-Tune: REALITY CHECK. Score {} (raw: {}) failed. Old best {} is stale vs. baseline {}. Resetting best to baseline.", evaluation.new_score, evaluation.new_raw_score, evaluation.best_score_before, evaluation.baseline_u64);
             } else {
-                tracing_event!(Level::DEBUG, "Self-Tune: REVERTING. Score {} (raw: {}, penalty: {:.2}x) was not better than {}. (Baseline is {})", new_score, new_raw_score, penalty_factor, best_score, baseline_u64);
+                tracing_event!(Level::DEBUG, "Self-Tune: REVERTING. Score {} (raw: {}, penalty: {:.2}x) was not better than {}. (Baseline is {})", evaluation.new_score, evaluation.new_raw_score, evaluation.penalty_factor, evaluation.best_score_before, evaluation.baseline_u64);
             }
 
             let _ = self
@@ -3294,102 +3278,6 @@ fn compose_system_warning(
     }
 }
 
-const MIN_STEP_RATE: f64 = 0.01;
-const MAX_STEP_RATE: f64 = 0.10;
-
-// --- Define Min/Max bounds for all resource types ---
-const MIN_PEERS: usize = 20;
-const MIN_DISK: usize = 2;
-const MIN_RESERVE: usize = 0;
-
-// --- Maximum attempts to find a valid trade per cycle ---
-const MAX_TRADE_ATTEMPTS: usize = 5;
-
-fn get_limit(limits: &CalculatedLimits, resource: ResourceType) -> usize {
-    match resource {
-        ResourceType::PeerConnection => limits.max_connected_peers,
-        ResourceType::DiskRead => limits.disk_read_permits,
-        ResourceType::DiskWrite => limits.disk_write_permits,
-        ResourceType::Reserve => limits.reserve_permits,
-    }
-}
-
-fn set_limit(limits: &mut CalculatedLimits, resource: ResourceType, value: usize) {
-    match resource {
-        ResourceType::PeerConnection => limits.max_connected_peers = value,
-        ResourceType::DiskRead => limits.disk_read_permits = value,
-        ResourceType::DiskWrite => limits.disk_write_permits = value,
-        ResourceType::Reserve => limits.reserve_permits = value,
-    }
-}
-
-/// Makes a random, proportional trade, retrying a few times if the first is blocked.
-/// This version is refactored to support any number of resources, including Reserve.
-fn make_random_adjustment(mut limits: CalculatedLimits) -> (CalculatedLimits, String) {
-    let mut rng = rand::rng();
-    let mut parameters = [
-        ResourceType::PeerConnection,
-        ResourceType::DiskRead,
-        ResourceType::DiskWrite,
-        ResourceType::Reserve, // Add Reserve to the trading pool
-    ];
-
-    for attempt in 0..MAX_TRADE_ATTEMPTS {
-        parameters.shuffle(&mut rng);
-        let source_param = parameters[0];
-        let dest_param = parameters[1];
-
-        let source_val = get_limit(&limits, source_param);
-        let dest_val = get_limit(&limits, dest_param);
-
-        let source_min = match source_param {
-            ResourceType::PeerConnection => MIN_PEERS,
-            ResourceType::DiskRead => MIN_DISK,
-            ResourceType::DiskWrite => MIN_DISK,
-            ResourceType::Reserve => MIN_RESERVE,
-        };
-
-        let step_rate = rng.random_range(MIN_STEP_RATE..=MAX_STEP_RATE);
-        let amount_to_trade = ((source_val as f64 * step_rate).ceil() as usize).max(1);
-
-        let can_give = source_val >= source_min.saturating_add(amount_to_trade);
-
-        if can_give {
-            // --- VALID TRADE FOUND ---
-
-            set_limit(
-                &mut limits,
-                source_param,
-                source_val.saturating_sub(amount_to_trade),
-            );
-            set_limit(
-                &mut limits,
-                dest_param,
-                dest_val.saturating_add(amount_to_trade),
-            );
-
-            let description = format!(
-                "Traded {} from {:?} to {:?} (Attempt {})",
-                amount_to_trade,
-                source_param,
-                dest_param,
-                attempt + 1
-            );
-            // Return immediately with the successful trade
-            return (limits, description);
-        }
-        // If trade wasn't possible, the loop continues to the next attempt...
-    }
-
-    // --- NO VALID TRADE FOUND after all attempts ---
-    // Return the original limits unchanged
-    let description = format!(
-        "Skipped all trade attempts ({}) this cycle: blocked by bounds",
-        MAX_TRADE_ATTEMPTS
-    );
-    (limits, description)
-}
-
 pub fn decode_info_hash(hash_string: &str) -> Result<Vec<u8>, String> {
     // Try Hex Decoding (Handles standard V1 and Hex-encoded V2 Multihash)
     if let Ok(bytes) = hex::decode(hash_string) {
@@ -3677,13 +3565,14 @@ fn prune_rss_feed_errors(
 mod tests {
     use super::{
         clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
-        flush_persistence_writer_parts, queue_persistence_payload, should_persist_network_history_on_interval,
-        parse_hybrid_hashes, persisted_validation_status_from_piece_completion,
-        prune_rss_feed_errors, resolve_magnet_torrent_name, rss_settings_changed, PersistPayload,
+        flush_persistence_writer_parts, parse_hybrid_hashes,
+        persisted_validation_status_from_piece_completion,
+        prune_rss_feed_errors, queue_persistence_payload, resolve_magnet_torrent_name,
+        rss_settings_changed, should_persist_network_history_on_interval, App, AppMode, AppState,
+        FilePriority, PeerInfo, PersistPayload, SelectedHeader, SortDirection,
+        TorrentDisplayState, TorrentMetrics, TorrentSortColumn, UiState,
         sort_and_filter_torrent_list_state, torrent_completion_percent,
-        torrent_is_effectively_incomplete, App, AppMode, AppState, FilePriority, PeerInfo,
-        SelectedHeader, SortDirection, TorrentDisplayState, TorrentMetrics, TorrentSortColumn,
-        UiState,
+        torrent_is_effectively_incomplete,
     };
     use std::collections::HashMap;
     fn mock_display(name: &str, peer_count: usize) -> TorrentDisplayState {
@@ -4020,4 +3909,5 @@ mod tests {
         assert!(tx_opt.is_none());
         assert!(task_opt.is_none());
     }
+
 }
