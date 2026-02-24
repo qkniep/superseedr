@@ -19,6 +19,10 @@ use crate::config::{
     FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SortDirection,
     TorrentSettings, TorrentSortColumn,
 };
+use crate::persistence::network_history::{
+    load_network_history_state, save_network_history_state, NetworkHistoryPersistedState,
+    NetworkHistoryRollupState,
+};
 use crate::persistence::rss::{load_rss_state, save_rss_state, RssPersistedState};
 
 use crate::token_bucket::TokenBucket;
@@ -34,6 +38,7 @@ use crate::config::get_watch_path;
 use crate::storage::build_fs_tree;
 
 use crate::resource_manager::ResourceType;
+use crate::telemetry::network_history_telemetry::NetworkHistoryTelemetry;
 use crate::telemetry::ui_telemetry::UiTelemetry;
 use crate::theme::Theme;
 
@@ -393,6 +398,7 @@ pub enum AppCommand {
     },
     RssDownloadSelected(RssHistoryEntry),
     RssDownloadPreview(RssPreviewItem),
+    NetworkHistoryLoaded(NetworkHistoryPersistedState),
     UpdateConfig(Settings),
     UpdateVersionAvailable(String),
 }
@@ -699,6 +705,9 @@ pub struct AppState {
     pub graph_mode: GraphDisplayMode,
     pub minute_avg_dl_history: Vec<u64>,
     pub minute_avg_ul_history: Vec<u64>,
+    pub network_history_state: NetworkHistoryPersistedState,
+    pub network_history_rollups: NetworkHistoryRollupState,
+    pub network_history_dirty: bool,
 
     pub last_tuning_score: u64,
     pub current_tuning_score: u64,
@@ -757,6 +766,7 @@ pub struct App {
 pub struct PersistPayload {
     pub settings: Settings,
     pub rss_state: RssPersistedState,
+    pub network_history_state: NetworkHistoryPersistedState,
 }
 impl App {
     pub async fn new(client_configs: Settings) -> Result<Self, Box<dyn std::error::Error>> {
@@ -783,6 +793,8 @@ impl App {
                         .map_err(|e| format!("Failed to auto-save settings: {}", e))?;
                     save_rss_state(&payload.rss_state)
                         .map_err(|e| format!("Failed to auto-save RSS state: {}", e))?;
+                    save_network_history_state(&payload.network_history_state)
+                        .map_err(|e| format!("Failed to auto-save network history state: {}", e))?;
                     Ok::<(), String>(())
                 })
                 .await;
@@ -1000,6 +1012,7 @@ impl App {
         self.process_pending_commands().await;
 
         self.startup_crossterm_event_listener();
+        self.startup_network_history_restore();
 
         let mut sys = System::new();
 
@@ -1007,7 +1020,9 @@ impl App {
         let mut tuning_interval = time::interval(Duration::from_secs(90));
         let mut version_interval = time::interval(Duration::from_secs(24 * 60 * 60));
         let mut dht_bootstrap_retry_interval = time::interval(Duration::from_secs(60));
+        let mut network_history_persist_interval = time::interval(Duration::from_secs(15));
         dht_bootstrap_retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        network_history_persist_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let output_status_interval = self.client_configs.output_status_interval;
         let mut status_dump_timer = tokio::time::interval(std::time::Duration::from_secs(
@@ -1063,6 +1078,11 @@ impl App {
 
                 _ = status_dump_timer.tick(), if output_status_interval > 0 => {
                     self.dump_status_to_file();
+                }
+                _ = network_history_persist_interval.tick() => {
+                    if should_persist_network_history_on_interval(&self.app_state) {
+                        self.save_state_to_disk();
+                    }
                 }
 
                 _ = time::sleep_until(next_draw_time.into()) => {
@@ -1264,12 +1284,7 @@ impl App {
     }
 
     async fn flush_persistence_writer(&mut self) {
-        self.persistence_tx = None;
-        if let Some(handle) = self.persistence_task.take() {
-            if let Err(e) = handle.await {
-                tracing_event!(Level::ERROR, "Error joining persistence task: {}", e);
-            }
-        }
+        flush_persistence_writer_parts(&mut self.persistence_tx, &mut self.persistence_task).await;
     }
 
     async fn shutdown_sequence(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
@@ -1858,6 +1873,10 @@ impl App {
                 self.refresh_rss_derived();
                 self.app_state.ui.needs_redraw = true;
             }
+            AppCommand::NetworkHistoryLoaded(state) => {
+                NetworkHistoryTelemetry::apply_loaded_state(&mut self.app_state, state);
+                self.app_state.ui.needs_redraw = true;
+            }
             AppCommand::UpdateConfig(new_settings) => {
                 let old_settings = self.client_configs.clone();
                 self.client_configs = new_settings.clone();
@@ -2205,6 +2224,26 @@ impl App {
 
     fn calculate_stats(&mut self, sys: &mut System) {
         UiTelemetry::on_second_tick(&mut self.app_state, sys);
+        NetworkHistoryTelemetry::on_second_tick(&mut self.app_state);
+    }
+
+    fn startup_network_history_restore(&self) {
+        let tx = self.app_command_tx.clone();
+        tokio::spawn(async move {
+            let load_result = tokio::task::spawn_blocking(load_network_history_state).await;
+            match load_result {
+                Ok(state) => {
+                    let _ = tx.send(AppCommand::NetworkHistoryLoaded(state)).await;
+                }
+                Err(e) => {
+                    tracing_event!(
+                        Level::ERROR,
+                        "Network history restore task failed to join: {}",
+                        e
+                    );
+                }
+            }
+        });
     }
 
     fn drain_latest_torrent_metrics(&mut self) {
@@ -2365,20 +2404,24 @@ impl App {
             last_sync_at: self.app_state.rss_runtime.last_sync_at.clone(),
             feed_errors: self.app_state.rss_runtime.feed_errors.clone(),
         };
+        self.app_state.network_history_state.updated_at_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
 
         let payload = PersistPayload {
             settings: self.client_configs.clone(),
             rss_state,
+            network_history_state: self.app_state.network_history_state.clone(),
         };
 
-        if let Some(tx) = &self.persistence_tx {
-            tx.send_replace(Some(payload));
-            if tx.is_closed() {
-                tracing_event!(
-                    Level::ERROR,
-                    "Failed to queue persistence payload: persistence task unavailable"
-                );
-            }
+        if queue_persistence_payload(self.persistence_tx.as_ref(), payload).is_ok() {
+            self.app_state.network_history_dirty = false;
+        } else {
+            tracing_event!(
+                Level::ERROR,
+                "Failed to queue persistence payload: persistence task unavailable"
+            );
         }
     }
 
@@ -3570,6 +3613,36 @@ fn rss_settings_changed(old_settings: &Settings, new_settings: &Settings) -> boo
     new_settings.rss != old_settings.rss
 }
 
+fn should_persist_network_history_on_interval(app_state: &AppState) -> bool {
+    app_state.network_history_dirty
+}
+
+fn queue_persistence_payload(
+    tx: Option<&watch::Sender<Option<PersistPayload>>>,
+    payload: PersistPayload,
+) -> Result<(), ()> {
+    let Some(tx) = tx else {
+        return Err(());
+    };
+    tx.send_replace(Some(payload));
+    if tx.is_closed() {
+        return Err(());
+    }
+    Ok(())
+}
+
+async fn flush_persistence_writer_parts(
+    persistence_tx: &mut Option<watch::Sender<Option<PersistPayload>>>,
+    persistence_task: &mut Option<tokio::task::JoinHandle<()>>,
+) {
+    *persistence_tx = None;
+    if let Some(handle) = persistence_task.take() {
+        if let Err(e) = handle.await {
+            tracing_event!(Level::ERROR, "Error joining persistence task: {}", e);
+        }
+    }
+}
+
 fn prune_rss_feed_errors(
     feed_errors: &mut HashMap<String, FeedSyncError>,
     settings: &Settings,
@@ -3589,8 +3662,9 @@ fn prune_rss_feed_errors(
 mod tests {
     use super::{
         clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
+        flush_persistence_writer_parts, queue_persistence_payload, should_persist_network_history_on_interval,
         parse_hybrid_hashes, persisted_validation_status_from_piece_completion,
-        prune_rss_feed_errors, resolve_magnet_torrent_name, rss_settings_changed,
+        prune_rss_feed_errors, resolve_magnet_torrent_name, rss_settings_changed, PersistPayload,
         sort_and_filter_torrent_list_state, torrent_completion_percent,
         torrent_is_effectively_incomplete, App, AppMode, AppState, FilePriority, PeerInfo,
         SelectedHeader, SortDirection, TorrentDisplayState, TorrentMetrics, TorrentSortColumn,
@@ -3869,5 +3943,66 @@ mod tests {
             Some("dht warning".to_string())
         );
         assert_eq!(compose_system_warning(None, None), None);
+    }
+
+    #[test]
+    fn network_history_interval_persistence_only_when_dirty() {
+        let mut app_state = AppState::default();
+        app_state.network_history_dirty = false;
+        assert!(!should_persist_network_history_on_interval(&app_state));
+
+        app_state.network_history_dirty = true;
+        assert!(should_persist_network_history_on_interval(&app_state));
+    }
+
+    #[tokio::test]
+    async fn queue_persistence_payload_carries_network_history_state() {
+        let (tx, mut rx) = tokio::sync::watch::channel::<Option<PersistPayload>>(None);
+        let mut network_history_state =
+            crate::persistence::network_history::NetworkHistoryPersistedState::default();
+        network_history_state.updated_at_unix = 42;
+        network_history_state
+            .tiers
+            .second_1s
+            .push(crate::persistence::network_history::NetworkHistoryPoint {
+                ts_unix: 41,
+                download_bps: 1000,
+                upload_bps: 100,
+                backoff_ms_max: 0,
+            });
+
+        let payload = PersistPayload {
+            settings: crate::config::Settings::default(),
+            rss_state: crate::persistence::rss::RssPersistedState::default(),
+            network_history_state: network_history_state.clone(),
+        };
+
+        assert!(queue_persistence_payload(Some(&tx), payload).is_ok());
+        assert!(rx.changed().await.is_ok());
+
+        let received = rx.borrow().clone().expect("payload should be present");
+        assert_eq!(
+            received.network_history_state.updated_at_unix,
+            network_history_state.updated_at_unix
+        );
+        assert_eq!(
+            received.network_history_state.tiers.second_1s,
+            network_history_state.tiers.second_1s
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_persistence_writer_parts_drops_sender_and_joins_task() {
+        let (tx, mut rx) = tokio::sync::watch::channel::<Option<PersistPayload>>(None);
+        let task = tokio::spawn(async move {
+            while rx.changed().await.is_ok() {}
+        });
+
+        let mut tx_opt = Some(tx);
+        let mut task_opt = Some(task);
+        flush_persistence_writer_parts(&mut tx_opt, &mut task_opt).await;
+
+        assert!(tx_opt.is_none());
+        assert!(task_opt.is_none());
     }
 }

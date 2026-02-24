@@ -14,6 +14,7 @@ Implement simple file-based persistence for global network time-series history u
   - Peer accounting/reputation persistence.
   - Per-torrent peer/block stream persistence.
   - SQLite integration.
+  - Per-torrent telemetry persistence implementation (only architecture boundary is planned now).
 
 ## Decisions Locked
 1. Persistence backend: TOML file in app data dir (`persistence/network_history.toml`).
@@ -30,6 +31,10 @@ Implement simple file-based persistence for global network time-series history u
    - Non-blocking app startup
    - History file loaded in background (`spawn_blocking`)
    - App state hydrated when load completes
+5. Telemetry ownership boundary:
+   - Keep global history persistence logic out of `ManagerTelemetry`.
+   - Keep `ManagerTelemetry` focused on per-torrent snapshot emit/dedupe policy.
+   - Reserve a separate per-torrent history telemetry path for future persistence.
 
 ## Data Model
 Add `src/persistence/network_history.rs` with:
@@ -52,6 +57,15 @@ Add versioning and tolerant parsing:
 - Extend `PersistPayload` in `src/app.rs` with `network_history_state`.
 - Add in-memory rollup holder in `AppState` (aggregator + tier buffers).
 - Add `network_history_dirty: bool` in `AppState`.
+
+### Telemetry component direction
+- Current phase:
+  - Global history is aggregated from app-level telemetry after per-second updates.
+- Future phase:
+  - Add a distinct `TorrentHistoryTelemetry` component for per-torrent persisted series keyed by info-hash.
+- Separation principle:
+  - `ManagerTelemetry`: manager snapshot emission decisions only.
+  - Global/per-torrent history components: rollups, retention, and persistence-facing state.
 
 ### Startup flow
 1. `App::new` initializes with empty/live history.

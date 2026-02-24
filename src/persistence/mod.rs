@@ -2,3 +2,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 pub mod rss;
+pub mod network_history;
