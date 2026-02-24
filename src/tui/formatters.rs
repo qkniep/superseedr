@@ -389,36 +389,6 @@ pub fn parse_peer_id(peer_id: &[u8]) -> String {
     "Unknown".to_string()
 }
 
-pub fn format_permits_spans<'a>(
-    ctx: &'a ThemeContext,
-    label: &'a str,
-    used: usize,
-    total: usize,
-    base_color: Color,
-) -> Vec<Span<'a>> {
-    let usage_ratio = if total > 0 {
-        used as f64 / total as f64
-    } else {
-        0.0
-    };
-
-    let status_color = if usage_ratio > 0.9 {
-        ctx.state_error()
-    } else if usage_ratio > 0.7 {
-        ctx.state_warning()
-    } else {
-        ctx.theme.semantic.text
-    };
-
-    vec![
-        Span::styled(label, ctx.apply(Style::default().fg(base_color))),
-        Span::styled(
-            format!(" {} / {}", used, total),
-            ctx.apply(Style::default().fg(status_color)),
-        ),
-    ]
-}
-
 pub fn format_latency(duration: Duration) -> String {
     let micros = duration.as_micros();
     if micros < 1000 {
@@ -432,19 +402,6 @@ pub fn format_latency(duration: Duration) -> String {
 
 pub fn format_iops(iops: u32) -> String {
     format!("{} ops/s", iops)
-}
-
-pub fn format_limit_delta(ctx: &ThemeContext, current: usize, last: usize) -> Span<'static> {
-    let delta = current as isize - last as isize;
-    if delta == 0 {
-        return Span::raw("");
-    }
-    let (sign, style) = if delta > 0 {
-        ("+", ctx.apply(Style::default().fg(ctx.state_success())))
-    } else {
-        ("-", ctx.apply(Style::default().fg(ctx.state_error())))
-    };
-    Span::styled(format!(" ({}{})", sign, delta.abs()), ctx.apply(style))
 }
 
 pub fn sanitize_text(text: &str) -> String {

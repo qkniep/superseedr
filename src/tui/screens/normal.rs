@@ -18,7 +18,7 @@ use crate::theme::ThemeContext;
 use crate::torrent_manager::ManagerCommand;
 use crate::tui::formatters::{
     calculate_nice_upper_bound, format_bytes, format_countdown, format_duration, format_iops,
-    format_latency, format_limit_bps, format_limit_delta, format_memory, format_permits_spans,
+    format_latency, format_limit_bps, format_memory,
     format_speed, format_time, generate_x_axis_labels, ip_to_color, parse_peer_id, sanitize_text,
     speed_to_style, truncate_with_ellipsis,
 };
@@ -60,6 +60,7 @@ use tracing::{event as tracing_event, Level};
 static APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SECONDS_HISTORY_MAX: usize = 3600;
 const MINUTES_HISTORY_MAX: usize = 48 * 60;
+const TUNING_LABEL_WIDTH: usize = 14;
 
 fn build_time_aligned_window(
     points: &[NetworkHistoryPoint],
@@ -1746,37 +1747,63 @@ pub fn draw_stats_panel(
         ));
     }
 
-    let thrash_text: String;
-    let thrash_style: Style;
+    let thrash_value_text: String;
+    let thrash_delta_text: String;
+    let thrash_delta_style: Style;
     let baseline_val = app_state.adaptive_max_scpb;
     let thrash_score_val = app_state.global_disk_thrash_score;
     let thrash_score_str = format!("{:.0}", thrash_score_val);
 
     if thrash_score_val < 0.01 {
-        thrash_text = format!("- ({})", thrash_score_str);
-        thrash_style = ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0));
+        thrash_value_text = "0".to_string();
+        thrash_delta_text = "(0%)".to_string();
+        thrash_delta_style = ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0));
     } else if baseline_val == 0.0 {
-        thrash_text = format!("∞ ({})", thrash_score_str);
-        thrash_style = ctx.apply(Style::default().fg(ctx.state_error())).bold();
+        thrash_value_text = thrash_score_str;
+        thrash_delta_text = "(∞%)".to_string();
+        thrash_delta_style = ctx.apply(Style::default().fg(ctx.state_error())).bold();
     } else {
         let diff = thrash_score_val - baseline_val;
         let thrash_percentage = (diff / baseline_val) * 100.0;
+        let thrash_pct_display = if thrash_percentage.abs() < 0.5 {
+            "0%".to_string()
+        } else {
+            format!("{:.0}%", thrash_percentage)
+        };
+        thrash_value_text = thrash_score_str;
 
         if thrash_percentage > -0.01 && thrash_percentage < 0.01 {
-            thrash_text = format!("0.0% ({})", thrash_score_str);
-            thrash_style = ctx.apply(Style::default().fg(ctx.theme.semantic.text));
+            thrash_delta_text = "(0%)".to_string();
+            thrash_delta_style = ctx.apply(Style::default().fg(ctx.theme.semantic.text));
         } else {
-            thrash_text = format!("{:+.1}% ({})", thrash_percentage, thrash_score_str);
+            thrash_delta_text = format!("({})", thrash_pct_display);
             if thrash_percentage > 15.0 {
-                thrash_style = ctx.apply(Style::default().fg(ctx.state_error())).bold();
+                thrash_delta_style = ctx.apply(Style::default().fg(ctx.state_error())).bold();
             } else if thrash_percentage > 0.0 {
-                thrash_style = ctx.apply(Style::default().fg(ctx.state_warning()));
+                thrash_delta_style = ctx.apply(Style::default().fg(ctx.state_warning()));
             } else {
-                thrash_style = ctx.apply(Style::default().fg(ctx.state_success()));
+                thrash_delta_style = ctx.apply(Style::default().fg(ctx.state_success()));
             }
         }
     }
 
+    let tune_delta_pct = if app_state.last_tuning_score > 0 {
+        let best = app_state.last_tuning_score as f64;
+        let current = app_state.current_tuning_score as f64;
+        Some(((current - best) / best) * 100.0)
+    } else {
+        Some(0.0)
+    };
+    let tune_status = if app_state.last_tuning_score == 0 || (dl_speed == 0 && ul_speed == 0) {
+        "Stable"
+    } else if tune_delta_pct.unwrap_or(0.0).abs() < 3.0 {
+        // Treat near-flat score movement as stable to avoid "always optimizing".
+        "Stable"
+    } else {
+        "Optimizing"
+    };
+    let tune_status_style = ctx.apply(Style::default().fg(ctx.theme.semantic.text));
+    let tune_header = format!("Self-Tune ({}s): ", app_state.tuning_countdown);
     let stats_text = vec![
         Line::from(vec![
             Span::styled(
@@ -1954,69 +1981,58 @@ pub fn draw_stats_panel(
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                "Next Tuning in: ",
+                tune_header,
                 ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
             ),
-            Span::raw(format!("{}s", app_state.tuning_countdown)),
+            Span::styled(tune_status.to_string(), tune_status_style),
+            if let Some(delta_pct) = tune_delta_pct {
+                let delta_style = if delta_pct > 0.0 {
+                    ctx.apply(Style::default().fg(ctx.state_success()))
+                } else if delta_pct < 0.0 {
+                    ctx.apply(Style::default().fg(ctx.state_error()))
+                } else {
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
+                };
+                Span::styled(format!(" ({:+.0}%)", delta_pct), delta_style)
+            } else {
+                Span::raw("")
+            },
         ]),
         Line::from(vec![
             Span::styled(
                 "Disk Thrash: ",
                 ctx.apply(Style::default().fg(ctx.accent_teal())),
             ),
-            Span::styled(thrash_text, ctx.apply(thrash_style)),
+            Span::raw(format!("{} ", thrash_value_text)),
+            Span::styled(thrash_delta_text, thrash_delta_style),
         ]),
-        Line::from(vec![
-            Span::styled(
-                "Reserve Pool:  ",
-                ctx.apply(Style::default().fg(ctx.accent_teal())),
-            ),
-            Span::raw(app_state.limits.reserve_permits.to_string()),
-            format_limit_delta(
-                ctx,
-                app_state.limits.reserve_permits,
-                app_state.last_tuning_limits.reserve_permits,
-            ),
-        ]),
-        {
-            let mut spans = format_permits_spans(
-                ctx,
-                "Peer Slots: ",
-                total_peers,
-                app_state.limits.max_connected_peers,
-                ctx.state_selected(),
-            );
-            spans.push(format_limit_delta(
-                ctx,
-                app_state.limits.max_connected_peers,
-                app_state.last_tuning_limits.max_connected_peers,
-            ));
-            Line::from(spans)
-        },
-        Line::from(vec![
-            Span::styled(
-                "Disk Reads:    ",
-                ctx.apply(Style::default().fg(ctx.state_success())),
-            ),
-            Span::raw(app_state.limits.disk_read_permits.to_string()),
-            format_limit_delta(
-                ctx,
-                app_state.limits.disk_read_permits,
-                app_state.last_tuning_limits.disk_read_permits,
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "Disk Writes:   ",
-                ctx.apply(Style::default().fg(ctx.accent_sky())),
-            ),
-            Span::raw(app_state.limits.disk_write_permits.to_string()),
-            format_limit_delta(
-                ctx,
-                app_state.limits.disk_write_permits,
-                app_state.last_tuning_limits.disk_write_permits,
-            ),
-        ]),
+        build_tuning_numeric_line(
+            ctx,
+            "Reserve Slots:",
+            app_state.limits.reserve_permits,
+            app_state.last_tuning_limits.reserve_permits,
+            ctx.accent_teal(),
+        ),
+        build_tuning_peer_line(
+            ctx,
+            total_peers,
+            app_state.limits.max_connected_peers,
+            app_state.last_tuning_limits.max_connected_peers,
+        ),
+        build_tuning_numeric_line(
+            ctx,
+            "Read Slots:",
+            app_state.limits.disk_read_permits,
+            app_state.last_tuning_limits.disk_read_permits,
+            ctx.state_success(),
+        ),
+        build_tuning_numeric_line(
+            ctx,
+            "Write Slots:",
+            app_state.limits.disk_write_permits,
+            app_state.last_tuning_limits.disk_write_permits,
+            ctx.accent_sky(),
+        ),
     ];
 
     let (lvl, progress) = crate::tui::view::calculate_player_stats(app_state);
@@ -2069,6 +2085,71 @@ pub fn draw_stats_panel(
         .style(ctx.apply(Style::default().fg(ctx.theme.semantic.text)));
 
     f.render_widget(stats_paragraph, stats_chunk);
+}
+
+fn build_tuning_numeric_line(
+    ctx: &ThemeContext,
+    label: &str,
+    current: usize,
+    last: usize,
+    label_color: Color,
+) -> Line<'static> {
+    let delta = current as isize - last as isize;
+    let delta_style = if delta > 0 {
+        ctx.apply(Style::default().fg(ctx.state_success()))
+    } else if delta < 0 {
+        ctx.apply(Style::default().fg(ctx.state_error()))
+    } else {
+        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
+    };
+    let delta_text = if delta > 0 {
+        format!(" (+{})", delta)
+    } else if delta < 0 {
+        format!(" ({})", delta)
+    } else {
+        String::new()
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{:<TUNING_LABEL_WIDTH$}", label),
+            ctx.apply(Style::default().fg(label_color)),
+        ),
+        Span::raw(" "),
+        Span::raw(current.to_string()),
+        Span::styled(delta_text, delta_style),
+    ])
+}
+
+fn build_tuning_peer_line(
+    ctx: &ThemeContext,
+    used: usize,
+    current_limit: usize,
+    last_limit: usize,
+) -> Line<'static> {
+    let delta = current_limit as isize - last_limit as isize;
+    let delta_style = if delta > 0 {
+        ctx.apply(Style::default().fg(ctx.state_success()))
+    } else if delta < 0 {
+        ctx.apply(Style::default().fg(ctx.state_error()))
+    } else {
+        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
+    };
+    let delta_text = if delta > 0 {
+        format!(" (+{})", delta)
+    } else if delta < 0 {
+        format!(" ({})", delta)
+    } else {
+        String::new()
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{:<TUNING_LABEL_WIDTH$}", "Peer Slots:"),
+            ctx.apply(Style::default().fg(ctx.state_selected())),
+        ),
+        Span::raw(" "),
+        Span::raw(format!("{} / {}", used, current_limit)),
+        Span::styled(delta_text, delta_style),
+    ])
 }
 
 fn rss_sync_countdown_label(next_sync_at: &str) -> Option<String> {

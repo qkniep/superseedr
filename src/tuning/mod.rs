@@ -33,6 +33,32 @@ pub(crate) struct TuningEvaluation {
     pub(crate) reality_check_applied: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TuningScore {
+    pub(crate) new_raw_score: u64,
+    pub(crate) penalty_factor: f64,
+    pub(crate) new_score: u64,
+}
+
+pub(crate) fn compute_tuning_score(
+    relevant_history: &[u64],
+    current_scpb: f64,
+    scpb_max: f64,
+) -> TuningScore {
+    let new_raw_score = if relevant_history.is_empty() {
+        0
+    } else {
+        relevant_history.iter().sum::<u64>() / relevant_history.len() as u64
+    };
+    let penalty_factor = (current_scpb / scpb_max - 1.0).max(0.0);
+    let new_score = (new_raw_score as f64 / (1.0 + penalty_factor)) as u64;
+    TuningScore {
+        new_raw_score,
+        penalty_factor,
+        new_score,
+    }
+}
+
 pub(crate) fn evaluate_tuning_cycle(
     current_limits: &CalculatedLimits,
     last_tuning_limits: &CalculatedLimits,
@@ -42,15 +68,24 @@ pub(crate) fn evaluate_tuning_cycle(
     current_scpb: f64,
     scpb_max: f64,
 ) -> TuningEvaluation {
-    let new_raw_score = if relevant_history.is_empty() {
-        0
-    } else {
-        relevant_history.iter().sum::<u64>() / relevant_history.len() as u64
-    };
-    let penalty_factor = (current_scpb / scpb_max - 1.0).max(0.0);
-    let new_score = (new_raw_score as f64 / (1.0 + penalty_factor)) as u64;
+    let score = compute_tuning_score(relevant_history, current_scpb, scpb_max);
+    evaluate_tuning_cycle_from_score(
+        current_limits,
+        last_tuning_limits,
+        last_tuning_score,
+        baseline_speed_ema,
+        score,
+    )
+}
 
-    let new_score_f64 = new_score as f64;
+pub(crate) fn evaluate_tuning_cycle_from_score(
+    current_limits: &CalculatedLimits,
+    last_tuning_limits: &CalculatedLimits,
+    last_tuning_score: u64,
+    baseline_speed_ema: f64,
+    score: TuningScore,
+) -> TuningEvaluation {
+    let new_score_f64 = score.new_score as f64;
     let updated_baseline_speed_ema = if baseline_speed_ema == 0.0 {
         new_score_f64
     } else {
@@ -65,8 +100,8 @@ pub(crate) fn evaluate_tuning_cycle(
     let mut accepted_improvement = false;
     let mut reality_check_applied = false;
 
-    if new_score > best_score_before {
-        updated_last_tuning_score = new_score;
+    if score.new_score > best_score_before {
+        updated_last_tuning_score = score.new_score;
         updated_last_tuning_limits = current_limits.clone();
         accepted_improvement = true;
     } else {
@@ -80,9 +115,9 @@ pub(crate) fn evaluate_tuning_cycle(
     }
 
     TuningEvaluation {
-        new_raw_score,
-        penalty_factor,
-        new_score,
+        new_raw_score: score.new_raw_score,
+        penalty_factor: score.penalty_factor,
+        new_score: score.new_score,
         updated_baseline_speed_ema,
         best_score_before,
         baseline_u64,

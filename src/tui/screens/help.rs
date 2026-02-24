@@ -501,22 +501,31 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
                     )),
                     Cell::from(
-                        "Score measuring if randomized changes resulted in optimial speeds.",
+                        "Score measuring if randomized changes resulted in optimal speeds.",
                     ),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
-                        "Next seconds",
+                        "Self-Tune (Xs):",
                         ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
                     )),
-                    Cell::from("Countdown to try a new random resource adjustment (file handles)"),
+                    Cell::from("Tuning state with countdown to the next adjustment cycle."),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
-                        "(+/-)",
+                        "Resource Rows",
                         ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
                     )),
-                    Cell::from("Random setting change between resources. (Green=Good, Red=Bad)"),
+                    Cell::from(
+                        "Current limits shown as numbers for Peers/Reads/Writes/Reserve.",
+                    ),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "(+/-/0)",
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+                    )),
+                    Cell::from("Signed change vs best limits (green positive, red negative)."),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 Row::new(vec![Cell::from(Span::styled(

@@ -41,7 +41,9 @@ use crate::resource_manager::ResourceType;
 use crate::telemetry::network_history_telemetry::NetworkHistoryTelemetry;
 use crate::telemetry::ui_telemetry::UiTelemetry;
 use crate::theme::Theme;
-use crate::tuning::{evaluate_tuning_cycle, make_random_adjustment};
+use crate::tuning::{
+    compute_tuning_score, evaluate_tuning_cycle_from_score, make_random_adjustment,
+};
 
 use crate::integrations::rss_url_safety::is_safe_rss_item_url;
 use crate::integrations::status::AppOutputState;
@@ -2239,6 +2241,19 @@ impl App {
     fn calculate_stats(&mut self, sys: &mut System) {
         UiTelemetry::on_second_tick(&mut self.app_state, sys);
         NetworkHistoryTelemetry::on_second_tick(&mut self.app_state);
+
+        let history = if !self.app_state.is_seeding {
+            &self.app_state.avg_download_history
+        } else {
+            &self.app_state.avg_upload_history
+        };
+        let relevant_history = &history[history.len().saturating_sub(60)..];
+        let live_score = compute_tuning_score(
+            relevant_history,
+            self.app_state.global_disk_thrash_score,
+            self.app_state.adaptive_max_scpb,
+        );
+        self.app_state.current_tuning_score = live_score.new_score;
     }
 
     fn startup_network_history_restore(&self) {
@@ -2299,17 +2314,20 @@ impl App {
         };
 
         let relevant_history = &history[history.len().saturating_sub(60)..];
-        let evaluation = evaluate_tuning_cycle(
-            &self.app_state.limits,
-            &self.app_state.last_tuning_limits,
-            self.app_state.last_tuning_score,
-            self.app_state.baseline_speed_ema,
+        let score = compute_tuning_score(
             relevant_history,
             self.app_state.global_disk_thrash_score,
             self.app_state.adaptive_max_scpb,
         );
+        self.app_state.current_tuning_score = score.new_score;
+        let evaluation = evaluate_tuning_cycle_from_score(
+            &self.app_state.limits,
+            &self.app_state.last_tuning_limits,
+            self.app_state.last_tuning_score,
+            self.app_state.baseline_speed_ema,
+            score,
+        );
 
-        self.app_state.current_tuning_score = evaluation.new_score;
         self.app_state.baseline_speed_ema = evaluation.updated_baseline_speed_ema;
         self.app_state.last_tuning_score = evaluation.updated_last_tuning_score;
         self.app_state.last_tuning_limits = evaluation.updated_last_tuning_limits.clone();
