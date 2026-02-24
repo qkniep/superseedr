@@ -916,8 +916,8 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.mauve,
-                    medium: categorical.pink,
+                    low: categorical.teal,
+                    medium: categorical.teal,
                     high: categorical.teal,
                     empty: Color::Rgb(30, 45, 65),
                 },
@@ -997,10 +997,10 @@ impl Theme {
                     categorical.blue,
                 ],
                 heatmap: ThemeHeatmap {
-                    low: categorical.flamingo,
-                    medium: categorical.pink,
-                    high: categorical.red,
-                    empty: Color::Rgb(255, 130, 205),
+                    low: categorical.mauve,
+                    medium: categorical.mauve,
+                    high: categorical.mauve,
+                    empty: Color::Rgb(89, 50, 78),
                 },
                 stream: ThemeStream {
                     inflow: categorical.mauve,
@@ -1204,9 +1204,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.sapphire,
-                    medium: categorical.mauve,
-                    high: categorical.rosewater,
+                    low: categorical.yellow,
+                    medium: categorical.yellow,
+                    high: categorical.yellow,
                     empty: Color::Rgb(78, 53, 22),
                 },
                 stream: ThemeStream {
@@ -1264,8 +1264,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.mauve,
-                    medium: categorical.pink,
-                    high: categorical.green,
+                    medium: categorical.mauve,
+                    high: categorical.mauve,
                     empty: Color::Rgb(68, 71, 90),
                 },
                 stream: ThemeStream {
@@ -1381,9 +1381,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
+                    low: categorical.yellow,
                     medium: categorical.yellow,
-                    high: categorical.red,
+                    high: categorical.yellow,
                     empty: Color::Rgb(60, 56, 54),
                 },
                 stream: ThemeStream {
@@ -1440,9 +1440,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.sky,
-                    high: categorical.red,
+                    low: categorical.mauve,
+                    medium: categorical.mauve,
+                    high: categorical.mauve,
                     empty: Color::Rgb(36, 40, 59),
                 },
                 stream: ThemeStream {
@@ -1500,8 +1500,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(40, 44, 52),
                 },
                 stream: ThemeStream {
@@ -1558,9 +1558,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.teal,
+                    medium: categorical.teal,
+                    high: categorical.teal,
                     empty: Color::Rgb(7, 54, 66),
                 },
                 stream: ThemeStream {
@@ -1617,9 +1617,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.green,
+                    medium: categorical.green,
+                    high: categorical.green,
                     empty: Color::Rgb(39, 40, 34),
                 },
                 stream: ThemeStream {
@@ -1676,9 +1676,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.green,
+                    medium: categorical.green,
+                    high: categorical.green,
                     empty: Color::Rgb(59, 69, 71),
                 },
                 stream: ThemeStream {
@@ -1735,9 +1735,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.sapphire,
+                    medium: categorical.sapphire,
+                    high: categorical.sapphire,
                     empty: Color::Rgb(54, 54, 75),
                 },
                 stream: ThemeStream {
@@ -1795,8 +1795,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(33, 38, 45),
                 },
                 stream: ThemeStream {
@@ -1854,8 +1854,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(238, 232, 213),
                 },
                 stream: ThemeStream {
@@ -2055,9 +2055,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
+                    low: categorical.pink,
                     medium: categorical.pink,
-                    high: categorical.yellow,
+                    high: categorical.pink,
                     empty: Color::Rgb(30, 0, 60),
                 },
                 stream: ThemeStream {
@@ -2114,9 +2114,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.teal,
+                    medium: categorical.teal,
+                    high: categorical.teal,
                     empty: Color::Rgb(25, 30, 36),
                 },
                 stream: ThemeStream {
@@ -2173,9 +2173,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.green,
+                    medium: categorical.green,
+                    high: categorical.green,
                     empty: Color::Rgb(71, 71, 71),
                 },
                 stream: ThemeStream {
@@ -2239,9 +2239,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
+                    low: categorical.pink,
                     medium: categorical.pink,
-                    high: categorical.yellow,
+                    high: categorical.pink,
                     empty: Color::Rgb(52, 43, 73),
                 },
                 stream: ThemeStream {
@@ -2299,8 +2299,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(234, 238, 242),
                 },
                 stream: ThemeStream {
@@ -2372,9 +2372,9 @@ impl Theme {
                     Color::Rgb(160, 160, 160),
                 ],
                 heatmap: ThemeHeatmap {
-                    low: Color::Rgb(110, 110, 110),
-                    medium: Color::Rgb(255, 175, 0),
-                    high: Color::Rgb(255, 128, 0),
+                    low: categorical.peach,
+                    medium: categorical.peach,
+                    high: categorical.peach,
                     empty: Color::Rgb(30, 30, 30),
                 },
                 stream: ThemeStream {
@@ -2431,9 +2431,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.teal,
+                    medium: categorical.teal,
+                    high: categorical.teal,
                     empty: Color::Rgb(25, 27, 41),
                 },
                 stream: ThemeStream {
@@ -2490,9 +2490,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
+                    low: categorical.yellow,
                     medium: categorical.yellow,
-                    high: categorical.red,
+                    high: categorical.yellow,
                     empty: Color::Rgb(213, 196, 161),
                 },
                 stream: ThemeStream {
@@ -2550,8 +2550,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(38, 38, 38),
                 },
                 stream: ThemeStream {
@@ -2613,9 +2613,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: Color::Rgb(0, 0, 255),
-                    medium: Color::Rgb(0, 255, 0),
-                    high: Color::Rgb(255, 0, 0),
+                    low: categorical.sapphire,
+                    medium: categorical.sapphire,
+                    high: categorical.pink,
                     empty: Color::Rgb(50, 50, 50),
                 },
                 stream: ThemeStream {
@@ -2677,9 +2677,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: Color::Rgb(150, 0, 0),
-                    medium: Color::Rgb(255, 80, 0),
-                    high: Color::Rgb(255, 255, 0),
+                    low: categorical.maroon,
+                    medium: categorical.maroon,
+                    high: categorical.yellow,
                     empty: Color::Rgb(40, 10, 0),
                 },
                 stream: ThemeStream {
@@ -2746,9 +2746,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: Color::Rgb(50, 50, 150),
-                    medium: Color::Rgb(0, 150, 150),
-                    high: Color::Rgb(0, 255, 128),
+                    low: categorical.sapphire,
+                    medium: categorical.sapphire,
+                    high: categorical.teal,
                     empty: Color::Rgb(20, 30, 60),
                 },
                 stream: ThemeStream {
@@ -2805,9 +2805,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.mauve,
+                    medium: categorical.mauve,
+                    high: categorical.mauve,
                     empty: Color::Rgb(43, 48, 59),
                 },
                 stream: ThemeStream {
@@ -2864,9 +2864,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    low: categorical.mauve,
+                    medium: categorical.mauve,
+                    high: categorical.mauve,
                     empty: Color::Rgb(38, 35, 58),
                 },
                 stream: ThemeStream {
@@ -2924,8 +2924,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(40, 50, 76),
                 },
                 stream: ThemeStream {
@@ -2983,8 +2983,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.yellow,
-                    high: categorical.red,
+                    medium: categorical.blue,
+                    high: categorical.blue,
                     empty: Color::Rgb(228, 221, 205),
                 },
                 stream: ThemeStream {
@@ -3055,9 +3055,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.sapphire,
-                    medium: categorical.peach,
-                    high: categorical.pink,
+                    low: categorical.mauve,
+                    medium: categorical.mauve,
+                    high: categorical.mauve,
                     empty: Color::Rgb(6, 8, 14),
                 },
                 stream: ThemeStream {
@@ -3124,9 +3124,9 @@ impl Theme {
                 ],
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
-                    medium: categorical.peach,
-                    high: categorical.red,
+                    low: categorical.sapphire,
+                    medium: categorical.sapphire,
+                    high: categorical.peach,
                     empty: Color::Rgb(40, 32, 28),
                 },
                 stream: ThemeStream {
@@ -3198,8 +3198,8 @@ impl Theme {
                 ip_hash: categorical_ip_hash(categorical),
                 heatmap: ThemeHeatmap {
                     low: categorical.blue,
-                    medium: categorical.sky,
-                    high: categorical.mauve,
+                    medium: categorical.sapphire,
+                    high: categorical.teal,
                     empty: Color::Rgb(222, 232, 245),
                 },
                 stream: ThemeStream {
@@ -3285,7 +3285,7 @@ impl Theme {
                     categorical.maroon,
                 ],
                 heatmap: ThemeHeatmap {
-                    low: categorical.blue,
+                    low: categorical.sky,
                     medium: categorical.sky,
                     high: categorical.mauve,
                     empty: Color::Rgb(28, 41, 64),
