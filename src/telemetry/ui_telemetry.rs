@@ -406,6 +406,7 @@ impl UiTelemetry {
             );
             app_state.last_tuning_score = 0;
             app_state.current_tuning_score = 0;
+            app_state.baseline_speed_ema = 0.0;
             app_state.last_tuning_limits = app_state.limits.clone();
 
             if is_seeding {
@@ -581,6 +582,7 @@ mod tests {
     use crate::telemetry::manager_telemetry::ManagerTelemetry;
     use std::collections::HashMap;
     use std::time::Duration;
+    use sysinfo::System;
 
     #[test]
     fn on_metrics_updates_totals_and_histories() {
@@ -811,5 +813,29 @@ mod tests {
         let before = app_state.disk_health_state_level;
         update_disk_health_state_level(&mut app_state);
         assert!(app_state.disk_health_state_level <= before);
+    }
+
+    #[test]
+    fn objective_switch_resets_tuning_ema_and_scores() {
+        let mut app_state = AppState {
+            is_seeding: true,
+            last_tuning_score: 1234,
+            current_tuning_score: 987,
+            baseline_speed_ema: 4321.0,
+            ..Default::default()
+        };
+
+        let mut torrent = TorrentDisplayState::default();
+        torrent.latest_state.number_of_pieces_total = 10;
+        torrent.latest_state.number_of_pieces_completed = 9;
+        app_state.torrents.insert(vec![1; 20], torrent);
+
+        let mut sys = System::new();
+        UiTelemetry::on_second_tick(&mut app_state, &mut sys);
+
+        assert!(!app_state.is_seeding);
+        assert_eq!(app_state.last_tuning_score, 0);
+        assert_eq!(app_state.current_tuning_score, 0);
+        assert_eq!(app_state.baseline_speed_ema, 0.0);
     }
 }
