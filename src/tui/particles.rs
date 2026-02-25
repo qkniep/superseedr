@@ -8,6 +8,9 @@ use crate::theme::{
     blend_colors, color_to_rgb, ParticleProfile, ThemeContext, ThemeParticleEffect,
 };
 
+// Terminal cells are typically taller than wide. Scale Y in radial math so circles render visually circular.
+const BLACK_HOLE_Y_ASPECT: f64 = 0.5;
+
 pub(crate) fn apply_theme_particles_background_to_frame(f: &mut Frame, ctx: &ThemeContext) {
     let particle = ctx.theme.effects.particle;
     if !particle.enabled || !particle.layer_mode.has_background() {
@@ -122,7 +125,8 @@ fn render_black_hole_particles(
             let local_y = y as f64 - area.top() as f64;
             let dx = local_x - burst.cx;
             let dy = local_y - burst.cy;
-            let radius = (dx * dx + dy * dy).sqrt();
+            let dy_scaled = dy * BLACK_HOLE_Y_ASPECT;
+            let radius = (dx * dx + dy_scaled * dy_scaled).sqrt();
 
             if let Some(cell) = buf.cell_mut((x, y)) {
                 if radius <= burst.inner_radius {
@@ -152,7 +156,7 @@ fn render_black_hole_particles(
                     continue;
                 }
 
-                let theta = dy.atan2(dx);
+                let theta = dy_scaled.atan2(dx);
                 let normalized_r = (radius / burst.outer_radius).clamp(0.0, 1.0);
                 let inward = 1.0 - normalized_r;
                 let spiral = ((theta * burst.arm_count) + (radius * 0.34)
