@@ -1026,11 +1026,11 @@ impl App {
         let mut sys = System::new();
 
         let mut stats_interval = time::interval(Duration::from_secs(1));
-        let mut tuning_interval =
-            time::interval(Duration::from_secs(self.tuning_controller.cadence_secs()));
         let mut version_interval = time::interval(Duration::from_secs(24 * 60 * 60));
         let mut dht_bootstrap_retry_interval = time::interval(Duration::from_secs(60));
         let mut network_history_persist_interval = time::interval(Duration::from_secs(15));
+        let mut next_tuning_at =
+            time::Instant::now() + Duration::from_secs(self.tuning_controller.cadence_secs());
         dht_bootstrap_retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         network_history_persist_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -1082,8 +1082,10 @@ impl App {
                     self.app_state.ui.needs_redraw = true;
                 }
 
-                _ = tuning_interval.tick() => {
+                _ = time::sleep_until(next_tuning_at) => {
                     self.tuning_resource_limits().await;
+                    next_tuning_at = time::Instant::now()
+                        + Duration::from_secs(self.tuning_controller.cadence_secs());
                 }
 
                 _ = status_dump_timer.tick(), if output_status_interval > 0 => {
