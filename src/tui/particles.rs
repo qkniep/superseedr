@@ -197,10 +197,10 @@ fn render_black_hole_particles(
 }
 
 fn black_hole_burst_state(width: f64, height: f64, phase: f64) -> BlackHoleBurst {
-    const WINDOW_SECS: f64 = 10.0;
+    const WINDOW_SECS: f64 = 14.0;
     let slot = (phase / WINDOW_SECS).floor();
     let t = phase - slot * WINDOW_SECS;
-    let active_len = 2.2 + hash01(slot, 0.0, 0.0, 801.0) * 3.1;
+    let active_len = 4.0 + hash01(slot, 0.0, 0.0, 801.0) * 5.0;
     let latest_start = (WINDOW_SECS - active_len).max(0.4);
     let start = hash01(slot, 0.0, 0.0, 809.0) * latest_start;
     let active = t >= start && t <= start + active_len;

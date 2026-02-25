@@ -14,7 +14,7 @@ use crate::app::{
 use crate::config::Settings;
 use crate::config::SortDirection;
 use crate::persistence::network_history::NetworkHistoryPoint;
-use crate::theme::ThemeContext;
+use crate::theme::{ThemeContext, ThemeName};
 use crate::torrent_manager::ManagerCommand;
 use crate::tui::formatters::{
     calculate_nice_upper_bound, format_bytes, format_countdown, format_duration, format_iops,
@@ -2580,7 +2580,13 @@ fn disk_health_state_word(state_level: u8) -> &'static str {
 
 fn disk_health_status_color(ctx: &ThemeContext, state_level: u8) -> Color {
     match state_level {
-        0 => ctx.theme.semantic.subtext0,
+        0 => {
+            if ctx.theme.name == ThemeName::BlackHole {
+                ctx.theme.semantic.subtext1
+            } else {
+                ctx.theme.semantic.subtext0
+            }
+        }
         1 => ctx.state_info(),
         2 => ctx.state_warning(),
         _ => ctx.state_error(),
