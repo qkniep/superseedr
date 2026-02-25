@@ -1794,16 +1794,7 @@ pub fn draw_stats_panel(
     } else {
         Some(0.0)
     };
-    let tune_status = if app_state.last_tuning_score == 0 || (dl_speed == 0 && ul_speed == 0) {
-        "Stable"
-    } else if tune_delta_pct.unwrap_or(0.0).abs() < 3.0 {
-        // Treat near-flat score movement as stable to avoid "always optimizing".
-        "Stable"
-    } else {
-        "Optimizing"
-    };
-    let tune_status_style = ctx.apply(Style::default().fg(ctx.theme.semantic.text));
-    let tune_header = format!("Self-Tune ({}s): ", app_state.tuning_countdown);
+    let tune_header = format!("Self-Tune({}s): ", app_state.tuning_countdown);
     let stats_text = vec![
         Line::from(vec![
             Span::styled(
@@ -1984,7 +1975,10 @@ pub fn draw_stats_panel(
                 tune_header,
                 ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
             ),
-            Span::styled(tune_status.to_string(), tune_status_style),
+            Span::styled(
+                app_state.current_tuning_score.to_string(),
+                ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+            ),
             if let Some(delta_pct) = tune_delta_pct {
                 let delta_style = if delta_pct > 0.0 {
                     ctx.apply(Style::default().fg(ctx.state_success()))
@@ -2615,8 +2609,8 @@ fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
     let phase = app_state.disk_health_phase;
 
     let orb_color = disk_health_status_color(ctx, app_state.disk_health_state_level);
-    let has_iops_activity = app_state.read_iops > 0 || app_state.write_iops > 0;
-    let orb_style = if has_iops_activity {
+    let has_disk_speed_activity = app_state.avg_disk_read_bps > 0 || app_state.avg_disk_write_bps > 0;
+    let orb_style = if has_disk_speed_activity {
         ctx.apply(Style::default().fg(orb_color))
     } else {
         ctx.apply(Style::default().fg(orb_color).dim())
