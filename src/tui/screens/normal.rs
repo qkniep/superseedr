@@ -54,7 +54,6 @@ use ratatui::widgets::{
     Block, Borders, Cell, Clear, Gauge, LineGauge, Padding, Paragraph, Row, Table, TableState, Wrap,
 };
 use strum::IntoEnumIterator;
-use throbber_widgets_tui::Throbber;
 use tracing::{event as tracing_event, Level};
 
 static APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -411,9 +410,6 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
 
     if let Some(r) = plan.chart {
         draw_network_chart(f, app_state, r, ctx);
-    }
-    if let Some(r) = plan.sparklines {
-        draw_torrent_sparklines(f, app_state, r, ctx);
     }
     if let Some(r) = plan.peer_stream {
         draw_peer_stream(f, app_state, r, ctx);
@@ -2995,173 +2991,6 @@ fn render_sparkles<'a>(
             style.add_modifier(Modifier::DIM)
         };
         spans.push(Span::styled(symbol, style));
-    }
-}
-
-pub fn draw_torrent_sparklines(
-    f: &mut Frame,
-    app_state: &AppState,
-    area: Rect,
-    ctx: &ThemeContext,
-) {
-    let torrent = app_state
-        .torrent_list_order
-        .get(app_state.ui.selected_torrent_index)
-        .and_then(|info_hash| app_state.torrents.get(info_hash));
-
-    let Some(torrent) = torrent else {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
-        f.render_widget(block, area);
-        return;
-    };
-
-    let dl_history = &torrent.download_history;
-    let ul_history = &torrent.upload_history;
-    const ACTIVITY_WINDOW: usize = 60;
-    let check_dl_slice = &dl_history[dl_history.len().saturating_sub(ACTIVITY_WINDOW)..];
-    let check_ul_slice = &ul_history[ul_history.len().saturating_sub(ACTIVITY_WINDOW)..];
-    let has_dl_activity = check_dl_slice.iter().any(|&s| s > 0);
-    let has_ul_activity = check_ul_slice.iter().any(|&s| s > 0);
-
-    if has_dl_activity && !has_ul_activity {
-        let width = area.width.saturating_sub(2).max(1) as usize;
-        let dl_slice = &dl_history[dl_history.len().saturating_sub(width)..];
-        let max_speed = dl_slice.iter().max().copied().unwrap_or(1);
-        let nice_max_speed = calculate_nice_upper_bound(max_speed).max(1);
-
-        let dl_sparkline = ratatui::widgets::Sparkline::default()
-            .block(
-                Block::default()
-                    .title(Span::styled(
-                        format!("DL Activity (Peak: {})", format_speed(nice_max_speed)),
-                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
-            )
-            .data(dl_slice)
-            .max(nice_max_speed)
-            .style(ctx.apply(Style::default().fg(ctx.state_info())));
-        f.render_widget(dl_sparkline, area);
-    } else if !has_dl_activity && has_ul_activity {
-        let width = area.width.saturating_sub(2).max(1) as usize;
-        let ul_slice = &ul_history[ul_history.len().saturating_sub(width)..];
-        let max_speed = ul_slice.iter().max().copied().unwrap_or(1);
-        let nice_max_speed = calculate_nice_upper_bound(max_speed).max(1);
-        let ul_sparkline = ratatui::widgets::Sparkline::default()
-            .block(
-                Block::default()
-                    .title(Span::styled(
-                        format!("UL Activity (Peak: {})", format_speed(nice_max_speed)),
-                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
-            )
-            .data(ul_slice)
-            .max(nice_max_speed)
-            .style(ctx.apply(Style::default().fg(ctx.state_success())));
-        f.render_widget(ul_sparkline, area);
-    } else if !has_dl_activity && !has_ul_activity {
-        let style = ctx.apply(Style::default().fg(ctx.state_selected()));
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
-        let inner_area = block.inner(area);
-        f.render_widget(block, area);
-
-        let vertical_chunks = Layout::vertical([
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .split(inner_area);
-        let throbber_width = 23;
-        let horizontal_chunks = Layout::horizontal([
-            Constraint::Min(0),
-            Constraint::Length(throbber_width),
-            Constraint::Min(0),
-        ])
-        .split(vertical_chunks[1]);
-        let inner_chunks = Layout::horizontal([
-            Constraint::Length(1),
-            Constraint::Length(21),
-            Constraint::Length(1),
-        ])
-        .split(horizontal_chunks[1]);
-
-        let throbber_left_area = inner_chunks[0];
-        let label_area = inner_chunks[1];
-        let throbber_right_area = inner_chunks[2];
-
-        let label_text = Paragraph::new(" Searching for Peers ")
-            .style(style)
-            .alignment(Alignment::Center);
-        let throbber_style = ctx.apply(
-            Style::default()
-                .fg(ctx.state_complete())
-                .add_modifier(Modifier::BOLD),
-        );
-        let throbber_widget = Throbber::default().style(throbber_style);
-
-        f.render_widget(label_text, label_area);
-        f.render_stateful_widget(
-            throbber_widget.clone(),
-            throbber_left_area,
-            &mut app_state.throbber_holder.borrow_mut().torrent_sparkline,
-        );
-        f.render_stateful_widget(
-            throbber_widget,
-            throbber_right_area,
-            &mut app_state.throbber_holder.borrow_mut().torrent_sparkline,
-        );
-    } else {
-        let sparkline_chunks =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(area);
-        let dl_sparkline_chunk = sparkline_chunks[0];
-        let ul_sparkline_chunk = sparkline_chunks[1];
-
-        let dl_width = dl_sparkline_chunk.width.saturating_sub(2).max(1) as usize;
-        let ul_width = ul_sparkline_chunk.width.saturating_sub(2).max(1) as usize;
-        let dl_slice = &dl_history[dl_history.len().saturating_sub(dl_width)..];
-        let ul_slice = &ul_history[ul_history.len().saturating_sub(ul_width)..];
-        let max_dl = dl_slice.iter().max().copied().unwrap_or(0);
-        let max_ul = ul_slice.iter().max().copied().unwrap_or(0);
-        let dl_nice_max = calculate_nice_upper_bound(max_dl).max(1);
-        let ul_nice_max = calculate_nice_upper_bound(max_ul).max(1);
-
-        let dl_sparkline = ratatui::widgets::Sparkline::default()
-            .block(
-                Block::default()
-                    .title(Span::styled(
-                        format!("DL (Peak: {})", format_speed(dl_nice_max)),
-                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
-            )
-            .data(dl_slice)
-            .max(dl_nice_max)
-            .style(ctx.apply(Style::default().fg(ctx.state_info())));
-        f.render_widget(dl_sparkline, dl_sparkline_chunk);
-
-        let ul_sparkline = ratatui::widgets::Sparkline::default()
-            .block(
-                Block::default()
-                    .title(Span::styled(
-                        format!("UL (Peak: {})", format_speed(ul_nice_max)),
-                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
-            )
-            .data(ul_slice)
-            .max(ul_nice_max)
-            .style(ctx.apply(Style::default().fg(ctx.state_success())));
-        f.render_widget(ul_sparkline, ul_sparkline_chunk);
     }
 }
 

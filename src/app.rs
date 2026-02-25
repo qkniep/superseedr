@@ -80,8 +80,6 @@ use std::time::Duration;
 
 use ratatui::prelude::Rect;
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::cell::RefCell;
-use throbber_widgets_tui::ThrobberState;
 
 use sysinfo::System;
 
@@ -194,11 +192,6 @@ pub enum FileBrowserMode {
 pub struct FileMetadata {
     pub size: u64,
     pub modified: std::time::SystemTime,
-}
-
-#[derive(Debug, Default)]
-pub struct ThrobberHolder {
-    pub torrent_sparkline: ThrobberState,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -741,8 +734,6 @@ pub struct AppState {
     pub disk_health_state_level: u8,
 
     pub recently_processed_files: HashMap<PathBuf, Instant>,
-
-    pub throbber_holder: RefCell<ThrobberHolder>,
 }
 
 pub struct App {

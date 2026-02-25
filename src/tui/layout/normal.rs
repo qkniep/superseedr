@@ -15,7 +15,6 @@ pub struct LayoutPlan {
     pub details: Rect,
     pub peers: Rect,
     pub chart: Option<Rect>,
-    pub sparklines: Option<Rect>,
     pub stats: Option<Rect>,
     pub peer_stream: Option<Rect>,
     pub block_stream: Option<Rect>,
@@ -61,11 +60,7 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         ])
         .split(area);
 
-        let top_split =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(5)]).split(main[0]);
-        plan.list = top_split[0];
-        plan.sparklines = Some(top_split[1]);
-
+        plan.list = main[0];
         let bottom_cols =
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(main[1]);
@@ -151,10 +146,7 @@ pub fn calculate_layout(area: Rect, ctx: &LayoutContext) -> LayoutPlan {
         let top_h = Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)])
             .split(top_area);
 
-        let left_v = Layout::vertical([Constraint::Min(0), Constraint::Length(5)]).split(top_h[0]);
-        plan.list = left_v[0];
-        plan.sparklines = Some(left_v[1]);
-
+        plan.list = top_h[0];
         let right_v = Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).split(top_h[1]);
 
         let header_h =

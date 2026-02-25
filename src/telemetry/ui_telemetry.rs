@@ -196,12 +196,6 @@ impl UiTelemetry {
     }
 
     pub fn on_second_tick(app_state: &mut AppState, sys: &mut System) {
-        app_state
-            .throbber_holder
-            .borrow_mut()
-            .torrent_sparkline
-            .calc_next();
-
         if matches!(app_state.mode, AppMode::PowerSaving) && !app_state.run_time.is_multiple_of(5) {
             app_state.run_time += 1;
             return;

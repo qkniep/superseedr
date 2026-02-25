@@ -202,10 +202,6 @@ mod tests {
         let plan = calculate_layout(area, &ctx);
 
         // Short layout specific checks
-        assert!(
-            plan.sparklines.is_some(),
-            "Short layout should show sparklines"
-        );
         assert!(plan.stats.is_some(), "Short layout should show stats");
         assert!(plan.chart.is_none(), "Short layout hides the large chart");
 
@@ -278,7 +274,6 @@ mod tests {
             plan.list.width >= MIN_SIDEBAR_WIDTH,
             "Sidebar should respect min width"
         );
-        assert!(plan.sparklines.is_some());
         assert!(plan.peer_stream.is_some());
 
         // Width 120 is < 135, so block_stream should be hidden in standard view
