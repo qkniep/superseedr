@@ -43,6 +43,7 @@ use crate::telemetry::ui_telemetry::UiTelemetry;
 use crate::theme::Theme;
 use crate::tuning::{
     compute_tuning_score, evaluate_tuning_cycle_from_score, make_random_adjustment,
+    normalize_limits_for_mode,
 };
 
 use crate::integrations::rss_url_safety::is_safe_rss_item_url;
@@ -2239,8 +2240,20 @@ impl App {
     }
 
     fn calculate_stats(&mut self, sys: &mut System) {
+        let was_seeding = self.app_state.is_seeding;
         UiTelemetry::on_second_tick(&mut self.app_state, sys);
         NetworkHistoryTelemetry::on_second_tick(&mut self.app_state);
+        if was_seeding != self.app_state.is_seeding {
+            self.app_state.limits =
+                normalize_limits_for_mode(&self.app_state.limits, self.app_state.is_seeding);
+            self.app_state.last_tuning_limits = self.app_state.limits.clone();
+
+            let rm = self.resource_manager.clone();
+            let limits_map = self.app_state.limits.clone().into_map();
+            tokio::spawn(async move {
+                let _ = rm.update_limits(limits_map).await;
+            });
+        }
 
         let history = if !self.app_state.is_seeding {
             &self.app_state.avg_download_history
@@ -2354,7 +2367,8 @@ impl App {
                 .await;
         }
 
-        let (next_limits, desc) = make_random_adjustment(self.app_state.limits.clone());
+        let (next_limits, desc) =
+            make_random_adjustment(self.app_state.limits.clone(), self.app_state.is_seeding);
         self.app_state.limits = next_limits;
 
         tracing_event!(Level::DEBUG, "Self-Tune: Trying next change... {}", desc);

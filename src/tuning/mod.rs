@@ -18,6 +18,38 @@ pub(crate) const MIN_RESERVE: usize = 0;
 
 pub(crate) const MAX_TRADE_ATTEMPTS: usize = 5;
 
+pub(crate) fn normalize_limits_for_mode(
+    limits: &CalculatedLimits,
+    is_seeding: bool,
+) -> CalculatedLimits {
+    if is_seeding {
+        let total_budget = limits
+            .reserve_permits
+            .saturating_add(limits.max_connected_peers)
+            .saturating_add(limits.disk_read_permits)
+            .saturating_add(limits.disk_write_permits);
+        let peer_slots = total_budget.saturating_mul(70) / 100;
+        let read_slots = total_budget.saturating_sub(peer_slots);
+        return CalculatedLimits {
+            reserve_permits: 0,
+            max_connected_peers: peer_slots,
+            disk_read_permits: read_slots,
+            disk_write_permits: 0,
+        };
+    }
+
+    // Downloading mode: keep total disk budget, targeting 30% read / 70% write.
+    let disk_budget = limits.disk_read_permits.saturating_add(limits.disk_write_permits);
+    let read_slots = disk_budget.saturating_mul(30) / 100;
+    let write_slots = disk_budget.saturating_sub(read_slots);
+    CalculatedLimits {
+        reserve_permits: limits.reserve_permits,
+        max_connected_peers: limits.max_connected_peers,
+        disk_read_permits: read_slots,
+        disk_write_permits: write_slots,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TuningEvaluation {
     pub(crate) new_raw_score: u64,
@@ -147,21 +179,39 @@ fn set_limit(limits: &mut CalculatedLimits, resource: ResourceType, value: usize
     }
 }
 
-pub(crate) fn make_random_adjustment(limits: CalculatedLimits) -> (CalculatedLimits, String) {
+pub(crate) fn make_random_adjustment(
+    limits: CalculatedLimits,
+    is_seeding: bool,
+) -> (CalculatedLimits, String) {
     let mut rng = rand::rng();
-    make_random_adjustment_with_rng(limits, &mut rng)
+    make_random_adjustment_with_rng(limits, is_seeding, &mut rng)
 }
 
 pub(crate) fn make_random_adjustment_with_rng<R: Rng + ?Sized>(
-    mut limits: CalculatedLimits,
+    limits: CalculatedLimits,
+    is_seeding: bool,
     rng: &mut R,
 ) -> (CalculatedLimits, String) {
-    let mut parameters = [
+    let mut limits = if is_seeding {
+        normalize_limits_for_mode(&limits, true)
+    } else {
+        limits
+    };
+    let mut parameters = vec![
         ResourceType::PeerConnection,
         ResourceType::DiskRead,
-        ResourceType::DiskWrite,
         ResourceType::Reserve,
     ];
+    if !is_seeding {
+        parameters.push(ResourceType::DiskWrite);
+    }
+
+    if parameters.len() < 2 {
+        return (
+            limits,
+            "Skipped all trade attempts (0): insufficient adjustable resources".to_string(),
+        );
+    }
 
     for attempt in 0..MAX_TRADE_ATTEMPTS {
         parameters.shuffle(rng);
@@ -312,7 +362,7 @@ mod tests {
             last_tuning_limits = evaluation.updated_last_tuning_limits;
             limits = evaluation.effective_limits;
 
-            let (next_limits, _desc) = make_random_adjustment_with_rng(limits, &mut rng);
+            let (next_limits, _desc) = make_random_adjustment_with_rng(limits, false, &mut rng);
             limits = next_limits;
         }
 
@@ -439,7 +489,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(99);
 
         for _ in 0..2_000 {
-            let (next, _desc) = make_random_adjustment_with_rng(limits, &mut rng);
+            let (next, _desc) = make_random_adjustment_with_rng(limits, false, &mut rng);
             limits = next;
 
             assert!(limits.max_connected_peers >= MIN_PEERS);
@@ -463,5 +513,102 @@ mod tests {
         assert!(eval.reality_check_applied);
         assert_eq!(eval.updated_last_tuning_score, eval.baseline_u64);
         assert!(!eval.accepted_improvement);
+    }
+
+    #[test]
+    fn seeding_adjustment_disables_disk_write_trades_and_sets_zero_write_slots() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let mut rng = StdRng::seed_from_u64(123);
+
+        for _ in 0..200 {
+            let (next, _desc) = make_random_adjustment_with_rng(limits.clone(), true, &mut rng);
+            assert_eq!(next.disk_write_permits, 0);
+        }
+    }
+
+    #[test]
+    fn seeding_adjustment_preserves_total_disk_slots_by_moving_write_to_read() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let expected_total = limits
+            .reserve_permits
+            .saturating_add(limits.max_connected_peers)
+            .saturating_add(limits.disk_read_permits)
+            .saturating_add(limits.disk_write_permits);
+        let mut rng = StdRng::seed_from_u64(321);
+
+        for _ in 0..200 {
+            let (next, _desc) = make_random_adjustment_with_rng(limits.clone(), true, &mut rng);
+            assert_eq!(next.disk_write_permits, 0);
+            let next_total = next
+                .reserve_permits
+                .saturating_add(next.max_connected_peers)
+                .saturating_add(next.disk_read_permits)
+                .saturating_add(next.disk_write_permits);
+            assert_eq!(next_total, expected_total);
+        }
+    }
+
+    #[test]
+    fn normalize_limits_for_mode_seeding_zeros_write_and_preserves_total() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let normalized = normalize_limits_for_mode(&limits, true);
+        let before_total = limits
+            .reserve_permits
+            .saturating_add(limits.max_connected_peers)
+            .saturating_add(limits.disk_read_permits)
+            .saturating_add(limits.disk_write_permits);
+        let after_total = normalized
+            .reserve_permits
+            .saturating_add(normalized.max_connected_peers)
+            .saturating_add(normalized.disk_read_permits)
+            .saturating_add(normalized.disk_write_permits);
+        assert_eq!(normalized.disk_write_permits, 0);
+        assert_eq!(before_total, after_total);
+    }
+
+    #[test]
+    fn normalize_limits_for_mode_seeding_targets_70_30_peer_read_and_zero_reserve_write() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let normalized = normalize_limits_for_mode(&limits, true);
+        assert_eq!(normalized.max_connected_peers, 74);
+        assert_eq!(normalized.disk_read_permits, 32);
+        assert_eq!(normalized.reserve_permits, 0);
+        assert_eq!(normalized.disk_write_permits, 0);
+    }
+
+    #[test]
+    fn normalize_limits_for_mode_downloading_targets_30_70_read_write_split() {
+        let limits = CalculatedLimits {
+            reserve_permits: 20,
+            max_connected_peers: 64,
+            disk_read_permits: 12,
+            disk_write_permits: 10,
+        };
+        let normalized = normalize_limits_for_mode(&limits, false);
+        let before_disk_total = limits.disk_read_permits + limits.disk_write_permits;
+        let after_disk_total = normalized.disk_read_permits + normalized.disk_write_permits;
+        assert_eq!(before_disk_total, after_disk_total);
+        assert_eq!(normalized.disk_read_permits, 6);
+        assert_eq!(normalized.disk_write_permits, 16);
     }
 }
