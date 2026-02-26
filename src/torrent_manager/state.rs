@@ -10767,22 +10767,41 @@ mod integration_tests {
             temp_dir.clone(),
         );
 
-        let (_rx_fast, _ctrl_fast) = spawn_mock_peer(
-            &mut manager,
-            full_bitfield(num_pieces),
-            std::time::Duration::from_millis(0),
-        )
-        .await;
         let (mut rx_slow, _ctrl_slow) = spawn_mock_peer(
             &mut manager,
             full_bitfield(num_pieces),
-            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(120),
+        )
+        .await;
+        let (_rx_fast, _ctrl_fast) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(10),
         )
         .await;
 
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
         });
+
+        let precondition_start = std::time::Instant::now();
+        let precondition_timeout = std::time::Duration::from_secs(4);
+        let mut slow_peer_requested_piece = false;
+        while precondition_start.elapsed() < precondition_timeout {
+            if let Ok(Some(msg)) =
+                tokio::time::timeout(std::time::Duration::from_millis(250), rx_slow.recv()).await
+            {
+                if decode_triplet_event(&msg, 6).is_some() {
+                    slow_peer_requested_piece = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            slow_peer_requested_piece,
+            "Precondition failed: slow peer never received a request tuple"
+        );
 
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(8);
@@ -10833,22 +10852,41 @@ mod integration_tests {
             temp_dir.clone(),
         );
 
-        let (_rx_fast, _ctrl_fast) = spawn_mock_peer(
-            &mut manager,
-            full_bitfield(num_pieces),
-            std::time::Duration::from_millis(0),
-        )
-        .await;
         let (mut rx_slow, _ctrl_slow) = spawn_mock_peer(
             &mut manager,
             full_bitfield(num_pieces),
-            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(120),
+        )
+        .await;
+        let (_rx_fast, _ctrl_fast) = spawn_mock_peer(
+            &mut manager,
+            full_bitfield(num_pieces),
+            std::time::Duration::from_millis(10),
         )
         .await;
 
         let manager_handle = tokio::spawn(async move {
             let _ = manager.run(false).await;
         });
+
+        let precondition_start = std::time::Instant::now();
+        let precondition_timeout = std::time::Duration::from_secs(4);
+        let mut slow_peer_requested_piece = false;
+        while precondition_start.elapsed() < precondition_timeout {
+            if let Ok(Some(msg)) =
+                tokio::time::timeout(std::time::Duration::from_millis(250), rx_slow.recv()).await
+            {
+                if decode_triplet_event(&msg, 6).is_some() {
+                    slow_peer_requested_piece = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            slow_peer_requested_piece,
+            "Precondition failed: slow peer never received a request tuple"
+        );
 
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(8);
