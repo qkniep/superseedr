@@ -1,124 +1,111 @@
 # Roadmap
-This document will serve as a high level guide to the direction of superseedr.
-Consider this roadmap as mostly stable, but flexible to minor changes in terms of features and timing.
-For specific tracking details visit the issues page and filter via labels.
+This document is a high-level guide to the direction of superseedr.
+It is intentionally stable but flexible as implementation details evolve.
+For specific tracking, use repository issues and labels.
 
+## Status Baseline (from changelog)
+The roadmap now reflects features shipped through `v1.0.1`.
 
-# Big Features
-- **RSS Feed Support:** Automatically monitor RSS feeds and download new torrents matching user-defined filters.
-- **Config Screen Redesign:** Modernize and refactor the config screen management for more complex user inputs.
-- **Advanced Torrent Management:** TUI Screen to manage the torrent list. Full features such as multi-select and grouping.
-- **User Adjustables:** Configs to allow user to select which columns are visible on tables, ability to set it to auto (dl/ul aware).
-- **Alternative and Custom Themes:** Extensible themes defined by superseedr and the users. Fancy screen to config this, saved as json/toml.
-- **Internal TUI architecture refactor:** Proper architecture for the TUI layer, modern best practices for UI management.
-- **Persistent Data Across Sessions:** Network graphs, system data, and peering stats persist across sessions. Allows to block malicious peers based on ratio.
-- **Scriptability and CLI Enhancements:** Torrent management and period stats made available.
-- **Log Levels and TUI:** Allow users to set log levels (INFO, DEBUG, WARN...) and to allow log access within the TUI.
-- **User Configurable Layouts:** Drag-n-Drop layouting of the main TUI.
-- **Peer Stream Redesign:** Enable more visualizations in the peer stream focusing more on size, color, and opacity.
-- **Fully asynchronous validation:** Refactor for handling torrent validation and revalidations async.
-- **Peer Churn Overload Management:** End-to-End peer management in scales of over 10k potential peers.
-- **Integration Testing:** Automatic testing against existing clients (qbit nox, transmission).
+### Shipped
+- `v1.0.0`: Integrated RSS workspace, advanced RSS filtering, and safer high-impact confirmation flows.
+- `v1.0.1`: RSS duplicate-filter guardrails and follow-up RSS UX/readability fixes.
+- `v0.9.38`: Semantic theme system, new built-in themes, theme cycling, and broader theme effects.
+- `v0.9.29` to `v0.9.38`: Major TUI architecture and layout/table behavior refactors, including smarter column visibility behavior.
+- `v0.9.30`: BitTorrent v2/hybrid support, merkle verification, and related integration test coverage.
+- `v0.9.35`: JSON state dump/export foundation for external integrations.
+- `v0.9.36`: Peer activity visualization redesign improvements.
 
-## Roadmap to V1.0
-This release will be focused on stability in the torrent core and basic usability.
-Many big items were already addressed such as BitTorrent V2, selective downloading, and performance.
-An additional requirement is to have the codebase in a place for maximum extensibility for the big features above.
-Technical and non-technical documentation will also be updated to the latest versions.
+## Big Features
+- `[Shipped]` **RSS Feed Support**
+- `[Planned]` **Config Screen Redesign**: Modernize and refactor config management for more complex user inputs.
+- `[Planned]` **Advanced Torrent Management**: Add multi-select, bulk actions, and grouping in torrent management UI flows.
+- `[Partially Shipped]` **User Adjustables**: Continue improving user control over visible columns and auto behaviors.
+- `[Partially Shipped]` **Alternative and Custom Themes**: Extend beyond built-ins with full user-defined theme packs.
+- `[Shipped]` **Internal TUI Architecture Refactor**
+- `[Planned]` **Persistent Data Across Sessions**: Persist peer/system history and support reputation/blocking logic.
+- `[Partially Shipped]` **Scriptability and CLI Enhancements**: Build on JSON status export with richer control surfaces.
+- `[Planned]` **Log Levels and TUI**: Runtime log level controls and in-app log viewer.
+- `[Planned]` **User Configurable Layouts**: Saveable/reconfigurable layouts.
+- `[Partially Shipped]` **Peer Stream Redesign**: Continue expanding stream visual encoding and controls.
+- `[Planned]` **Fully Asynchronous Validation**: Complete non-blocking validation/revalidation pipeline work.
+- `[Planned]` **Peer Churn Overload Management**: Harden behavior for very large swarms and peer churn.
+- `[Partially Shipped]` **Integration Testing**: Continue scaling interop coverage and CI automation.
 
-## Roadmap to V1.5
-The bulk of this release will be focused on the TUI. 
-Features such as user customizable columns, RSS, and torrent list management.
-This includes further polishing of current components in terms of sizing, layouts, and dynamic content.
-TUI code architecture will be included here as the foundation of this release.
-Heavy regression testing will take up a lot of time in this release, possibly with a beta program.
+## Roadmap to v1.5
+`v1.0` shipped core usability and stability milestones.
+The `v1.1` to `v1.5` window focuses on finishing advanced UX and operator controls on top of the current baseline.
 
-## Future (V2.0 and Beyond)
-Although very far away, these releases will be where superseedr can begin to ship features that can push TUIs and BitTorrent forward.
-As a new BitTorrent client, superseedr has tons of catching up to do (uTP, IPv6, UPnP, hole punch, DHT search, ..etc)
-These include: custom layout engines, advance swarm observability, peering management, world map view, torrent creation, remote TUI.
+Priority themes:
+- Advanced torrent management workflows (multi-select, bulk actions, grouping/tagging).
+- Config UX overhaul (structured inputs, validation, grouped sections).
+- Logging observability inside TUI (log widget and runtime verbosity controls).
+- Validation pipeline hardening (async/revalidation progress and resilience).
+- Expanded interop testing depth and CI confidence gates.
+
+## Future (v2.0+)
+Longer-term work targets deeper networking and operational control:
+- Persistent long-term stats, peer reputation, and auto-blocking.
+- Headless/scriptable control surface and richer CLI automation.
+- User-configurable/saved TUI layouts.
+- High-churn peer management at large scale.
+- Networking parity/features (uTP, IPv6, UPnP, hole punch, DHT search).
 
 # Detailed Roadmap Steps
 
-## Phase: 1 - v1.0
-**Goal:** Core stability, basic usability, and integration testing.
-
-### Integration Testing
-- **phase: 1 - v1.0** | Containerized Test Environment - Docker setup for qBit/Transmission interoperability | [Issue #____]
-- **phase: 1 - v1.0** | Interop Test Runner - script to verify transfer success between clients | [Issue #____]
-- **phase: 1 - v1.0** | CI/CD Pipeline - auto-run integration tests on Pull Requests | [Issue #____]
-
----
-
-## Phase: 1.5 - v1.5
-**Goal:** TUI polish, RSS, and advanced management features.
-
-### Log Levels and TUI
-- **phase: 1 - v1.0** | Structured Logging - implement level-based logging (INFO, DEBUG, WARN) | [Issue #____]
-- **phase: 1 - v1.0** | Log Widget - scrollable text view within TUI to tail logs | [Issue #____]
-- **phase: 1 - v1.0** | Configurable Log Level - user setting to change verbosity at runtime | [Issue #____]
-
-### Fully Asynchronous Validation
-- **phase: 1 - v1.0** | Async Hashing - move file verification to dedicated thread pool to prevent UI freezing | [Issue #____]
-- **phase: 1 - v1.0** | Validation Progress - granular progress events sent back to UI/Logger | [Issue #____]
-- **phase: 1 - v1.0** | Revalidation Logic - handling forced re-checks on existing files | [Issue #____]
-
-### RSS Feed Support (TBD Plugin System)
-- **phase: 1.5 - v1.5** | RSS Parser implementation - parse standard RSS XML feeds | [Issue #____]
-- **phase: 1.5 - v1.5** | Filter Engine - regex/text matching for auto-downloading items | [Issue #____]
-- **phase: 1.5 - v1.5** | RSS Manager UI - TUI screen to add, remove, and view feed status | [Issue #____]
-- **phase: 1.5 - v1.5** | Polling Scheduler - configurable interval for checking feed updates | [Issue #____]
-
-### Config Screen Redesign
-- **phase: 1.5 - v1.5** | Input Field Refactor - support for complex types (dropdowns, toggles) | [Issue #____]
-- **phase: 1.5 - v1.5** | Categorized Views - tabbed or sectional layout for different config groups | [Issue #____]
-- **phase: 1.5 - v1.5** | Field Validation - immediate visual feedback for invalid user inputs | [Issue #____]
+## Phase: 1.1 to v1.5
+**Goal:** Complete advanced management and observability on top of the shipped v1.0 baseline.
 
 ### Advanced Torrent Management
-- **phase: 1.5 - v1.5** | Multi-select State - internal logic to track multiple selected rows | [Issue #____]
-- **phase: 1.5 - v1.5** | Bulk Actions - apply start, stop, delete to selection context | [Issue #____]
-- **phase: 1.5 - v1.5** | Grouping/Tagging - data structure to associate torrents with arbitrary tags | [Issue #____]
+- **phase: 1.1 to v1.5** | Multi-select State - internal logic to track multiple selected rows | [Issue #____]
+- **phase: 1.1 to v1.5** | Bulk Actions - apply start, stop, and delete to selection context | [Issue #____]
+- **phase: 1.1 to v1.5** | Grouping/Tagging - associate torrents with tags/groups for management flows | [Issue #____]
 
-### User Adjustables (Columns)
-- **phase: 1.5 - v1.5** | Column Config Loader - read column visibility/order from config | [Issue #____]
-- **phase: 1.5 - v1.5** | Auto-hiding Logic - dynamically hide columns based on terminal width | [Issue #____]
-- **phase: 1.5 - v1.5** | Smart Units - toggle for raw bytes vs human-readable units | [Issue #____]
+### Config Screen Redesign
+- **phase: 1.1 to v1.5** | Input Field Refactor - support complex field types (dropdowns, toggles) | [Issue #____]
+- **phase: 1.1 to v1.5** | Categorized Views - sectional layout for config groups | [Issue #____]
+- **phase: 1.1 to v1.5** | Field Validation - immediate visual feedback for invalid inputs | [Issue #____]
 
-### Internal TUI Architecture Refactor
-- **phase: 1.5 - v1.5** | View/State Decoupling - separate rendering logic from application state | [Issue #____]
-- **phase: 1.5 - v1.5** | Event Bus Implementation - standardized event passing for UI updates | [Issue #____]
-- **phase: 1.5 - v1.5** | Widget Componentization - create reusable UI components for consistency | [Issue #____]
+### Log Levels and TUI
+- **phase: 1.1 to v1.5** | Structured Logging - level-based logging (INFO, DEBUG, WARN) across modules | [Issue #____]
+- **phase: 1.1 to v1.5** | Log Widget - scrollable in-app view to tail recent logs | [Issue #____]
+- **phase: 1.1 to v1.5** | Runtime Verbosity - user setting to change log level without restart | [Issue #____]
 
-### Alternative and Custom Themes
-- **phase: 1.5 - v1.5** | Theme Schema - define JSON/TOML structure for TUI colors/styles | [Issue #____]
-- **phase: 1.5 - v1.5** | Style Loader - logic to apply hex/ansi colors to TUI widgets at runtime | [Issue #____]
-- **phase: 1.5 - v1.5** | Theme Selection UI - menu to swap themes live | [Issue #____]
+### Fully Asynchronous Validation
+- **phase: 1.1 to v1.5** | Async Hashing - verification without blocking primary UI/input loop | [Issue #____]
+- **phase: 1.1 to v1.5** | Validation Progress - granular progress events for UI and status output | [Issue #____]
+- **phase: 1.1 to v1.5** | Revalidation Logic - robust forced re-check handling for existing data | [Issue #____]
 
-### Peer Stream Redesign
-- **phase: 1.5 - v1.5** | Data Visualization - map transfer rates to visual cues (color/size) | [Issue #____]
-- **phase: 1.5 - v1.5** | Opacity Rendering - fade inactive peers visually | [Issue #____]
+### Integration Testing Expansion
+- **phase: 1.1 to v1.5** | Matrix Expansion - broaden client/version interop matrix coverage | [Issue #____]
+- **phase: 1.1 to v1.5** | CI Stability - auto-run integration suites with reliable artifacts and triage logs | [Issue #____]
+- **phase: 1.1 to v1.5** | Regression Scenarios - codify RSS and UI edge-case regressions in automated tests | [Issue #____]
+
+### Scriptability and CLI Enhancements
+- **phase: 1.1 to v1.5** | CLI Control Surface - pause/resume/list/control torrents from CLI paths | [Issue #____]
+- **phase: 1.1 to v1.5** | JSON Output Expansion - richer machine-readable status for automation | [Issue #____]
+- **phase: 1.1 to v1.5** | Headless Mode Foundations - separate core runtime from TUI lifecycle | [Issue #____]
 
 ---
 
 ## Phase: 2 - v2.0+
-**Goal:** Advanced networking, swarm observability, and custom layouts.
+**Goal:** Advanced networking, persistent analytics, and fully customizable operations.
 
 ### Persistent Data Across Sessions
-- **phase: 2 - v2.0+** | Stats Database - local storage (SQLite/KV store) for long-term metrics | [Issue #____]
-- **phase: 2 - v2.0+** | Peer Reputation Logic - track peer ratios/behavior over time | [Issue #____]
-- **phase: 2 - v2.0+** | Peer Blocklist - auto-block peers based on historical reputation | [Issue #____]
-
-### Scriptability and CLI Enhancements
-- **phase: 2 - v2.0+** | Headless Mode - run core without TUI rendering | [Issue #____]
-- **phase: 2 - v2.0+** | CLI Control Surface - commands to pause/resume torrents via CLI args | [Issue #____]
-- **phase: 2 - v2.0+** | JSON Output - ability to pipe torrent status as JSON for external scripts | [Issue #____]
+- **phase: 2 - v2.0+** | Stats Database - local storage for long-term metrics and trends | [Issue #____]
+- **phase: 2 - v2.0+** | Peer Reputation Logic - track peer behavior over time | [Issue #____]
+- **phase: 2 - v2.0+** | Peer Blocklist - automated or assisted peer blocking from reputation data | [Issue #____]
 
 ### User Configurable Layouts
-- **phase: 2 - v2.0+** | Layout Serialization - save panel positions/sizes to config | [Issue #____]
-- **phase: 2 - v2.0+** | Interactive Resize - keybindings to resize panes | [Issue #____]
-- **phase: 2 - v2.0+** | Drag-n-Drop Logic - (Simulated) movement of panes within the grid | [Issue #____]
+- **phase: 2 - v2.0+** | Layout Serialization - save and restore panel positions/sizes | [Issue #____]
+- **phase: 2 - v2.0+** | Interactive Resize - keybindings for pane resizing workflows | [Issue #____]
+- **phase: 2 - v2.0+** | Layout Presets - user-selectable named layout profiles | [Issue #____]
 
 ### Peer Churn Overload Management
-- **phase: 2 - v2.0+** | Connection Capping - hard limits on active vs. embryonic connections | [Issue #____]
-- **phase: 2 - v2.0+** | Aggressive Pruning - heuristics to disconnect slow/useless peers under load | [Issue #____]
-- **phase: 2 - v2.0+** | 10k Scale Test - performance profiling with massive peer lists | [Issue #____]
+- **phase: 2 - v2.0+** | Connection Capping - active vs. pending connection caps | [Issue #____]
+- **phase: 2 - v2.0+** | Aggressive Pruning - disconnect low-value peers under load | [Issue #____]
+- **phase: 2 - v2.0+** | 10k Scale Test - profiling and behavior validation with massive peer sets | [Issue #____]
+
+### Networking Feature Parity
+- **phase: 2 - v2.0+** | IPv6 and uTP - transport capability expansion | [Issue #____]
+- **phase: 2 - v2.0+** | UPnP/NAT Traversal - improved reachability and connectivity | [Issue #____]
+- **phase: 2 - v2.0+** | DHT Search and Discovery - richer discovery tooling and UX | [Issue #____]
