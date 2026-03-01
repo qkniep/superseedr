@@ -1062,8 +1062,6 @@ impl TorrentState {
 
                 self.number_of_successfully_connected_peers = self.peers.len();
                 self.refresh_peer_admission_guard();
-                self.piece_manager
-                    .update_rarity(self.peers.values().map(|p| &p.bitfield));
 
                 effects
             }
@@ -1103,8 +1101,6 @@ impl TorrentState {
                     }
                 }
 
-                self.piece_manager
-                    .update_rarity(self.peers.values().map(|p| &p.bitfield));
                 self.update(Action::AssignWork { peer_id })
             }
 
@@ -1150,8 +1146,6 @@ impl TorrentState {
                         peer.bitfield[piece_index as usize] = true;
                     }
                 }
-                self.piece_manager
-                    .update_rarity(self.peers.values().map(|p| &p.bitfield));
                 self.update(Action::AssignWork { peer_id })
             }
 
@@ -1768,9 +1762,6 @@ impl TorrentState {
                         }
                     }
                 }
-
-                self.piece_manager
-                    .update_rarity(self.peers.values().map(|p| &p.bitfield));
 
                 if !self.is_paused {
                     if !self.has_started_announce_sent {

@@ -2183,6 +2183,8 @@ impl TorrentManager {
 
         let mut cleanup_timer = tokio::time::interval(Duration::from_secs(3));
         let mut choke_timer = tokio::time::interval(Duration::from_secs(10));
+        let mut rarity_timer = tokio::time::interval(Duration::from_secs(1));
+        rarity_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let mut pex_timer = tokio::time::interval(Duration::from_secs(75));
         loop {
@@ -2224,14 +2226,16 @@ impl TorrentManager {
                 }
 
                 _ = choke_timer.tick(), if !self.state.is_paused => {
+                    self.apply_action(Action::RecalculateChokes {
+                        random_seed: rand::rng().random()
+                    });
+                }
+
+                _ = rarity_timer.tick(), if !self.state.is_paused => {
                     if self.state.torrent_status != TorrentStatus::Done {
                         let peer_bitfields = self.state.peers.values().map(|p| &p.bitfield);
                         self.state.piece_manager.update_rarity(peer_bitfields);
                     }
-
-                    self.apply_action(Action::RecalculateChokes {
-                        random_seed: rand::rng().random()
-                    });
                 }
 
                 _ = pex_timer.tick(), if !self.state.is_paused => {
@@ -2593,6 +2597,10 @@ impl TorrentManager {
                             #[cfg(all(feature = "dht", feature = "pex"))]
                             if torrent.info.private == Some(1) {
                                 break Ok(());
+                            }
+
+                            if self.state.torrent.is_some() {
+                                continue;
                             }
 
                             let mut torrent = *torrent;
@@ -3158,6 +3166,153 @@ mod resource_tests {
             0,
             "closed peer admission guard should drop all 10k candidates"
         );
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_metadata_torrent_is_ignored_in_manager() {
+        let (_incoming_peer_tx, incoming_peer_rx) = mpsc::channel(32);
+        let (manager_command_tx, manager_command_rx) = mpsc::channel(32);
+        let (metrics_tx, _) = watch::channel(TorrentMetrics::default());
+        let (manager_event_tx, mut manager_event_rx) = mpsc::channel(32);
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let settings = Arc::new(Settings::default());
+
+        let mut limits = HashMap::new();
+        limits.insert(
+            crate::resource_manager::ResourceType::PeerConnection,
+            (1000, 1000),
+        );
+        limits.insert(crate::resource_manager::ResourceType::DiskRead, (1000, 1000));
+        limits.insert(crate::resource_manager::ResourceType::DiskWrite, (1000, 1000));
+        limits.insert(crate::resource_manager::ResourceType::Reserve, (0, 0));
+
+        let (resource_manager, resource_manager_client) =
+            ResourceManager::new(limits, shutdown_tx.clone());
+        tokio::spawn(resource_manager.run());
+
+        let dl_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
+        let ul_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
+
+        let magnet_link = "magnet:?xt=urn:btih:0000000000000000000000000000000000000000";
+        let magnet = Magnet::new(magnet_link).unwrap();
+
+        let params = TorrentParameters {
+            dht_handle: {
+                #[cfg(feature = "dht")]
+                {
+                    mainline::Dht::builder().port(0).build().unwrap().as_async()
+                }
+                #[cfg(not(feature = "dht"))]
+                {
+                    ()
+                }
+            },
+            incoming_peer_rx,
+            metrics_tx,
+            torrent_validation_status: false,
+            torrent_data_path: None,
+            container_name: None,
+            manager_command_rx,
+            manager_event_tx,
+            settings,
+            resource_manager: resource_manager_client,
+            global_dl_bucket: dl_bucket,
+            global_ul_bucket: ul_bucket,
+            file_priorities: HashMap::new(),
+        };
+
+        let mut manager = TorrentManager::from_magnet(params, magnet, magnet_link).unwrap();
+
+        let torrent = Torrent {
+            announce: None,
+            announce_list: None,
+            url_list: None,
+            info: crate::torrent_file::Info {
+                name: "dup_meta_test".to_string(),
+                piece_length: 16_384,
+                pieces: vec![0u8; 20],
+                length: 16_384,
+                files: vec![],
+                private: None,
+                md5sum: None,
+                meta_version: None,
+                file_tree: None,
+            },
+            info_dict_bencode: b"d4:infod6:lengthi16384e4:name13:dup_meta_test12:piece lengthi16384e6:pieces20:00000000000000000000ee".to_vec(),
+            created_by: None,
+            creation_date: None,
+            encoding: None,
+            comment: None,
+            piece_layers: None,
+        };
+
+        let mut hasher = sha1::Sha1::new();
+        hasher.update(&torrent.info_dict_bencode);
+        manager.state.info_hash = hasher.finalize().to_vec();
+
+        let torrent_tx = manager.torrent_manager_tx.clone();
+        let manager_handle = tokio::spawn(async move {
+            let _ = manager.run(false).await;
+        });
+
+        torrent_tx
+            .send(TorrentCommand::MetadataTorrent(
+                Box::new(torrent.clone()),
+                torrent.info_dict_bencode.len() as i64,
+            ))
+            .await
+            .unwrap();
+
+        let first_event = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match manager_event_rx.recv().await {
+                    Some(ManagerEvent::MetadataLoaded { .. }) => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        assert!(
+            first_event,
+            "first metadata torrent command should emit MetadataLoaded"
+        );
+
+        torrent_tx
+            .send(TorrentCommand::MetadataTorrent(
+                Box::new(torrent),
+                109,
+            ))
+            .await
+            .unwrap();
+
+        let duplicate_emitted = tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                match manager_event_rx.recv().await {
+                    Some(ManagerEvent::MetadataLoaded { .. }) => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        assert!(
+            !duplicate_emitted,
+            "duplicate metadata torrent command should not emit MetadataLoaded"
+        );
+
+        manager_command_tx
+            .send(ManagerCommand::Shutdown)
+            .await
+            .unwrap();
+
+        let _ = tokio::time::timeout(Duration::from_secs(2), manager_handle)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
