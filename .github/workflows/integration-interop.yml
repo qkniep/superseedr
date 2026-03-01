@@ -64,7 +64,7 @@ jobs:
 
       - name: Upload interop artifacts
         if: always() && steps.select_mode.outputs.run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: interop-artifacts-${{ matrix.scenario }}-${{ matrix.mode }}-${{ github.run_id }}
           path: integration_tests/artifacts/
