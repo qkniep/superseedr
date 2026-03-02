@@ -580,6 +580,7 @@ mod tests {
     struct SyntheticWorkload {
         optimum: CalculatedLimits,
         peak_score: u64,
+        reserve_penalty: u64,
         peer_penalty: u64,
         read_penalty: u64,
         write_penalty: u64,
@@ -589,6 +590,7 @@ mod tests {
 
     impl SyntheticWorkload {
         fn sample(&self, limits: &CalculatedLimits) -> (u64, f64) {
+            let reserve_delta = limits.reserve_permits.abs_diff(self.optimum.reserve_permits);
             let peer_delta = limits
                 .max_connected_peers
                 .abs_diff(self.optimum.max_connected_peers);
@@ -602,6 +604,11 @@ mod tests {
             let raw_penalty = (peer_delta as u64)
                 .saturating_mul(peer_delta as u64)
                 .saturating_mul(self.peer_penalty)
+                .saturating_add(
+                    (reserve_delta as u64)
+                        .saturating_mul(reserve_delta as u64)
+                        .saturating_mul(self.reserve_penalty),
+                )
                 .saturating_add(
                     (read_delta as u64)
                         .saturating_mul(read_delta as u64)
@@ -633,58 +640,79 @@ mod tests {
         score_trace: Vec<u64>,
     }
 
+    struct SimulationState {
+        limits: CalculatedLimits,
+        last_tuning_limits: CalculatedLimits,
+        last_tuning_score: u64,
+        baseline_speed_ema: f64,
+        rng: StdRng,
+    }
+
+    impl SimulationState {
+        fn new(initial_limits: CalculatedLimits, seed: u64) -> Self {
+            Self {
+                limits: initial_limits.clone(),
+                last_tuning_limits: initial_limits,
+                last_tuning_score: 0,
+                baseline_speed_ema: 0.0,
+                rng: StdRng::seed_from_u64(seed),
+            }
+        }
+
+        fn run_phase(&mut self, cycles: usize, workload: &SyntheticWorkload) -> SimulationResult {
+            let mut accepted_count = 0usize;
+            let mut reverted_count = 0usize;
+            let mut score_trace = Vec::with_capacity(cycles);
+            let adaptive_max_scpb = 10.0;
+
+            for _ in 0..cycles {
+                let (raw_score, scpb) = workload.sample(&self.limits);
+                let history = [raw_score; 60];
+                let evaluation = evaluate_tuning_cycle(
+                    &self.limits,
+                    &self.last_tuning_limits,
+                    self.last_tuning_score,
+                    self.baseline_speed_ema,
+                    &history,
+                    scpb,
+                    adaptive_max_scpb,
+                );
+
+                if evaluation.accepted_improvement {
+                    accepted_count = accepted_count.saturating_add(1);
+                } else {
+                    reverted_count = reverted_count.saturating_add(1);
+                }
+
+                score_trace.push(evaluation.new_score);
+                self.baseline_speed_ema = evaluation.updated_baseline_speed_ema;
+                self.last_tuning_score = evaluation.updated_last_tuning_score;
+                self.last_tuning_limits = evaluation.updated_last_tuning_limits;
+                self.limits = evaluation.effective_limits;
+
+                let (next_limits, _desc) =
+                    make_random_adjustment_with_rng(self.limits.clone(), false, &mut self.rng);
+                self.limits = next_limits;
+            }
+
+            SimulationResult {
+                best_limits: self.last_tuning_limits.clone(),
+                best_score: self.last_tuning_score,
+                accepted_count,
+                reverted_count,
+                score_trace,
+            }
+        }
+    }
+
     fn simulate_tuning_cycles(
         initial_limits: CalculatedLimits,
         cycles: usize,
         seed: u64,
         workload: &SyntheticWorkload,
     ) -> SimulationResult {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let mut limits = initial_limits.clone();
-        let mut last_tuning_limits = initial_limits;
-        let mut last_tuning_score = 0;
-        let mut baseline_speed_ema = 0.0;
-        let mut accepted_count = 0usize;
-        let mut reverted_count = 0usize;
-        let mut score_trace = Vec::with_capacity(cycles);
-        let adaptive_max_scpb = 10.0;
-
-        for _ in 0..cycles {
-            let (raw_score, scpb) = workload.sample(&limits);
-            let history = [raw_score; 60];
-            let evaluation = evaluate_tuning_cycle(
-                &limits,
-                &last_tuning_limits,
-                last_tuning_score,
-                baseline_speed_ema,
-                &history,
-                scpb,
-                adaptive_max_scpb,
-            );
-
-            if evaluation.accepted_improvement {
-                accepted_count = accepted_count.saturating_add(1);
-            } else {
-                reverted_count = reverted_count.saturating_add(1);
-            }
-
-            score_trace.push(evaluation.new_score);
-            baseline_speed_ema = evaluation.updated_baseline_speed_ema;
-            last_tuning_score = evaluation.updated_last_tuning_score;
-            last_tuning_limits = evaluation.updated_last_tuning_limits;
-            limits = evaluation.effective_limits;
-
-            let (next_limits, _desc) = make_random_adjustment_with_rng(limits, false, &mut rng);
-            limits = next_limits;
-        }
-
-        SimulationResult {
-            best_limits: last_tuning_limits,
-            best_score: last_tuning_score,
-            accepted_count,
-            reverted_count,
-            score_trace,
-        }
+        let mut state = SimulationState::new(initial_limits, seed);
+        state.run_phase(cycles, workload)
     }
 
     #[test]
@@ -703,6 +731,7 @@ mod tests {
                 disk_write_permits: 10,
             },
             peak_score: 120_000,
+            reserve_penalty: 0,
             peer_penalty: 4,
             read_penalty: 70,
             write_penalty: 80,
@@ -734,6 +763,220 @@ mod tests {
                 .best_limits
                 .disk_write_permits
                 .abs_diff(workload.optimum.disk_write_permits)
+                <= 4
+        );
+    }
+
+    #[test]
+    fn tuner_simulation_under_disk_pressure_converges_to_lower_disk_limits() {
+        let initial_limits = CalculatedLimits {
+            reserve_permits: 18,
+            max_connected_peers: 72,
+            disk_read_permits: 34,
+            disk_write_permits: 26,
+        };
+        let workload = SyntheticWorkload {
+            optimum: CalculatedLimits {
+                reserve_permits: 18,
+                max_connected_peers: 72,
+                disk_read_permits: 10,
+                disk_write_permits: 8,
+            },
+            peak_score: 100_000,
+            reserve_penalty: 0,
+            peer_penalty: 0,
+            read_penalty: 120,
+            write_penalty: 140,
+            base_scpb: 7.5,
+            scpb_slope: 0.18,
+        };
+        let initial_disk_total = initial_limits.disk_read_permits + initial_limits.disk_write_permits;
+        let result = simulate_tuning_cycles(initial_limits, 600, 41, &workload);
+        let best_disk_total =
+            result.best_limits.disk_read_permits + result.best_limits.disk_write_permits;
+        let optimum_disk_total =
+            workload.optimum.disk_read_permits + workload.optimum.disk_write_permits;
+
+        assert!(
+            result.best_score > 80_000,
+            "Expected disk-throttled workload to recover a strong score"
+        );
+        assert!(
+            best_disk_total + 20 <= initial_disk_total,
+            "Expected disk budget to throttle down materially under pressure"
+        );
+        assert!(
+            best_disk_total.abs_diff(optimum_disk_total) <= 4,
+            "Expected best disk budget to converge near the lower-pressure optimum"
+        );
+        assert!(
+            result
+                .best_limits
+                .disk_read_permits
+                .abs_diff(workload.optimum.disk_read_permits)
+                <= 3
+        );
+        assert!(
+            result
+                .best_limits
+                .disk_write_permits
+                .abs_diff(workload.optimum.disk_write_permits)
+                <= 3
+        );
+    }
+
+    #[test]
+    fn tuner_simulation_converges_toward_nonzero_reserve_optimum() {
+        let initial_limits = CalculatedLimits {
+            reserve_permits: 4,
+            max_connected_peers: 92,
+            disk_read_permits: 20,
+            disk_write_permits: 14,
+        };
+        let workload = SyntheticWorkload {
+            optimum: CalculatedLimits {
+                reserve_permits: 34,
+                max_connected_peers: 72,
+                disk_read_permits: 14,
+                disk_write_permits: 10,
+            },
+            peak_score: 110_000,
+            reserve_penalty: 45,
+            peer_penalty: 10,
+            read_penalty: 55,
+            write_penalty: 65,
+            base_scpb: 5.0,
+            scpb_slope: 0.10,
+        };
+        let result = simulate_tuning_cycles(initial_limits, 600, 73, &workload);
+
+        assert!(
+            result.best_score > 95_000,
+            "Expected strong recovery after moving excess budget into reserve"
+        );
+        assert!(
+            result.best_limits.reserve_permits > 20,
+            "Expected tuner to increase reserve materially from the initial allocation"
+        );
+        assert!(
+            result
+                .best_limits
+                .reserve_permits
+                .abs_diff(workload.optimum.reserve_permits)
+                <= 5,
+            "Expected reserve allocation to converge near the optimum"
+        );
+        assert!(
+            result
+                .best_limits
+                .max_connected_peers
+                .abs_diff(workload.optimum.max_connected_peers)
+                <= 8
+        );
+        assert!(
+            result
+                .best_limits
+                .disk_read_permits
+                .abs_diff(workload.optimum.disk_read_permits)
+                <= 4
+        );
+        assert!(
+            result
+                .best_limits
+                .disk_write_permits
+                .abs_diff(workload.optimum.disk_write_permits)
+                <= 4
+        );
+    }
+
+    #[test]
+    fn tuner_simulation_recovers_from_high_reserve_phase_when_demand_returns() {
+        let initial_limits = CalculatedLimits {
+            reserve_permits: 4,
+            max_connected_peers: 92,
+            disk_read_permits: 20,
+            disk_write_permits: 14,
+        };
+        let reserve_heavy_workload = SyntheticWorkload {
+            optimum: CalculatedLimits {
+                reserve_permits: 34,
+                max_connected_peers: 72,
+                disk_read_permits: 14,
+                disk_write_permits: 10,
+            },
+            peak_score: 110_000,
+            reserve_penalty: 45,
+            peer_penalty: 10,
+            read_penalty: 55,
+            write_penalty: 65,
+            base_scpb: 5.0,
+            scpb_slope: 0.10,
+        };
+        let active_workload = SyntheticWorkload {
+            optimum: CalculatedLimits {
+                reserve_permits: 6,
+                max_connected_peers: 90,
+                disk_read_permits: 20,
+                disk_write_permits: 14,
+            },
+            peak_score: 140_000,
+            reserve_penalty: 90,
+            peer_penalty: 16,
+            read_penalty: 55,
+            write_penalty: 60,
+            base_scpb: 5.0,
+            scpb_slope: 0.08,
+        };
+        let mut state = SimulationState::new(initial_limits, 101);
+
+        let reserve_phase = state.run_phase(500, &reserve_heavy_workload);
+        let recovery_phase = state.run_phase(700, &active_workload);
+
+        assert!(
+            reserve_phase.best_limits.reserve_permits >= 28,
+            "Expected first phase to converge into a high-reserve steady state, got {}",
+            reserve_phase.best_limits.reserve_permits
+        );
+        assert!(
+            recovery_phase.best_score > 95_000,
+            "Expected strong recovery after shifting budget back out of reserve, got {}",
+            recovery_phase.best_score
+        );
+        assert!(
+            recovery_phase.best_limits.reserve_permits + 14
+                <= reserve_phase.best_limits.reserve_permits,
+            "Expected reserve allocation to fall materially once demand returns, reserve phase={}, recovery phase={}",
+            reserve_phase.best_limits.reserve_permits,
+            recovery_phase.best_limits.reserve_permits
+        );
+        assert!(
+            recovery_phase
+                .best_limits
+                .reserve_permits
+                .abs_diff(active_workload.optimum.reserve_permits)
+                <= 5,
+            "Expected reserve allocation to reconverge near the lower-demand optimum, got {}",
+            recovery_phase.best_limits.reserve_permits
+        );
+        assert!(
+            recovery_phase
+                .best_limits
+                .max_connected_peers
+                .abs_diff(active_workload.optimum.max_connected_peers)
+                <= 8
+        );
+        assert!(
+            recovery_phase
+                .best_limits
+                .disk_read_permits
+                .abs_diff(active_workload.optimum.disk_read_permits)
+                <= 4
+        );
+        assert!(
+            recovery_phase
+                .best_limits
+                .disk_write_permits
+                .abs_diff(active_workload.optimum.disk_write_permits)
                 <= 4
         );
     }
@@ -794,6 +1037,7 @@ mod tests {
                 disk_write_permits: 10,
             },
             peak_score: 50_000,
+            reserve_penalty: 0,
             peer_penalty: 0,
             read_penalty: 0,
             write_penalty: 0,
