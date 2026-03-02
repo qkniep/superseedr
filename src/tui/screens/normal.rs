@@ -74,10 +74,11 @@ fn build_time_aligned_window(
     let mut dl = vec![0_u64; window_points];
     let mut ul = vec![0_u64; window_points];
     let mut backoff = vec![0_u64; window_points];
-    let start_ts = now_unix.saturating_sub((window_points.saturating_sub(1) as u64) * step_secs);
+    let end_ts = now_unix.saturating_sub(now_unix % step_secs);
+    let start_ts = end_ts.saturating_sub((window_points.saturating_sub(1) as u64) * step_secs);
 
     for point in points {
-        if point.ts_unix < start_ts || point.ts_unix > now_unix {
+        if point.ts_unix < start_ts || point.ts_unix > end_ts {
             continue;
         }
         let idx = ((point.ts_unix - start_ts) / step_secs) as usize;
@@ -3972,6 +3973,36 @@ mod tests {
 
         reduce_ui_action(&mut app_state, UiAction::GraphPrev);
         assert_eq!(app_state.graph_mode, initial);
+    }
+
+    #[test]
+    fn build_time_aligned_window_snaps_unaligned_now_to_step_boundary() {
+        let points = vec![
+            NetworkHistoryPoint {
+                ts_unix: 60,
+                download_bps: 10,
+                upload_bps: 20,
+                backoff_ms_max: 1,
+            },
+            NetworkHistoryPoint {
+                ts_unix: 120,
+                download_bps: 30,
+                upload_bps: 40,
+                backoff_ms_max: 2,
+            },
+            NetworkHistoryPoint {
+                ts_unix: 180,
+                download_bps: 50,
+                upload_bps: 60,
+                backoff_ms_max: 3,
+            },
+        ];
+
+        let (dl, ul, backoff) = build_time_aligned_window(&points, 60, 3, 190);
+
+        assert_eq!(dl, vec![10, 30, 50]);
+        assert_eq!(ul, vec![20, 40, 60]);
+        assert_eq!(backoff, vec![1, 2, 3]);
     }
 
     #[test]
