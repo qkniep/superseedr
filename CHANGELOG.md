@@ -1,5 +1,22 @@
 # Changelog
 
+## Release v1.0.2
+### 🚀 New Features
+- **Persistent Network History**: Added on-disk network history so charts can restore download, upload, and backoff data after restart.
+- **Extended Network Graph Ranges**: Added 3h, 12h, 24h, 7d, 30d, and 1y graph views for longer-range traffic visibility.
+- **New Particle Themes**: Added Sakura and Matrix themes, plus layered particle rendering for richer animated backgrounds.
+
+### ✨ Improvements
+- **Adaptive Self-Tuning**: Self-tuning now starts faster and adjusts its cadence more intelligently when conditions improve, stall, or regress.
+- **History Persistence Efficiency**: Network history snapshots are now more compact and restore more predictably after restart.
+- **Theme Motion Polish**: Particle timing, swarm heatmaps, and motion profiles were refined across Black Hole, Diamond, and Bioluminescent Reef.
+
+### 🐛 Bug Fixes
+- **Graph Window Alignment**: Fixed long-range network charts so minute, 15-minute, and hourly buckets align to wall-clock boundaries instead of rendering shifted windows.
+- **Network History Recovery**: Fixed restore and densification edge cases that could leave persisted history incomplete or misaligned after startup.
+- **Deletion Restart Behavior**: Torrents already marked for deletion no longer reappear in the UI after an interrupted shutdown and restart.
+- **Theme Rendering Stability**: Fixed Black Hole aspect-scaling issues and improved disk panel readability during particle-heavy themes.
+
 ## Release v1.0.1
 ### 🚀 New Features
 - **Duplicate Filter Guardrails**: RSS filter creation now blocks duplicates for the same mode using normalized matching (trim + case-insensitive), with a clear in-app status message.
