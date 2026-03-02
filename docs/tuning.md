@@ -6,7 +6,7 @@ Document the self-tuning control loop and define a refactor path that improves a
 
 ## Current Implementation Snapshot
 
-- Tuning cadence is fixed at 90 seconds in the app loop.
+- Tuning cadence is fixed at 15 minutes in the app loop.
 - Tuning score uses a 60-second lookback of throughput history.
 - Each cycle evaluates the current candidate, may revert to last best limits, then applies a new random adjustment.
 - Mode switches (leeching <-> seeding) reset tuning score state.
@@ -18,7 +18,7 @@ Refactor first, behavior changes second.
 
 1. Extract a `TuningController` with a clear API and internal state.
 2. Move cadence/window/countdown policy into that controller.
-3. Keep existing 60/90 behavior as the initial policy to preserve parity.
+3. Keep existing 60/900 behavior as the initial policy to preserve parity.
 4. Add tests around controller behavior and invariants.
 5. Only after parity is proven, enable adaptive cadence/window policy.
 
