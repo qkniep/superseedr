@@ -590,7 +590,9 @@ mod tests {
 
     impl SyntheticWorkload {
         fn sample(&self, limits: &CalculatedLimits) -> (u64, f64) {
-            let reserve_delta = limits.reserve_permits.abs_diff(self.optimum.reserve_permits);
+            let reserve_delta = limits
+                .reserve_permits
+                .abs_diff(self.optimum.reserve_permits);
             let peer_delta = limits
                 .max_connected_peers
                 .abs_diff(self.optimum.max_connected_peers);
@@ -790,7 +792,8 @@ mod tests {
             base_scpb: 7.5,
             scpb_slope: 0.18,
         };
-        let initial_disk_total = initial_limits.disk_read_permits + initial_limits.disk_write_permits;
+        let initial_disk_total =
+            initial_limits.disk_read_permits + initial_limits.disk_write_permits;
         let result = simulate_tuning_cycles(initial_limits, 600, 41, &workload);
         let best_disk_total =
             result.best_limits.disk_read_permits + result.best_limits.disk_write_permits;
