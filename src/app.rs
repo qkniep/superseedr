@@ -1027,6 +1027,14 @@ impl App {
         let mut torrents_to_load = app.client_configs.torrents.clone();
         torrents_to_load.sort_by_key(|t| !t.validation_status);
         for torrent_config in torrents_to_load {
+            if !should_load_persisted_torrent(&torrent_config) {
+                tracing_event!(
+                    Level::WARN,
+                    torrent = %torrent_config.torrent_or_magnet,
+                    "Skipping persisted torrent left in transient Deleting state during startup"
+                );
+                continue;
+            }
             if torrent_config.torrent_or_magnet.starts_with("magnet:") {
                 app.add_magnet_torrent(
                     torrent_config.name.clone(),
@@ -3554,6 +3562,10 @@ fn rss_settings_changed(old_settings: &Settings, new_settings: &Settings) -> boo
     new_settings.rss != old_settings.rss
 }
 
+fn should_load_persisted_torrent(torrent_settings: &TorrentSettings) -> bool {
+    torrent_settings.torrent_control_state != TorrentControlState::Deleting
+}
+
 fn build_persist_payload(
     client_configs: &mut Settings,
     app_state: &mut AppState,
@@ -3696,11 +3708,13 @@ mod tests {
         flush_persistence_writer_parts, parse_hybrid_hashes,
         persisted_validation_status_from_piece_completion, prune_rss_feed_errors,
         queue_persistence_payload, resolve_magnet_torrent_name, rss_settings_changed,
-        should_persist_network_history_on_interval, sort_and_filter_torrent_list_state,
-        torrent_completion_percent, torrent_is_effectively_incomplete, App, AppMode, AppState,
-        FilePriority, PeerInfo, PersistPayload, SelectedHeader, SortDirection, TorrentDisplayState,
+        should_load_persisted_torrent, should_persist_network_history_on_interval,
+        sort_and_filter_torrent_list_state, torrent_completion_percent,
+        torrent_is_effectively_incomplete, App, AppMode, AppState, FilePriority, PeerInfo,
+        PersistPayload, SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState,
         TorrentMetrics, TorrentSortColumn, UiState,
     };
+    use crate::config::TorrentSettings;
     use std::collections::HashMap;
     fn mock_display(name: &str, peer_count: usize) -> TorrentDisplayState {
         let mut display = TorrentDisplayState::default();
@@ -3974,6 +3988,26 @@ mod tests {
             Some("dht warning".to_string())
         );
         assert_eq!(compose_system_warning(None, None), None);
+    }
+
+    #[test]
+    fn should_load_persisted_torrent_skips_only_deleting_entries() {
+        let running = TorrentSettings {
+            torrent_control_state: TorrentControlState::Running,
+            ..Default::default()
+        };
+        let paused = TorrentSettings {
+            torrent_control_state: TorrentControlState::Paused,
+            ..Default::default()
+        };
+        let deleting = TorrentSettings {
+            torrent_control_state: TorrentControlState::Deleting,
+            ..Default::default()
+        };
+
+        assert!(should_load_persisted_torrent(&running));
+        assert!(should_load_persisted_torrent(&paused));
+        assert!(!should_load_persisted_torrent(&deleting));
     }
 
     #[test]
