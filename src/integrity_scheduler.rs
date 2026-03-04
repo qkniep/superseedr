@@ -10,6 +10,7 @@ pub const INTEGRITY_SCHEDULER_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 const PROBE_BATCH_MAX_FILES: usize = 256;
 const MAX_IN_FLIGHT_PROBE_BATCHES: usize = 2;
+const PROBE_BATCH_TIMEOUT: Duration = Duration::from_secs(30);
 const PENDING_METADATA_RETRY_INTERVAL: Duration = Duration::from_secs(15);
 const RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const ACTIVE_HEALTHY_RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -212,6 +213,8 @@ impl IntegrityScheduler {
     pub fn drain_due_probe_requests(&mut self) -> Vec<ProbeBatchRequest> {
         let mut requests = Vec::new();
 
+        self.reclaim_timed_out_probe_batches();
+
         while self.in_flight_probe_batches < MAX_IN_FLIGHT_PROBE_BATCHES {
             let Some(info_hash) = self.pick_next_due_torrent() else {
                 break;
@@ -238,6 +241,28 @@ impl IntegrityScheduler {
         }
 
         requests
+    }
+
+    fn reclaim_timed_out_probe_batches(&mut self) {
+        for state in self.torrents.values_mut() {
+            let timed_out = state.in_flight
+                && state.last_probe_started_at.is_some_and(|started_at| {
+                    self.now.saturating_duration_since(started_at) >= PROBE_BATCH_TIMEOUT
+                });
+
+            if !timed_out {
+                continue;
+            }
+
+            state.in_flight = false;
+            state.probe_epoch = state.probe_epoch.saturating_add(1);
+            state.next_probe_file_index = 0;
+            state.current_sweep_problem_files.clear();
+            state.pending_metadata = false;
+            state.next_due_at = self.now;
+            state.last_probe_started_at = None;
+            self.in_flight_probe_batches = self.in_flight_probe_batches.saturating_sub(1);
+        }
     }
 
     fn pick_next_due_torrent(&self) -> Option<Vec<u8>> {
@@ -571,5 +596,85 @@ mod tests {
             .expect("expected replacement request");
         assert_eq!(replacement.info_hash, b"faulted".to_vec());
         assert!(replacement.epoch > request.epoch);
+    }
+
+    #[test]
+    fn timed_out_probe_batch_is_reclaimed_and_reissued_from_start() {
+        let now = Instant::now();
+        let mut scheduler = IntegrityScheduler::new(now);
+        scheduler.sync_torrents([snapshot(b"stalled", true, Some("/downloads/shared"), 0, 0)]);
+
+        let request = scheduler
+            .drain_due_probe_requests()
+            .into_iter()
+            .next()
+            .expect("expected initial request");
+        assert_eq!(request.start_file_index, 0);
+
+        scheduler.advance_time(PROBE_BATCH_TIMEOUT - Duration::from_secs(1));
+        assert!(scheduler.drain_due_probe_requests().is_empty());
+
+        scheduler.advance_time(Duration::from_secs(1));
+        let replacement = scheduler
+            .drain_due_probe_requests()
+            .into_iter()
+            .next()
+            .expect("expected timed-out request to be reissued");
+
+        assert_eq!(replacement.info_hash, b"stalled".to_vec());
+        assert_eq!(replacement.start_file_index, 0);
+        assert!(replacement.epoch > request.epoch);
+    }
+
+    #[test]
+    fn stale_batch_result_is_ignored_after_timeout_epoch_bump() {
+        let now = Instant::now();
+        let mut scheduler = IntegrityScheduler::new(now);
+        scheduler.sync_torrents([snapshot(b"stalled", true, Some("/downloads/shared"), 0, 0)]);
+
+        let request = scheduler
+            .drain_due_probe_requests()
+            .into_iter()
+            .next()
+            .expect("expected initial request");
+
+        scheduler.advance_time(PROBE_BATCH_TIMEOUT);
+        let replacement = scheduler
+            .drain_due_probe_requests()
+            .into_iter()
+            .next()
+            .expect("expected timed-out request to be reissued");
+        assert!(replacement.epoch > request.epoch);
+
+        let outcome = scheduler.on_probe_batch_result(
+            b"stalled",
+            FileProbeBatchResult {
+                epoch: request.epoch,
+                scanned_files: 1,
+                next_file_index: 0,
+                reached_end_of_manifest: true,
+                pending_metadata: false,
+                problem_files: vec![missing_entry("missing.bin")],
+            },
+        );
+        assert!(outcome.is_none());
+
+        let replacement_outcome = scheduler.on_probe_batch_result(
+            b"stalled",
+            FileProbeBatchResult {
+                epoch: replacement.epoch,
+                scanned_files: 1,
+                next_file_index: 0,
+                reached_end_of_manifest: true,
+                pending_metadata: false,
+                problem_files: Vec::new(),
+            },
+        );
+        assert_eq!(
+            replacement_outcome,
+            Some(ProbeBatchOutcome::CompletedSweep {
+                problem_files: Vec::new()
+            })
+        );
     }
 }
