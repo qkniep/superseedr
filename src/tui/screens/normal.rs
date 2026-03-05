@@ -1776,14 +1776,14 @@ pub fn draw_network_chart(
                 "Download".to_string(),
                 ctx.state_info(),
                 true,
-                None,
+                Some(ratatui::widgets::GraphType::Line),
             ));
             dataset_data.push(ul_data);
             dataset_specs.push((
                 "Upload".to_string(),
                 ctx.state_success(),
                 true,
-                None,
+                Some(ratatui::widgets::GraphType::Line),
             ));
 
             let backoff_marker_data: Vec<(f64, f64)> = backoff_history_relevant_ms
