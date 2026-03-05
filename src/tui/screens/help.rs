@@ -393,7 +393,9 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         "o",
                         ctx.apply(Style::default().fg(ctx.accent_teal())),
                     )),
-                    Cell::from("Toggle torrent overlay between net and DL/UL split"),
+                    Cell::from(
+                        "Next chart view, or cycle TOR overlay between net, DL/UL split, and disk",
+                    ),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(

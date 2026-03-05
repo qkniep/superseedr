@@ -384,6 +384,7 @@ pub enum ChartPanelView {
     Network,
     Cpu,
     Ram,
+    Disk,
     Tuning,
     TorrentOverlay,
 }
@@ -394,6 +395,7 @@ impl ChartPanelView {
             Self::Network => "NET",
             Self::Cpu => "CPU",
             Self::Ram => "RAM",
+            Self::Disk => "DISK",
             Self::Tuning => "TUNE",
             Self::TorrentOverlay => "TOR",
         }
@@ -403,7 +405,8 @@ impl ChartPanelView {
         match self {
             Self::Network => Self::Cpu,
             Self::Cpu => Self::Ram,
-            Self::Ram => Self::Tuning,
+            Self::Ram => Self::Disk,
+            Self::Disk => Self::Tuning,
             Self::Tuning => Self::TorrentOverlay,
             Self::TorrentOverlay => Self::Network,
         }
@@ -414,7 +417,8 @@ impl ChartPanelView {
             Self::Network => Self::TorrentOverlay,
             Self::Cpu => Self::Network,
             Self::Ram => Self::Cpu,
-            Self::Tuning => Self::Ram,
+            Self::Disk => Self::Ram,
+            Self::Tuning => Self::Disk,
             Self::TorrentOverlay => Self::Tuning,
         }
     }
@@ -425,13 +429,15 @@ pub enum OverlayGraphMode {
     #[default]
     Net,
     SplitDirectional,
+    Disk,
 }
 
 impl OverlayGraphMode {
     pub fn toggle(self) -> Self {
         match self {
             Self::Net => Self::SplitDirectional,
-            Self::SplitDirectional => Self::Net,
+            Self::SplitDirectional => Self::Disk,
+            Self::Disk => Self::Net,
         }
     }
 
@@ -439,6 +445,7 @@ impl OverlayGraphMode {
         match self {
             Self::Net => "NET",
             Self::SplitDirectional => "DL+UL",
+            Self::Disk => "DISK",
         }
     }
 }
