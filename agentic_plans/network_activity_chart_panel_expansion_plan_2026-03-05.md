@@ -9,7 +9,7 @@ Implement tiered history plus persistence for all new modes, including per-torre
 1. UI state and controls
 - Add `ChartPanelView` enum in app state: `Network`, `Cpu`, `Ram`, `Disk`, `Tuning`, `TorrentOverlay`.
 - Add `overlay_split_direction: bool` state for overlay sub-mode (`Net` vs `DL/UL split`), default `Net`.
-- Keep `t/T` for time range; add `v/V` for chart view next/prev.
+- Keep `t/T` for time range; add `g/G` for chart view next/prev.
 - Add one overlay-specific keybinding for split toggle (for example `o`) and display current overlay sub-mode in chart title.
 - Update help screen and footer command hints with new controls.
 
@@ -39,7 +39,7 @@ Implement tiered history plus persistence for all new modes, including per-torre
 - `CPU` and `RAM` views render percentage series with fixed 0-100 y-bounds.
 - `Disk` view renders read/write throughput series.
 - `Tuning` view renders current tuning score + baseline/best reference series.
-- `Torrent Overlay` view renders top 5 active torrents for selected window:
+- `Torrent Overlay` view renders top 5 active torrents for selected window, and always includes the currently highlighted torrent if it is not already in that set:
   - Default: net-speed line per torrent.
   - Toggle: split DL/UL lines per torrent.
   - Deterministic color assignment by info-hash; compact legend with truncation.
@@ -53,7 +53,7 @@ Implement tiered history plus persistence for all new modes, including per-torre
 
 ## Test Plan
 1. Reducer/keybinding tests
-- `v/V` cycles chart views correctly and wraps.
+- `g/G` cycles chart views correctly and wraps.
 - `t/T` still only cycles time range.
 - Overlay split toggle flips state and redraws.
 
@@ -70,7 +70,7 @@ Implement tiered history plus persistence for all new modes, including per-torre
 
 4. Renderer tests
 - Each chart view builds non-empty datasets from valid history and honors y-axis rules.
-- Overlay mode uses top-5 selection and stable color mapping.
+- Overlay mode uses top-5-plus-highlight selection and stable color mapping.
 - Split vs net overlay mode switches datasets/legend as expected.
 
 5. Manual acceptance scenarios
@@ -80,8 +80,8 @@ Implement tiered history plus persistence for all new modes, including per-torre
 
 ## Assumptions and Defaults
 - Chart content switching replaces current single-purpose network chart behavior.
-- `v/V` controls chart view; `t/T` remains time-scale control.
-- Overlay mode defaults to top 5 active torrents.
+- `g/G` controls chart view; `t/T` remains time-scale control.
+- Overlay mode defaults to top 5 active torrents plus highlighted torrent inclusion.
 - Overlay supports full-range persisted history.
 - Overlay history is retained while torrent remains in list; removed torrents are pruned.
 - Overlay offers runtime toggle between net-only and split DL/UL display.
