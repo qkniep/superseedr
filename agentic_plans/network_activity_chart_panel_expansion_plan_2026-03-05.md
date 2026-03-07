@@ -8,9 +8,7 @@ Implement tiered history plus persistence for all new modes, including per-torre
 ## Key Changes
 1. UI state and controls
 - Add `ChartPanelView` enum in app state: `Network`, `Cpu`, `Ram`, `Disk`, `Tuning`, `TorrentOverlay`.
-- Add `overlay_split_direction: bool` state for overlay sub-mode (`Net` vs `DL/UL split`), default `Net`.
 - Keep `t/T` for time range; add `g/G` for chart view next/prev.
-- Add one overlay-specific keybinding for split toggle (for example `o`) and display current overlay sub-mode in chart title.
 - Update help screen and footer command hints with new controls.
 
 2. History model and persistence
@@ -21,7 +19,7 @@ Implement tiered history plus persistence for all new modes, including per-torre
   - Disk write bps
   - Tuning score (current)
   - Tuning baseline/best score
-  - Per-torrent overlay series keyed by `info_hash` (net + directional samples)
+  - Per-torrent overlay series keyed by `info_hash` (net samples)
 - Reuse the existing 1s/1m/15m/1h rollup pattern and retention caps to support 1m..1y in all chart views.
 - Persist overlay history for all torrents currently present in `torrent_list_order`; prune history when torrent is removed from list.
 - Keep existing network history persistence compatible; add migration/read-path so old persisted files still load without data loss for network mode.
@@ -40,22 +38,19 @@ Implement tiered history plus persistence for all new modes, including per-torre
 - `Disk` view renders read/write throughput series.
 - `Tuning` view renders current tuning score + baseline/best reference series.
 - `Torrent Overlay` view renders top 5 active torrents for selected window, and always includes the currently highlighted torrent if it is not already in that set:
-  - Default: net-speed line per torrent.
-  - Toggle: split DL/UL lines per torrent.
+  - Net-speed line per torrent.
   - Deterministic color assignment by info-hash; compact legend with truncation.
 
 5. Public interface/type updates
 - New app-level enum/type additions:
   - `ChartPanelView`
-  - Overlay sub-mode enum (`Net` vs `SplitDirectional`)
-- New UI reducer actions/effects for chart-view cycling and overlay split toggle.
+- New UI reducer actions/effects for chart-view cycling.
 - New persisted schema/type for generalized activity history (and loader/saver API alongside existing persistence APIs).
 
 ## Test Plan
 1. Reducer/keybinding tests
 - `g/G` cycles chart views correctly and wraps.
 - `t/T` still only cycles time range.
-- Overlay split toggle flips state and redraws.
 
 2. History/rollup tests
 - Per-second ingestion creates expected tier points for CPU/RAM/disk/tuning and per-torrent series.
@@ -71,7 +66,6 @@ Implement tiered history plus persistence for all new modes, including per-torre
 4. Renderer tests
 - Each chart view builds non-empty datasets from valid history and honors y-axis rules.
 - Overlay mode uses top-5-plus-highlight selection and stable color mapping.
-- Split vs net overlay mode switches datasets/legend as expected.
 
 5. Manual acceptance scenarios
 - User can switch between all six views and all existing time ranges.
@@ -84,4 +78,3 @@ Implement tiered history plus persistence for all new modes, including per-torre
 - Overlay mode defaults to top 5 active torrents plus highlighted torrent inclusion.
 - Overlay supports full-range persisted history.
 - Overlay history is retained while torrent remains in list; removed torrents are pruned.
-- Overlay offers runtime toggle between net-only and split DL/UL display.

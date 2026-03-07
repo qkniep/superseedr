@@ -218,6 +218,16 @@ fn chart_legend_position(view: ChartPanelView) -> Option<ratatui::widgets::Legen
     }
 }
 
+fn speed_chart_upper_bound(max_displayed_speed: u64) -> u64 {
+    if max_displayed_speed == 0 {
+        return 10_000;
+    }
+
+    let padded = max_displayed_speed.saturating_mul(105).div_ceil(100);
+    let half_step = calculate_nice_upper_bound((padded / 2).max(1));
+    half_step.saturating_mul(2)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiAction {
     ClearSystemError,
@@ -1765,13 +1775,15 @@ pub fn draw_network_chart(
             let source_points = network_points_for_tier(app_state, tier);
             let (dl_history_slice, ul_history_slice, backoff_history_relevant_ms) =
                 build_time_aligned_window(source_points, step_secs, points_to_show, now_unix);
-            let stable_max_speed = dl_history_slice
+            let smoothed_dl_data = smooth_data(&dl_history_slice, alpha);
+            let smoothed_ul_data = smooth_data(&ul_history_slice, alpha);
+            let displayed_max_speed = smoothed_dl_data
                 .iter()
-                .chain(ul_history_slice.iter())
+                .chain(smoothed_ul_data.iter())
                 .max()
                 .copied()
-                .unwrap_or(10_000);
-            let nice_max_speed = calculate_nice_upper_bound(stable_max_speed);
+                .unwrap_or(0);
+            let nice_max_speed = speed_chart_upper_bound(displayed_max_speed);
             y_axis_upper = nice_max_speed as f64;
             y_axis_labels = vec![
                 Span::raw("0"),
@@ -1785,8 +1797,6 @@ pub fn draw_network_chart(
                 ),
             ];
 
-            let smoothed_dl_data = smooth_data(&dl_history_slice, alpha);
-            let smoothed_ul_data = smooth_data(&ul_history_slice, alpha);
             let dl_data: Vec<(f64, f64)> = smoothed_dl_data
                 .iter()
                 .enumerate()
@@ -1898,13 +1908,15 @@ pub fn draw_network_chart(
             let points = activity_points_for_tier(&app_state.activity_history_state.disk, tier);
             let (read_bps, write_bps) =
                 build_time_aligned_pair_window(points, step_secs, points_to_show, now_unix);
-            let stable_max_speed = read_bps
+            let smoothed_read = smooth_data(&read_bps, alpha);
+            let smoothed_write = smooth_data(&write_bps, alpha);
+            let displayed_max_speed = smoothed_read
                 .iter()
-                .chain(write_bps.iter())
+                .chain(smoothed_write.iter())
                 .max()
                 .copied()
-                .unwrap_or(10_000);
-            let nice_max_speed = calculate_nice_upper_bound(stable_max_speed.max(1));
+                .unwrap_or(0);
+            let nice_max_speed = speed_chart_upper_bound(displayed_max_speed);
             y_axis_upper = nice_max_speed as f64;
             y_axis_labels = vec![
                 Span::raw("0"),
@@ -1918,8 +1930,6 @@ pub fn draw_network_chart(
                 ),
             ];
 
-            let smoothed_read = smooth_data(&read_bps, alpha);
-            let smoothed_write = smooth_data(&write_bps, alpha);
             let read_data: Vec<(f64, f64)> = smoothed_read
                 .iter()
                 .enumerate()
@@ -2104,7 +2114,7 @@ pub fn draw_network_chart(
                 dataset_specs.push((label, color, true, Some(ratatui::widgets::GraphType::Line)));
             }
 
-            let nice_max_speed = calculate_nice_upper_bound(max_overlay_speed.max(1));
+            let nice_max_speed = speed_chart_upper_bound(max_overlay_speed);
             y_axis_upper = nice_max_speed as f64;
             y_axis_labels = vec![
                 Span::raw("0"),
@@ -4596,6 +4606,13 @@ mod tests {
             chart_legend_position(ChartPanelView::Network),
             Some(ratatui::widgets::LegendPosition::TopRight)
         );
+    }
+
+    #[test]
+    fn speed_chart_upper_bound_adds_headroom_while_staying_near_peak() {
+        assert_eq!(speed_chart_upper_bound(8_500_000), 10_000_000);
+        assert_eq!(speed_chart_upper_bound(12_000_000), 14_000_000);
+        assert_eq!(speed_chart_upper_bound(0), 10_000);
     }
 
     #[test]
