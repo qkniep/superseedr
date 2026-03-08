@@ -43,13 +43,6 @@ impl From<std::io::Error> for StorageError {
 }
 
 impl StorageError {
-    pub fn io_kind(&self) -> Option<std::io::ErrorKind> {
-        match self {
-            Self::Io { kind, .. } => Some(*kind),
-            _ => None,
-        }
-    }
-
     pub fn indicates_data_unavailability(&self) -> bool {
         match self {
             Self::Io { kind, .. } => matches!(

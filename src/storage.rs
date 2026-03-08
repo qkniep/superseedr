@@ -588,7 +588,13 @@ mod tests {
         let res = read_data_from_disk(&mfi, 95, 10).await;
         assert!(res.is_err());
         if let Err(err) = res {
-            assert_eq!(err.io_kind(), Some(std::io::ErrorKind::InvalidInput));
+            assert!(matches!(
+                err,
+                StorageError::Io {
+                    kind: std::io::ErrorKind::InvalidInput,
+                    ..
+                }
+            ));
         } else {
             panic!("Expected Io Error");
         }
@@ -607,7 +613,13 @@ mod tests {
         let res = write_data_to_disk(&mfi, 95, &data).await;
         assert!(res.is_err());
         if let Err(err) = res {
-            assert_eq!(err.io_kind(), Some(std::io::ErrorKind::InvalidInput));
+            assert!(matches!(
+                err,
+                StorageError::Io {
+                    kind: std::io::ErrorKind::InvalidInput,
+                    ..
+                }
+            ));
         } else {
             panic!("Expected Io Error");
         }

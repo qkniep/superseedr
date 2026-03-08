@@ -468,7 +468,7 @@ pub enum AppCommand {
     RssDownloadSelected(RssHistoryEntry),
     RssDownloadPreview(RssPreviewItem),
     NetworkHistoryLoaded(NetworkHistoryPersistedState),
-    ActivityHistoryLoaded(ActivityHistoryPersistedState),
+    ActivityHistoryLoaded(Box<ActivityHistoryPersistedState>),
     NetworkHistoryPersisted {
         request_id: u64,
         success: bool,
@@ -503,6 +503,8 @@ pub enum AppMode {
     FileBrowser,
     Rss,
 }
+
+type AvailabilityTransitionLog = (String, bool, usize, Option<std::path::PathBuf>, Vec<String>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RssScreen {
@@ -2126,7 +2128,7 @@ impl App {
                 self.app_state.ui.needs_redraw = true;
             }
             AppCommand::ActivityHistoryLoaded(state) => {
-                ActivityHistoryTelemetry::apply_loaded_state(&mut self.app_state, state);
+                ActivityHistoryTelemetry::apply_loaded_state(&mut self.app_state, *state);
                 self.app_state.activity_history_restore_pending = false;
                 self.app_state.ui.needs_redraw = true;
             }
@@ -2340,13 +2342,7 @@ impl App {
                     .integrity_scheduler
                     .on_probe_batch_result(&info_hash, result);
                 let mut availability_changed = false;
-                let mut availability_transition_log: Option<(
-                    String,
-                    bool,
-                    usize,
-                    Option<std::path::PathBuf>,
-                    Vec<String>,
-                )> = None;
+                let mut availability_transition_log: Option<AvailabilityTransitionLog> = None;
 
                 if let Some(torrent) = self.app_state.torrents.get_mut(&info_hash) {
                     match completed_sweep {
@@ -2741,7 +2737,9 @@ impl App {
             let load_result = tokio::task::spawn_blocking(load_activity_history_state).await;
             match load_result {
                 Ok(state) => {
-                    let _ = tx.send(AppCommand::ActivityHistoryLoaded(state)).await;
+                    let _ = tx
+                        .send(AppCommand::ActivityHistoryLoaded(Box::new(state)))
+                        .await;
                 }
                 Err(e) => {
                     tracing_event!(
@@ -2750,9 +2748,7 @@ impl App {
                         e
                     );
                     let _ = tx
-                        .send(AppCommand::ActivityHistoryLoaded(
-                            ActivityHistoryPersistedState::default(),
-                        ))
+                        .send(AppCommand::ActivityHistoryLoaded(Box::default()))
                         .await;
                 }
             }

@@ -2202,15 +2202,16 @@ pub fn draw_network_chart(
             let mut seen = HashSet::new();
             chosen_hashes.retain(|hash| seen.insert(hash.clone()));
             chosen_hashes.sort_by(|a, b| {
-                torrent_period_traffic(app_state, b, tier, step_secs, points_to_show, now_unix)
-                    .cmp(&torrent_period_traffic(
+                torrent_period_traffic(app_state, b, tier, step_secs, points_to_show, now_unix).cmp(
+                    &torrent_period_traffic(
                         app_state,
                         a,
                         tier,
                         step_secs,
                         points_to_show,
                         now_unix,
-                    ))
+                    ),
+                )
             });
 
             let palette = [
@@ -4698,7 +4699,10 @@ mod tests {
         assert_eq!(ChartPanelView::Ram.next(), ChartPanelView::Disk);
         assert_eq!(ChartPanelView::Disk.prev(), ChartPanelView::Ram);
         assert_eq!(ChartPanelView::Disk.next(), ChartPanelView::Tuning);
-        assert_eq!(ChartPanelView::Tuning.next(), ChartPanelView::TorrentOverlay);
+        assert_eq!(
+            ChartPanelView::Tuning.next(),
+            ChartPanelView::TorrentOverlay
+        );
         assert_eq!(
             ChartPanelView::TorrentOverlay.next(),
             ChartPanelView::MultiTorrentOverlay

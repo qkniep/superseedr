@@ -127,6 +127,32 @@ impl IntegrityTorrentState {
             IDLE_HEALTHY_RETRY_INTERVAL
         }
     }
+
+    fn expected_healthy_interval(&self) -> Option<Duration> {
+        if self.has_completed_probe
+            && !self.in_flight
+            && !self.pending_metadata
+            && matches!(self.availability, DataAvailabilityState::Available)
+        {
+            Some(self.healthy_retry_interval())
+        } else {
+            None
+        }
+    }
+
+    fn healthy_deadline_mismatch(&self, now: Instant) -> Option<(Duration, Duration)> {
+        let expected = self.expected_healthy_interval()?;
+        if self.next_due_at <= now {
+            return None;
+        }
+
+        let remaining = self.next_due_at.saturating_duration_since(now);
+        if remaining.abs_diff(expected) > Duration::from_secs(5) {
+            Some((remaining, expected))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -156,10 +182,11 @@ impl IntegrityScheduler {
         let mut seen = HashSet::new();
 
         for snapshot in snapshots {
-            seen.insert(snapshot.info_hash.clone());
+            let info_hash = snapshot.info_hash.clone();
+            seen.insert(info_hash.clone());
             let state = self
                 .torrents
-                .entry(snapshot.info_hash)
+                .entry(info_hash.clone())
                 .or_insert_with(|| IntegrityTorrentState::new(self.now));
 
             state.is_active = snapshot.download_speed_bps > 0 || snapshot.upload_speed_bps > 0;
@@ -170,6 +197,10 @@ impl IntegrityScheduler {
                 state.availability = DataAvailabilityState::Unavailable;
             } else if state.has_completed_probe {
                 state.availability = DataAvailabilityState::Available;
+            }
+
+            if let Some((_remaining, expected)) = state.healthy_deadline_mismatch(self.now) {
+                state.next_due_at = self.now + expected;
             }
         }
 
@@ -824,5 +855,97 @@ mod tests {
 
         scheduler.advance_time(Duration::from_secs(1));
         assert_eq!(scheduler.drain_due_probe_requests().len(), 1);
+    }
+
+    #[test]
+    fn healthy_deadline_mismatch_detects_small_manifest_on_long_deadline() {
+        let now = Instant::now();
+        let mut state = IntegrityTorrentState::new(now);
+        state.has_completed_probe = true;
+        state.availability = DataAvailabilityState::Available;
+        state.file_count = Some(1);
+        state.next_due_at = now + IDLE_HEALTHY_RETRY_INTERVAL;
+
+        assert_eq!(
+            state.healthy_deadline_mismatch(now),
+            Some((
+                IDLE_HEALTHY_RETRY_INTERVAL,
+                SMALL_MANIFEST_HEALTHY_RETRY_INTERVAL
+            ))
+        );
+    }
+
+    #[test]
+    fn healthy_deadline_mismatch_detects_shorter_deadlines_and_ignores_matching() {
+        let now = Instant::now();
+        let mut state = IntegrityTorrentState::new(now);
+        state.has_completed_probe = true;
+        state.availability = DataAvailabilityState::Available;
+        state.file_count = Some(1);
+        state.next_due_at = now + Duration::from_secs(30);
+        assert_eq!(
+            state.healthy_deadline_mismatch(now),
+            Some((
+                Duration::from_secs(30),
+                SMALL_MANIFEST_HEALTHY_RETRY_INTERVAL
+            ))
+        );
+
+        state.next_due_at = now + SMALL_MANIFEST_HEALTHY_RETRY_INTERVAL;
+        assert_eq!(state.healthy_deadline_mismatch(now), None);
+    }
+
+    #[test]
+    fn sync_torrents_shortens_stale_healthy_deadline_to_small_manifest_policy() {
+        let now = Instant::now();
+        let mut scheduler = IntegrityScheduler::new(now);
+        let info_hash = b"small-stale".to_vec();
+        let mut state = IntegrityTorrentState::new(now);
+        state.has_completed_probe = true;
+        state.availability = DataAvailabilityState::Available;
+        state.file_count = Some(1);
+        state.next_due_at = now + IDLE_HEALTHY_RETRY_INTERVAL;
+        scheduler.torrents.insert(info_hash.clone(), state);
+
+        scheduler.sync_torrents([snapshot(
+            &info_hash,
+            true,
+            Some(1),
+            Some("/downloads/small"),
+            0,
+            0,
+        )]);
+
+        assert_eq!(
+            scheduler.next_probe_in(&info_hash),
+            Some(SMALL_MANIFEST_HEALTHY_RETRY_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn sync_torrents_extends_stale_healthy_deadline_to_idle_policy() {
+        let now = Instant::now();
+        let mut scheduler = IntegrityScheduler::new(now);
+        let info_hash = b"idle-stale".to_vec();
+        let mut state = IntegrityTorrentState::new(now);
+        state.has_completed_probe = true;
+        state.availability = DataAvailabilityState::Available;
+        state.file_count = Some(1);
+        state.next_due_at = now + SMALL_MANIFEST_HEALTHY_RETRY_INTERVAL;
+        scheduler.torrents.insert(info_hash.clone(), state);
+
+        scheduler.sync_torrents([snapshot(
+            &info_hash,
+            true,
+            None,
+            Some("/downloads/idle"),
+            0,
+            0,
+        )]);
+
+        assert_eq!(
+            scheduler.next_probe_in(&info_hash),
+            Some(IDLE_HEALTHY_RETRY_INTERVAL)
+        );
     }
 }

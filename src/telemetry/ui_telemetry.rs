@@ -694,9 +694,11 @@ mod tests {
     #[test]
     fn disk_speed_uses_current_tick_and_returns_to_zero_when_idle() {
         let mut app_state = AppState::default();
-        let mut torrent = TorrentDisplayState::default();
-        torrent.bytes_read_this_tick = 1_024;
-        torrent.bytes_written_this_tick = 2_048;
+        let torrent = TorrentDisplayState {
+            bytes_read_this_tick: 1_024,
+            bytes_written_this_tick: 2_048,
+            ..TorrentDisplayState::default()
+        };
         app_state.torrents.insert(vec![3; 20], torrent);
 
         let mut sys = System::new();

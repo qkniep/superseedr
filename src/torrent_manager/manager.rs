@@ -5265,7 +5265,13 @@ mod resource_tests {
         assert_eq!(files.len(), 2);
         assert!(files.iter().any(|entry| {
             entry.relative_path.ends_with("missing.bin")
-                && entry.error.io_kind() == Some(std::io::ErrorKind::NotFound)
+                && matches!(
+                    entry.error,
+                    StorageError::Io {
+                        kind: std::io::ErrorKind::NotFound,
+                        ..
+                    }
+                )
         }));
         assert!(files.iter().any(|entry| {
             entry.relative_path.ends_with("short.bin")
