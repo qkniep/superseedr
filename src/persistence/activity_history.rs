@@ -8,13 +8,15 @@ use crate::persistence::network_history::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io;
+use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
 use tracing::{event as tracing_event, Level};
 
 pub const ACTIVITY_HISTORY_SCHEMA_VERSION: u32 = 1;
-const ACTIVITY_HISTORY_FILE_NAME: &str = "activity_history.json";
-const ACTIVITY_HISTORY_TEMP_EXTENSION: &str = "json.tmp";
+const ACTIVITY_HISTORY_FILE_NAME: &str = "activity_history.bin";
+const ACTIVITY_HISTORY_TEMP_EXTENSION: &str = "bin.tmp";
+const ACTIVITY_HISTORY_MAGIC: &[u8; 8] = b"SSAHBIN1";
+const MAX_ACTIVITY_HISTORY_TORRENTS: usize = 100_000;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(default)]
@@ -371,23 +373,216 @@ pub fn save_activity_history_state(state: &ActivityHistoryPersistedState) -> io:
     save_activity_history_state_to_path(state, &path)
 }
 
+fn encode_u16(buf: &mut Vec<u8>, value: u16) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn encode_u32(buf: &mut Vec<u8>, value: u32) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn encode_u64(buf: &mut Vec<u8>, value: u64) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn encode_u128(buf: &mut Vec<u8>, value: u128) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn decode_u16(cursor: &mut Cursor<&[u8]>) -> io::Result<u16> {
+    let mut bytes = [0_u8; 2];
+    cursor.read_exact(&mut bytes)?;
+    Ok(u16::from_le_bytes(bytes))
+}
+
+fn decode_u32(cursor: &mut Cursor<&[u8]>) -> io::Result<u32> {
+    let mut bytes = [0_u8; 4];
+    cursor.read_exact(&mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn decode_u64(cursor: &mut Cursor<&[u8]>) -> io::Result<u64> {
+    let mut bytes = [0_u8; 8];
+    cursor.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn decode_u128(cursor: &mut Cursor<&[u8]>) -> io::Result<u128> {
+    let mut bytes = [0_u8; 16];
+    cursor.read_exact(&mut bytes)?;
+    Ok(u128::from_le_bytes(bytes))
+}
+
+fn encode_rollup_accumulator(buf: &mut Vec<u8>, accumulator: &PersistedRollupAccumulator) {
+    encode_u32(buf, accumulator.count);
+    encode_u128(buf, accumulator.primary_sum);
+    encode_u128(buf, accumulator.secondary_sum);
+}
+
+fn decode_rollup_accumulator(cursor: &mut Cursor<&[u8]>) -> io::Result<PersistedRollupAccumulator> {
+    Ok(PersistedRollupAccumulator {
+        count: decode_u32(cursor)?,
+        primary_sum: decode_u128(cursor)?,
+        secondary_sum: decode_u128(cursor)?,
+    })
+}
+
+fn encode_points(buf: &mut Vec<u8>, points: &[ActivityHistoryPoint]) {
+    encode_u32(buf, points.len() as u32);
+    for point in points {
+        encode_u64(buf, point.ts_unix);
+        encode_u64(buf, point.primary);
+        encode_u64(buf, point.secondary);
+    }
+}
+
+fn decode_points(
+    cursor: &mut Cursor<&[u8]>,
+    max_points: usize,
+) -> io::Result<Vec<ActivityHistoryPoint>> {
+    let count = decode_u32(cursor)? as usize;
+    if count > max_points {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "activity history tier exceeds retention cap",
+        ));
+    }
+
+    let mut points = Vec::with_capacity(count);
+    for _ in 0..count {
+        points.push(ActivityHistoryPoint {
+            ts_unix: decode_u64(cursor)?,
+            primary: decode_u64(cursor)?,
+            secondary: decode_u64(cursor)?,
+        });
+    }
+
+    Ok(points)
+}
+
+fn encode_series(buf: &mut Vec<u8>, series: &ActivityHistorySeries) {
+    encode_rollup_accumulator(buf, &series.rollups.second_to_minute);
+    encode_rollup_accumulator(buf, &series.rollups.minute_to_15m);
+    encode_rollup_accumulator(buf, &series.rollups.m15_to_hour);
+    encode_points(buf, &series.tiers.second_1s);
+    encode_points(buf, &series.tiers.minute_1m);
+    encode_points(buf, &series.tiers.minute_15m);
+    encode_points(buf, &series.tiers.hour_1h);
+}
+
+fn decode_series(cursor: &mut Cursor<&[u8]>) -> io::Result<ActivityHistorySeries> {
+    Ok(ActivityHistorySeries {
+        rollups: ActivityHistoryRollupSnapshot {
+            second_to_minute: decode_rollup_accumulator(cursor)?,
+            minute_to_15m: decode_rollup_accumulator(cursor)?,
+            m15_to_hour: decode_rollup_accumulator(cursor)?,
+        },
+        tiers: ActivityHistoryTiers {
+            second_1s: decode_points(cursor, SECOND_1S_CAP)?,
+            minute_1m: decode_points(cursor, MINUTE_1M_CAP)?,
+            minute_15m: decode_points(cursor, MINUTE_15M_CAP)?,
+            hour_1h: decode_points(cursor, HOUR_1H_CAP)?,
+        },
+    })
+}
+
+fn encode_string(buf: &mut Vec<u8>, value: &str) {
+    let bytes = value.as_bytes();
+    encode_u16(buf, bytes.len() as u16);
+    buf.extend_from_slice(bytes);
+}
+
+fn decode_string(cursor: &mut Cursor<&[u8]>) -> io::Result<String> {
+    let len = decode_u16(cursor)? as usize;
+    let mut bytes = vec![0_u8; len];
+    cursor.read_exact(&mut bytes)?;
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn encode_activity_history_state(state: &ActivityHistoryPersistedState) -> Vec<u8> {
+    let mut torrents: Vec<_> = state.torrents.iter().collect();
+    torrents.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(ACTIVITY_HISTORY_MAGIC);
+    encode_u32(&mut buf, state.schema_version);
+    encode_u64(&mut buf, state.updated_at_unix);
+    encode_series(&mut buf, &state.cpu);
+    encode_series(&mut buf, &state.ram);
+    encode_series(&mut buf, &state.disk);
+    encode_series(&mut buf, &state.tuning);
+    encode_u32(&mut buf, torrents.len() as u32);
+    for (info_hash, series) in torrents {
+        encode_string(&mut buf, info_hash);
+        encode_series(&mut buf, series);
+    }
+    buf
+}
+
+fn decode_activity_history_state(bytes: &[u8]) -> io::Result<ActivityHistoryPersistedState> {
+    let mut cursor = Cursor::new(bytes);
+    let mut magic = [0_u8; ACTIVITY_HISTORY_MAGIC.len()];
+    cursor.read_exact(&mut magic)?;
+    if &magic != ACTIVITY_HISTORY_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid activity history binary header",
+        ));
+    }
+
+    let schema_version = decode_u32(&mut cursor)?;
+    if schema_version != ACTIVITY_HISTORY_SCHEMA_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported activity history schema version {schema_version}"),
+        ));
+    }
+
+    let updated_at_unix = decode_u64(&mut cursor)?;
+    let cpu = decode_series(&mut cursor)?;
+    let ram = decode_series(&mut cursor)?;
+    let disk = decode_series(&mut cursor)?;
+    let tuning = decode_series(&mut cursor)?;
+    let torrent_count = decode_u32(&mut cursor)? as usize;
+    if torrent_count > MAX_ACTIVITY_HISTORY_TORRENTS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "activity history torrent count exceeds decoder limit",
+        ));
+    }
+    let mut torrents = HashMap::with_capacity(torrent_count);
+    for _ in 0..torrent_count {
+        let info_hash = decode_string(&mut cursor)?;
+        let series = decode_series(&mut cursor)?;
+        torrents.insert(info_hash, series);
+    }
+
+    if cursor.position() != bytes.len() as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "trailing bytes in activity history binary payload",
+        ));
+    }
+
+    Ok(ActivityHistoryPersistedState {
+        schema_version,
+        updated_at_unix,
+        cpu,
+        ram,
+        disk,
+        tuning,
+        torrents,
+    })
+}
+
 fn load_activity_history_state_from_path(path: &Path) -> ActivityHistoryPersistedState {
     if !path.exists() {
         return ActivityHistoryPersistedState::default();
     }
 
     match fs::read(path) {
-        Ok(bytes) => match serde_json::from_slice::<ActivityHistoryPersistedState>(&bytes) {
+        Ok(bytes) => match decode_activity_history_state(&bytes) {
             Ok(mut state) => {
-                if state.schema_version != ACTIVITY_HISTORY_SCHEMA_VERSION {
-                    tracing_event!(
-                        Level::WARN,
-                        "Unsupported activity history schema version {} in {:?}. Resetting state.",
-                        state.schema_version,
-                        path
-                    );
-                    return ActivityHistoryPersistedState::default();
-                }
                 enforce_retention_caps(&mut state);
                 state
             }
@@ -422,7 +617,7 @@ fn save_activity_history_state_to_path(
     }
 
     let sparse_state = sparse_state_for_persistence(state);
-    let content = serde_json::to_vec(&sparse_state).map_err(io::Error::other)?;
+    let content = encode_activity_history_state(&sparse_state);
     let tmp_path = path.with_extension(ACTIVITY_HISTORY_TEMP_EXTENSION);
 
     fs::write(&tmp_path, content)?;
