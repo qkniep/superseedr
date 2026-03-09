@@ -56,6 +56,7 @@ use crate::integrity_scheduler::{
     INTEGRITY_SCHEDULER_TICK_INTERVAL,
 };
 use crate::torrent_file::parser::from_bytes;
+use crate::torrent_manager::data_availability_from_file_probe_result;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
 use crate::torrent_manager::TorrentFileProbeStatus;
@@ -2328,9 +2329,6 @@ impl App {
                             "Foreground disk read marked torrent data unavailable"
                         );
                     }
-                    if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
-                        let _ = manager_tx.try_send(ManagerCommand::SetDataAvailability(false));
-                    }
                     self.save_state_to_disk();
                 }
 
@@ -2338,6 +2336,7 @@ impl App {
                 self.app_state.ui.needs_redraw = true;
             }
             ManagerEvent::FileProbeBatchResult { info_hash, result } => {
+                let probe_result_availability = data_availability_from_file_probe_result(&result);
                 let completed_sweep = self
                     .integrity_scheduler
                     .on_probe_batch_result(&info_hash, result);
@@ -2362,7 +2361,8 @@ impl App {
 
                             torrent.latest_file_probe_status =
                                 Some(TorrentFileProbeStatus::Files(problem_files));
-                            torrent.latest_state.data_available = issue_count == 0;
+                            torrent.latest_state.data_available =
+                                probe_result_availability.unwrap_or(was_available);
                             availability_changed =
                                 was_available != torrent.latest_state.data_available;
 
@@ -2424,15 +2424,6 @@ impl App {
                                 "Torrent data became unavailable"
                             );
                         }
-                    }
-                    if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
-                        let available = self
-                            .app_state
-                            .torrents
-                            .get(&info_hash)
-                            .map(|torrent| torrent.latest_state.data_available)
-                            .unwrap_or(true);
-                        let _ = manager_tx.try_send(ManagerCommand::SetDataAvailability(available));
                     }
                     self.save_state_to_disk();
                 }
@@ -4850,20 +4841,12 @@ mod tests {
             )),
         });
 
-        let faulted_first = faulted_rx
+        let faulted_command = faulted_rx
             .recv()
             .await
-            .expect("expected first faulted torrent command");
-        let faulted_second = faulted_rx
-            .recv()
-            .await
-            .expect("expected second faulted torrent command");
+            .expect("expected faulted torrent probe command");
         assert!(matches!(
-            faulted_first,
-            ManagerCommand::SetDataAvailability(false)
-        ));
-        assert!(matches!(
-            faulted_second,
+            faulted_command,
             ManagerCommand::ProbeFileBatch {
                 start_file_index: 0,
                 ..

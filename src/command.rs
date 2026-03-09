@@ -120,6 +120,8 @@ pub enum TorrentCommand {
         bytes: u64,
     },
 
+    SetDataAvailability(bool),
+
     ValidationProgress(u32),
 
     FatalStorageError(String),

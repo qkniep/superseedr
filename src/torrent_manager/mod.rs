@@ -78,6 +78,14 @@ pub struct FileProbeBatchResult {
     pub problem_files: Vec<FileProbeEntry>,
 }
 
+pub fn data_availability_from_file_probe_result(result: &FileProbeBatchResult) -> Option<bool> {
+    if result.pending_metadata || !result.reached_end_of_manifest {
+        None
+    } else {
+        Some(result.problem_files.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TorrentFileProbeStatus {
     PendingMetadata,
@@ -138,7 +146,6 @@ pub enum ManagerCommand {
         start_file_index: usize,
         max_files: usize,
     },
-    SetDataAvailability(bool),
     Pause,
     Resume,
     Shutdown,
@@ -156,3 +163,70 @@ pub enum ManagerCommand {
 }
 
 pub use manager::TorrentManager;
+
+#[cfg(test)]
+mod tests {
+    use super::{data_availability_from_file_probe_result, FileProbeBatchResult, FileProbeEntry};
+    use crate::errors::StorageError;
+
+    #[test]
+    fn data_availability_from_completed_probe_uses_problem_file_count() {
+        assert_eq!(
+            data_availability_from_file_probe_result(&FileProbeBatchResult {
+                epoch: 0,
+                scanned_files: 1,
+                next_file_index: 0,
+                reached_end_of_manifest: true,
+                pending_metadata: false,
+                problem_files: Vec::new(),
+            }),
+            Some(true)
+        );
+        assert_eq!(
+            data_availability_from_file_probe_result(&FileProbeBatchResult {
+                epoch: 0,
+                scanned_files: 1,
+                next_file_index: 0,
+                reached_end_of_manifest: true,
+                pending_metadata: false,
+                problem_files: vec![FileProbeEntry {
+                    relative_path: "missing.bin".into(),
+                    absolute_path: "/tmp/missing.bin".into(),
+                    error: StorageError::from(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "No such file or directory",
+                    )),
+                    expected_size: 1,
+                    observed_size: None,
+                }],
+            }),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn data_availability_from_incomplete_probe_result_is_unknown() {
+        assert_eq!(
+            data_availability_from_file_probe_result(&FileProbeBatchResult {
+                epoch: 0,
+                scanned_files: 128,
+                next_file_index: 128,
+                reached_end_of_manifest: false,
+                pending_metadata: false,
+                problem_files: Vec::new(),
+            }),
+            None
+        );
+        assert_eq!(
+            data_availability_from_file_probe_result(&FileProbeBatchResult {
+                epoch: 0,
+                scanned_files: 0,
+                next_file_index: 0,
+                reached_end_of_manifest: false,
+                pending_metadata: true,
+                problem_files: Vec::new(),
+            }),
+            None
+        );
+    }
+}

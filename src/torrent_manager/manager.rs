@@ -15,8 +15,8 @@ use crate::networking::ConnectionType;
 use crate::token_bucket::TokenBucket;
 
 use crate::torrent_manager::DiskIoOperation;
-use crate::torrent_manager::FileProbeBatchResult;
 use crate::torrent_manager::FileProbeEntry;
+use crate::torrent_manager::{data_availability_from_file_probe_result, FileProbeBatchResult};
 
 use crate::config::Settings;
 
@@ -825,6 +825,9 @@ impl TorrentManager {
                                 bytes: block_info.length as u64,
                             })
                             .await;
+                    } else if matches!(result, Err(ref error) if error.indicates_data_unavailability())
+                    {
+                        let _ = tx.send(TorrentCommand::SetDataAvailability(false)).await;
                     }
 
                     let _ = event_tx.try_send(ManagerEvent::DiskReadFinished);
@@ -2312,7 +2315,7 @@ impl TorrentManager {
     }
 
     async fn emit_file_probe_batch_result(
-        &self,
+        &mut self,
         epoch: u64,
         start_file_index: usize,
         max_files: usize,
@@ -2320,6 +2323,9 @@ impl TorrentManager {
         let result = self
             .collect_file_probe_batch_result(epoch, start_file_index, max_files)
             .await;
+        if let Some(available) = data_availability_from_file_probe_result(&result) {
+            self.apply_action(Action::SetDataAvailability { available });
+        }
         let _ = self
             .manager_event_tx
             .send(ManagerEvent::FileProbeBatchResult {
@@ -2440,9 +2446,6 @@ impl TorrentManager {
                         } => {
                             self.emit_file_probe_batch_result(epoch, start_file_index, max_files)
                                 .await;
-                        }
-                        ManagerCommand::SetDataAvailability(available) => {
-                            self.apply_action(Action::SetDataAvailability { available });
                         }
                         ManagerCommand::Pause => self.apply_action(Action::Pause),
                         ManagerCommand::Resume => self.apply_action(Action::Resume),
@@ -2863,6 +2866,9 @@ impl TorrentManager {
                                 byte_count: bytes
                             });
                         },
+                        TorrentCommand::SetDataAvailability(available) => {
+                            self.apply_action(Action::SetDataAvailability { available });
+                        }
                         TorrentCommand::ValidationProgress(count) => {
                             self.apply_action(Action::ValidationProgress { count });
                         },
