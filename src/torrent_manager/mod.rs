@@ -146,6 +146,7 @@ pub enum ManagerCommand {
         start_file_index: usize,
         max_files: usize,
     },
+    SetDataAvailability(bool),
     Pause,
     Resume,
     Shutdown,

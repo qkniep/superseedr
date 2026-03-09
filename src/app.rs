@@ -2275,60 +2275,42 @@ impl App {
                     .on_data_availability_fault(&info_hash);
 
                 let mut availability_changed = false;
-                let mut availability_transition_log: Option<(
-                    String,
-                    usize,
-                    Option<std::path::PathBuf>,
-                    String,
-                )> = None;
-
                 if let Some(torrent) = self.app_state.torrents.get_mut(&info_hash) {
-                    let was_available = torrent.latest_state.data_available;
+                    availability_changed = torrent.latest_state.data_available;
                     torrent.latest_state.data_available = false;
-                    availability_changed = was_available;
+                }
 
-                    if availability_changed {
-                        let saved_location =
-                            torrent
-                                .latest_state
-                                .download_path
-                                .as_ref()
-                                .map(|download_path| {
-                                    if let Some(container_name) =
-                                        torrent.latest_state.container_name.as_deref()
-                                    {
-                                        if !container_name.is_empty() {
-                                            download_path.join(container_name)
-                                        } else {
-                                            download_path.clone()
-                                        }
+                if let Some(torrent) = self.app_state.torrents.get(&info_hash) {
+                    let saved_location =
+                        torrent
+                            .latest_state
+                            .download_path
+                            .as_ref()
+                            .map(|download_path| {
+                                if let Some(container_name) =
+                                    torrent.latest_state.container_name.as_deref()
+                                {
+                                    if !container_name.is_empty() {
+                                        download_path.join(container_name)
                                     } else {
                                         download_path.clone()
                                     }
-                                });
-                        availability_transition_log = Some((
-                            torrent.latest_state.torrent_name.clone(),
-                            piece_index as usize,
-                            saved_location,
-                            error.to_string(),
-                        ));
-                    }
+                                } else {
+                                    download_path.clone()
+                                }
+                            });
+                    tracing_event!(
+                        Level::WARN,
+                        info_hash = %hex::encode(&info_hash),
+                        torrent = %torrent.latest_state.torrent_name,
+                        piece = piece_index as usize,
+                        saved_location = ?saved_location,
+                        error = %error,
+                        "Foreground disk read marked torrent data unavailable"
+                    );
                 }
 
                 if availability_changed {
-                    if let Some((torrent_name, piece_index, saved_location, error_text)) =
-                        availability_transition_log
-                    {
-                        tracing_event!(
-                            Level::WARN,
-                            info_hash = %hex::encode(&info_hash),
-                            torrent = %torrent_name,
-                            piece = piece_index,
-                            saved_location = ?saved_location,
-                            error = %error_text,
-                            "Foreground disk read marked torrent data unavailable"
-                        );
-                    }
                     self.save_state_to_disk();
                 }
 
@@ -2340,8 +2322,9 @@ impl App {
                 let completed_sweep = self
                     .integrity_scheduler
                     .on_probe_batch_result(&info_hash, result);
-                let mut availability_changed = false;
                 let mut availability_transition_log: Option<AvailabilityTransitionLog> = None;
+                let mut should_request_recovery = false;
+                let mut should_persist_unavailable = false;
 
                 if let Some(torrent) = self.app_state.torrents.get_mut(&info_hash) {
                     match completed_sweep {
@@ -2361,71 +2344,80 @@ impl App {
 
                             torrent.latest_file_probe_status =
                                 Some(TorrentFileProbeStatus::Files(problem_files));
-                            torrent.latest_state.data_available =
-                                probe_result_availability.unwrap_or(was_available);
-                            availability_changed =
-                                was_available != torrent.latest_state.data_available;
-
-                            if availability_changed {
-                                let saved_location =
-                                    torrent.latest_state.download_path.as_ref().map(
-                                        |download_path| {
-                                            if let Some(container_name) =
-                                                torrent.latest_state.container_name.as_deref()
-                                            {
-                                                if !container_name.is_empty() {
-                                                    download_path.join(container_name)
-                                                } else {
-                                                    download_path.clone()
-                                                }
+                            let saved_location =
+                                torrent
+                                    .latest_state
+                                    .download_path
+                                    .as_ref()
+                                    .map(|download_path| {
+                                        if let Some(container_name) =
+                                            torrent.latest_state.container_name.as_deref()
+                                        {
+                                            if !container_name.is_empty() {
+                                                download_path.join(container_name)
                                             } else {
                                                 download_path.clone()
                                             }
-                                        },
-                                    );
-                                availability_transition_log = Some((
-                                    torrent.latest_state.torrent_name.clone(),
-                                    torrent.latest_state.data_available,
-                                    issue_count,
-                                    saved_location,
-                                    issue_files,
-                                ));
+                                        } else {
+                                            download_path.clone()
+                                        }
+                                    });
+                            availability_transition_log = Some((
+                                torrent.latest_state.torrent_name.clone(),
+                                probe_result_availability.unwrap_or(was_available),
+                                issue_count,
+                                saved_location,
+                                issue_files,
+                            ));
+
+                            if matches!(probe_result_availability, Some(false)) {
+                                torrent.latest_state.data_available = false;
+                                should_persist_unavailable = was_available;
+                            }
+                            if matches!(probe_result_availability, Some(true)) && !was_available {
+                                should_request_recovery = true;
                             }
                         }
                         None => {}
                     }
                 }
 
-                if availability_changed {
-                    if let Some((
-                        torrent_name,
-                        is_available,
-                        issue_count,
-                        saved_location,
-                        issue_files,
-                    )) = availability_transition_log
-                    {
-                        if is_available {
-                            tracing_event!(
-                                Level::INFO,
-                                info_hash = %hex::encode(&info_hash),
-                                torrent = %torrent_name,
-                                saved_location = ?saved_location,
-                                "Torrent data became available again"
-                            );
-                        } else {
-                            tracing_event!(
-                                Level::WARN,
-                                info_hash = %hex::encode(&info_hash),
-                                torrent = %torrent_name,
-                                saved_location = ?saved_location,
-                                issues = issue_count,
-                                issue_files = ?issue_files,
-                                "Torrent data became unavailable"
-                            );
+                if let Some((
+                    torrent_name,
+                    is_available,
+                    issue_count,
+                    saved_location,
+                    issue_files,
+                )) = availability_transition_log
+                {
+                    if is_available {
+                        tracing_event!(
+                            Level::INFO,
+                            info_hash = %hex::encode(&info_hash),
+                            torrent = %torrent_name,
+                            saved_location = ?saved_location,
+                            "Torrent probe found data available; awaiting manager metrics confirmation"
+                        );
+                    } else {
+                        tracing_event!(
+                            Level::WARN,
+                            info_hash = %hex::encode(&info_hash),
+                            torrent = %torrent_name,
+                            saved_location = ?saved_location,
+                            issues = issue_count,
+                            issue_files = ?issue_files,
+                            "Torrent probe found data unavailable"
+                        );
+                        if should_persist_unavailable {
+                            self.save_state_to_disk();
                         }
                     }
-                    self.save_state_to_disk();
+                }
+
+                if should_request_recovery {
+                    if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
+                        let _ = manager_tx.try_send(ManagerCommand::SetDataAvailability(true));
+                    }
                 }
 
                 self.dispatch_integrity_probe_batches();
@@ -3993,6 +3985,14 @@ pub(crate) fn sort_and_filter_torrent_list_state(app_state: &mut AppState) {
             return std::cmp::Ordering::Equal;
         };
 
+        let availability_ordering = a_torrent
+            .latest_state
+            .data_available
+            .cmp(&b_torrent.latest_state.data_available);
+        if availability_ordering != std::cmp::Ordering::Equal {
+            return availability_ordering;
+        }
+
         let ordering = match sort_by {
             TorrentSortColumn::Name => a_torrent
                 .latest_state
@@ -4385,6 +4385,36 @@ mod tests {
 
         assert_eq!(app_state.torrent_list_order, vec![hash_a]);
         assert_eq!(app_state.ui.selected_torrent_index, 0);
+    }
+
+    #[test]
+    fn sort_and_filter_prioritizes_unavailable_torrents() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Down, SortDirection::Descending),
+            ..Default::default()
+        };
+
+        let unavailable_hash = b"unavailable_hash".to_vec();
+        let available_hash = b"available_hash".to_vec();
+
+        let mut unavailable = mock_display("sample-unavailable.iso", 0);
+        unavailable.latest_state.data_available = false;
+        unavailable.smoothed_download_speed_bps = 1;
+
+        let mut available = mock_display("sample-available.iso", 0);
+        available.smoothed_download_speed_bps = 10_000;
+
+        app_state
+            .torrents
+            .insert(unavailable_hash.clone(), unavailable);
+        app_state.torrents.insert(available_hash.clone(), available);
+
+        sort_and_filter_torrent_list_state(&mut app_state);
+
+        assert_eq!(
+            app_state.torrent_list_order,
+            vec![unavailable_hash, available_hash]
+        );
     }
 
     #[test]
@@ -4867,8 +4897,108 @@ mod tests {
             .torrents
             .get(&sibling_info_hash)
             .expect("sibling torrent display should exist");
-        assert!(!faulted_torrent.latest_state.data_available);
+        assert!(faulted_torrent.latest_state.data_available);
         assert!(sibling_torrent.latest_state.data_available);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn healthy_probe_requests_manager_recovery_but_does_not_flip_ui_until_metrics() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings).await.expect("build app");
+        let info_hash = b"recovery_probe_hash".to_vec();
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.info_hash = info_hash.clone();
+        display.latest_state.torrent_name = "recovery probe torrent".to_string();
+        display.latest_state.torrent_control_state = TorrentControlState::Running;
+        display.latest_state.data_available = false;
+        app.app_state.torrents.insert(info_hash.clone(), display);
+        app.integrity_scheduler
+            .sync_torrents(app.current_integrity_snapshots());
+
+        let (manager_tx, mut manager_rx) = mpsc::channel(4);
+        app.torrent_manager_command_txs
+            .insert(info_hash.clone(), manager_tx);
+
+        app.handle_manager_event(ManagerEvent::FileProbeBatchResult {
+            info_hash: info_hash.clone(),
+            result: FileProbeBatchResult {
+                epoch: 0,
+                scanned_files: 1,
+                next_file_index: 0,
+                reached_end_of_manifest: true,
+                pending_metadata: false,
+                problem_files: Vec::new(),
+            },
+        });
+
+        let recovery_command = manager_rx.recv().await.expect("expected recovery command");
+        assert!(matches!(
+            recovery_command,
+            ManagerCommand::SetDataAvailability(true)
+        ));
+        assert!(matches!(
+            manager_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let torrent = app
+            .app_state
+            .torrents
+            .get(&info_hash)
+            .expect("torrent display should exist");
+        assert!(!torrent.latest_state.data_available);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn stale_healthy_probe_does_not_request_manager_recovery() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings).await.expect("build app");
+        let info_hash = b"stale_recovery_probe_hash".to_vec();
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.info_hash = info_hash.clone();
+        display.latest_state.torrent_name = "stale recovery probe torrent".to_string();
+        display.latest_state.torrent_control_state = TorrentControlState::Running;
+        display.latest_state.data_available = false;
+        app.app_state.torrents.insert(info_hash.clone(), display);
+        app.integrity_scheduler
+            .sync_torrents(app.current_integrity_snapshots());
+        app.integrity_scheduler
+            .on_data_availability_fault(&info_hash);
+
+        let (manager_tx, mut manager_rx) = mpsc::channel(4);
+        app.torrent_manager_command_txs
+            .insert(info_hash.clone(), manager_tx);
+
+        app.handle_manager_event(ManagerEvent::FileProbeBatchResult {
+            info_hash: info_hash.clone(),
+            result: FileProbeBatchResult {
+                epoch: 0,
+                scanned_files: 1,
+                next_file_index: 0,
+                reached_end_of_manifest: true,
+                pending_metadata: false,
+                problem_files: Vec::new(),
+            },
+        });
+
+        let command = manager_rx.recv().await.expect("expected replacement probe");
+        assert!(matches!(command, ManagerCommand::ProbeFileBatch { .. }));
+        assert!(matches!(
+            manager_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
 
         let _ = app.shutdown_tx.send(());
     }
@@ -4896,7 +5026,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_telemetry_metrics_refresh_preserves_data_availability_flag() {
+    fn ui_telemetry_metrics_refresh_updates_data_availability_flag() {
         let mut app_state = AppState::default();
         let info_hash = b"telemetry_probe_hash".to_vec();
 
@@ -4908,6 +5038,7 @@ mod tests {
         let message = TorrentMetrics {
             info_hash: info_hash.clone(),
             torrent_name: "sample".to_string(),
+            data_available: true,
             download_speed_bps: 123,
             ..Default::default()
         };
@@ -4918,7 +5049,7 @@ mod tests {
             .torrents
             .get(&info_hash)
             .expect("torrent display should exist");
-        assert!(!torrent.latest_state.data_available);
+        assert!(torrent.latest_state.data_available);
         assert_eq!(torrent.latest_state.download_speed_bps, 123);
     }
 

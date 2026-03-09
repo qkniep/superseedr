@@ -2323,8 +2323,11 @@ impl TorrentManager {
         let result = self
             .collect_file_probe_batch_result(epoch, start_file_index, max_files)
             .await;
-        if let Some(available) = data_availability_from_file_probe_result(&result) {
-            self.apply_action(Action::SetDataAvailability { available });
+        if matches!(
+            data_availability_from_file_probe_result(&result),
+            Some(false)
+        ) {
+            self.apply_action(Action::SetDataAvailability { available: false });
         }
         let _ = self
             .manager_event_tx
@@ -2446,6 +2449,9 @@ impl TorrentManager {
                         } => {
                             self.emit_file_probe_batch_result(epoch, start_file_index, max_files)
                                 .await;
+                        }
+                        ManagerCommand::SetDataAvailability(available) => {
+                            self.apply_action(Action::SetDataAvailability { available });
                         }
                         ManagerCommand::Pause => self.apply_action(Action::Pause),
                         ManagerCommand::Resume => self.apply_action(Action::Resume),
