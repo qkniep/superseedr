@@ -94,30 +94,6 @@ impl MultiFileInfo {
     }
 }
 
-pub async fn probe_file_info(file_info: &FileInfo) -> (Option<StorageError>, Option<u64>) {
-    match fs::metadata(&file_info.path).await {
-        Ok(metadata) => {
-            if !metadata.is_file() {
-                return (Some(StorageError::UnexpectedType), None);
-            }
-
-            let observed_size = metadata.len();
-            (
-                if observed_size == file_info.length {
-                    None
-                } else {
-                    Some(StorageError::SizeMismatch {
-                        expected_size: file_info.length,
-                        observed_size,
-                    })
-                },
-                Some(observed_size),
-            )
-        }
-        Err(error) => (Some(StorageError::from(error)), None),
-    }
-}
-
 /// Creates all necessary directories and pre-allocates all files for a torrent.
 /// This function works for both single and multi-file torrents.
 pub async fn create_and_allocate_files(

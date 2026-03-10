@@ -554,6 +554,8 @@ pub struct TorrentMetrics {
     pub torrent_name: String,
     pub download_path: Option<PathBuf>,
     pub container_name: Option<String>,
+    #[serde(default)]
+    pub is_multi_file: bool,
     pub file_count: Option<usize>,
     pub file_priorities: HashMap<usize, FilePriority>,
     pub data_available: bool,
@@ -594,6 +596,7 @@ impl Default for TorrentMetrics {
             torrent_name: String::new(),
             download_path: None,
             container_name: None,
+            is_multi_file: false,
             file_count: None,
             file_priorities: HashMap::new(),
             data_available: true,
@@ -2410,11 +2413,13 @@ impl App {
             }
             ManagerEvent::MetadataLoaded { info_hash, torrent } => {
                 self.integrity_scheduler.on_metadata_loaded(&info_hash);
-                self.dispatch_integrity_probe_batches();
 
                 if let Some(display) = self.app_state.torrents.get_mut(&info_hash) {
+                    display.latest_state.is_multi_file = !torrent.info.files.is_empty();
                     display.latest_state.file_count = Some(torrent_file_count(&torrent));
                 }
+
+                self.dispatch_integrity_probe_batches();
 
                 if let FileBrowserMode::DownloadLocSelection {
                     preview_tree,
@@ -2856,6 +2861,8 @@ impl App {
             Some(container_name) if !container_name.is_empty() => {
                 Some(download_path.join(container_name))
             }
+            // Explicit empty-container multi-file torrents save directly into the root directory.
+            Some(_) if metrics.is_multi_file => Some(download_path.clone()),
             // Flat payloads need a torrent-specific identity rather than the shared parent folder.
             _ => Some(download_path.join(&metrics.torrent_name)),
         }
@@ -3155,6 +3162,7 @@ impl App {
                 torrent_name: torrent.info.name.clone(),
                 download_path: download_path.clone(),
                 container_name: container_name.clone(),
+                is_multi_file: !torrent.info.files.is_empty(),
                 file_count: Some(torrent_file_count(&torrent)),
                 number_of_pieces_total,
                 file_priorities: file_priorities.clone(),
@@ -3282,6 +3290,7 @@ impl App {
                 torrent_name: resolved_name,
                 download_path: download_path.clone(),
                 container_name: container_name.clone(),
+                is_multi_file: false,
                 file_count: None,
                 ..Default::default()
             },
@@ -4232,6 +4241,7 @@ mod tests {
         FileProbeBatchResult, FileProbeEntry, ManagerCommand, ManagerEvent, TorrentFileProbeStatus,
     };
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time;
@@ -4319,6 +4329,57 @@ mod tests {
 
         assert!(!torrent_is_effectively_incomplete(&metrics));
         assert_eq!(torrent_completion_percent(&metrics), 100.0);
+    }
+
+    #[test]
+    fn torrent_saved_location_uses_file_path_for_flat_torrents() {
+        let metrics = TorrentMetrics {
+            torrent_name: "flat.bin".to_string(),
+            download_path: Some("/downloads/shared".into()),
+            container_name: None,
+            is_multi_file: false,
+            file_count: Some(1),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            App::torrent_saved_location(&metrics),
+            Some(PathBuf::from("/downloads/shared/flat.bin"))
+        );
+    }
+
+    #[test]
+    fn torrent_saved_location_uses_root_for_explicit_empty_container_multi_file_torrents() {
+        let metrics = TorrentMetrics {
+            torrent_name: "folderless-multi".to_string(),
+            download_path: Some("/downloads/shared".into()),
+            container_name: Some(String::new()),
+            is_multi_file: true,
+            file_count: Some(2),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            App::torrent_saved_location(&metrics),
+            Some(PathBuf::from("/downloads/shared"))
+        );
+    }
+
+    #[test]
+    fn torrent_saved_location_uses_root_for_single_entry_multi_file_torrents_without_container() {
+        let metrics = TorrentMetrics {
+            torrent_name: "single-entry-multi".to_string(),
+            download_path: Some("/downloads/shared".into()),
+            container_name: Some(String::new()),
+            is_multi_file: true,
+            file_count: Some(1),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            App::torrent_saved_location(&metrics),
+            Some(PathBuf::from("/downloads/shared"))
+        );
     }
 
     #[test]
@@ -4788,6 +4849,94 @@ mod tests {
         assert!(matches!(
             second_command,
             ManagerCommand::ProbeFileBatch { .. }
+        ));
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn metadata_loaded_updates_layout_before_fault_fanout_for_single_entry_multi_file() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings).await.expect("build app");
+        let faulted_info_hash = b"metadata_faulted_hash".to_vec();
+        let sibling_info_hash = b"metadata_sibling_hash".to_vec();
+
+        let mut faulted = TorrentDisplayState::default();
+        faulted.latest_state.info_hash = faulted_info_hash.clone();
+        faulted.latest_state.torrent_name = "shared-name".to_string();
+        faulted.latest_state.torrent_control_state = TorrentControlState::Running;
+        faulted.latest_state.download_path = Some("/downloads/shared".into());
+        faulted.latest_state.container_name = Some(String::new());
+        app.app_state
+            .torrents
+            .insert(faulted_info_hash.clone(), faulted);
+
+        let mut sibling = TorrentDisplayState::default();
+        sibling.latest_state.info_hash = sibling_info_hash.clone();
+        sibling.latest_state.torrent_name = "shared-name".to_string();
+        sibling.latest_state.torrent_control_state = TorrentControlState::Running;
+        sibling.latest_state.download_path = Some("/downloads/shared".into());
+        sibling.latest_state.file_count = Some(1);
+        app.app_state
+            .torrents
+            .insert(sibling_info_hash.clone(), sibling);
+
+        let (faulted_tx, mut faulted_rx) = mpsc::channel(8);
+        let (sibling_tx, mut sibling_rx) = mpsc::channel(8);
+        app.torrent_manager_command_txs
+            .insert(faulted_info_hash.clone(), faulted_tx);
+        app.torrent_manager_command_txs
+            .insert(sibling_info_hash.clone(), sibling_tx);
+        app.integrity_scheduler
+            .sync_torrents(app.current_integrity_snapshots());
+
+        let torrent = crate::torrent_file::Torrent {
+            info: crate::torrent_file::Info {
+                name: "shared-name".to_string(),
+                files: vec![crate::torrent_file::InfoFile {
+                    length: 1,
+                    path: vec!["entry.bin".to_string()],
+                    md5sum: None,
+                    attr: None,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        app.handle_manager_event(ManagerEvent::MetadataLoaded {
+            info_hash: faulted_info_hash.clone(),
+            torrent: Box::new(torrent),
+        });
+
+        while faulted_rx.try_recv().is_ok() {}
+        while sibling_rx.try_recv().is_ok() {}
+
+        app.handle_manager_event(ManagerEvent::DataAvailabilityFault {
+            info_hash: faulted_info_hash.clone(),
+            piece_index: 7,
+            error: StorageError::from(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No such file or directory",
+            )),
+        });
+
+        let faulted_command = faulted_rx
+            .recv()
+            .await
+            .expect("expected faulted torrent probe command");
+        assert!(matches!(
+            faulted_command,
+            ManagerCommand::ProbeFileBatch {
+                start_file_index: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            sibling_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
 
         let _ = app.shutdown_tx.send(());
