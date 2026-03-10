@@ -2,17 +2,117 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::{App, AppMode};
-
+use crate::tui::paste_burst::FlushResult as PasteBurstFlushResult;
 use crate::tui::screens::{browser, config, delete_confirm, help, normal, power, rss, welcome};
 
-use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
 use ratatui::prelude::Rect;
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
 static GLOBAL_ESC_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
 
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
+    handle_event_at(event, app, Instant::now()).await;
+}
+
+pub async fn flush_pending_paste_burst(app: &mut App) {
+    flush_pending_paste_burst_at(app, Instant::now()).await;
+}
+
+async fn handle_event_at(event: CrosstermEvent, app: &mut App, now: Instant) {
+    let translated = translate_event(event, app, now);
+    if translated.is_empty() {
+        return;
+    }
+
+    for event in translated {
+        apply_event(event, app).await;
+    }
+    app.app_state.ui.needs_redraw = true;
+}
+
+async fn flush_pending_paste_burst_at(app: &mut App, now: Instant) {
+    let translated = flush_due_events(app, now);
+    if translated.is_empty() {
+        return;
+    }
+
+    for event in translated {
+        apply_event(event, app).await;
+    }
+    app.app_state.ui.needs_redraw = true;
+}
+
+fn translate_event(event: CrosstermEvent, app: &mut App, now: Instant) -> Vec<CrosstermEvent> {
+    let mut translated = Vec::new();
+    if should_ignore_event_for_paste_burst(&event) {
+        return translated;
+    }
+
+    let buffered_key = match &event {
+        CrosstermEvent::Key(key) if should_buffer_normal_key(app, *key) => Some(*key),
+        _ => None,
+    };
+
+    if let Some(key) = buffered_key {
+        let flush = app.app_state.ui.normal_paste_burst.push_key(key, now);
+        translated.extend(convert_burst_flush(flush));
+        return translated;
+    }
+
+    if app.app_state.ui.normal_paste_burst.has_pending() {
+        let flush = app
+            .app_state
+            .ui
+            .normal_paste_burst
+            .flush_now(normal::accepts_pasted_text);
+        translated.extend(convert_burst_flush(flush));
+    }
+
+    translated.push(event);
+    translated
+}
+fn flush_due_events(app: &mut App, now: Instant) -> Vec<CrosstermEvent> {
+    let flush = app
+        .app_state
+        .ui
+        .normal_paste_burst
+        .flush_if_due(now, normal::accepts_pasted_text);
+    convert_burst_flush(flush)
+}
+
+fn convert_burst_flush(flush: PasteBurstFlushResult) -> Vec<CrosstermEvent> {
+    match flush {
+        PasteBurstFlushResult::None | PasteBurstFlushResult::Buffered => Vec::new(),
+        PasteBurstFlushResult::Text(text) => vec![CrosstermEvent::Paste(text)],
+        PasteBurstFlushResult::Keys(keys) => keys.into_iter().map(CrosstermEvent::Key).collect(),
+    }
+}
+
+fn should_buffer_normal_key(app: &App, key: KeyEvent) -> bool {
+    matches!(app.app_state.mode, AppMode::Normal)
+        && !app.app_state.ui.is_searching
+        && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && matches!(key.code, KeyCode::Char(_))
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+}
+
+fn should_ignore_event_for_paste_burst(event: &CrosstermEvent) -> bool {
+    matches!(
+        event,
+        CrosstermEvent::Key(KeyEvent {
+            kind: KeyEventKind::Release,
+            ..
+        })
+    )
+}
+
+async fn apply_event(event: CrosstermEvent, app: &mut App) {
     if handle_resize_event(&event, app) {
         return;
     }
@@ -32,7 +132,6 @@ pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     }
 
     dispatch_mode_event(event, app).await;
-    app.app_state.ui.needs_redraw = true;
 }
 
 fn should_quit_on_ctrl_c(event: &CrosstermEvent, app: &mut App) -> bool {
@@ -116,7 +215,6 @@ async fn dispatch_mode_event(event: CrosstermEvent, app: &mut App) {
         AppMode::FileBrowser => {}
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,9 +222,12 @@ mod tests {
         AppState, FilePriority, PeerInfo, SelectedHeader, TorrentDisplayState, TorrentMetrics,
         TorrentPreviewPayload,
     };
+    use crate::config::Settings;
+    use crate::tui::paste_burst::PasteBurst;
     use crate::tui::tree::RawNode;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;
+    use std::time::Instant;
 
     /// Creates a mock TorrentMetrics with a specific number of peers.
     fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
@@ -175,6 +276,13 @@ mod tests {
 
     // --- NAVIGATION TESTS ---
 
+    async fn build_test_app() -> App {
+        let mut settings = Settings::default();
+        settings.client_port = 0;
+        let mut app = App::new(settings).await.expect("build app");
+        app.app_state.mode = AppMode::Normal;
+        app
+    }
     #[test]
     fn test_nav_down_torrents() {
         let mut app_state = create_test_app_state();
@@ -383,5 +491,100 @@ mod tests {
 
         assert!(!should_debounce_escape(&event));
         assert!(should_debounce_escape(&event));
+    }
+
+    #[tokio::test]
+    async fn single_shortcut_replays_after_burst_timeout() {
+        let mut app = build_test_app().await;
+        let start = Instant::now();
+
+        handle_event_at(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            &mut app,
+            start,
+        )
+        .await;
+        assert!(matches!(app.app_state.mode, AppMode::Normal));
+
+        let translated = flush_due_events(&mut app, start + PasteBurst::flush_delay());
+        assert!(matches!(translated.as_slice(), [CrosstermEvent::Key(_)]));
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn supported_burst_flushes_as_synthetic_paste() {
+        let mut app = build_test_app().await;
+        let start = Instant::now();
+        let magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+
+        for (offset, ch) in magnet.chars().enumerate() {
+            handle_event_at(
+                CrosstermEvent::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                &mut app,
+                start + std::time::Duration::from_millis(offset as u64),
+            )
+            .await;
+        }
+
+        let translated = flush_due_events(
+            &mut app,
+            start
+                + std::time::Duration::from_millis((magnet.len() - 1) as u64)
+                + PasteBurst::flush_delay(),
+        );
+        assert!(matches!(translated.as_slice(), [CrosstermEvent::Paste(text)] if text == magnet));
+        assert!(matches!(app.app_state.mode, AppMode::Normal));
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn unsupported_burst_replays_original_keys() {
+        let mut app = build_test_app().await;
+        let start = Instant::now();
+
+        for (offset, ch) in ['j', 'j'].into_iter().enumerate() {
+            handle_event_at(
+                CrosstermEvent::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                &mut app,
+                start + std::time::Duration::from_millis(offset as u64),
+            )
+            .await;
+        }
+
+        let translated = flush_due_events(
+            &mut app,
+            start + std::time::Duration::from_millis(1) + PasteBurst::flush_delay(),
+        );
+        assert!(matches!(
+            translated.as_slice(),
+            [CrosstermEvent::Key(_), CrosstermEvent::Key(_)]
+        ));
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn explicit_paste_bypasses_pending_burst() {
+        let mut app = build_test_app().await;
+        let start = Instant::now();
+
+        handle_event_at(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            &mut app,
+            start,
+        )
+        .await;
+
+        let translated = translate_event(
+            CrosstermEvent::Paste(
+                "magnet:?xt=urn:btih:fedcba9876543210fedcba9876543210fedcba98".to_string(),
+            ),
+            &mut app,
+            start + std::time::Duration::from_millis(1),
+        );
+        assert!(matches!(
+            translated.as_slice(),
+            [CrosstermEvent::Key(_), CrosstermEvent::Paste(_)]
+        ));
+        let _ = app.shutdown_tx.send(());
     }
 }

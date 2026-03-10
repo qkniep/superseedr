@@ -33,6 +33,7 @@ use crate::token_bucket::TokenBucket;
 
 use crate::tui::effects::compute_effects_activity_speed_multiplier;
 use crate::tui::events;
+use crate::tui::paste_burst::PasteBurst;
 use crate::tui::tree;
 use crate::tui::tree::RawNode;
 use crate::tui::tree::TreeViewState;
@@ -669,6 +670,7 @@ pub struct UiState {
     pub config: ConfigUiState,
     pub delete_confirm: DeleteConfirmUiState,
     pub file_browser: FileBrowserUiState,
+    pub normal_paste_burst: PasteBurst,
     #[allow(dead_code)]
     pub rss: RssUiState,
 }
@@ -1279,6 +1281,7 @@ impl App {
                 _ => Duration::from_millis(self.app_state.data_rate.as_ms()), // User-defined FPS
             };
             let next_tuning_at = self.next_tuning_at;
+            let next_paste_flush_at = self.app_state.ui.normal_paste_burst.next_deadline();
 
             tokio::select! {
                 _ = signal::ctrl_c() => {
@@ -1305,6 +1308,18 @@ impl App {
 
                 Some(result) = self.notify_rx.recv() => {
                     self.handle_file_event(result).await;
+                }
+
+                _ = async {
+                    if let Some(deadline) = next_paste_flush_at {
+                        time::sleep_until(deadline.into()).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    self.clamp_selected_indices();
+                    events::flush_pending_paste_burst(self).await;
+                    next_draw_time = Instant::now();
                 }
 
                 _ = stats_interval.tick() => {

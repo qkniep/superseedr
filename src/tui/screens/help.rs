@@ -356,7 +356,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
-                        "Paste | v",
+                        "Paste | Ctrl+V",
                         ctx.apply(Style::default().fg(ctx.accent_sapphire())),
                     )),
                     Cell::from("Paste a magnet link or local file path to add"),

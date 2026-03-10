@@ -46,9 +46,9 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(windows)]
-use clipboard::{ClipboardContext, ClipboardProvider};
-use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
 use ratatui::layout::Layout;
 use ratatui::prelude::{
     symbols, Alignment, Color, Constraint, Direction, Frame, Line, Modifier, Rect, Span, Style,
@@ -323,9 +323,7 @@ pub enum UiAction {
     GraphNext,
     GraphPrev,
     OpenAddTorrentBrowser,
-    OpenDeleteConfirm {
-        with_files: bool,
-    },
+    OpenDeleteConfirm { with_files: bool },
     OpenConfig,
     OpenRss,
     DataRateSlower,
@@ -336,8 +334,6 @@ pub enum UiAction {
     SortBySelectedColumn,
     OpenHelp,
     PasteText(String),
-    #[cfg(windows)]
-    PasteFromClipboard,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -354,8 +350,6 @@ pub enum UiEffect {
     SendResume(Vec<u8>),
     OpenHelpScreen,
     HandlePastedText(String),
-    #[cfg(windows)]
-    ReadClipboardAndPaste,
 }
 
 #[derive(Default)]
@@ -590,16 +584,15 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
             redraw: true,
             effects: vec![UiEffect::HandlePastedText(text)],
         },
-        #[cfg(windows)]
-        UiAction::PasteFromClipboard => ReduceResult {
-            redraw: true,
-            effects: vec![UiEffect::ReadClipboardAndPaste],
-        },
     }
 }
 
-fn map_key_to_ui_action(key_code: KeyCode) -> Option<UiAction> {
-    match key_code {
+fn map_key_to_ui_action(key: KeyEvent) -> Option<UiAction> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+
+    match key.code {
         KeyCode::Esc => Some(UiAction::ClearSystemError),
         KeyCode::Char('/') => Some(UiAction::StartSearch),
         KeyCode::Char('x') => Some(UiAction::ToggleAnonymizeNames),
@@ -615,8 +608,6 @@ fn map_key_to_ui_action(key_code: KeyCode) -> Option<UiAction> {
         KeyCode::Char('c') => Some(UiAction::OpenConfig),
         KeyCode::Char('r') => Some(UiAction::OpenRss),
         KeyCode::Char('m') => Some(UiAction::OpenHelp),
-        #[cfg(windows)]
-        KeyCode::Char('v') => Some(UiAction::PasteFromClipboard),
         KeyCode::Char('[') | KeyCode::Char('{') => Some(UiAction::DataRateSlower),
         KeyCode::Char(']') | KeyCode::Char('}') => Some(UiAction::DataRateFaster),
         KeyCode::Char('<') => Some(UiAction::ThemePrev),
@@ -630,7 +621,7 @@ fn map_key_to_ui_action(key_code: KeyCode) -> Option<UiAction> {
         | KeyCode::Left
         | KeyCode::Char('h')
         | KeyCode::Right
-        | KeyCode::Char('l') => Some(UiAction::Navigate(key_code)),
+        | KeyCode::Char('l') => Some(UiAction::Navigate(key.code)),
         _ => None,
     }
 }
@@ -1098,7 +1089,7 @@ pub fn draw_footer(
         ctx.apply(Style::default().fg(ctx.state_error())),
     );
     push_if_fits(
-        "[v]",
+        "[Ctrl+V]",
         "paste",
         ctx.apply(Style::default().fg(ctx.accent_teal())),
     );
@@ -1429,7 +1420,7 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                 ),
             )),
             Line::from(Span::styled(
-                "Press [a] to add a file or [v] to paste a magnet link",
+                "Press [a] to add a file or paste a magnet link",
                 ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
             )),
         ];
@@ -4297,45 +4288,70 @@ fn handle_search_key(key_code: KeyCode, app: &mut App) -> bool {
     true
 }
 
-async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
+enum PastedContent<'a> {
+    Magnet(&'a str),
+    TorrentFile(&'a Path),
+    Unsupported,
+}
+
+fn classify_pasted_text(pasted_text: &str) -> PastedContent<'_> {
     let pasted_text = pasted_text.trim();
-
     if pasted_text.starts_with("magnet:") {
-        let download_path = app.client_configs.default_download_folder.clone();
+        return PastedContent::Magnet(pasted_text);
+    }
 
-        app.add_magnet_torrent(
-            "Fetching name...".to_string(),
-            pasted_text.to_string(),
-            download_path.clone(),
-            false,
-            TorrentControlState::Running,
-            HashMap::new(),
-            None,
-        )
-        .await;
+    let path = Path::new(pasted_text);
+    if path.is_file() && path.extension().is_some_and(|ext| ext == "torrent") {
+        return PastedContent::TorrentFile(path);
+    }
 
-        if download_path.is_none() {
-            app.app_state.pending_torrent_link = pasted_text.to_string();
-            let initial_path = app.get_initial_destination_path();
-            let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
-                path: initial_path,
-                browser_mode: FileBrowserMode::DownloadLocSelection {
-                    torrent_files: vec![],
-                    container_name: String::new(),
-                    use_container: false,
-                    is_editing_name: false,
-                    focused_pane: BrowserPane::FileSystem,
-                    preview_tree: Vec::new(),
-                    preview_state: TreeViewState::default(),
-                    cursor_pos: 0,
-                    original_name_backup: "Magnet Download".to_string(),
-                },
-                highlight_path: None,
-            });
+    PastedContent::Unsupported
+}
+
+pub fn accepts_pasted_text(pasted_text: &str) -> bool {
+    !matches!(
+        classify_pasted_text(pasted_text),
+        PastedContent::Unsupported
+    )
+}
+
+async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
+    match classify_pasted_text(pasted_text) {
+        PastedContent::Magnet(magnet_link) => {
+            let download_path = app.client_configs.default_download_folder.clone();
+
+            app.add_magnet_torrent(
+                "Fetching name...".to_string(),
+                magnet_link.to_string(),
+                download_path.clone(),
+                false,
+                TorrentControlState::Running,
+                HashMap::new(),
+                None,
+            )
+            .await;
+
+            if download_path.is_none() {
+                app.app_state.pending_torrent_link = magnet_link.to_string();
+                let initial_path = app.get_initial_destination_path();
+                let _ = app.app_command_tx.try_send(AppCommand::FetchFileTree {
+                    path: initial_path,
+                    browser_mode: FileBrowserMode::DownloadLocSelection {
+                        torrent_files: vec![],
+                        container_name: String::new(),
+                        use_container: false,
+                        is_editing_name: false,
+                        focused_pane: BrowserPane::FileSystem,
+                        preview_tree: Vec::new(),
+                        preview_state: TreeViewState::default(),
+                        cursor_pos: 0,
+                        original_name_backup: "Magnet Download".to_string(),
+                    },
+                    highlight_path: None,
+                });
+            }
         }
-    } else {
-        let path = Path::new(pasted_text);
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "torrent") {
+        PastedContent::TorrentFile(path) => {
             if let Some(download_path) = app.client_configs.default_download_folder.clone() {
                 app.add_torrent_from_file(
                     path.to_path_buf(),
@@ -4351,47 +4367,44 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
                     .app_command_tx
                     .try_send(AppCommand::AddTorrentFromFile(path.to_path_buf()));
             }
-        } else {
+        }
+        PastedContent::Unsupported => {
+            let pasted_text = pasted_text.trim();
             tracing_event!(
                 Level::WARN,
-                "Clipboard content not recognized as magnet link or torrent file: {}",
+                "Pasted content not recognized as magnet link or torrent file: {}",
                 pasted_text
             );
-            app.app_state.system_error = Some(
-                "Clipboard content not recognized as magnet link or torrent file.".to_string(),
-            );
+            app.app_state.system_error =
+                Some("Pasted content not recognized as magnet link or torrent file.".to_string());
         }
     }
 }
-
 pub async fn handle_event(event: CrosstermEvent, app: &mut App) {
     match event {
         CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-            let _ = handle_key_press(key.code, app).await;
+            let _ = handle_key_press(key, app).await;
         }
-        #[cfg(not(windows))]
         CrosstermEvent::Paste(pasted_text) => {
             let _ = handle_paste_text(pasted_text.trim().to_string(), app).await;
         }
         _ => {}
     };
 }
-
-async fn handle_key_press(key_code: KeyCode, app: &mut App) -> bool {
-    if handle_search_key(key_code, app) {
+async fn handle_key_press(key: KeyEvent, app: &mut App) -> bool {
+    if handle_search_key(key.code, app) {
         app.app_state.ui.needs_redraw = true;
         return true;
     }
 
-    if handle_reducer_key(key_code, app).await {
+    if handle_reducer_key(key, app).await {
         return true;
     }
 
     false
 }
-
-async fn handle_reducer_key(key_code: KeyCode, app: &mut App) -> bool {
-    let Some(action) = map_key_to_ui_action(key_code) else {
+async fn handle_reducer_key(key: KeyEvent, app: &mut App) -> bool {
+    let Some(action) = map_key_to_ui_action(key) else {
         return false;
     };
 
@@ -4402,7 +4415,6 @@ async fn handle_reducer_key(key_code: KeyCode, app: &mut App) -> bool {
     execute_ui_effects(app, result.effects).await;
     true
 }
-
 async fn handle_paste_text(text: String, app: &mut App) -> bool {
     let result = reduce_ui_action(&mut app.app_state, UiAction::PasteText(text));
     if result.redraw {
@@ -4510,22 +4522,6 @@ async fn execute_ui_effect(app: &mut App, effect: UiEffect) {
         UiEffect::HandlePastedText(text) => {
             handle_pasted_text(app, &text).await;
         }
-        #[cfg(windows)]
-        UiEffect::ReadClipboardAndPaste => match ClipboardContext::new() {
-            Ok(mut ctx) => match ctx.get_contents() {
-                Ok(text) => {
-                    handle_pasted_text(app, text.trim()).await;
-                }
-                Err(e) => {
-                    tracing_event!(Level::ERROR, "Clipboard read error: {}", e);
-                    app.app_state.system_error = Some(format!("Clipboard read error: {}", e));
-                }
-            },
-            Err(e) => {
-                tracing_event!(Level::ERROR, "Clipboard context error: {}", e);
-                app.app_state.system_error = Some(format!("Clipboard initialization error: {}", e));
-            }
-        },
     }
 }
 
@@ -4539,7 +4535,10 @@ mod tests {
     use crate::config::{PeerSortColumn, SortDirection, TorrentSortColumn};
     use crate::errors::StorageError;
     use crate::theme::{Theme, ThemeContext, ThemeName};
+    use std::fs;
+    use std::path::PathBuf;
     use std::time::Duration;
+    use tempfile::tempdir;
 
     fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
         let mut metrics = TorrentMetrics::default();
@@ -4847,16 +4846,51 @@ mod tests {
     #[test]
     fn keymap_includes_chart_view_controls() {
         assert_eq!(
-            map_key_to_ui_action(KeyCode::Char('g')),
+            map_key_to_ui_action(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)),
             Some(UiAction::ChartViewNext)
         );
         assert_eq!(
-            map_key_to_ui_action(KeyCode::Char('G')),
+            map_key_to_ui_action(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)),
             Some(UiAction::ChartViewPrev)
         );
-        assert_eq!(map_key_to_ui_action(KeyCode::Char('o')), None);
+        assert_eq!(
+            map_key_to_ui_action(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)),
+            None
+        );
     }
 
+    #[test]
+    fn keymap_ignores_control_modified_shortcuts() {
+        assert_eq!(
+            map_key_to_ui_action(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(
+            map_key_to_ui_action(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            None
+        );
+    }
+
+    #[test]
+    fn accepts_magnet_links_as_paste_candidates() {
+        assert!(accepts_pasted_text(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+        ));
+    }
+
+    #[test]
+    fn accepts_existing_torrent_files_as_paste_candidates() {
+        let dir = tempdir().expect("temp dir");
+        let torrent_path = dir.path().join("sample_fixture.torrent");
+        fs::write(&torrent_path, b"sample torrent data").expect("write torrent fixture");
+
+        assert!(accepts_pasted_text(torrent_path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn rejects_invalid_paste_candidates() {
+        assert!(!accepts_pasted_text("jj"));
+    }
     #[test]
     fn build_time_aligned_window_snaps_unaligned_now_to_step_boundary() {
         let points = vec![
@@ -5080,10 +5114,15 @@ mod tests {
 
         let panel = selected_torrent_critical_details(&torrent, false)
             .expect("critical panel should be present for unavailable data");
+        let expected_path = PathBuf::from("/downloads")
+            .join("sample")
+            .join("missing.bin")
+            .display()
+            .to_string();
         assert_eq!(panel.title, "Critical");
         assert!(panel.text.contains("DATA UNAVAILABLE (1)"));
         assert!(panel.text.contains("Files Check: 5s"));
-        assert!(panel.text.contains("/downloads/sample/missing.bin"));
+        assert!(panel.text.contains(&expected_path));
     }
 
     #[test]
@@ -5108,11 +5147,16 @@ mod tests {
 
         let panel = selected_torrent_critical_details(&torrent, true)
             .expect("critical panel should be present for unavailable data");
+        let unexpected_path = PathBuf::from("/downloads")
+            .join("sample")
+            .join("missing.bin")
+            .display()
+            .to_string();
         assert_eq!(panel.title, "Critical");
         assert!(panel.text.contains("DATA UNAVAILABLE (1)"));
         assert!(panel.text.contains("Files Check: 5s"));
         assert!(panel.text.contains("/path/to/torrent/file"));
-        assert!(!panel.text.contains("/downloads/sample/missing.bin"));
+        assert!(!panel.text.contains(&unexpected_path));
     }
 
     #[test]
