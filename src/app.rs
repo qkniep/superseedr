@@ -2281,24 +2281,7 @@ impl App {
                 }
 
                 if let Some(torrent) = self.app_state.torrents.get(&info_hash) {
-                    let saved_location =
-                        torrent
-                            .latest_state
-                            .download_path
-                            .as_ref()
-                            .map(|download_path| {
-                                if let Some(container_name) =
-                                    torrent.latest_state.container_name.as_deref()
-                                {
-                                    if !container_name.is_empty() {
-                                        download_path.join(container_name)
-                                    } else {
-                                        download_path.clone()
-                                    }
-                                } else {
-                                    download_path.clone()
-                                }
-                            });
+                    let saved_location = Self::torrent_saved_location(&torrent.latest_state);
                     tracing_event!(
                         Level::WARN,
                         info_hash = %hex::encode(&info_hash),
@@ -2323,15 +2306,24 @@ impl App {
                     .integrity_scheduler
                     .on_probe_batch_result(&info_hash, result);
                 let mut availability_transition_log: Option<AvailabilityTransitionLog> = None;
+                let mut should_notify_manager_unavailable = false;
                 let mut should_request_recovery = false;
                 let mut should_persist_unavailable = false;
 
                 if let Some(torrent) = self.app_state.torrents.get_mut(&info_hash) {
+                    if completed_sweep.is_some() && matches!(probe_result_availability, Some(false))
+                    {
+                        should_notify_manager_unavailable = torrent.latest_state.data_available;
+                        torrent.latest_state.data_available = false;
+                        should_persist_unavailable |= should_notify_manager_unavailable;
+                    }
+
                     match completed_sweep {
                         Some(ProbeBatchOutcome::PendingMetadata) => {
                             torrent.latest_file_probe_status =
                                 Some(TorrentFileProbeStatus::PendingMetadata);
                         }
+                        Some(ProbeBatchOutcome::SweepInProgress) => {}
                         Some(ProbeBatchOutcome::CompletedSweep { problem_files }) => {
                             let was_available = torrent.latest_state.data_available;
                             let issue_count = problem_files.len();
@@ -2345,23 +2337,7 @@ impl App {
                             torrent.latest_file_probe_status =
                                 Some(TorrentFileProbeStatus::Files(problem_files));
                             let saved_location =
-                                torrent
-                                    .latest_state
-                                    .download_path
-                                    .as_ref()
-                                    .map(|download_path| {
-                                        if let Some(container_name) =
-                                            torrent.latest_state.container_name.as_deref()
-                                        {
-                                            if !container_name.is_empty() {
-                                                download_path.join(container_name)
-                                            } else {
-                                                download_path.clone()
-                                            }
-                                        } else {
-                                            download_path.clone()
-                                        }
-                                    });
+                                Self::torrent_saved_location(&torrent.latest_state);
                             availability_transition_log = Some((
                                 torrent.latest_state.torrent_name.clone(),
                                 probe_result_availability.unwrap_or(was_available),
@@ -2372,7 +2348,7 @@ impl App {
 
                             if matches!(probe_result_availability, Some(false)) {
                                 torrent.latest_state.data_available = false;
-                                should_persist_unavailable = was_available;
+                                should_persist_unavailable |= was_available;
                             }
                             if matches!(probe_result_availability, Some(true)) && !was_available {
                                 should_request_recovery = true;
@@ -2380,6 +2356,15 @@ impl App {
                         }
                         None => {}
                     }
+                }
+
+                if should_notify_manager_unavailable {
+                    if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
+                        let _ = manager_tx.try_send(ManagerCommand::SetDataAvailability(false));
+                    }
+                }
+                if should_persist_unavailable && availability_transition_log.is_none() {
+                    self.save_state_to_disk();
                 }
 
                 if let Some((
@@ -2864,6 +2849,18 @@ impl App {
         }
     }
 
+    fn torrent_saved_location(metrics: &TorrentMetrics) -> Option<PathBuf> {
+        let download_path = metrics.download_path.as_ref()?;
+
+        match metrics.container_name.as_deref() {
+            Some(container_name) if !container_name.is_empty() => {
+                Some(download_path.join(container_name))
+            }
+            // Flat payloads need a torrent-specific identity rather than the shared parent folder.
+            _ => Some(download_path.join(&metrics.torrent_name)),
+        }
+    }
+
     fn current_integrity_snapshots(&self) -> Vec<TorrentIntegritySnapshot> {
         self.app_state
             .torrents
@@ -2877,21 +2874,7 @@ impl App {
                     info_hash: info_hash.clone(),
                     data_available: torrent.latest_state.data_available,
                     file_count: torrent.latest_state.file_count,
-                    saved_location: torrent.latest_state.download_path.as_ref().map(
-                        |download_path| {
-                            if let Some(container_name) =
-                                torrent.latest_state.container_name.as_deref()
-                            {
-                                if !container_name.is_empty() {
-                                    download_path.join(container_name)
-                                } else {
-                                    download_path.clone()
-                                }
-                            } else {
-                                download_path.clone()
-                            }
-                        },
-                    ),
+                    saved_location: Self::torrent_saved_location(&torrent.latest_state),
                     download_speed_bps: torrent.latest_state.download_speed_bps,
                     upload_speed_bps: torrent.latest_state.upload_speed_bps,
                 })
@@ -4811,7 +4794,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn data_availability_fault_does_not_fan_out_across_shared_download_root() {
+    async fn data_availability_fault_does_not_fan_out_across_flat_torrents_in_same_directory() {
         let settings = crate::config::Settings {
             client_port: 0,
             ..Default::default()
@@ -4825,7 +4808,7 @@ mod tests {
         faulted.latest_state.torrent_name = "faulted probe torrent".to_string();
         faulted.latest_state.torrent_control_state = TorrentControlState::Running;
         faulted.latest_state.download_path = Some("/downloads/shared".into());
-        faulted.latest_state.container_name = Some("faulted".to_string());
+        faulted.latest_state.file_count = Some(1);
         app.app_state
             .torrents
             .insert(faulted_info_hash.clone(), faulted);
@@ -4835,7 +4818,7 @@ mod tests {
         sibling.latest_state.torrent_name = "sibling probe torrent".to_string();
         sibling.latest_state.torrent_control_state = TorrentControlState::Running;
         sibling.latest_state.download_path = Some("/downloads/shared".into());
-        sibling.latest_state.container_name = Some("sibling".to_string());
+        sibling.latest_state.file_count = Some(1);
         app.app_state
             .torrents
             .insert(sibling_info_hash.clone(), sibling);
@@ -4897,8 +4880,82 @@ mod tests {
             .torrents
             .get(&sibling_info_hash)
             .expect("sibling torrent display should exist");
-        assert!(faulted_torrent.latest_state.data_available);
+        assert!(!faulted_torrent.latest_state.data_available);
         assert!(sibling_torrent.latest_state.data_available);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn partial_probe_marks_torrent_unavailable_before_sweep_completion() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings).await.expect("build app");
+        let info_hash = b"partial_unavailable_probe_hash".to_vec();
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.info_hash = info_hash.clone();
+        display.latest_state.torrent_name = "partial probe torrent".to_string();
+        display.latest_state.torrent_control_state = TorrentControlState::Running;
+        display.latest_state.data_available = true;
+        app.app_state.torrents.insert(info_hash.clone(), display);
+        app.integrity_scheduler
+            .sync_torrents(app.current_integrity_snapshots());
+
+        let (manager_tx, mut manager_rx) = mpsc::channel(4);
+        app.torrent_manager_command_txs
+            .insert(info_hash.clone(), manager_tx);
+
+        app.handle_manager_event(ManagerEvent::FileProbeBatchResult {
+            info_hash: info_hash.clone(),
+            result: FileProbeBatchResult {
+                epoch: 0,
+                scanned_files: 256,
+                next_file_index: 256,
+                reached_end_of_manifest: false,
+                pending_metadata: false,
+                problem_files: vec![FileProbeEntry {
+                    relative_path: "missing-segment.bin".into(),
+                    absolute_path: "/downloads/shared/missing-segment.bin".into(),
+                    error: StorageError::from(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "No such file or directory",
+                    )),
+                    expected_size: 1,
+                    observed_size: None,
+                }],
+            },
+        });
+
+        let manager_command = manager_rx
+            .recv()
+            .await
+            .expect("expected manager availability downgrade");
+        assert!(matches!(
+            manager_command,
+            ManagerCommand::SetDataAvailability(false)
+        ));
+        let replacement_probe = manager_rx
+            .recv()
+            .await
+            .expect("expected continuation probe batch");
+        assert!(matches!(
+            replacement_probe,
+            ManagerCommand::ProbeFileBatch {
+                start_file_index: 256,
+                ..
+            }
+        ));
+
+        let torrent = app
+            .app_state
+            .torrents
+            .get(&info_hash)
+            .expect("torrent display should exist");
+        assert!(!torrent.latest_state.data_available);
+        assert!(torrent.latest_file_probe_status.is_none());
 
         let _ = app.shutdown_tx.send(());
     }

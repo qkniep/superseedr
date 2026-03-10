@@ -54,6 +54,7 @@ pub struct ProbeBatchRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeBatchOutcome {
     PendingMetadata,
+    SweepInProgress,
     CompletedSweep { problem_files: Vec<FileProbeEntry> },
 }
 
@@ -397,7 +398,7 @@ impl IntegrityScheduler {
         }
 
         state.next_due_at = self.now;
-        None
+        Some(ProbeBatchOutcome::SweepInProgress)
     }
 }
 
@@ -485,7 +486,7 @@ mod tests {
                 problem_files: vec![missing_entry("missing.bin")],
             },
         );
-        assert!(outcome.is_none());
+        assert_eq!(outcome, Some(ProbeBatchOutcome::SweepInProgress));
 
         let next_request = scheduler
             .drain_due_probe_requests()
@@ -581,7 +582,7 @@ mod tests {
                 );
                 completed = true;
             } else {
-                assert!(outcome.is_none());
+                assert_eq!(outcome, Some(ProbeBatchOutcome::SweepInProgress));
                 expected_start = next_file_index;
             }
         }

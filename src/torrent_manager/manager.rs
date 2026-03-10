@@ -15,8 +15,8 @@ use crate::networking::ConnectionType;
 use crate::token_bucket::TokenBucket;
 
 use crate::torrent_manager::DiskIoOperation;
+use crate::torrent_manager::FileProbeBatchResult;
 use crate::torrent_manager::FileProbeEntry;
-use crate::torrent_manager::{data_availability_from_file_probe_result, FileProbeBatchResult};
 
 use crate::config::Settings;
 
@@ -2272,12 +2272,14 @@ impl TorrentManager {
     }
 
     async fn collect_file_probe_batch_result(
-        &self,
+        torrent_status: TorrentStatus,
+        torrent: Option<Torrent>,
+        multi_file_info: Option<MultiFileInfo>,
         epoch: u64,
         start_file_index: usize,
         max_files: usize,
     ) -> FileProbeBatchResult {
-        if self.state.torrent_status == TorrentStatus::AwaitingMetadata {
+        if torrent_status == TorrentStatus::AwaitingMetadata {
             return FileProbeBatchResult {
                 epoch,
                 scanned_files: 0,
@@ -2288,7 +2290,7 @@ impl TorrentManager {
             };
         }
 
-        let Some(torrent) = self.state.torrent.as_ref() else {
+        let Some(torrent) = torrent.as_ref() else {
             return FileProbeBatchResult {
                 epoch,
                 scanned_files: 0,
@@ -2299,7 +2301,7 @@ impl TorrentManager {
             };
         };
 
-        let Some(multi_file_info) = self.state.multi_file_info.as_ref() else {
+        let Some(multi_file_info) = multi_file_info.as_ref() else {
             return FileProbeBatchResult {
                 epoch,
                 scanned_files: 0,
@@ -2314,28 +2316,27 @@ impl TorrentManager {
             .await
     }
 
-    async fn emit_file_probe_batch_result(
-        &mut self,
-        epoch: u64,
-        start_file_index: usize,
-        max_files: usize,
-    ) {
-        let result = self
-            .collect_file_probe_batch_result(epoch, start_file_index, max_files)
+    fn spawn_file_probe_batch(&self, epoch: u64, start_file_index: usize, max_files: usize) {
+        let info_hash = self.state.info_hash.clone();
+        let torrent_status = self.state.torrent_status.clone();
+        let torrent = self.state.torrent.clone();
+        let multi_file_info = self.state.multi_file_info.clone();
+        let manager_event_tx = self.manager_event_tx.clone();
+
+        tokio::spawn(async move {
+            let result = Self::collect_file_probe_batch_result(
+                torrent_status,
+                torrent,
+                multi_file_info,
+                epoch,
+                start_file_index,
+                max_files,
+            )
             .await;
-        if matches!(
-            data_availability_from_file_probe_result(&result),
-            Some(false)
-        ) {
-            self.apply_action(Action::SetDataAvailability { available: false });
-        }
-        let _ = self
-            .manager_event_tx
-            .send(ManagerEvent::FileProbeBatchResult {
-                info_hash: self.state.info_hash.clone(),
-                result,
-            })
-            .await;
+            let _ = manager_event_tx
+                .send(ManagerEvent::FileProbeBatchResult { info_hash, result })
+                .await;
+        });
     }
 
     pub async fn run(mut self, is_paused: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -2447,8 +2448,7 @@ impl TorrentManager {
                             start_file_index,
                             max_files,
                         } => {
-                            self.emit_file_probe_batch_result(epoch, start_file_index, max_files)
-                                .await;
+                            self.spawn_file_probe_batch(epoch, start_file_index, max_files);
                         }
                         ManagerCommand::SetDataAvailability(available) => {
                             self.apply_action(Action::SetDataAvailability { available });

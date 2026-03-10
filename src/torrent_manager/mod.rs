@@ -79,10 +79,14 @@ pub struct FileProbeBatchResult {
 }
 
 pub fn data_availability_from_file_probe_result(result: &FileProbeBatchResult) -> Option<bool> {
-    if result.pending_metadata || !result.reached_end_of_manifest {
+    if result.pending_metadata {
         None
+    } else if !result.problem_files.is_empty() {
+        Some(false)
+    } else if result.reached_end_of_manifest {
+        Some(true)
     } else {
-        Some(result.problem_files.is_empty())
+        None
     }
 }
 
@@ -217,6 +221,26 @@ mod tests {
                 problem_files: Vec::new(),
             }),
             None
+        );
+        assert_eq!(
+            data_availability_from_file_probe_result(&FileProbeBatchResult {
+                epoch: 0,
+                scanned_files: 128,
+                next_file_index: 128,
+                reached_end_of_manifest: false,
+                pending_metadata: false,
+                problem_files: vec![FileProbeEntry {
+                    relative_path: "missing.bin".into(),
+                    absolute_path: "/tmp/missing.bin".into(),
+                    error: StorageError::from(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "No such file or directory",
+                    )),
+                    expected_size: 1,
+                    observed_size: None,
+                }],
+            }),
+            Some(false)
         );
         assert_eq!(
             data_availability_from_file_probe_result(&FileProbeBatchResult {
