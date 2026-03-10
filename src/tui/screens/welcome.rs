@@ -111,17 +111,17 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
         Line::from(""),
         Line::from(vec![
             Span::styled(" ★ ", ctx.apply(Style::default().fg(ctx.state_success()))),
-            Span::raw("Paste ("),
+            Span::raw("Paste using "),
             Span::styled(
-                "Ctrl+V",
+                "your terminal shortcut",
                 ctx.apply(Style::default().fg(ctx.accent_sky()).bold()),
             ),
-            Span::raw(") a "),
+            Span::raw(" to add a "),
             Span::styled(
                 "magnet link",
                 ctx.apply(Style::default().fg(ctx.accent_peach())),
             ),
-            Span::raw(" from your clipboard."),
+            Span::raw("."),
         ]),
         Line::from(vec![
             Span::raw("      - "),

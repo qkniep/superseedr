@@ -587,4 +587,23 @@ mod tests {
         ));
         let _ = app.shutdown_tx.send(());
     }
+
+    #[tokio::test]
+    async fn release_events_are_ignored_by_translation() {
+        let mut app = build_test_app().await;
+        app.app_state.mode = AppMode::Help;
+
+        let translated = translate_event(
+            CrosstermEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('m'),
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            )),
+            &mut app,
+            Instant::now(),
+        );
+
+        assert!(translated.is_empty());
+        let _ = app.shutdown_tx.send(());
+    }
 }

@@ -1089,7 +1089,7 @@ pub fn draw_footer(
         ctx.apply(Style::default().fg(ctx.state_error())),
     );
     push_if_fits(
-        "[Ctrl+V]",
+        "[Paste]",
         "paste",
         ctx.apply(Style::default().fg(ctx.accent_teal())),
     );
@@ -1420,7 +1420,7 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                 ),
             )),
             Line::from(Span::styled(
-                "Press [a] to add a file or paste a magnet link",
+                "Press [a] to add a file or use your terminal paste shortcut",
                 ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
             )),
         ];
