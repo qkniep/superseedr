@@ -18,7 +18,7 @@ Superseedr is a modern Rust BitTorrent client featuring a high-performance termi
 | :--- | :--- | :--- |
 | 🎨 **60 FPS TUI + Themes**<br>Fluid, animated interface with heatmaps and 40 live-switchable built-in themes. | 🐳 **Docker + VPN**<br>Gluetun integration with dynamic port reloading. | 🧬 **BitTorrent v2**<br>Hybrid swarms & Merkle tree verification. |
 | 📊 **Deep Analytics**<br>Real-time bandwidth graphs & peer metrics. | 📰 **RSS Feeds**<br>In-app feed tracking, filtering, and ingest. | 🧠 **Self-Tuning**<br>Adaptive limits control for max speed and I/O Stability. |
-| 🧲 **Magnet Links**<br>Native OS-level handler support. | 👻 **Private Mode**<br>Optional builds disabling DHT/PEX. | 🛡️ **Integrity Prober**<br>Background recovery sweeps for completed torrents, with immediate fault-driven reprobes when disk data goes missing. |
+| 🧲 **Magnet Links**<br>Native OS-level handler support. | 👻 **Private Mode**<br>Optional builds disabling DHT/PEX. | 📡 **Integrity Prober**<br>Continuous lightweight background integrity checks with fast recovery reprobes. |
 
 ### Terminal Torrenting With Superseedr
 
@@ -269,6 +269,12 @@ The application logic abandons traditional mutex-heavy threading in favor of a *
 Instead of static `ulimit` values, Superseedr runs a **Stochastic Hill Climbing** optimizer in the background.
 * **The Loop:** Every 90 seconds, it randomly reallocates internal permits between competing resources—**Peer Sockets**, **Disk Read Slots**, and **Disk Write Slots**—to find the local maximum for performance.
 * **Universal Optimization:** This algorithm dynamically discovers the optimal configuration for *any* combination of hardware (SSD vs HDD) and network environment (Home Fiber vs Datacenter), automatically scaling concurrency to match capacity.
+
+### 📡 Integrity Prober
+Superseedr automatically and continuously checks completed torrents in the background without falling back to blunt full-library rescans.
+* **Designed for Scale:** Integrity work is split into small bounded batches, keeping checks cheap even across very large collections.
+* **Fast Fault Detection:** Foreground disk-read failures immediately trigger targeted recovery reprobes, surfacing missing or damaged data quickly.
+* **No-Config Recovery:** Healthy torrents are monitored automatically, while unavailable torrents are prioritized for fast recovery detection without extra setup.
 
 ### 🧮 Statistical Engine
 Superseedr calculates granular metrics in real-time to drive optimization and observability:
