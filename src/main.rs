@@ -23,7 +23,6 @@ mod tuning;
 use app::App;
 use rand::Rng;
 
-use fs2::FileExt;
 use std::fs;
 use std::fs::File;
 
@@ -61,9 +60,6 @@ const DEFAULT_LOG_FILTER: LevelFilter = LevelFilter::INFO;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    //#[cfg(feature = "console")]
-    //console_subscriber::init();
-
     let base_data_dir = config::get_app_paths()
         .map(|(_, data_dir)| data_dir)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -143,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(lock_path) = get_lock_path() {
         if let Ok(file) = File::create(&lock_path) {
-            if file.try_lock_exclusive().is_ok() {
+            if file.try_lock().is_ok() {
                 _lock_file_handle = Some(file);
             } else {
                 proceed_to_app = false;
