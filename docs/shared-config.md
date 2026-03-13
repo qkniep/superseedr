@@ -177,8 +177,35 @@ watch_folder = "Z:\\watch"
 media = "Z:\\nas"
 ```
 
+## Migration Script
+A one-time migration helper is available at `local_scripts/migrate_legacy_settings_to_layered.py`.
+
+It reads a legacy flat `settings.toml` and writes:
+- shared `settings.toml`
+- shared `catalog.toml`
+- `hosts/<host-id>.toml`
+- canonical shared `.torrent` copies under `torrents/` when possible
+
+Example:
+
+```bash
+python3 local_scripts/migrate_legacy_settings_to_layered.py \
+  --input "/path/to/old/settings.toml" \
+  --shared-root "/Volumes/seedbox/superseedr-config" \
+  --host-id "seedbox" \
+  --path-root media=/Volumes/seedbox \
+  --force
+```
+
+Notes:
+- The script converts `default_download_folder` and per-torrent `download_path` through the `--path-root` mappings you provide.
+- Magnet entries are preserved as-is.
+- File-based torrent entries are copied into `torrents/` only when the source filename already uses the expected 40-character hex info-hash stem.
+- If a file-based torrent source is missing or its filename stem is not the expected info hash, the script warns and keeps the original source path instead of inventing a broken shared artifact reference.
+
 ## Notes
 - Shared config mode is opt-in.
 - No automatic migration is performed from the normal `settings.toml` layout.
 - Shared config mode is only about config sharing. It does not add multi-instance torrent ownership or execution coordination.
+
 
