@@ -274,6 +274,22 @@ fn selector_window<'a>(labels: &'a [&'a str], active_idx: usize, compact: bool) 
     ]
 }
 
+fn selector_active_position(labels_len: usize, active_idx: usize, compact: bool) -> usize {
+    if !compact || labels_len <= 3 {
+        return active_idx;
+    }
+
+    if active_idx == 0 {
+        return 0;
+    }
+
+    if active_idx >= labels_len.saturating_sub(1) {
+        return 2;
+    }
+
+    1
+}
+
 fn build_selector_spans(
     ctx: &ThemeContext,
     labels: &[&str],
@@ -281,11 +297,7 @@ fn build_selector_spans(
     compact: bool,
 ) -> Vec<Span<'static>> {
     let visible = selector_window(labels, active_idx, compact);
-    let active_pos = if compact && labels.len() > 3 {
-        1
-    } else {
-        active_idx
-    };
+    let active_pos = selector_active_position(labels.len(), active_idx, compact);
 
     let mut spans = Vec::with_capacity(visible.len().saturating_mul(2));
     for (i, label) in visible.iter().enumerate() {
@@ -4902,6 +4914,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn selector_active_position_clamps_to_visible_edge_slots() {
+        let labels = ["1m", "5m", "10m", "30m", "1h"];
+        assert_eq!(selector_active_position(labels.len(), 0, true), 0);
+        assert_eq!(selector_active_position(labels.len(), 2, true), 1);
+        assert_eq!(
+            selector_active_position(labels.len(), labels.len() - 1, true),
+            2
+        );
+    }
     #[test]
     fn keymap_includes_chart_view_controls() {
         assert_eq!(
