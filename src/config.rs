@@ -9,7 +9,7 @@ use tracing::{event as tracing_event, Level};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::io;
@@ -234,7 +234,10 @@ mod string_usize_map {
     use std::collections::HashMap;
     use std::str::FromStr;
 
-    pub fn serialize<S>(map: &HashMap<usize, FilePriority>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(
+        map: &HashMap<usize, FilePriority>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -423,7 +426,10 @@ impl CatalogTorrentSettings {
         shared_root: &Path,
     ) -> Self {
         Self {
-            torrent_or_magnet: encode_catalog_torrent_source(&settings.torrent_or_magnet, shared_root),
+            torrent_or_magnet: encode_catalog_torrent_source(
+                &settings.torrent_or_magnet,
+                shared_root,
+            ),
             name: settings.name.clone(),
             validation_status: settings.validation_status,
             download_path: settings
@@ -520,7 +526,8 @@ impl SharedSettingsConfig {
         settings.upload_slots = self.upload_slots;
         settings.peer_upload_in_flight_limit = self.peer_upload_in_flight_limit;
         settings.tracker_fallback_interval_secs = self.tracker_fallback_interval_secs;
-        settings.client_leeching_fallback_interval_secs = self.client_leeching_fallback_interval_secs;
+        settings.client_leeching_fallback_interval_secs =
+            self.client_leeching_fallback_interval_secs;
         settings.output_status_interval = self.output_status_interval;
         settings.rss = self.rss.clone();
         Ok(())
@@ -537,7 +544,9 @@ impl CatalogConfig {
             torrents: settings
                 .torrents
                 .iter()
-                .map(|torrent| CatalogTorrentSettings::from_settings(torrent, path_roots, shared_root))
+                .map(|torrent| {
+                    CatalogTorrentSettings::from_settings(torrent, path_roots, shared_root)
+                })
                 .collect(),
         }
     }
@@ -723,6 +732,65 @@ fn resolve_shared_path(
     }
 }
 
+fn shared_path_root(path: &SharedPath) -> Option<&str> {
+    match path {
+        SharedPath::Absolute(_) => None,
+        SharedPath::Portable { root, .. } => Some(root.as_str()),
+    }
+}
+
+fn collect_required_path_roots(
+    settings_config: &SharedSettingsConfig,
+    catalog: &CatalogConfig,
+) -> BTreeSet<String> {
+    let mut roots = BTreeSet::new();
+
+    if let Some(root) = settings_config
+        .default_download_folder
+        .as_ref()
+        .and_then(shared_path_root)
+    {
+        roots.insert(root.to_string());
+    }
+
+    for torrent in &catalog.torrents {
+        if let Some(root) = torrent.download_path.as_ref().and_then(shared_path_root) {
+            roots.insert(root.to_string());
+        }
+    }
+
+    roots
+}
+
+fn inferred_shared_data_root(paths: &SharedConfigPaths) -> PathBuf {
+    paths
+        .root_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| paths.root_dir.clone())
+}
+
+fn bootstrap_shared_host_config(
+    paths: &SharedConfigPaths,
+    settings_config: &SharedSettingsConfig,
+    catalog: &CatalogConfig,
+) -> io::Result<HostConfig> {
+    let mut host = HostConfig::default();
+    let inferred_root = inferred_shared_data_root(paths);
+
+    for root in collect_required_path_roots(settings_config, catalog) {
+        host.path_roots.insert(root, inferred_root.clone());
+    }
+
+    write_toml_atomically(&paths.host_path, &host)?;
+    tracing_event!(
+        Level::INFO,
+        "Bootstrapped shared host config at {:?}",
+        paths.host_path
+    );
+
+    Ok(host)
+}
 fn portable_relative_path_string(path: &Path) -> String {
     path.components()
         .map(|component| component.as_os_str().to_string_lossy().to_string())
@@ -842,7 +910,10 @@ fn first_run_settings() -> Settings {
 impl NormalConfigBackend {
     fn load_settings(&self) -> io::Result<Settings> {
         if !self.paths.settings_path.exists() {
-            tracing_event!(Level::INFO, "No settings found. Performing first-run setup.");
+            tracing_event!(
+                Level::INFO,
+                "No settings found. Performing first-run setup."
+            );
             let settings = first_run_settings();
             self.save_settings(&settings)?;
             return Ok(settings);
@@ -884,9 +955,14 @@ impl NormalConfigBackend {
 
 impl SharedConfigBackend {
     fn load_settings(&self) -> io::Result<Settings> {
-        let settings_config: SharedSettingsConfig = read_toml_or_default(&self.paths.settings_path)?;
+        let settings_config: SharedSettingsConfig =
+            read_toml_or_default(&self.paths.settings_path)?;
         let catalog: CatalogConfig = read_toml_or_default(&self.paths.catalog_path)?;
-        let host: HostConfig = read_toml_or_default(&self.paths.host_path)?;
+        let host = if self.paths.host_path.exists() {
+            read_toml_or_default(&self.paths.host_path)?
+        } else {
+            bootstrap_shared_host_config(&self.paths, &settings_config, &catalog)?
+        };
 
         let mut settings = Settings::default();
         settings_config.apply_to_settings(&mut settings, &host.path_roots)?;
@@ -943,7 +1019,8 @@ impl SharedConfigBackend {
         if state.host.client_id.is_some() {
             next_settings_config.client_id = state.settings_config.client_id.clone();
         }
-        let next_catalog = CatalogConfig::from_settings(settings, &state.host.path_roots, &state.paths.root_dir);
+        let next_catalog =
+            CatalogConfig::from_settings(settings, &state.host.path_roots, &state.paths.root_dir);
         let next_host = HostConfig::from_settings(
             settings,
             &state.host.path_roots,
@@ -1054,7 +1131,6 @@ pub fn is_shared_config_path(path: &Path) -> bool {
             path == paths.settings_path || path == paths.catalog_path || path == paths.host_path
         })
 }
-
 
 pub fn resolve_command_watch_path(settings: &Settings) -> Option<PathBuf> {
     settings
@@ -1397,11 +1473,8 @@ mod tests {
 
     #[test]
     fn test_resolve_host_id_uses_system_hostname_fallback() {
-        let resolved = resolve_host_id_from_sources(
-            None,
-            Vec::new(),
-            Some("MacBook Pro.local".to_string()),
-        );
+        let resolved =
+            resolve_host_id_from_sources(None, Vec::new(), Some("MacBook Pro.local".to_string()));
 
         assert_eq!(resolved, "macbook-pro.local");
     }
@@ -1589,7 +1662,9 @@ mod tests {
             ..TorrentSettings::default()
         });
 
-        backend.save_settings(&loaded).expect("save shared settings");
+        backend
+            .save_settings(&loaded)
+            .expect("save shared settings");
         let reloaded = backend.load_settings().expect("reload shared settings");
 
         let settings_contents =
@@ -1608,7 +1683,49 @@ mod tests {
         assert!(catalog_contents.contains("name = \"Library Item\""));
         assert!(catalog_contents.contains("torrent_or_magnet = \"shared:torrents/0123456789abcdef0123456789abcdef01234567.torrent\""));
         assert!(!catalog_contents.contains("global_upload_limit_bps"));
-        assert_eq!(reloaded.torrents[0].torrent_or_magnet, shared_torrent_path.to_string_lossy().to_string());
+        assert_eq!(
+            reloaded.torrents[0].torrent_or_magnet,
+            shared_torrent_path.to_string_lossy().to_string()
+        );
+    }
+
+    #[test]
+    fn test_shared_backend_bootstraps_missing_host_file_with_inferred_roots() {
+        clear_shared_config_state();
+        let dir = tempdir().expect("create tempdir");
+        let shared_root = dir.path().join("superseedr-config");
+        let backend = SharedConfigBackend {
+            paths: SharedConfigPaths {
+                root_dir: shared_root.clone(),
+                settings_path: shared_root.join("settings.toml"),
+                catalog_path: shared_root.join("catalog.toml"),
+                host_path: shared_root.join("hosts").join("windows-node.toml"),
+                host_id: "windows-node".to_string(),
+            },
+        };
+
+        fs::create_dir_all(&backend.paths.root_dir).expect("create shared root");
+        write_toml_atomically(
+            &backend.paths.settings_path,
+            &SharedSettingsConfig {
+                default_download_folder: Some(SharedPath::Portable {
+                    root: "media".to_string(),
+                    relative: PathBuf::new(),
+                }),
+                ..SharedSettingsConfig::default()
+            },
+        )
+        .expect("seed shared settings");
+
+        let loaded = backend.load_settings().expect("load shared settings");
+        let host_contents = fs::read_to_string(&backend.paths.host_path).expect("read host file");
+
+        assert_eq!(
+            loaded.default_download_folder,
+            Some(dir.path().to_path_buf())
+        );
+        assert!(host_contents.contains("[path_roots]"));
+        assert!(host_contents.contains("media = "));
     }
 
     #[test]
@@ -1646,7 +1763,9 @@ mod tests {
         assert_eq!(loaded.client_id, "host-override");
 
         loaded.global_download_limit_bps = 9876;
-        backend.save_settings(&loaded).expect("save shared settings");
+        backend
+            .save_settings(&loaded)
+            .expect("save shared settings");
 
         let settings_contents =
             fs::read_to_string(&backend.paths.settings_path).expect("read settings file");
@@ -1657,25 +1776,3 @@ mod tests {
         assert!(host_contents.contains("client_id = \"host-override\""));
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

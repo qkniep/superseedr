@@ -542,8 +542,3 @@ mod tests {
         assert!(matches!(out.effects[1], ConfigEffect::ToNormal));
     }
 }
-
-
-
-
-

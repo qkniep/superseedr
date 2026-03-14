@@ -1689,7 +1689,11 @@ impl App {
         self.dispatch_integrity_probe_batches();
     }
 
-    async fn reconcile_config_torrents(&mut self, old_settings: &Settings, new_settings: &Settings) {
+    async fn reconcile_config_torrents(
+        &mut self,
+        old_settings: &Settings,
+        new_settings: &Settings,
+    ) {
         let old_by_hash = torrents_by_info_hash(old_settings);
         let new_by_hash = torrents_by_info_hash(new_settings);
 
@@ -1761,7 +1765,8 @@ impl App {
                 torrent.latest_state.download_path = torrent_config.download_path.clone();
                 torrent.latest_state.container_name = torrent_config.container_name.clone();
                 torrent.latest_state.file_priorities = torrent_config.file_priorities.clone();
-                torrent.latest_state.torrent_control_state = torrent_config.torrent_control_state.clone();
+                torrent.latest_state.torrent_control_state =
+                    torrent_config.torrent_control_state.clone();
                 if !torrent_config.name.is_empty() {
                     torrent.latest_state.torrent_name = torrent_config.name.clone();
                 }
@@ -1839,7 +1844,8 @@ impl App {
             }
         }
 
-        self.reconcile_config_torrents(&old_settings, &new_settings).await;
+        self.reconcile_config_torrents(&old_settings, &new_settings)
+            .await;
 
         if rss_changed {
             prune_rss_feed_errors(
@@ -2360,10 +2366,8 @@ impl App {
                 }
                 Err(error) => {
                     tracing_event!(Level::ERROR, "Failed to reload shared config: {}", error);
-                    self.app_state.system_error = Some(format!(
-                        "Failed to reload shared config: {}",
-                        error
-                    ));
+                    self.app_state.system_error =
+                        Some(format!("Failed to reload shared config: {}", error));
                     self.app_state.ui.needs_redraw = true;
                 }
             },
@@ -3262,10 +3266,8 @@ impl App {
                 fs::create_dir_all(parent)?;
             }
 
-            let temp_torrent_path = destination.with_extension(format!(
-                "torrent.{}.tmp",
-                std::process::id()
-            ));
+            let temp_torrent_path =
+                destination.with_extension(format!("torrent.{}.tmp", std::process::id()));
             fs::write(&temp_torrent_path, &buffer)?;
             if let Err(e) = fs::rename(&temp_torrent_path, destination) {
                 if e.kind() == ErrorKind::AlreadyExists {
@@ -3285,7 +3287,12 @@ impl App {
                 }
             }
 
-            tracing_event!(Level::DEBUG, "Persisted torrent file copy in {}: {:?}", label, destination);
+            tracing_event!(
+                Level::DEBUG,
+                "Persisted torrent file copy in {}: {:?}",
+                label,
+                destination
+            );
             Ok(())
         };
 
@@ -5653,11 +5660,3 @@ mod tests {
         assert!(task_opt.is_none());
     }
 }
-
-
-
-
-
-
-
-

@@ -2309,4 +2309,3 @@ mod tests {
         assert_eq!(nodes[0].children[0].payload.priority, FilePriority::Skip);
     }
 }
-

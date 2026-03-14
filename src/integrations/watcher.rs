@@ -50,7 +50,11 @@ pub fn create_watcher(
                 e
             );
         } else {
-            tracing_event!(Level::INFO, "Watching shared config path: {:?}", shared_path);
+            tracing_event!(
+                Level::INFO,
+                "Watching shared config path: {:?}",
+                shared_path
+            );
         }
     }
 
@@ -226,5 +230,3 @@ mod tests {
         let _ = fs::remove_dir(dir);
     }
 }
-
-

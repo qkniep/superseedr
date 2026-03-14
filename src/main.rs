@@ -162,7 +162,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Get the config file path to show the user
                 let config_path_str = config::shared_settings_path()
-                    .or_else(|| config::get_app_paths().map(|(config_dir, _)| config_dir.join("settings.toml")))
+                    .or_else(|| {
+                        config::get_app_paths()
+                            .map(|(config_dir, _)| config_dir.join("settings.toml"))
+                    })
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Unable to determine config path.".to_string());
 
@@ -311,7 +314,3 @@ fn generate_client_id_string() -> String {
 
     format!("{}{}", CLIENT_PREFIX, random_chars)
 }
-
-
-
-
