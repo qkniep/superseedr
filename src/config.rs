@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -262,6 +263,7 @@ mod string_usize_map {
 
 const SHARED_CONFIG_DIR_ENV: &str = "SUPERSEEDR_SHARED_CONFIG_DIR";
 const SHARED_HOST_ID_ENV: &str = "SUPERSEEDR_HOST_ID";
+const EXTRA_WATCH_PATH_PREFIX: &str = "SUPERSEEDR_WATCH_PATH_";
 const SHARED_TORRENT_SOURCE_PREFIX: &str = "shared:";
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -1139,6 +1141,73 @@ pub fn resolve_command_watch_path(settings: &Settings) -> Option<PathBuf> {
         .or_else(|| get_watch_path().map(|(watch_path, _)| watch_path))
 }
 
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn resolve_additional_watch_paths_from_sources<I, K, V>(vars: I) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<OsString>,
+    V: Into<OsString>,
+{
+    let mut indexed_paths = vars
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = key.into();
+            let value = value.into();
+            let key = key.to_string_lossy();
+            let suffix = key.strip_prefix(EXTRA_WATCH_PATH_PREFIX)?;
+
+            if suffix.is_empty() || value.is_empty() {
+                return None;
+            }
+
+            let index = suffix.parse::<usize>().ok();
+            Some((index, suffix.to_string(), PathBuf::from(value)))
+        })
+        .collect::<Vec<_>>();
+
+    indexed_paths.sort_by(|left, right| {
+        left.0
+            .unwrap_or(usize::MAX)
+            .cmp(&right.0.unwrap_or(usize::MAX))
+            .then_with(|| left.1.cmp(&right.1))
+    });
+
+    let mut paths = Vec::new();
+    for (_, _, path) in indexed_paths {
+        push_unique_path(&mut paths, path);
+    }
+    paths
+}
+
+pub fn additional_watch_paths() -> Vec<PathBuf> {
+    resolve_additional_watch_paths_from_sources(env::vars_os())
+}
+
+pub fn configured_watch_paths(settings: &Settings) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(path) = settings.watch_folder.clone() {
+        push_unique_path(&mut paths, path);
+    }
+
+    for path in additional_watch_paths() {
+        push_unique_path(&mut paths, path);
+    }
+
+    if paths.is_empty() {
+        if let Some((watch_path, _)) = get_watch_path() {
+            push_unique_path(&mut paths, watch_path);
+        }
+    }
+
+    paths
+}
+
 pub fn get_watch_path() -> Option<(PathBuf, PathBuf)> {
     if let Some((_, base_path)) = get_app_paths() {
         let watch_path = base_path.join("watch_files");
@@ -1774,5 +1843,71 @@ mod tests {
         assert!(settings_contents.contains("client_id = \"shared-default\""));
         assert!(settings_contents.contains("global_download_limit_bps = 9876"));
         assert!(host_contents.contains("client_id = \"host-override\""));
+    }
+
+    fn watch_env_guard() -> &'static std::sync::Mutex<()> {
+        static GUARD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        GUARD.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn test_configured_watch_paths_uses_local_watch_only_as_fallback() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let original = env::var_os("SUPERSEEDR_WATCH_PATH_1");
+        env::set_var("SUPERSEEDR_WATCH_PATH_1", "/bridge-watch");
+
+        let explicit_watch = PathBuf::from("/shared-watch");
+        let settings = Settings {
+            watch_folder: Some(explicit_watch.clone()),
+            ..Settings::default()
+        };
+        let configured = configured_watch_paths(&settings);
+        let local_watch = get_watch_path().map(|(watch_path, _)| watch_path);
+
+        assert!(configured.contains(&explicit_watch));
+        assert!(configured.contains(&PathBuf::from("/bridge-watch")));
+        if let Some(local_watch) = local_watch {
+            assert!(!configured.contains(&local_watch));
+        }
+
+        if let Some(value) = original.clone() {
+            env::set_var("SUPERSEEDR_WATCH_PATH_1", value);
+        } else {
+            env::remove_var("SUPERSEEDR_WATCH_PATH_1");
+        }
+
+        let fallback_paths = configured_watch_paths(&Settings::default());
+        if let Some(local_watch) = get_watch_path().map(|(watch_path, _)| watch_path) {
+            assert!(fallback_paths.contains(&local_watch));
+        }
+
+        if let Some(value) = original {
+            env::set_var("SUPERSEEDR_WATCH_PATH_1", value);
+        } else {
+            env::remove_var("SUPERSEEDR_WATCH_PATH_1");
+        }
+    }
+
+    #[test]
+    fn test_resolve_additional_watch_paths_from_sources_orders_and_deduplicates() {
+        let paths = resolve_additional_watch_paths_from_sources([
+            ("SUPERSEEDR_WATCH_PATH_2", "/watch-b"),
+            ("SUPERSEEDR_WATCH_PATH_10", "/watch-z"),
+            ("IGNORED", "/nope"),
+            ("SUPERSEEDR_WATCH_PATH_1", "/watch-a"),
+            ("SUPERSEEDR_WATCH_PATH_3", "/watch-b"),
+            ("SUPERSEEDR_WATCH_PATH_ALPHA", "/watch-alpha"),
+            ("SUPERSEEDR_WATCH_PATH_4", ""),
+        ]);
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/watch-a"),
+                PathBuf::from("/watch-b"),
+                PathBuf::from("/watch-z"),
+                PathBuf::from("/watch-alpha"),
+            ]
+        );
     }
 }

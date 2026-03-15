@@ -34,16 +34,20 @@ services:
     volumes:
       - ${HOST_SUPERSEEDR_ROOT_PATH:-superseedr-root}:/seedbox
       - ${HOST_SUPERSEEDR_SHARE_PATH:-superseedr-share}:/root/.local/share/jagalite.superseedr
+      - ${HOST_WINDOWS_WATCH_PATH:-superseedr-windows-watch}:/windows-watch
       - forwarded-port:/port-data
     environment:
       - SUPERSEEDR_DEFAULT_DOWNLOAD_FOLDER=/seedbox
       - SUPERSEEDR_CLIENT_PORT=${CLIENT_PORT:-6881}
       - SUPERSEEDR_SHARED_CONFIG_DIR=${SUPERSEEDR_SHARED_CONFIG_DIR:-}
       - SUPERSEEDR_HOST_ID=${SUPERSEEDR_HOST_ID:-}
+      - SUPERSEEDR_WATCH_PATH_1=${SUPERSEEDR_WATCH_PATH_1:-/windows-watch}
     stop_grace_period: 0s
 
 volumes:
   superseedr-root:
   superseedr-share:
+  superseedr-windows-watch:
   gluetun-data:
   forwarded-port:
+

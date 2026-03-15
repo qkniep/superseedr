@@ -45,3 +45,7 @@ rust-toolchain
 *.tar
 *.gz
 *.nfo
+
+# --- Local Docker Runtime State ---
+docker-data/
+

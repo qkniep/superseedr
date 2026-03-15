@@ -39,7 +39,7 @@ use crate::tui::tree::RawNode;
 use crate::tui::tree::TreeViewState;
 use crate::tui::view::draw;
 
-use crate::config::get_watch_path;
+use crate::config::{configured_watch_paths, get_watch_path};
 use crate::storage::build_fs_tree;
 
 use crate::resource_manager::ResourceType;
@@ -115,6 +115,7 @@ const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
 pub const RSS_MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 const RSS_MANUAL_DOWNLOAD_TIMEOUT_SECS: u64 = 20;
 const NETWORK_HISTORY_PERSIST_INTERVAL_SECS: u64 = 15 * 60;
+const WATCH_FOLDER_RESCAN_INTERVAL_SECS: u64 = 5;
 const SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 const INCOMING_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 
@@ -508,6 +509,40 @@ pub enum AppMode {
 }
 
 type AvailabilityTransitionLog = (String, bool, usize, Option<std::path::PathBuf>, Vec<String>);
+
+fn is_cross_device_link_error(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(18)
+}
+
+fn move_file_with_fallback_impl<F>(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    rename_op: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+{
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    match rename_op(source, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if is_cross_device_link_error(&error) => {
+            fs::copy(source, destination)?;
+            fs::remove_file(source)?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn move_file_with_fallback(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    move_file_with_fallback_impl(source, destination, |src, dst| fs::rename(src, dst))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RssScreen {
@@ -1262,10 +1297,13 @@ impl App {
         let mut dht_bootstrap_retry_interval = time::interval(Duration::from_secs(60));
         let mut network_history_persist_interval =
             time::interval(Duration::from_secs(NETWORK_HISTORY_PERSIST_INTERVAL_SECS));
+        let mut watch_folder_rescan_interval =
+            time::interval(Duration::from_secs(WATCH_FOLDER_RESCAN_INTERVAL_SECS));
         let mut integrity_scheduler_interval = time::interval(INTEGRITY_SCHEDULER_TICK_INTERVAL);
         self.reschedule_tuning_deadline();
         dht_bootstrap_retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         network_history_persist_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        watch_folder_rescan_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         integrity_scheduler_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let output_status_interval = self.client_configs.output_status_interval;
@@ -1311,6 +1349,10 @@ impl App {
 
                 Some(result) = self.notify_rx.recv() => {
                     self.handle_file_event(result).await;
+                }
+
+                _ = watch_folder_rescan_interval.tick() => {
+                    self.process_pending_commands().await;
                 }
 
                 _ = async {
@@ -1867,18 +1909,12 @@ impl App {
     async fn handle_app_command(&mut self, command: AppCommand) {
         match command {
             AppCommand::AddTorrentFromFile(path) => {
-                // Determine if the file is coming from a watch folder (User or System)
                 let parent_dir = path.parent();
-                let is_user_watch = self
-                    .client_configs
-                    .watch_folder
-                    .as_ref()
-                    .is_some_and(|p| parent_dir == Some(p));
+                let is_configured_watch = configured_watch_paths(&self.client_configs)
+                    .iter()
+                    .any(|watch_path| parent_dir == Some(watch_path.as_path()));
 
                 let system_watch_info = get_watch_path();
-                let is_system_watch = system_watch_info
-                    .as_ref()
-                    .is_some_and(|(p, _)| parent_dir == Some(p));
 
                 if let Some(download_path) = &self.client_configs.default_download_folder {
                     // --- CASE A: Automatic Adding (Default Path Exists) ---
@@ -1895,13 +1931,12 @@ impl App {
                     self.save_state_to_disk();
 
                     // Cleanup: Move to processed or rename to .added
-                    if is_user_watch || is_system_watch {
+                    if is_configured_watch {
                         let move_successful = if let Some((_, processed_path)) = system_watch_info {
                             (|| {
-                                fs::create_dir_all(&processed_path).ok()?;
                                 let file_name = path.file_name()?;
                                 let new_path = processed_path.join(file_name);
-                                fs::rename(&path, &new_path).ok()?;
+                                move_file_with_fallback(&path, &new_path).ok()?;
                                 Some(())
                             })()
                             .is_some()
@@ -1921,7 +1956,7 @@ impl App {
                         if let Ok(torrent) = from_bytes(&buffer) {
                             // 1. Rename the file immediately if it's in a watch folder
                             // This prevents the watcher from re-triggering while the UI is open.
-                            let final_path = if is_user_watch || is_system_watch {
+                            let final_path = if is_configured_watch {
                                 let mut new_path = path.clone();
                                 new_path.set_extension("torrent.added");
                                 if let Err(e) = fs::rename(&path, &new_path) {
@@ -2054,7 +2089,7 @@ impl App {
 
                     if let Some(file_name) = path.file_name() {
                         let new_path = processed_path.join(file_name);
-                        if let Err(e) = fs::rename(&path, &new_path) {
+                        if let Err(e) = move_file_with_fallback(&path, &new_path) {
                             tracing_event!(
                                 Level::WARN,
                                 "Failed to move processed path file {:?}: {}",
@@ -2114,15 +2149,9 @@ impl App {
                         }
                     }
 
-                    if let Err(e) = fs::create_dir_all(&processed_path) {
-                        tracing_event!(
-                            Level::ERROR,
-                            "Could not create processed files directory: {}",
-                            e
-                        );
-                    } else if let Some(file_name) = path.file_name() {
+                    if let Some(file_name) = path.file_name() {
                         let new_path = processed_path.join(file_name);
-                        if let Err(e) = fs::rename(&path, &new_path) {
+                        if let Err(e) = move_file_with_fallback(&path, &new_path) {
                             tracing_event!(
                                 Level::ERROR,
                                 "Failed to move processed magnet file {:?}: {}",
@@ -2663,27 +2692,14 @@ impl App {
         match result {
             Ok(event) => {
                 const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+
                 for path in event.paths {
                     if path.to_string_lossy().ends_with(".tmp") {
                         continue;
                     }
 
-                    let now = Instant::now();
-                    if let Some(last_time) = self.app_state.recently_processed_files.get(&path) {
-                        if now.duration_since(*last_time) < DEBOUNCE_DURATION {
-                            continue;
-                        }
-                    }
-
-                    self.app_state
-                        .recently_processed_files
-                        .insert(path.clone(), now);
-
-                    // Use externalized logic for mapping path/event to command.
-                    // Note: event_to_commands could be used, but since we are already looping and debouncing,
-                    // we can just use the path-to-command logic if we expose it or just use event_to_commands as a batch.
                     if let Some(cmd) = watcher::path_to_command(&path) {
-                        let _ = self.app_command_tx.send(cmd).await;
+                        self.enqueue_watch_command(cmd, DEBOUNCE_DURATION).await;
                     }
                 }
             }
@@ -3541,10 +3557,46 @@ impl App {
         }
     }
 
+
+    fn watch_command_path(cmd: &AppCommand) -> Option<&PathBuf> {
+        match cmd {
+            AppCommand::AddTorrentFromFile(path)
+            | AppCommand::AddTorrentFromPathFile(path)
+            | AppCommand::AddMagnetFromFile(path)
+            | AppCommand::ClientShutdown(path)
+            | AppCommand::PortFileChanged(path) => Some(path),
+            AppCommand::ReloadSharedConfig => None,
+            _ => None,
+        }
+    }
+
+    async fn enqueue_watch_command(&mut self, cmd: AppCommand, min_spacing: Duration) {
+        if let Some(path) = Self::watch_command_path(&cmd).cloned() {
+            let now = Instant::now();
+            if let Some(last_time) = self.app_state.recently_processed_files.get(&path) {
+                let elapsed = now.duration_since(*last_time);
+                if elapsed < min_spacing {
+                    return;
+                }
+            }
+
+            self.app_state
+                .recently_processed_files
+                .insert(path.clone(), now);
+        }
+
+        let _ = self.app_command_tx.try_send(cmd);
+    }
+
     async fn process_pending_commands(&mut self) {
-        let commands = watcher::scan_watch_folders(&self.client_configs);
-        for cmd in commands {
-            let _ = self.app_command_tx.send(cmd).await;
+        for path in watcher::scan_watch_folder_paths(&self.client_configs) {
+            if let Some(cmd) = watcher::path_to_command(&path) {
+                self.enqueue_watch_command(
+                    cmd,
+                    Duration::from_secs(WATCH_FOLDER_RESCAN_INTERVAL_SECS),
+                )
+                .await;
+            }
         }
     }
 
@@ -4428,7 +4480,7 @@ mod tests {
     use super::{
         apply_network_history_persist_result, build_persist_payload,
         clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
-        flush_persistence_writer_parts, parse_hybrid_hashes,
+        flush_persistence_writer_parts, move_file_with_fallback_impl, parse_hybrid_hashes,
         persisted_validation_status_from_piece_completion, prune_rss_feed_errors,
         queue_persistence_payload, resolve_magnet_torrent_name, rss_settings_changed,
         should_load_persisted_torrent, should_persist_network_history_on_interval,
@@ -4459,6 +4511,29 @@ mod tests {
             })
             .collect();
         display
+    }
+
+    #[test]
+    fn move_file_with_fallback_copies_when_rename_crosses_devices() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let source = dir.path().join("bridge.magnet");
+        let destination = dir.path().join("processed").join("bridge.magnet");
+        std::fs::write(
+            &source,
+            b"magnet:?xt=urn:btih:1111111111111111111111111111111111111111",
+        )
+        .expect("write source file");
+
+        move_file_with_fallback_impl(&source, &destination, |_src, _dst| {
+            Err(std::io::Error::from_raw_os_error(18))
+        })
+        .expect("fallback move should succeed");
+
+        assert!(!source.exists());
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("read copied destination"),
+            "magnet:?xt=urn:btih:1111111111111111111111111111111111111111"
+        );
     }
 
     #[test]
@@ -5660,3 +5735,15 @@ mod tests {
         assert!(task_opt.is_none());
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+

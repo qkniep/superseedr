@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::AppCommand;
-use crate::config::{get_watch_path, is_shared_config_path, shared_config_watch_paths, Settings};
+use crate::config::{
+    configured_watch_paths, is_shared_config_path, shared_config_watch_paths, Settings,
+};
 use notify::{Config, Error as NotifyError, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,22 +24,16 @@ pub fn create_watcher(
         Config::default(),
     )?;
 
-    if let Some(path) = &settings.watch_folder {
-        if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
-            tracing_event!(Level::ERROR, "Failed to watch user path {:?}: {}", path, e);
-        } else {
-            tracing_event!(Level::INFO, "Watching user path: {:?}", path);
-        }
-    }
-
-    if let Some((watch_path, _)) = get_watch_path() {
-        if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
+    for path in configured_watch_paths(settings) {
+        if let Err(e) = watcher.watch(&path, RecursiveMode::NonRecursive) {
             tracing_event!(
                 Level::ERROR,
-                "Failed to watch system path {:?}: {}",
-                watch_path,
+                "Failed to watch command path {:?}: {}",
+                path,
                 e
             );
+        } else {
+            tracing_event!(Level::INFO, "Watching command path: {:?}", path);
         }
     }
 
@@ -79,36 +75,31 @@ pub fn create_watcher(
     Ok(watcher)
 }
 
-pub fn scan_watch_folders(settings: &Settings) -> Vec<AppCommand> {
-    let mut commands = Vec::new();
+pub fn scan_watch_folder_paths(settings: &Settings) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
 
-    if let Some(user_watch_path) = &settings.watch_folder {
-        if let Ok(entries) = fs::read_dir(user_watch_path) {
+    for watch_path in configured_watch_paths(settings) {
+        if let Ok(entries) = fs::read_dir(&watch_path) {
             for entry in entries.flatten() {
-                if let Some(cmd) = path_to_command(&entry.path()) {
-                    commands.push(cmd);
-                }
+                paths.push(entry.path());
             }
         } else {
             tracing_event!(
                 Level::WARN,
-                "Failed to read user watch directory: {:?}",
-                user_watch_path
+                "Failed to read watch directory: {:?}",
+                watch_path
             );
         }
     }
 
-    if let Some((watch_path, _)) = get_watch_path() {
-        if let Ok(entries) = fs::read_dir(watch_path) {
-            for entry in entries.flatten() {
-                if let Some(cmd) = path_to_command(&entry.path()) {
-                    commands.push(cmd);
-                }
-            }
-        }
-    }
+    paths
+}
 
-    commands
+pub fn scan_watch_folders(settings: &Settings) -> Vec<AppCommand> {
+    scan_watch_folder_paths(settings)
+        .into_iter()
+        .filter_map(|path| path_to_command(&path))
+        .collect()
 }
 
 pub fn path_to_command(path: &Path) -> Option<AppCommand> {
@@ -161,7 +152,9 @@ pub fn path_to_command(path: &Path) -> Option<AppCommand> {
 mod tests {
     use super::*;
     use crate::app::AppCommand;
+    use notify::EventKind;
     use std::fs::File;
+    use std::time::Duration;
 
     // Helper to create a dummy file for testing (since path_to_command checks is_file())
     fn with_dummy_file<F>(name: &str, test_fn: F)
@@ -194,6 +187,79 @@ mod tests {
             let cmd = path_to_command(path);
             assert!(matches!(cmd, Some(AppCommand::AddTorrentFromPathFile(_))));
         });
+    }
+
+    fn watch_env_guard() -> &'static std::sync::Mutex<()> {
+        static GUARD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        GUARD.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn scan_watch_folders_reads_env_watch_paths() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let original = std::env::var_os("SUPERSEEDR_WATCH_PATH_1");
+
+        let dir = std::env::temp_dir().join(format!("watcher_env_test_{}", rand::random::<u32>()));
+        fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("queued-job.magnet");
+        File::create(&file_path).unwrap();
+        std::env::set_var("SUPERSEEDR_WATCH_PATH_1", &dir);
+
+        let commands = scan_watch_folders(&crate::config::Settings::default());
+        assert!(commands
+            .iter()
+            .any(|cmd| matches!(cmd, AppCommand::AddMagnetFromFile(path) if path == &file_path)));
+
+        if let Some(value) = original {
+            std::env::set_var("SUPERSEEDR_WATCH_PATH_1", value);
+        } else {
+            std::env::remove_var("SUPERSEEDR_WATCH_PATH_1");
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn create_watcher_emits_live_events_for_env_watch_paths() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let original = std::env::var_os("SUPERSEEDR_WATCH_PATH_1");
+
+        let dir = std::env::temp_dir().join(format!("watcher_live_test_{}", rand::random::<u32>()));
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SUPERSEEDR_WATCH_PATH_1", &dir);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let _watcher = create_watcher(&crate::config::Settings::default(), tx).unwrap();
+
+        let file_path = dir.join("bridge.magnet");
+        std::fs::write(
+            &file_path,
+            "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=LocalWatchProbe",
+        )
+        .unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Some(Ok(event)) if event.paths.iter().any(|path| path == &file_path) => {
+                        break event;
+                    }
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => panic!("watcher error: {error}"),
+                    None => panic!("watcher channel closed before receiving file event"),
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for watch event");
+
+        assert!(matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)));
+
+        if let Some(value) = original {
+            std::env::set_var("SUPERSEEDR_WATCH_PATH_1", value);
+        } else {
+            std::env::remove_var("SUPERSEEDR_WATCH_PATH_1");
+        }
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -230,3 +296,6 @@ mod tests {
         let _ = fs::remove_dir(dir);
     }
 }
+
+
+

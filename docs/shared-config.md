@@ -39,6 +39,21 @@ Example:
 SUPERSEEDR_HOST_ID=seedbox-a
 ```
 
+### `SUPERSEEDR_WATCH_PATH_1`, `SUPERSEEDR_WATCH_PATH_2`, ...
+Optional additional read-only watch folders.
+
+These paths are watched in addition to the host `watch_folder`. The built-in local `watch_files` directory is only used as a fallback when no explicit watch sources are configured.
+They are useful when a Dockerized Superseedr instance needs to ingest `.magnet` files written by a native host install or browser handler.
+
+Example:
+
+```bash
+SUPERSEEDR_WATCH_PATH_1=/windows-watch
+SUPERSEEDR_WATCH_PATH_2=/seedbox/extra-watch
+```
+
+These extra paths do not change where `superseedr add ...` writes. Command writes still go to the primary host `watch_folder` when set, or the built-in local watch directory otherwise.
+
 ## Shared Mode Layout
 
 ```text
@@ -338,5 +353,42 @@ Notes:
 - No automatic migration is performed from the normal `settings.toml` layout.
 - Shared config mode is only about config sharing. It does not add multi-instance torrent ownership or execution coordination.
 
+
+
+
+### Docker bridge for native magnet handoff
+Best for:
+- Dockerized Superseedr
+- native Windows browser magnet registration
+- keeping the native browser handoff path unchanged
+
+Mount the native host watch folder into the container and expose it through an extra watch env var.
+This is especially useful when the native install writes magnets into the Windows local app-data watch directory.
+
+Compose example:
+
+```yaml
+services:
+  superseedr:
+    volumes:
+      - ${HOST_SUPERSEEDR_ROOT_PATH:-superseedr-root}:/seedbox
+      - ${HOST_SUPERSEEDR_SHARE_PATH:-superseedr-share}:/root/.local/share/jagalite.superseedr
+      - ${HOST_WINDOWS_WATCH_PATH}:/windows-watch
+      - forwarded-port:/port-data
+    environment:
+      - SUPERSEEDR_WATCH_PATH_1=/windows-watch
+```
+
+Windows `.env` example:
+
+```env
+HOST_WINDOWS_WATCH_PATH=C:\Users\jagat\AppData\Local\github\jagalite.superseedr\data\watch_files
+```
+
+In this setup:
+- the native Windows handler keeps writing `.magnet` files where it already does today
+- Dockerized Superseedr watches `/windows-watch`
+- the configured host `watch_folder` can still point somewhere else, such as `/seedbox/watch`
+- the built-in local Docker `watch_files` inbox is no longer scanned once explicit watch sources are configured
 
 
