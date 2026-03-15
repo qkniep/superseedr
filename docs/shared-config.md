@@ -389,6 +389,7 @@ In this setup:
 - the native Windows handler keeps writing `.magnet` files where it already does today
 - Dockerized Superseedr watches `/windows-watch`
 - the configured host `watch_folder` can still point somewhere else, such as `/seedbox/watch`
-- the built-in local Docker `watch_files` inbox is no longer scanned once explicit watch sources are configured
+- the built-in local Docker `watch_files` inbox remains watched as the primary command inbox unless you set `watch_folder` explicitly
+
 
 

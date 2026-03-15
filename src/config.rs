@@ -1191,18 +1191,12 @@ pub fn additional_watch_paths() -> Vec<PathBuf> {
 pub fn configured_watch_paths(settings: &Settings) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if let Some(path) = settings.watch_folder.clone() {
+    if let Some(path) = resolve_command_watch_path(settings) {
         push_unique_path(&mut paths, path);
     }
 
     for path in additional_watch_paths() {
         push_unique_path(&mut paths, path);
-    }
-
-    if paths.is_empty() {
-        if let Some((watch_path, _)) = get_watch_path() {
-            push_unique_path(&mut paths, watch_path);
-        }
     }
 
     paths
@@ -1851,7 +1845,7 @@ mod tests {
     }
 
     #[test]
-    fn test_configured_watch_paths_uses_local_watch_only_as_fallback() {
+    fn test_configured_watch_paths_always_include_primary_command_inbox() {
         let _guard = watch_env_guard().lock().unwrap();
         let original = env::var_os("SUPERSEEDR_WATCH_PATH_1");
         env::set_var("SUPERSEEDR_WATCH_PATH_1", "/bridge-watch");
@@ -1862,13 +1856,9 @@ mod tests {
             ..Settings::default()
         };
         let configured = configured_watch_paths(&settings);
-        let local_watch = get_watch_path().map(|(watch_path, _)| watch_path);
 
         assert!(configured.contains(&explicit_watch));
         assert!(configured.contains(&PathBuf::from("/bridge-watch")));
-        if let Some(local_watch) = local_watch {
-            assert!(!configured.contains(&local_watch));
-        }
 
         if let Some(value) = original.clone() {
             env::set_var("SUPERSEEDR_WATCH_PATH_1", value);
@@ -1880,6 +1870,13 @@ mod tests {
         if let Some(local_watch) = get_watch_path().map(|(watch_path, _)| watch_path) {
             assert!(fallback_paths.contains(&local_watch));
         }
+
+        env::set_var("SUPERSEEDR_WATCH_PATH_1", "/bridge-watch");
+        let fallback_with_bridge = configured_watch_paths(&Settings::default());
+        if let Some(local_watch) = get_watch_path().map(|(watch_path, _)| watch_path) {
+            assert!(fallback_with_bridge.contains(&local_watch));
+        }
+        assert!(fallback_with_bridge.contains(&PathBuf::from("/bridge-watch")));
 
         if let Some(value) = original {
             env::set_var("SUPERSEEDR_WATCH_PATH_1", value);
@@ -1911,3 +1908,5 @@ mod tests {
         );
     }
 }
+
+
