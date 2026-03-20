@@ -19,6 +19,12 @@ use crate::config::{
     FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SortDirection,
     TorrentSettings, TorrentSortColumn,
 };
+use crate::config_reconcile::{
+    configured_watch_path_changes, diff_torrent_configs, TorrentConfigChange,
+};
+use crate::control_service::{
+    control_event_details, find_torrent_settings_index_by_info_hash, resolve_priority_file_index,
+};
 use crate::persistence::activity_history::{
     load_activity_history_state, save_activity_history_state, ActivityHistoryPersistedState,
     ActivityHistoryRollupState,
@@ -65,12 +71,14 @@ use crate::integrity_scheduler::{
     INTEGRITY_SCHEDULER_TICK_INTERVAL,
 };
 use crate::torrent_file::parser::from_bytes;
+use crate::torrent_identity::info_hash_from_torrent_source;
 use crate::torrent_manager::data_availability_from_file_probe_result;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
 use crate::torrent_manager::TorrentFileProbeStatus;
 use crate::torrent_manager::TorrentManager;
 use crate::torrent_manager::TorrentParameters;
+use crate::watch_inbox::archive_watch_file;
 
 use std::collections::HashMap;
 use tokio::io::AsyncReadExt;
@@ -99,8 +107,6 @@ use ratatui::prelude::Rect;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use sysinfo::System;
-
-use data_encoding::BASE32;
 
 use tracing::{event as tracing_event, Level};
 
@@ -565,10 +571,6 @@ pub(crate) enum CommandIngestResult {
     },
 }
 
-fn is_cross_device_link_error(error: &std::io::Error) -> bool {
-    error.raw_os_error() == Some(18)
-}
-
 fn move_file_with_fallback_impl<F>(
     source: &std::path::Path,
     destination: &std::path::Path,
@@ -577,26 +579,7 @@ fn move_file_with_fallback_impl<F>(
 where
     F: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
 {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    match rename_op(source, destination) {
-        Ok(()) => Ok(()),
-        Err(error) if is_cross_device_link_error(&error) => {
-            fs::copy(source, destination)?;
-            fs::remove_file(source)?;
-            Ok(())
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn move_file_with_fallback(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-) -> std::io::Result<()> {
-    move_file_with_fallback_impl(source, destination, |src, dst| fs::rename(src, dst))
+    crate::watch_inbox::move_file_with_fallback_impl(source, destination, rename_op)
 }
 
 fn ingest_kind_from_path(path: &std::path::Path) -> Option<IngestKind> {
@@ -610,25 +593,6 @@ fn ingest_kind_from_path(path: &std::path::Path) -> Option<IngestKind> {
 
 fn event_correlation_id_for_path(path: &std::path::Path) -> String {
     hex::encode(sha1::Sha1::digest(path.to_string_lossy().as_bytes()))
-}
-
-fn control_event_details(request: &ControlRequest, origin: ControlOrigin) -> EventDetails {
-    let (file_index, file_path) = match request.priority_target() {
-        Some(ControlPriorityTarget::FileIndex(index)) => (Some(*index), None),
-        Some(ControlPriorityTarget::FilePath(path)) => (None, Some(path.clone())),
-        None => (None, None),
-    };
-
-    EventDetails::Control {
-        origin,
-        action: request.action_name().to_string(),
-        target_info_hash_hex: request.target_info_hash_hex().map(str::to_string),
-        file_index,
-        file_path,
-        priority: request
-            .priority_value()
-            .map(|priority| format!("{:?}", priority)),
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1889,108 +1853,98 @@ impl App {
         old_settings: &Settings,
         new_settings: &Settings,
     ) {
-        let old_by_hash = torrents_by_info_hash(old_settings);
-        let new_by_hash = torrents_by_info_hash(new_settings);
+        for change in diff_torrent_configs(old_settings, new_settings) {
+            match change {
+                TorrentConfigChange::Removed { info_hash, .. } => {
+                    tracing_event!(
+                        Level::INFO,
+                        info_hash = %hex::encode(&info_hash),
+                        "Shared config removed torrent; shutting down local manager"
+                    );
 
-        for info_hash in old_by_hash.keys() {
-            if new_by_hash.contains_key(info_hash) {
-                continue;
-            }
+                    if let Some(torrent) = self.app_state.torrents.get_mut(&info_hash) {
+                        torrent.latest_state.torrent_control_state = TorrentControlState::Deleting;
+                    }
 
-            tracing_event!(
-                Level::INFO,
-                info_hash = %hex::encode(info_hash),
-                "Shared config removed torrent; shutting down local manager"
-            );
-
-            if let Some(torrent) = self.app_state.torrents.get_mut(info_hash) {
-                torrent.latest_state.torrent_control_state = TorrentControlState::Deleting;
-            }
-
-            if let Some(manager_tx) = self.torrent_manager_command_txs.get(info_hash) {
-                let _ = manager_tx.try_send(ManagerCommand::Shutdown);
-            } else {
-                self.remove_torrent_runtime(info_hash);
-            }
-        }
-
-        for (info_hash, torrent_config) in &new_by_hash {
-            if !old_by_hash.contains_key(info_hash) {
-                if !should_load_persisted_torrent(torrent_config) {
-                    continue;
-                }
-
-                tracing_event!(
-                    Level::INFO,
-                    info_hash = %hex::encode(info_hash),
-                    "Shared config added torrent; loading locally"
-                );
-
-                if torrent_config.torrent_or_magnet.starts_with("magnet:") {
-                    self.add_magnet_torrent(
-                        torrent_config.name.clone(),
-                        torrent_config.torrent_or_magnet.clone(),
-                        torrent_config.download_path.clone(),
-                        torrent_config.validation_status,
-                        torrent_config.torrent_control_state.clone(),
-                        torrent_config.file_priorities.clone(),
-                        torrent_config.container_name.clone(),
-                    )
-                    .await;
-                } else {
-                    self.add_torrent_from_file(
-                        PathBuf::from(&torrent_config.torrent_or_magnet),
-                        torrent_config.download_path.clone(),
-                        torrent_config.validation_status,
-                        torrent_config.torrent_control_state.clone(),
-                        torrent_config.file_priorities.clone(),
-                        torrent_config.container_name.clone(),
-                    )
-                    .await;
-                }
-
-                continue;
-            }
-
-            let Some(previous) = old_by_hash.get(info_hash) else {
-                continue;
-            };
-
-            if let Some(torrent) = self.app_state.torrents.get_mut(info_hash) {
-                torrent.latest_state.download_path = torrent_config.download_path.clone();
-                torrent.latest_state.container_name = torrent_config.container_name.clone();
-                torrent.latest_state.file_priorities = torrent_config.file_priorities.clone();
-                torrent.latest_state.torrent_control_state =
-                    torrent_config.torrent_control_state.clone();
-                if !torrent_config.name.is_empty() {
-                    torrent.latest_state.torrent_name = torrent_config.name.clone();
-                }
-            }
-
-            if let Some(manager_tx) = self.torrent_manager_command_txs.get(info_hash) {
-                if previous.download_path != torrent_config.download_path
-                    || previous.file_priorities != torrent_config.file_priorities
-                    || previous.container_name != torrent_config.container_name
-                {
-                    if let Some(path) = torrent_config.download_path.clone() {
-                        let _ = manager_tx.try_send(ManagerCommand::SetUserTorrentConfig {
-                            torrent_data_path: path,
-                            file_priorities: torrent_config.file_priorities.clone(),
-                            container_name: torrent_config.container_name.clone(),
-                        });
+                    if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
+                        let _ = manager_tx.try_send(ManagerCommand::Shutdown);
+                    } else {
+                        self.remove_torrent_runtime(&info_hash);
                     }
                 }
+                TorrentConfigChange::Added { info_hash, current } => {
+                    if !should_load_persisted_torrent(&current) {
+                        continue;
+                    }
 
-                if previous.torrent_control_state != torrent_config.torrent_control_state {
-                    match torrent_config.torrent_control_state {
-                        TorrentControlState::Paused => {
-                            let _ = manager_tx.try_send(ManagerCommand::Pause);
+                    tracing_event!(
+                        Level::INFO,
+                        info_hash = %hex::encode(&info_hash),
+                        "Shared config added torrent; loading locally"
+                    );
+
+                    if current.torrent_or_magnet.starts_with("magnet:") {
+                        self.add_magnet_torrent(
+                            current.name.clone(),
+                            current.torrent_or_magnet.clone(),
+                            current.download_path.clone(),
+                            current.validation_status,
+                            current.torrent_control_state.clone(),
+                            current.file_priorities.clone(),
+                            current.container_name.clone(),
+                        )
+                        .await;
+                    } else {
+                        self.add_torrent_from_file(
+                            PathBuf::from(&current.torrent_or_magnet),
+                            current.download_path.clone(),
+                            current.validation_status,
+                            current.torrent_control_state.clone(),
+                            current.file_priorities.clone(),
+                            current.container_name.clone(),
+                        )
+                        .await;
+                    }
+                }
+                TorrentConfigChange::Updated {
+                    info_hash,
+                    current,
+                    runtime_config,
+                    control_state_changed,
+                    ..
+                } => {
+                    if let Some(torrent) = self.app_state.torrents.get_mut(&info_hash) {
+                        torrent.latest_state.download_path = current.download_path.clone();
+                        torrent.latest_state.container_name = current.container_name.clone();
+                        torrent.latest_state.file_priorities = current.file_priorities.clone();
+                        torrent.latest_state.torrent_control_state =
+                            current.torrent_control_state.clone();
+                        if !current.name.is_empty() {
+                            torrent.latest_state.torrent_name = current.name.clone();
                         }
-                        TorrentControlState::Running => {
-                            let _ = manager_tx.try_send(ManagerCommand::Resume);
+                    }
+
+                    if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
+                        if let Some(runtime_config) = runtime_config {
+                            let _ = manager_tx.try_send(ManagerCommand::SetUserTorrentConfig {
+                                torrent_data_path: runtime_config.torrent_data_path,
+                                file_priorities: runtime_config.file_priorities,
+                                container_name: runtime_config.container_name,
+                            });
                         }
-                        TorrentControlState::Deleting => {
-                            let _ = manager_tx.try_send(ManagerCommand::Shutdown);
+
+                        if control_state_changed {
+                            match current.torrent_control_state {
+                                TorrentControlState::Paused => {
+                                    let _ = manager_tx.try_send(ManagerCommand::Pause);
+                                }
+                                TorrentControlState::Running => {
+                                    let _ = manager_tx.try_send(ManagerCommand::Resume);
+                                }
+                                TorrentControlState::Deleting => {
+                                    let _ = manager_tx.try_send(ManagerCommand::Shutdown);
+                                }
+                            }
                         }
                     }
                 }
@@ -2059,22 +2013,15 @@ impl App {
     }
 
     fn sync_configured_watch_paths(&mut self, old_settings: &Settings, new_settings: &Settings) {
-        let old_paths = configured_watch_paths(old_settings);
-        let new_paths = configured_watch_paths(new_settings);
+        let changes = configured_watch_path_changes(old_settings, new_settings);
 
-        for old_path in &old_paths {
-            if new_paths.iter().any(|new_path| new_path == old_path) {
-                continue;
-            }
+        for old_path in &changes.removed {
             if let Err(error) = self.watcher.unwatch(old_path) {
                 tracing::info!("Failed to unwatch old folder {:?}: {}", old_path, error);
             }
         }
 
-        for new_path in &new_paths {
-            if old_paths.iter().any(|old_path| old_path == new_path) {
-                continue;
-            }
+        for new_path in &changes.added {
             if let Err(error) = self.watcher.watch(new_path, RecursiveMode::NonRecursive) {
                 tracing::error!("Failed to watch new folder {:?}: {}", new_path, error);
             }
@@ -2088,8 +2035,6 @@ impl App {
                 let is_configured_watch = configured_watch_paths(&self.client_configs)
                     .iter()
                     .any(|watch_path| parent_dir == Some(watch_path.as_path()));
-
-                let system_watch_info = get_watch_path();
 
                 if let Some(download_path) = &self.client_configs.default_download_folder {
                     // --- CASE A: Automatic Adding (Default Path Exists) ---
@@ -2107,24 +2052,14 @@ impl App {
 
                     self.save_state_to_disk();
 
-                    // Cleanup: Move to processed or rename to .added
                     if is_configured_watch {
-                        let move_successful = if let Some((_, processed_path)) = system_watch_info {
-                            (|| {
-                                let file_name = path.file_name()?;
-                                let new_path = processed_path.join(file_name);
-                                move_file_with_fallback(&path, &new_path).ok()?;
-                                Some(())
-                            })()
-                            .is_some()
-                        } else {
-                            false
-                        };
-
-                        if !move_successful {
-                            let mut new_path = path.clone();
-                            new_path.set_extension("torrent.added");
-                            let _ = fs::rename(&path, &new_path);
+                        if let Err(error) = archive_watch_file(&path, "torrent.added") {
+                            tracing_event!(
+                                Level::WARN,
+                                "Failed to archive processed torrent file {:?}: {}",
+                                &path,
+                                error
+                            );
                         }
                     }
                 } else {
@@ -2235,7 +2170,7 @@ impl App {
                 }
             }
             AppCommand::AddTorrentFromPathFile(path) => {
-                if let Some((_, processed_path)) = get_watch_path() {
+                if get_watch_path().is_some() {
                     match fs::read_to_string(&path) {
                         Ok(torrent_file_path_str) => {
                             let torrent_file_path = PathBuf::from(torrent_file_path_str.trim());
@@ -2291,21 +2226,18 @@ impl App {
                         }
                     }
 
-                    if let Some(file_name) = path.file_name() {
-                        let new_path = processed_path.join(file_name);
-                        if let Err(e) = move_file_with_fallback(&path, &new_path) {
-                            tracing_event!(
-                                Level::WARN,
-                                "Failed to move processed path file {:?}: {}",
-                                &path,
-                                e
-                            );
-                        }
+                    if let Err(error) = archive_watch_file(&path, "path.added") {
+                        tracing_event!(
+                            Level::WARN,
+                            "Failed to archive processed path file {:?}: {}",
+                            &path,
+                            error
+                        );
                     }
                 }
             }
             AppCommand::AddMagnetFromFile(path) => {
-                if let Some((_, processed_path)) = get_watch_path() {
+                if get_watch_path().is_some() {
                     match fs::read_to_string(&path) {
                         Ok(magnet_link) => {
                             if let Some(download_path) =
@@ -2360,16 +2292,13 @@ impl App {
                         }
                     }
 
-                    if let Some(file_name) = path.file_name() {
-                        let new_path = processed_path.join(file_name);
-                        if let Err(e) = move_file_with_fallback(&path, &new_path) {
-                            tracing_event!(
-                                Level::ERROR,
-                                "Failed to move processed magnet file {:?}: {}",
-                                &path,
-                                e
-                            );
-                        }
+                    if let Err(error) = archive_watch_file(&path, "magnet.added") {
+                        tracing_event!(
+                            Level::ERROR,
+                            "Failed to archive processed magnet file {:?}: {}",
+                            &path,
+                            error
+                        );
                     }
                 } else {
                     tracing_event!(
@@ -2383,18 +2312,13 @@ impl App {
                 self.record_control_result(&path, &request, result);
                 self.save_state_to_disk();
 
-                if let Some((_, processed_path)) = get_watch_path() {
-                    if let Some(file_name) = path.file_name() {
-                        let new_path = processed_path.join(file_name);
-                        if let Err(error) = move_file_with_fallback(&path, &new_path) {
-                            tracing_event!(
-                                Level::WARN,
-                                "Failed to move processed control file {:?}: {}",
-                                &path,
-                                error
-                            );
-                        }
-                    }
+                if let Err(error) = archive_watch_file(&path, "control.done") {
+                    tracing_event!(
+                        Level::WARN,
+                        "Failed to archive processed control file {:?}: {}",
+                        &path,
+                        error
+                    );
                 }
             }
             AppCommand::ClientShutdown(path) => {
@@ -2660,17 +2584,7 @@ impl App {
                 }
 
                 self.client_configs.torrents.retain(|t| {
-                    let t_info_hash = if t.torrent_or_magnet.starts_with("magnet:") {
-                        Magnet::new(&t.torrent_or_magnet)
-                            .ok()
-                            .and_then(|m| m.hash().map(|s| s.to_string()))
-                            .and_then(|hash_str| decode_info_hash(&hash_str).ok())
-                    } else {
-                        PathBuf::from(&t.torrent_or_magnet)
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .and_then(|s| hex::decode(s).ok())
-                    };
+                    let t_info_hash = info_hash_from_torrent_source(&t.torrent_or_magnet);
 
                     match t_info_hash {
                         Some(t_hash) => t_hash != info_hash,
@@ -4172,37 +4086,6 @@ impl App {
         });
     }
 
-    fn find_torrent_settings_index_by_info_hash(&self, info_hash: &[u8]) -> Option<usize> {
-        self.client_configs.torrents.iter().position(|torrent| {
-            torrent_info_hash_from_settings(torrent).as_deref() == Some(info_hash)
-        })
-    }
-
-    fn load_torrent_file_list_for_settings(
-        torrent_settings: &TorrentSettings,
-    ) -> Result<Vec<(Vec<String>, u64)>, String> {
-        if torrent_settings.torrent_or_magnet.starts_with("magnet:") {
-            return Err(
-                "This torrent does not have a persisted .torrent source for file path lookup"
-                    .to_string(),
-            );
-        }
-
-        let bytes = fs::read(&torrent_settings.torrent_or_magnet).map_err(|error| {
-            format!(
-                "Failed to read torrent metadata from '{}': {}",
-                torrent_settings.torrent_or_magnet, error
-            )
-        })?;
-        let torrent = from_bytes(&bytes).map_err(|error| {
-            format!(
-                "Failed to parse torrent metadata from '{}': {:?}",
-                torrent_settings.torrent_or_magnet, error
-            )
-        })?;
-        Ok(torrent.file_list())
-    }
-
     fn known_file_count_for_torrent(
         &self,
         info_hash: &[u8],
@@ -4213,13 +4096,13 @@ impl App {
             .get(info_hash)
             .and_then(|torrent| torrent.latest_state.file_count)
             .or_else(|| {
-                Self::load_torrent_file_list_for_settings(torrent_settings)
+                crate::control_service::load_torrent_file_list_for_settings(torrent_settings)
                     .ok()
                     .map(|files| files.len())
             })
     }
 
-    fn resolve_priority_file_index(
+    fn resolve_runtime_priority_file_index(
         &self,
         info_hash: &[u8],
         torrent_settings: &TorrentSettings,
@@ -4242,22 +4125,8 @@ impl App {
                     Err("Unable to resolve file count for this torrent".to_string())
                 }
             }
-            ControlPriorityTarget::FilePath(path) => {
-                let normalized_target = path.replace('\\', "/");
-                let file_list = Self::load_torrent_file_list_for_settings(torrent_settings)?;
-                file_list
-                    .into_iter()
-                    .enumerate()
-                    .find_map(|(index, (parts, _))| {
-                        let candidate = parts.join("/");
-                        (candidate == normalized_target).then_some(index)
-                    })
-                    .ok_or_else(|| {
-                        format!(
-                            "No file matching '{}' was found in torrent '{}'",
-                            path, torrent_settings.name
-                        )
-                    })
+            ControlPriorityTarget::FilePath(_) => {
+                resolve_priority_file_index(torrent_settings, target)
             }
         }
     }
@@ -4283,7 +4152,9 @@ impl App {
             }
             ControlRequest::Pause { info_hash_hex } => {
                 let info_hash = decode_info_hash(info_hash_hex)?;
-                let Some(index) = self.find_torrent_settings_index_by_info_hash(&info_hash) else {
+                let Some(index) =
+                    find_torrent_settings_index_by_info_hash(&self.client_configs, &info_hash)
+                else {
                     return Err(format!("Torrent '{}' was not found", info_hash_hex));
                 };
                 let mut next_settings = self.client_configs.clone();
@@ -4293,7 +4164,9 @@ impl App {
             }
             ControlRequest::Resume { info_hash_hex } => {
                 let info_hash = decode_info_hash(info_hash_hex)?;
-                let Some(index) = self.find_torrent_settings_index_by_info_hash(&info_hash) else {
+                let Some(index) =
+                    find_torrent_settings_index_by_info_hash(&self.client_configs, &info_hash)
+                else {
                     return Err(format!("Torrent '{}' was not found", info_hash_hex));
                 };
                 let mut next_settings = self.client_configs.clone();
@@ -4306,7 +4179,7 @@ impl App {
                 let initial_len = self.client_configs.torrents.len();
                 let mut next_settings = self.client_configs.clone();
                 next_settings.torrents.retain(|torrent| {
-                    torrent_info_hash_from_settings(torrent).as_deref()
+                    info_hash_from_torrent_source(&torrent.torrent_or_magnet).as_deref()
                         != Some(info_hash.as_slice())
                 });
                 if next_settings.torrents.len() == initial_len {
@@ -4321,7 +4194,9 @@ impl App {
                 priority,
             } => {
                 let info_hash = decode_info_hash(info_hash_hex)?;
-                let Some(index) = self.find_torrent_settings_index_by_info_hash(&info_hash) else {
+                let Some(index) =
+                    find_torrent_settings_index_by_info_hash(&self.client_configs, &info_hash)
+                else {
                     return Err(format!("Torrent '{}' was not found", info_hash_hex));
                 };
                 let mut next_settings = self.client_configs.clone();
@@ -4330,8 +4205,11 @@ impl App {
                     .get(index)
                     .cloned()
                     .ok_or_else(|| format!("Torrent '{}' was not found", info_hash_hex))?;
-                let file_index =
-                    self.resolve_priority_file_index(&info_hash, &torrent_settings, target)?;
+                let file_index = self.resolve_runtime_priority_file_index(
+                    &info_hash,
+                    &torrent_settings,
+                    target,
+                )?;
                 if matches!(priority, FilePriority::Normal) {
                     next_settings.torrents[index]
                         .file_priorities
@@ -4871,92 +4749,15 @@ fn compose_system_warning(
 }
 
 pub fn decode_info_hash(hash_string: &str) -> Result<Vec<u8>, String> {
-    // Try Hex Decoding (Handles standard V1 and Hex-encoded V2 Multihash)
-    if let Ok(bytes) = hex::decode(hash_string) {
-        // V1: 20 bytes (SHA-1)
-        if bytes.len() == 20 {
-            return Ok(bytes);
-        }
-        // V2: 34 bytes (Multihash: 2 byte prefix + 32 byte SHA-256)
-        // Prefix 0x12 (SHA2-256) + 0x20 (32 bytes)
-        if bytes.len() == 34 && bytes[0] == 0x12 && bytes[1] == 0x20 {
-            // Return truncated 20 bytes for internal ID
-            return Ok(bytes[2..22].to_vec());
-        }
-    }
-
-    // Try Base32 Decoding (Handles Base32-encoded V1 and V2)
-    if let Ok(bytes) = BASE32.decode(hash_string.to_uppercase().as_bytes()) {
-        if bytes.len() == 20 {
-            return Ok(bytes);
-        }
-        if bytes.len() == 34 && bytes[0] == 0x12 && bytes[1] == 0x20 {
-            return Ok(bytes[2..22].to_vec());
-        }
-    }
-
-    Err(format!("Invalid info_hash format/length: {}", hash_string))
+    crate::torrent_identity::decode_info_hash(hash_string)
 }
 
 pub fn parse_hybrid_hashes(magnet_link: &str) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
-    let query = magnet_link
-        .split_once('?')
-        .map(|(_, q)| q)
-        .unwrap_or(magnet_link);
-    let mut v1: Option<Vec<u8>> = None;
-    let mut v2: Option<Vec<u8>> = None;
-
-    for part in query.split('&') {
-        let Some((key, value)) = part.split_once('=') else {
-            continue;
-        };
-        if !key.eq_ignore_ascii_case("xt") {
-            continue;
-        }
-
-        const BTIH_PREFIX: &str = "urn:btih:";
-        const BTMH_PREFIX: &str = "urn:btmh:";
-        if value.len() > BTIH_PREFIX.len()
-            && value
-                .get(..BTIH_PREFIX.len())
-                .is_some_and(|p| p.eq_ignore_ascii_case(BTIH_PREFIX))
-        {
-            v1 = value
-                .get(BTIH_PREFIX.len()..)
-                .and_then(|h| decode_info_hash(h).ok());
-        } else if value.len() > BTMH_PREFIX.len()
-            && value
-                .get(..BTMH_PREFIX.len())
-                .is_some_and(|p| p.eq_ignore_ascii_case(BTMH_PREFIX))
-        {
-            v2 = value
-                .get(BTMH_PREFIX.len()..)
-                .and_then(|h| decode_info_hash(h).ok());
-        }
-    }
-    (v1, v2)
+    crate::torrent_identity::parse_hybrid_hashes(magnet_link)
 }
 
 pub fn info_hash_from_torrent_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
-    let torrent = from_bytes(bytes).ok()?;
-
-    let hash = if torrent.info.meta_version == Some(2) {
-        if !torrent.info.pieces.is_empty() {
-            let mut hasher = sha1::Sha1::new();
-            hasher.update(&torrent.info_dict_bencode);
-            hasher.finalize().to_vec()
-        } else {
-            let mut hasher = Sha256::new();
-            hasher.update(&torrent.info_dict_bencode);
-            hasher.finalize()[0..20].to_vec()
-        }
-    } else {
-        let mut hasher = sha1::Sha1::new();
-        hasher.update(&torrent.info_dict_bencode);
-        hasher.finalize().to_vec()
-    };
-
-    Some(hash)
+    crate::torrent_identity::info_hash_from_torrent_bytes(bytes)
 }
 
 fn resolve_magnet_torrent_name(
@@ -5126,30 +4927,6 @@ fn rss_settings_changed(old_settings: &Settings, new_settings: &Settings) -> boo
 
 fn should_load_persisted_torrent(torrent_settings: &TorrentSettings) -> bool {
     torrent_settings.torrent_control_state != TorrentControlState::Deleting
-}
-
-fn torrent_info_hash_from_settings(torrent_settings: &TorrentSettings) -> Option<Vec<u8>> {
-    if torrent_settings.torrent_or_magnet.starts_with("magnet:") {
-        Magnet::new(&torrent_settings.torrent_or_magnet)
-            .ok()
-            .and_then(|magnet| magnet.hash().map(|hash| hash.to_string()))
-            .and_then(|hash| decode_info_hash(&hash).ok())
-    } else {
-        PathBuf::from(&torrent_settings.torrent_or_magnet)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| hex::decode(stem).ok())
-    }
-}
-
-fn torrents_by_info_hash(settings: &Settings) -> HashMap<Vec<u8>, TorrentSettings> {
-    settings
-        .torrents
-        .iter()
-        .filter_map(|torrent| {
-            torrent_info_hash_from_settings(torrent).map(|info_hash| (info_hash, torrent.clone()))
-        })
-        .collect()
 }
 
 fn build_persist_payload(

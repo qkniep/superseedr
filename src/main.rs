@@ -4,6 +4,8 @@
 mod app;
 mod command;
 mod config;
+mod config_reconcile;
+mod control_service;
 mod errors;
 mod integrations;
 mod integrity_scheduler;
@@ -15,10 +17,12 @@ mod telemetry;
 mod theme;
 mod token_bucket;
 mod torrent_file;
+mod torrent_identity;
 mod torrent_manager;
 mod tracker;
 mod tui;
 mod tuning;
+mod watch_inbox;
 
 use app::App;
 use rand::Rng;
@@ -33,6 +37,9 @@ use std::time::Duration;
 
 use crate::config::Settings;
 use crate::config::{load_settings, resolve_command_watch_path};
+use crate::control_service::{
+    apply_offline_control_request, control_event_details, online_control_success_message,
+};
 use crate::integrations::cli::{
     command_to_control_requests, expand_add_inputs, status_control_request,
     status_file_modified_at, status_should_stream, wait_for_status_json_after,
@@ -42,11 +49,8 @@ use crate::integrations::control::{ControlPriorityTarget, ControlRequest};
 use crate::integrations::status::{offline_output_json, status_file_path};
 use crate::persistence::event_journal::{
     append_event_journal_entry, event_journal_json, load_event_journal_state,
-    save_event_journal_state, ControlOrigin, EventCategory, EventDetails, EventJournalEntry,
-    EventType,
+    save_event_journal_state, ControlOrigin, EventCategory, EventJournalEntry, EventType,
 };
-use crate::torrent_file::parser::from_bytes;
-use magnet_url::Magnet;
 
 use tracing_appender::rolling::RollingFileAppender;
 use tracing_appender::rolling::Rotation;
@@ -483,115 +487,6 @@ fn process_offline_control_request(
     Ok(())
 }
 
-fn online_control_success_message(request: &ControlRequest) -> String {
-    match request {
-        ControlRequest::Pause { info_hash_hex } => {
-            format!("Queued pause request for torrent '{}'", info_hash_hex)
-        }
-        ControlRequest::Resume { info_hash_hex } => {
-            format!("Queued resume request for torrent '{}'", info_hash_hex)
-        }
-        ControlRequest::Delete { info_hash_hex } => {
-            format!(
-                "Queued delete request for torrent '{}' (files deleted: no)",
-                info_hash_hex
-            )
-        }
-        ControlRequest::SetFilePriority {
-            info_hash_hex,
-            target,
-            priority,
-        } => format!(
-            "Queued file priority request for torrent '{}' ({}) -> {:?}",
-            info_hash_hex,
-            describe_priority_target(target),
-            priority
-        ),
-        ControlRequest::StatusNow
-        | ControlRequest::StatusFollowStart { .. }
-        | ControlRequest::StatusFollowStop => "Queued control request.".to_string(),
-    }
-}
-
-fn describe_priority_target(target: &ControlPriorityTarget) -> String {
-    match target {
-        ControlPriorityTarget::FileIndex(index) => format!("index {}", index),
-        ControlPriorityTarget::FilePath(path) => format!("path {}", path),
-    }
-}
-
-fn apply_offline_control_request(
-    settings: &mut Settings,
-    request: &ControlRequest,
-) -> Result<String, String> {
-    match request {
-        ControlRequest::Pause { info_hash_hex } => {
-            let info_hash = app::decode_info_hash(info_hash_hex)?;
-            let Some(index) = settings.torrents.iter().position(|torrent| {
-                torrent_info_hash_from_settings(torrent).as_deref() == Some(info_hash.as_slice())
-            }) else {
-                return Err(format!("Torrent '{}' was not found", info_hash_hex));
-            };
-            settings.torrents[index].torrent_control_state = app::TorrentControlState::Paused;
-            Ok(format!("Paused torrent '{}'", info_hash_hex))
-        }
-        ControlRequest::Resume { info_hash_hex } => {
-            let info_hash = app::decode_info_hash(info_hash_hex)?;
-            let Some(index) = settings.torrents.iter().position(|torrent| {
-                torrent_info_hash_from_settings(torrent).as_deref() == Some(info_hash.as_slice())
-            }) else {
-                return Err(format!("Torrent '{}' was not found", info_hash_hex));
-            };
-            settings.torrents[index].torrent_control_state = app::TorrentControlState::Running;
-            Ok(format!("Resumed torrent '{}'", info_hash_hex))
-        }
-        ControlRequest::Delete { info_hash_hex } => {
-            let info_hash = app::decode_info_hash(info_hash_hex)?;
-            let initial_len = settings.torrents.len();
-            settings.torrents.retain(|torrent| {
-                torrent_info_hash_from_settings(torrent).as_deref() != Some(info_hash.as_slice())
-            });
-            if settings.torrents.len() == initial_len {
-                return Err(format!("Torrent '{}' was not found", info_hash_hex));
-            }
-            Ok(format!(
-                "Removed torrent '{}' (files deleted: no)",
-                info_hash_hex
-            ))
-        }
-        ControlRequest::SetFilePriority {
-            info_hash_hex,
-            target,
-            priority,
-        } => {
-            let info_hash = app::decode_info_hash(info_hash_hex)?;
-            let Some(index) = settings.torrents.iter().position(|torrent| {
-                torrent_info_hash_from_settings(torrent).as_deref() == Some(info_hash.as_slice())
-            }) else {
-                return Err(format!("Torrent '{}' was not found", info_hash_hex));
-            };
-            let file_index =
-                resolve_offline_priority_file_index(&settings.torrents[index], target)?;
-            if matches!(priority, app::FilePriority::Normal) {
-                settings.torrents[index].file_priorities.remove(&file_index);
-            } else {
-                settings.torrents[index]
-                    .file_priorities
-                    .insert(file_index, *priority);
-            }
-            Ok(format!(
-                "Set file priority for torrent '{}' at index {} to {:?}",
-                info_hash_hex, file_index, priority
-            ))
-        }
-        ControlRequest::StatusNow
-        | ControlRequest::StatusFollowStart { .. }
-        | ControlRequest::StatusFollowStop => {
-            Err("Status commands require a running superseedr instance".to_string())
-        }
-    }
-}
-
 fn record_offline_control_journal_entry(request: &ControlRequest, result: &Result<String, String>) {
     let mut journal = load_event_journal_state();
     let event_type = if result.is_ok() {
@@ -610,109 +505,13 @@ fn record_offline_control_journal_entry(request: &ControlRequest, result: &Resul
             category: EventCategory::Control,
             event_type,
             message,
-            details: offline_control_event_details(request),
+            details: control_event_details(request, ControlOrigin::CliOffline),
             ..Default::default()
         },
     );
     if let Err(error) = save_event_journal_state(&journal) {
         tracing::error!("Failed to save offline control journal entry: {}", error);
     }
-}
-
-fn offline_control_event_details(request: &ControlRequest) -> EventDetails {
-    let (file_index, file_path) = match request {
-        ControlRequest::SetFilePriority { target, .. } => match target {
-            ControlPriorityTarget::FileIndex(index) => (Some(*index), None),
-            ControlPriorityTarget::FilePath(path) => (None, Some(path.clone())),
-        },
-        _ => (None, None),
-    };
-
-    EventDetails::Control {
-        origin: ControlOrigin::CliOffline,
-        action: request.action_name().to_string(),
-        target_info_hash_hex: request.target_info_hash_hex().map(str::to_string),
-        file_index,
-        file_path,
-        priority: request
-            .priority_value()
-            .map(|priority| format!("{:?}", priority)),
-    }
-}
-
-fn torrent_info_hash_from_settings(torrent_settings: &config::TorrentSettings) -> Option<Vec<u8>> {
-    if torrent_settings.torrent_or_magnet.starts_with("magnet:") {
-        Magnet::new(&torrent_settings.torrent_or_magnet)
-            .ok()
-            .and_then(|magnet| magnet.hash().map(|hash| hash.to_string()))
-            .and_then(|hash| app::decode_info_hash(&hash).ok())
-    } else {
-        PathBuf::from(&torrent_settings.torrent_or_magnet)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| hex::decode(stem).ok())
-    }
-}
-
-fn resolve_offline_priority_file_index(
-    torrent_settings: &config::TorrentSettings,
-    target: &ControlPriorityTarget,
-) -> Result<usize, String> {
-    let file_list = load_torrent_file_list_for_settings(torrent_settings)?;
-    match target {
-        ControlPriorityTarget::FileIndex(index) => {
-            if *index < file_list.len() {
-                Ok(*index)
-            } else {
-                Err(format!(
-                    "File index {} is out of range for torrent '{}' ({} files)",
-                    index,
-                    torrent_settings.name,
-                    file_list.len()
-                ))
-            }
-        }
-        ControlPriorityTarget::FilePath(path) => {
-            let normalized_target = path.replace('\\', "/");
-            file_list
-                .into_iter()
-                .enumerate()
-                .find_map(|(index, (parts, _))| {
-                    (parts.join("/") == normalized_target).then_some(index)
-                })
-                .ok_or_else(|| {
-                    format!(
-                        "No file matching '{}' was found in torrent '{}'",
-                        path, torrent_settings.name
-                    )
-                })
-        }
-    }
-}
-
-fn load_torrent_file_list_for_settings(
-    torrent_settings: &config::TorrentSettings,
-) -> Result<Vec<(Vec<String>, u64)>, String> {
-    if torrent_settings.torrent_or_magnet.starts_with("magnet:") {
-        return Err(
-            "This torrent does not have a persisted .torrent source for file path lookup"
-                .to_string(),
-        );
-    }
-
-    let bytes = fs::read(&torrent_settings.torrent_or_magnet).map_err(|error| {
-        format!(
-            "Failed to read torrent metadata from '{}': {}",
-            torrent_settings.torrent_or_magnet, error
-        )
-    })?;
-    let torrent = from_bytes(&bytes).map_err(|error| {
-        format!(
-            "Failed to parse torrent metadata from '{}': {:?}",
-            torrent_settings.torrent_or_magnet, error
-        )
-    })?;
-    Ok(torrent.file_list())
 }
 
 fn cleanup_terminal() -> Result<(), Box<dyn std::error::Error>> {

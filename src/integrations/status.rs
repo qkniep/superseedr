@@ -3,12 +3,13 @@
 
 use crate::app::TorrentMetrics;
 use crate::config::Settings;
-use magnet_url::Magnet;
 use serde::ser::SerializeStruct;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+
+use crate::torrent_identity::info_hash_from_torrent_source;
 
 #[derive(Serialize)]
 pub struct AppOutputState {
@@ -173,17 +174,7 @@ pub fn offline_output_json(settings: &Settings) -> io::Result<String> {
 fn torrent_metrics_from_settings(
     torrent_settings: &crate::config::TorrentSettings,
 ) -> Option<TorrentMetrics> {
-    let info_hash = if torrent_settings.torrent_or_magnet.starts_with("magnet:") {
-        Magnet::new(&torrent_settings.torrent_or_magnet)
-            .ok()
-            .and_then(|magnet| magnet.hash().map(|hash| hash.to_string()))
-            .and_then(|hash| crate::app::decode_info_hash(&hash).ok())?
-    } else {
-        PathBuf::from(&torrent_settings.torrent_or_magnet)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| hex::decode(stem).ok())?
-    };
+    let info_hash = info_hash_from_torrent_source(&torrent_settings.torrent_or_magnet)?;
 
     Some(TorrentMetrics {
         torrent_control_state: torrent_settings.torrent_control_state.clone(),
