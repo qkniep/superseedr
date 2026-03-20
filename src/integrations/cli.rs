@@ -51,7 +51,7 @@ pub enum Commands {
     },
     Priority {
         #[arg(value_name = "INFO_HASH_HEX")]
-        info_hash: Option<String>,
+        info_hash: String,
         #[arg(long, conflicts_with = "file_path")]
         file_index: Option<usize>,
         #[arg(long, conflicts_with = "file_index")]
@@ -198,7 +198,6 @@ pub fn command_to_control_requests(
             file_path,
             priority,
         } => {
-            let info_hash_hex = require_info_hash_hex(info_hash.as_deref(), "priority")?;
             let target = if let Some(file_index) = file_index {
                 ControlPriorityTarget::FileIndex(*file_index)
             } else if let Some(file_path) = file_path {
@@ -208,7 +207,7 @@ pub fn command_to_control_requests(
             };
 
             Ok(Some(vec![ControlRequest::SetFilePriority {
-                info_hash_hex: info_hash_hex.to_string(),
+                info_hash_hex: info_hash.clone(),
                 target,
                 priority: (*priority).into(),
             }]))
@@ -260,18 +259,6 @@ pub fn command_to_control_request(command: &Commands) -> Result<Option<ControlRe
         }
         None => Ok(None),
     }
-}
-
-fn require_info_hash_hex<'a>(
-    value: Option<&'a str>,
-    command_name: &str,
-) -> Result<&'a str, String> {
-    value.ok_or_else(|| {
-        format!(
-            "Missing INFO_HASH_HEX for `superseedr {}`. Get it from `superseedr status` and use the `info_hash_hex` field. Example: `superseedr {} 7f3a9c2d4e1b8a6f0d5c3b2a1908e7d6c5b4a321`",
-            command_name, command_name
-        )
-    })
 }
 
 fn require_info_hash_hexes(values: &[String], command_name: &str) -> Result<Vec<String>, String> {
@@ -369,6 +356,7 @@ pub fn status_file_modified_at() -> io::Result<Option<SystemTime>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
     use std::fs::{self, File};
     use std::io::Write;
 
@@ -487,7 +475,7 @@ mod tests {
     #[test]
     fn priority_requires_one_target() {
         let command = Commands::Priority {
-            info_hash: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            info_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             file_index: None,
             file_path: None,
             priority: CliPriority::High,
@@ -515,19 +503,6 @@ mod tests {
     }
 
     #[test]
-    fn priority_without_info_hash_returns_helpful_error() {
-        let error = command_to_control_request(&Commands::Priority {
-            info_hash: None,
-            file_index: Some(2),
-            file_path: None,
-            priority: CliPriority::High,
-        })
-        .expect_err("missing hash should fail");
-        assert!(error.contains("Missing INFO_HASH_HEX"));
-        assert!(error.contains("superseedr priority"));
-    }
-
-    #[test]
     fn delete_command_supports_multiple_hashes() {
         let requests = command_to_control_requests(&Commands::Delete {
             info_hashes: vec![
@@ -547,5 +522,35 @@ mod tests {
             expanded,
             vec!["alpha.torrent".to_string(), "beta.torrent".to_string()]
         );
+    }
+
+    #[test]
+    fn cli_priority_command_parses_without_panicking() {
+        Cli::command().debug_assert();
+
+        let parsed = Cli::try_parse_from([
+            "superseedr",
+            "priority",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--file-index",
+            "0",
+            "skip",
+        ])
+        .expect("priority command should parse");
+
+        match parsed.command.expect("subcommand") {
+            Commands::Priority {
+                info_hash,
+                file_index,
+                file_path,
+                priority,
+            } => {
+                assert_eq!(info_hash, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+                assert_eq!(file_index, Some(0));
+                assert_eq!(file_path, None);
+                assert_eq!(priority, CliPriority::Skip);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }
