@@ -254,6 +254,14 @@ pub struct TorrentMetadataConfig {
     pub torrents: Vec<TorrentMetadataEntry>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharedConfigScope {
+    GlobalSettings,
+    TorrentCatalog,
+    TorrentMetadata,
+    HostSettings,
+}
+
 mod string_usize_map {
     use crate::app::FilePriority;
     use serde::{self, Deserialize, Deserializer, Serializer};
@@ -1387,13 +1395,26 @@ pub fn shared_config_watch_paths() -> Vec<PathBuf> {
     watch_paths
 }
 
-pub fn is_shared_config_path(path: &Path) -> bool {
-    resolve_shared_config_paths()
-        .ok()
-        .flatten()
-        .is_some_and(|paths| {
-            path == paths.settings_path || path == paths.catalog_path || path == paths.host_path
-        })
+pub fn shared_config_scope_for_path(path: &Path) -> Option<SharedConfigScope> {
+    let paths = resolve_shared_config_paths().ok().flatten()?;
+
+    if path == paths.settings_path {
+        return Some(SharedConfigScope::GlobalSettings);
+    }
+
+    if path == paths.catalog_path {
+        return Some(SharedConfigScope::TorrentCatalog);
+    }
+
+    if path == paths.metadata_path {
+        return Some(SharedConfigScope::TorrentMetadata);
+    }
+
+    if path == paths.host_path {
+        return Some(SharedConfigScope::HostSettings);
+    }
+
+    None
 }
 
 pub fn resolve_command_watch_path(settings: &Settings) -> Option<PathBuf> {

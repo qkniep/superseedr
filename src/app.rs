@@ -14,7 +14,9 @@ use strum_macros::EnumIter;
 
 use crate::torrent_manager::DiskIoOperation;
 
-use crate::config::{get_app_paths, load_settings, save_settings, upsert_torrent_metadata};
+use crate::config::{
+    get_app_paths, load_settings, save_settings, upsert_torrent_metadata, SharedConfigScope,
+};
 use crate::config::{
     FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SortDirection,
     TorrentMetadataEntry, TorrentMetadataFileEntry, TorrentSettings, TorrentSortColumn,
@@ -502,7 +504,7 @@ pub enum AppCommand {
         success: bool,
     },
     UpdateConfig(Settings),
-    ReloadSharedConfig,
+    ReloadSharedConfig(SharedConfigScope),
     UpdateVersionAvailable(String),
 }
 
@@ -2012,6 +2014,104 @@ impl App {
         self.app_state.ui.needs_redraw = true;
     }
 
+    fn apply_shared_global_scope(current: &mut Settings, loaded: &Settings) {
+        current.client_id = loaded.client_id.clone();
+        current.lifetime_downloaded = loaded.lifetime_downloaded;
+        current.lifetime_uploaded = loaded.lifetime_uploaded;
+        current.private_client = loaded.private_client;
+        current.torrent_sort_column = loaded.torrent_sort_column;
+        current.torrent_sort_direction = loaded.torrent_sort_direction;
+        current.peer_sort_column = loaded.peer_sort_column;
+        current.peer_sort_direction = loaded.peer_sort_direction;
+        current.ui_theme = loaded.ui_theme;
+        current.default_download_folder = loaded.default_download_folder.clone();
+        current.max_connected_peers = loaded.max_connected_peers;
+        current.bootstrap_nodes = loaded.bootstrap_nodes.clone();
+        current.global_download_limit_bps = loaded.global_download_limit_bps;
+        current.global_upload_limit_bps = loaded.global_upload_limit_bps;
+        current.max_concurrent_validations = loaded.max_concurrent_validations;
+        current.connection_attempt_permits = loaded.connection_attempt_permits;
+        current.resource_limit_override = loaded.resource_limit_override;
+        current.upload_slots = loaded.upload_slots;
+        current.peer_upload_in_flight_limit = loaded.peer_upload_in_flight_limit;
+        current.tracker_fallback_interval_secs = loaded.tracker_fallback_interval_secs;
+        current.client_leeching_fallback_interval_secs =
+            loaded.client_leeching_fallback_interval_secs;
+        current.output_status_interval = loaded.output_status_interval;
+        current.rss = loaded.rss.clone();
+    }
+
+    fn merge_shared_scope_settings(
+        current: &Settings,
+        loaded: &Settings,
+        scope: SharedConfigScope,
+    ) -> Settings {
+        let mut merged = current.clone();
+
+        match scope {
+            SharedConfigScope::GlobalSettings => {
+                Self::apply_shared_global_scope(&mut merged, loaded);
+            }
+            SharedConfigScope::TorrentCatalog => {
+                merged.torrents = loaded.torrents.clone();
+            }
+            SharedConfigScope::TorrentMetadata => {
+                let loaded_by_hash = loaded
+                    .torrents
+                    .iter()
+                    .filter_map(|torrent| {
+                        info_hash_from_torrent_source(&torrent.torrent_or_magnet)
+                            .map(|info_hash| (info_hash, torrent))
+                    })
+                    .collect::<HashMap<_, _>>();
+
+                for torrent in &mut merged.torrents {
+                    let Some(info_hash) = info_hash_from_torrent_source(&torrent.torrent_or_magnet)
+                    else {
+                        continue;
+                    };
+                    let Some(updated) = loaded_by_hash.get(&info_hash) else {
+                        continue;
+                    };
+
+                    torrent.file_priorities = updated.file_priorities.clone();
+                    if torrent.name.is_empty() && !updated.name.is_empty() {
+                        torrent.name = updated.name.clone();
+                    }
+                }
+            }
+            SharedConfigScope::HostSettings => {
+                merged.client_id = loaded.client_id.clone();
+                merged.client_port = loaded.client_port;
+                merged.watch_folder = loaded.watch_folder.clone();
+                merged.default_download_folder = loaded.default_download_folder.clone();
+
+                let loaded_by_hash = loaded
+                    .torrents
+                    .iter()
+                    .filter_map(|torrent| {
+                        info_hash_from_torrent_source(&torrent.torrent_or_magnet)
+                            .map(|info_hash| (info_hash, torrent))
+                    })
+                    .collect::<HashMap<_, _>>();
+
+                for torrent in &mut merged.torrents {
+                    let Some(info_hash) = info_hash_from_torrent_source(&torrent.torrent_or_magnet)
+                    else {
+                        continue;
+                    };
+                    let Some(updated) = loaded_by_hash.get(&info_hash) else {
+                        continue;
+                    };
+
+                    torrent.download_path = updated.download_path.clone();
+                }
+            }
+        }
+
+        merged
+    }
+
     fn sync_configured_watch_paths(&mut self, old_settings: &Settings, new_settings: &Settings) {
         let changes = configured_watch_path_changes(old_settings, new_settings);
 
@@ -2170,7 +2270,8 @@ impl App {
                 }
             }
             AppCommand::AddTorrentFromPathFile(path) => {
-                if get_watch_path().is_some() {
+                let local_watch_available = get_watch_path().is_some();
+                if local_watch_available {
                     match fs::read_to_string(&path) {
                         Ok(torrent_file_path_str) => {
                             let torrent_file_path = PathBuf::from(torrent_file_path_str.trim());
@@ -2237,7 +2338,8 @@ impl App {
                 }
             }
             AppCommand::AddMagnetFromFile(path) => {
-                if get_watch_path().is_some() {
+                let local_watch_available = get_watch_path().is_some();
+                if local_watch_available {
                     match fs::read_to_string(&path) {
                         Ok(magnet_link) => {
                             if let Some(download_path) =
@@ -2300,11 +2402,6 @@ impl App {
                             error
                         );
                     }
-                } else {
-                    tracing_event!(
-                        Level::ERROR,
-                        "Could not get system watch paths for magnet processing."
-                    );
                 }
             }
             AppCommand::ControlRequest { path, request } => {
@@ -2552,10 +2649,15 @@ impl App {
             AppCommand::UpdateConfig(new_settings) => {
                 self.apply_settings_update(new_settings, true).await;
             }
-            AppCommand::ReloadSharedConfig => match load_settings() {
+            AppCommand::ReloadSharedConfig(scope) => match load_settings() {
                 Ok(new_settings) => {
-                    if new_settings != self.client_configs {
-                        self.apply_settings_update(new_settings, false).await;
+                    let merged_settings = Self::merge_shared_scope_settings(
+                        &self.client_configs,
+                        &new_settings,
+                        scope,
+                    );
+                    if merged_settings != self.client_configs {
+                        self.apply_settings_update(merged_settings, false).await;
                     }
                 }
                 Err(error) => {
@@ -4274,7 +4376,7 @@ impl App {
             | AppCommand::ControlRequest { path, .. }
             | AppCommand::ClientShutdown(path)
             | AppCommand::PortFileChanged(path) => Some(path),
-            AppCommand::ReloadSharedConfig => None,
+            AppCommand::ReloadSharedConfig(_) => None,
             _ => None,
         }
     }
