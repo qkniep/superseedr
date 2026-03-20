@@ -6,6 +6,8 @@
 # --- local temp---
 tmp
 *.tmp
+logs/
+*.lock
 integration_tests/test_output/
 integration_tests/artifacts/
 

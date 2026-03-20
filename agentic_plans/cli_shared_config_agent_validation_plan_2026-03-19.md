@@ -54,7 +54,7 @@ The agent must follow these safeguards before running any test:
 
 1. Refuse to run if another `superseedr` process is already active outside the test plan.
 2. Use a dedicated scratch root under `tmp/` and never write test artifacts outside that root unless the app itself requires OS-local config/data paths.
-3. Before launching the app, detect the normal Superseedr OS config/data directories. If they already contain user data, back them up into the scratch root and restore them during cleanup.
+3. Before launching the app, detect the normal Superseedr OS config/data directories and record them in the report, but do not require a backup or restore step for this validation plan.
 4. Use a dedicated host ID and client port for the test instance.
 5. Never use destructive git commands.
 6. Treat all failures as evidence first. Do not patch code during the run. Record the failure and continue unless the environment is unusable.
@@ -84,28 +84,36 @@ run/shared-root/hosts/
 run/shared-root/torrents/
 run/host-a-watch/
 run/host-a-downloads/
-run/os-config-backup/
-run/os-data-backup/
 ```
 
 ## Test Fixtures
-Use existing tracked fixtures from the repo and copy them into the scratch root:
+Reuse the existing tracked interop fixtures from `integration_tests/`, but make scratch-local copies before running validation so the plan never depends on or mutates the tracked fixture paths directly.
+
+Use this exact pair so the runtime can also see matching payload files under the interop data tree:
 
 - `integration_tests/torrents/v1/single_4k.bin.torrent`
 - `integration_tests/torrents/v1/single_8k.bin.torrent`
+- `integration_tests/test_data/single/single_4k.bin`
+- `integration_tests/test_data/single/single_8k.bin`
 
-Copy them into:
+Recommended fixture mapping:
 
-```text
-tmp/.../run/shared-root/torrents/
-```
+- logical torrent `alpha` -> `integration_tests/torrents/v1/single_4k.bin.torrent`
+- logical torrent `beta` -> `integration_tests/torrents/v1/single_8k.bin.torrent`
+- default download root -> `integration_tests/test_data/single/`
 
-Rename them to stable shared names if helpful:
+Copy strategy:
 
-- `alpha.torrent`
-- `beta.torrent`
+- copy the two `.torrent` fixtures into `tmp/.../run/shared-root/torrents/`
+- copy the matching payload files into `tmp/.../run/host-a-downloads/`
+- point seeded shared config at those scratch-local copies, not at the tracked repo paths
 
-Using two torrents is important because one scenario needs a second live torrent to trigger an unrelated save while validating shared-catalog removal behavior.
+Important notes:
+
+- Keep the logical names `alpha` and `beta` in the seeded shared catalog, but prefer preserving the real `.torrent` filenames or hash-stem scratch copies rather than arbitrary names like `alpha.torrent`.
+- The scratch copies should preserve or derive canonical info-hash-stem filenames when practical so offline `status` and hash-targeted CLI commands still work cleanly.
+- Do not mutate the tracked interop fixture files themselves. Only the scratch copies and the seeded shared config files under the scratch root should be edited during the run.
+- Using two torrents is still important because one scenario needs a second live torrent to trigger an unrelated save while validating shared-catalog removal behavior.
 
 ## Build And Launch Strategy
 1. Build the binary once:
@@ -126,7 +134,7 @@ Use values that make CLI/status validation easier:
 
 - `output_status_interval = 0`
 - `bootstrap_nodes = []`
-- `default_download_folder` should point at the scratch downloads root or use portable paths if the test explicitly wants to exercise portable roots
+- `default_download_folder` should point at the scratch-local copied payload directory, typically `tmp/.../run/host-a-downloads/`
 - keep RSS empty
 
 ### Shared `catalog.toml`
@@ -135,7 +143,7 @@ Seed two torrents:
 - `alpha`
 - `beta`
 
-Both should point at the copied `.torrent` files under the shared root. Set:
+Both should point at the scratch-local copied `.torrent` fixtures under `tmp/.../run/shared-root/torrents/`, ideally using hash-stem filenames derived from the interop fixtures. Their `download_path` should resolve to the scratch-local copied payload directory `tmp/.../run/host-a-downloads/`. Set:
 
 - `torrent_control_state = "Running"`
 - `container_name = ""`
@@ -193,16 +201,15 @@ Prefer JSON/file evidence over console prose when deciding pass or fail.
 1. Create the scratch root under `tmp/`.
 2. Build `superseedr`.
 3. Detect the normal OS config/data locations used by Superseedr.
-4. If those locations already contain files, copy them into `run/os-config-backup/` and `run/os-data-backup/`.
-5. Seed the shared config files and copy the two torrent fixtures into the shared root.
-6. Record the resolved local app data path and local config path in the report.
-7. Snapshot the initial shared config files into `evidence/shared_snapshots/phase0_*`.
+4. Copy the needed interop `.torrent` and payload fixtures from `integration_tests/` into the scratch workspace, then seed the shared config files to point only at those scratch-local copies.
+5. Record the resolved local app data path and local config path in the report.
+6. Snapshot the initial shared config files into `evidence/shared_snapshots/phase0_*`.
 
 Pass criteria:
 - scratch root exists
 - binary builds
 - shared files are valid TOML
-- no existing user state is lost
+- the plan records which OS-local paths may receive runtime artifacts
 
 ### Phase 1: Shared Config Bootstrap And Single-Host Sanity
 1. Launch host A with:
@@ -392,8 +399,7 @@ One object per phase with:
 At the end of the run:
 
 1. Stop all spawned Superseedr instances.
-2. Restore any pre-existing OS config/data directories from backup if they were backed up.
-3. Leave the scratch root under `tmp/` intact for inspection.
+2. Leave the scratch root under `tmp/` intact for inspection.
 
 ## Success Definition
 This validation pass is successful when:
