@@ -19,6 +19,9 @@ Absolute path to the shared network-drive root.
 Superseedr automatically places all shared config and runtime artifacts under a
 `superseedr-config/` subdirectory inside that root.
 
+Shared download paths are resolved relative to the mounted share root itself, not
+relative to `superseedr-config/`.
+
 Shared mode uses:
 
 - `settings.toml`
@@ -65,8 +68,9 @@ SUPERSEEDR_SHARED_HOST_ID=seedbox-a
     status/
       seedbox-a.json
       desktop-a.json
-    data/
     superseedr.lock
+  downloads/
+  library/
 ```
 
 Each host can mount that same shared drive at a different local path, for example:
@@ -76,6 +80,11 @@ Each host can mount that same shared drive at a different local path, for exampl
 
 Both hosts should set `SUPERSEEDR_SHARED_CONFIG_DIR` to their local mount root.
 Superseedr will then use `<mount-root>/superseedr-config/` automatically.
+
+Examples:
+
+- `default_download_folder = ""` resolves to the mounted share root itself
+- `default_download_folder = "downloads"` resolves to `<mount-root>/downloads`
 
 ## Layered Files
 
@@ -202,14 +211,14 @@ Example:
 
 ```toml
 # settings.toml
-default_download_folder = "data/downloads"
+default_download_folder = ""
 ```
 
 ```toml
 # catalog.toml
 [[torrents]]
 name = "Shared Collection"
-download_path = "data/downloads/shared-collection"
+download_path = "library/shared-collection"
 ```
 
 At runtime, those resolve under `SUPERSEEDR_SHARED_CONFIG_DIR`.
@@ -277,7 +286,7 @@ Shared settings:
 ```toml
 # settings.toml
 client_id = "shared-node"
-default_download_folder = "data/downloads"
+default_download_folder = "downloads"
 global_upload_limit_bps = 8000000
 ```
 
@@ -288,7 +297,7 @@ Shared catalog:
 [[torrents]]
 name = "Shared Collection"
 torrent_or_magnet = "shared:torrents/0123456789abcdef0123456789abcdef01234567.torrent"
-download_path = "data/downloads/shared-collection"
+download_path = "downloads/shared-collection"
 ```
 
 Host config:
