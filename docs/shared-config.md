@@ -95,6 +95,8 @@ Leader-written derived torrent metadata.
 ### `hosts/<host-id>.toml`
 Host-local runtime settings.
 
+This file is bootstrapped automatically on first load if it does not exist yet.
+
 Kept fields:
 - optional `client_id`
 - `client_port`

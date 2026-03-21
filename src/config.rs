@@ -1048,6 +1048,12 @@ fn write_shared_cluster_revision_marker(root_dir: &Path) -> io::Result<()> {
     write_string_atomically(&revision_path, &revision)
 }
 
+fn bootstrap_shared_host_config(host_path: &Path) -> io::Result<HostConfig> {
+    let host = HostConfig::default();
+    write_toml_atomically(host_path, &host)?;
+    Ok(host)
+}
+
 fn clear_shared_config_state() {
     if let Ok(mut guard) = shared_config_state().lock() {
         *guard = None;
@@ -1130,13 +1136,12 @@ impl SharedConfigBackend {
         let host = if self.paths.host_path.exists() {
             read_toml_or_default(&self.paths.host_path)?
         } else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "Missing shared host config at {:?}. Shared mode requires an explicit host file.",
-                    self.paths.host_path
-                ),
-            ));
+            tracing_event!(
+                Level::INFO,
+                "Bootstrapping missing shared host config at {:?}",
+                self.paths.host_path
+            );
+            bootstrap_shared_host_config(&self.paths.host_path)?
         };
 
         let layered = LayeredConfig {
@@ -2220,7 +2225,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shared_backend_requires_explicit_host_file() {
+    fn test_shared_backend_bootstraps_missing_host_file() {
         let _guard = shared_backend_guard().lock().unwrap();
         clear_shared_config_state();
         let dir = tempdir().expect("create tempdir");
@@ -2237,11 +2242,15 @@ mod tests {
         };
 
         fs::create_dir_all(&backend.paths.root_dir).expect("create shared root");
-        let error = backend
+        let settings = backend
             .load_settings()
-            .expect_err("missing host file should fail");
+            .expect("missing host file should bootstrap");
 
-        assert!(error.to_string().contains("Missing shared host config"));
+        assert_eq!(settings.client_port, Settings::default().client_port);
+        assert!(backend.paths.host_path.exists());
+        let host: HostConfig =
+            read_toml_or_default(&backend.paths.host_path).expect("read bootstrapped host file");
+        assert_eq!(host, HostConfig::default());
     }
 
     #[test]
