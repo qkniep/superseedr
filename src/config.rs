@@ -1499,7 +1499,10 @@ pub fn shared_lock_path() -> Option<PathBuf> {
 }
 
 pub fn resolve_host_watch_path(settings: &Settings) -> Option<PathBuf> {
-    settings.watch_folder.clone()
+    settings
+        .watch_folder
+        .clone()
+        .or_else(|| get_watch_path().map(|(watch_path, _)| watch_path))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1537,7 +1540,7 @@ pub fn resolve_command_watch_path(settings: &Settings) -> Option<PathBuf> {
         return shared_inbox_path();
     }
 
-    resolve_host_watch_path(settings).or_else(|| get_watch_path().map(|(watch_path, _)| watch_path))
+    resolve_host_watch_path(settings)
 }
 
 fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
@@ -2777,6 +2780,62 @@ mod tests {
 
         let leader_paths = runtime_watch_paths(&settings, true, true);
         assert!(leader_paths.contains(&effective_root.join("inbox")));
+
+        if let Some(value) = original_shared_dir {
+            env::set_var(SHARED_CONFIG_DIR_ENV, value);
+        } else {
+            env::remove_var(SHARED_CONFIG_DIR_ENV);
+        }
+        if let Some(value) = original_host_id {
+            env::set_var(SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(SHARED_HOST_ID_ENV);
+        }
+        if let Some(value) = original_legacy_host_id {
+            env::set_var(LEGACY_SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        }
+        clear_shared_config_state();
+    }
+
+    #[test]
+    fn test_resolve_host_watch_path_falls_back_to_local_app_watch_directory() {
+        let settings = Settings::default();
+        let expected_watch = get_watch_path().map(|(watch_path, _)| watch_path);
+
+        assert_eq!(resolve_host_watch_path(&settings), expected_watch);
+    }
+
+    #[test]
+    fn test_shared_runtime_watch_paths_include_local_app_watch_when_host_watch_unset() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let original_shared_dir = env::var_os(SHARED_CONFIG_DIR_ENV);
+        let original_host_id = env::var_os(SHARED_HOST_ID_ENV);
+        let original_legacy_host_id = env::var_os(LEGACY_SHARED_HOST_ID_ENV);
+        let dir = tempdir().expect("create tempdir");
+
+        env::set_var(SHARED_CONFIG_DIR_ENV, dir.path());
+        env::set_var(SHARED_HOST_ID_ENV, "node-a");
+        env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        clear_shared_config_state();
+
+        let settings = Settings::default();
+        let effective_root = dir.path().join(SHARED_CONFIG_SUBDIR);
+        let local_watch = get_watch_path().map(|(watch_path, _)| watch_path);
+
+        let follower_paths = runtime_watch_paths(&settings, true, false);
+        assert!(follower_paths.contains(&effective_root));
+        assert!(!follower_paths.contains(&effective_root.join("inbox")));
+        if let Some(local_watch) = &local_watch {
+            assert!(follower_paths.contains(local_watch));
+        }
+
+        let leader_paths = runtime_watch_paths(&settings, true, true);
+        assert!(leader_paths.contains(&effective_root.join("inbox")));
+        if let Some(local_watch) = &local_watch {
+            assert!(leader_paths.contains(local_watch));
+        }
 
         if let Some(value) = original_shared_dir {
             env::set_var(SHARED_CONFIG_DIR_ENV, value);
