@@ -452,7 +452,7 @@ fn process_cli_request(
                     delete_files: true,
                 };
 
-                if shared_mode {
+                if shared_mode && leader_is_running {
                     process_shared_control_request(
                         settings,
                         &request,
@@ -475,7 +475,7 @@ fn process_cli_request(
                 })?;
 
             for request in requests {
-                if shared_mode {
+                if shared_mode && leader_is_running {
                     process_shared_control_request(
                         settings,
                         &request,
@@ -1158,7 +1158,13 @@ fn generate_client_id_string() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::clear_shared_config_state_for_tests;
     use tempfile::tempdir;
+
+    fn shared_env_guard() -> &'static std::sync::Mutex<()> {
+        static GUARD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        GUARD.get_or_init(|| std::sync::Mutex::new(()))
+    }
 
     fn sample_settings() -> Settings {
         Settings {
@@ -1303,5 +1309,66 @@ mod tests {
             settings.torrents[0].file_priorities.get(&1),
             Some(&app::FilePriority::Skip)
         );
+    }
+
+    #[test]
+    fn shared_mode_without_running_leader_mutates_shared_settings_offline() {
+        let _guard = shared_env_guard().lock().unwrap();
+        let dir = tempdir().expect("create tempdir");
+        let shared_root = dir.path().join("shared-root");
+        let previous_shared_dir = std::env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let previous_host_id = std::env::var_os("SUPERSEEDR_SHARED_HOST_ID");
+
+        std::env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", &shared_root);
+        std::env::set_var("SUPERSEEDR_SHARED_HOST_ID", "host-a");
+        clear_shared_config_state_for_tests();
+
+        let mut settings = crate::config::load_settings().expect("load shared settings");
+        settings.torrents.push(crate::config::TorrentSettings {
+            torrent_or_magnet: "magnet:?xt=urn:btih:1111111111111111111111111111111111111111"
+                .to_string(),
+            name: "Sample Alpha".to_string(),
+            ..Default::default()
+        });
+        crate::config::save_settings(&settings).expect("save shared settings");
+
+        let loaded = crate::config::load_settings().expect("reload shared settings");
+        let cli = Cli {
+            json: false,
+            input: None,
+            command: Some(Commands::Pause {
+                info_hashes: vec!["1111111111111111111111111111111111111111".to_string()],
+            }),
+        };
+
+        process_cli_request(&cli, &loaded, true, false, OutputMode::Text)
+            .expect("shared offline pause");
+
+        let reloaded = crate::config::load_settings().expect("reload paused shared settings");
+        assert_eq!(
+            reloaded.torrents[0].torrent_control_state,
+            app::TorrentControlState::Paused
+        );
+
+        let inbox = crate::config::shared_inbox_path().expect("shared inbox path");
+        let inbox_entries = std::fs::read_dir(inbox)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(
+            inbox_entries, 0,
+            "offline shared mutation should not queue inbox files"
+        );
+
+        if let Some(value) = previous_shared_dir {
+            std::env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", value);
+        } else {
+            std::env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+        }
+        if let Some(value) = previous_host_id {
+            std::env::set_var("SUPERSEEDR_SHARED_HOST_ID", value);
+        } else {
+            std::env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
+        }
+        clear_shared_config_state_for_tests();
     }
 }
