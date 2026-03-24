@@ -7,6 +7,7 @@ This document replaces the older CLI-only validation plan with a practical agent
 This branch now spans much more than CLI control. It includes:
 
 - layered shared-config mode
+- env-driven shared-mode activation
 - launcher-persisted shared-mode activation
 - shared leader and follower behavior
 - shared inbox and watch-folder routing
@@ -20,6 +21,7 @@ This branch now spans much more than CLI control. It includes:
 This plan is optimized for an autonomous agent:
 - prioritize highest-signal shared-mode tests first
 - collect evidence under the current working directory
+- run the current local codebase directly
 - stop and report on critical failures
 - avoid spending excessive time on low-value permutations unless the core path passes
 
@@ -39,13 +41,21 @@ Validate the branch against these goals:
 8. True concurrent leader and follower behavior is validated when the environment supports it.
 9. Normal mode receives only light validation here; fuller normal-mode testing is manual or Docker-based.
 
+## Core Execution Rule
+
+- The agent should test the current checked-out codebase by running `cargo run`, not an installed global binary.
+- Prefer `cargo run -- <args>` for CLI validation.
+- Prefer env-prefixed `cargo run -- <args>` for shared-mode validation.
+- If the agent needs a release-mode check later, it may optionally use `cargo run --release -- <args>`, but the default path is normal `cargo run`.
+- Do not assume that a previously installed `superseedr` binary matches the current branch.
+- When reporting evidence, note that commands were executed through `cargo run` against the current working tree.
+
 ## Validation Priorities
 
 ### Priority 1: Shared Mode Required
 These tests are the default path and should always run.
 
 Covers:
-- launcher-sidecar shared activation
 - env-driven shared activation
 - direct magnet routing into shared inbox
 - shared file layout
@@ -64,12 +74,13 @@ Covers:
 - lock handoff and promotion under contention
 - multi-node pause, resume, remove, and purge timing and propagation
 
-### Priority 3: Normal Mode Limited
-Normal mode is not the focus of this agent plan.
+### Priority 3: Launcher Config And Normal Mode Limited
+This plan does not use `set-shared-config` as the default shared-mode activation path, because persisting launcher config can overwrite or replace a previously set local shared-config preference.
 
 Only do:
+- a focused validation of `show-shared-config`, `set-shared-config`, and `clear-shared-config` later in the plan
 - build and startup smoke if needed for baseline confidence
-- quick manual sanity if convenient
+- quick normal-mode manual sanity if convenient
 - Docker-based normal-mode sanity if part of broader runtime validation
 
 Do not spend significant time on exhaustive normal-mode coverage in this plan.
@@ -104,6 +115,36 @@ When this plan refers to:
 - absolute-shared-mount-root: use the absolute path of `./tmp`
 - shared-root: use `./tmp`
 
+## How To Run The Current Client Codebase
+
+Use these rules for all main test execution.
+
+### Default invocation style
+- use `cargo run -- <args>` for CLI commands
+- use `cargo run` for launching the TUI without args
+- use env-prefixed `cargo run` for shared-mode tests
+
+### Examples for local CLI execution
+- `cargo run -- --help`
+- `cargo run -- show-shared-config`
+- `cargo run -- status`
+- `cargo run -- journal`
+- `cargo run -- "magnet:?xt=..."`
+
+### Examples for local shared-mode CLI execution
+- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" cargo run -- show-shared-config`
+- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" SUPERSEEDR_SHARED_HOST_ID="host-a" cargo run -- status`
+- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" SUPERSEEDR_SHARED_HOST_ID="host-a" cargo run -- "magnet:?xt=..."`
+
+### Examples for launching the current TUI code in shared mode
+- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" cargo run`
+- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" SUPERSEEDR_SHARED_HOST_ID="host-a" cargo run`
+
+### Important rule
+- Do not replace these with `superseedr ...` during the main validation flow.
+- Only use an installed binary if a later packaging or Docker check explicitly requires it.
+- The main branch-validation evidence should come from `cargo run` against the current checkout.
+
 ## How To Run The Client In Shared Mode With The Env Var
 
 Use this section whenever the plan says to test env-driven shared mode.
@@ -111,6 +152,11 @@ Use this section whenever the plan says to test env-driven shared mode.
 ### Default shared root for this plan
 - shared mount root: the absolute path to `./tmp`
 - shared config root: the absolute path to `./tmp/superseedr-config`
+
+### Important rule for this plan
+- Do not use `set-shared-config` as the default way to activate shared mode during the main validation flow.
+- Prefer one-off env-var launches so the test does not modify or replace any previously persisted launcher shared-config setting.
+- Only test `set-shared-config` and `clear-shared-config` in the dedicated launcher-config section later in the plan.
 
 ### Shell setup
 Before launching the client in env-driven shared mode:
@@ -120,23 +166,27 @@ Before launching the client in env-driven shared mode:
 - optionally set `SUPERSEEDR_SHARED_HOST_ID` to a stable test host id such as `host-a` or `host-b`
 
 ### Example launch flow on Unix-like shells
-Use:
-- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" superseedr`
-- or, if you want a stable host id:
-  - `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" SUPERSEEDR_SHARED_HOST_ID="host-a" superseedr`
+Use one-off env-prefixed launches such as:
+
+- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" cargo run`
+- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" SUPERSEEDR_SHARED_HOST_ID="host-a" cargo run`
 
 For CLI commands in shared mode, use the same env prefix, for example:
-- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" superseedr show-shared-config`
-- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" SUPERSEEDR_SHARED_HOST_ID="host-a" superseedr status`
-- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" SUPERSEEDR_SHARED_HOST_ID="host-a" superseedr "magnet:?xt=..."`
+
+- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" cargo run -- show-shared-config`
+- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" SUPERSEEDR_SHARED_HOST_ID="host-a" cargo run -- status`
+- `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" SUPERSEEDR_SHARED_HOST_ID="host-a" cargo run -- "magnet:?xt=..."`
 
 ### Example launch flow on PowerShell
 Use:
+
 - `$env:SUPERSEEDR_SHARED_CONFIG_DIR = "$PWD\tmp"`
 - optionally:
   - `$env:SUPERSEEDR_SHARED_HOST_ID = "host-a"`
 - then run:
-  - `superseedr`
+  - `cargo run`
+- for CLI commands:
+  - `cargo run -- show-shared-config`
 
 For one-off cleanup after the test:
 - `Remove-Item Env:SUPERSEEDR_SHARED_CONFIG_DIR`
@@ -144,11 +194,14 @@ For one-off cleanup after the test:
 
 ### Example launch flow on Windows cmd.exe
 Use:
+
 - `set SUPERSEEDR_SHARED_CONFIG_DIR=%cd%\tmp`
 - optionally:
   - `set SUPERSEEDR_SHARED_HOST_ID=host-a`
 - then run:
-  - `superseedr`
+  - `cargo run`
+- for CLI commands:
+  - `cargo run -- show-shared-config`
 
 ### Sequential one-machine shared-role testing
 If only one machine is available, run the client twice against the same env-driven shared root with different host ids.
@@ -217,8 +270,7 @@ Use this strategy:
 
 ### Phase 1: Shared-Mode Fast Confidence
 Run the highest-signal tests first:
-- shared mode enablement via launcher sidecar
-- env precedence over launcher sidecar
+- env-driven shared mode activation
 - direct positional magnet in shared mode
 - shared root file-layout smoke
 - shared-mode journal and status JSON
@@ -243,8 +295,9 @@ Only if two active instances are possible:
 - live convergence across nodes
 - lock contention, handoff, and promotion
 
-### Phase 4: Limited Normal-Mode And Docker Validation
+### Phase 4: Launcher-Config And Limited Normal-Mode Validation
 Only after shared-mode confidence is established:
+- focused validation of `show-shared-config`, `set-shared-config`, and `clear-shared-config`
 - normal-mode manual sanity, if convenient
 - Docker-based runtime validation, including normal mode if needed
 
@@ -358,51 +411,33 @@ Log and continue:
 
 ## Phase 1: Shared-Mode Fast Confidence
 
-## 1. Shared Launcher Activation Smoke
+## 1. Env-Driven Shared Activation Smoke
 
 ### Preconditions
 - ensure `./tmp` exists
-- ensure `SUPERSEEDR_SHARED_CONFIG_DIR` is unset
-- clear any persisted shared launcher config if present
+- ensure `SUPERSEEDR_SHARED_CONFIG_DIR` is unset before the test
+- do not use `set-shared-config` for this section
 
 ### Steps
-1. Run `show-shared-config`.
-2. Persist shared mode using `set-shared-config` with the absolute path to `./tmp`.
-3. Run `show-shared-config` again.
-4. Inspect the normal config dir for the launcher sidecar file.
+1. Run `cargo run -- show-shared-config` without shared env vars and note the baseline result.
+2. Run `SUPERSEEDR_SHARED_CONFIG_DIR="$(pwd)/tmp" cargo run -- show-shared-config`.
+3. Repeat with `SUPERSEEDR_SHARED_HOST_ID=host-a`.
 
 ### Expected
-- initial state shows shared config disabled
-- `set-shared-config` succeeds
-- `show-shared-config` reports enabled
-- source is launcher
-- sidecar file exists in the normal config dir
+- baseline without env does not rely on persisted launcher changes for this test
+- env-driven `show-shared-config` reports enabled
+- source is `env`
 - mount root resolves to the absolute path of `./tmp`
 - config root resolves to the absolute path of `./tmp/superseedr-config`
 
-## 2. Shared Env Override Smoke
-
-### Steps
-1. Keep launcher sidecar configured to `./tmp`.
-2. Set `SUPERSEEDR_SHARED_CONFIG_DIR` to a different absolute path if available.
-3. Run `show-shared-config`.
-
-### Expected
-- source is env
-- effective mount root and config root resolve to the env path
-- launcher sidecar remains present but overridden
-
-After this check, restore the shared root back to `./tmp` for the rest of the plan.
-
-## 3. Shared Direct Magnet Routing
+## 2. Shared Direct Magnet Routing
 
 This is the highest-value branch-specific test.
 
 ### Steps
-1. Use shared mode with launcher-sidecar activation pointed at `./tmp`.
-2. Keep env var unset.
-3. Run direct positional input with a valid magnet.
-4. Inspect where the queued file lands.
+1. Use env-driven shared mode pointed at `./tmp`.
+2. Run direct positional input with a valid magnet through `cargo run`.
+3. Inspect where the queued file lands.
 
 ### Expected
 - shared mode is activated early
@@ -411,10 +446,10 @@ This is the highest-value branch-specific test.
 
 If this fails, stop and report as critical.
 
-## 4. Shared File Layout Smoke
+## 3. Shared File Layout Smoke
 
 ### Steps
-1. Launch app once in shared mode using `./tmp`.
+1. Launch app once in env-driven shared mode using `./tmp` with `cargo run`.
 2. Inspect `./tmp` and `./tmp/superseedr-config/`.
 3. Confirm expected directories and files exist when relevant:
    - `./tmp/superseedr-config/`
@@ -431,10 +466,10 @@ If this fails, stop and report as critical.
 - no duplicated nested config root
 - host-specific files are scoped under `hosts/` and `status/`
 
-## 5. Shared Status And Journal JSON Smoke
+## 4. Shared Status And Journal JSON Smoke
 
 ### Steps
-Run on at least one active shared-mode instance:
+Run on at least one active env-driven shared-mode instance through `cargo run`:
 - `status`
 - `journal`
 - JSON variants of both
@@ -445,10 +480,10 @@ Run on at least one active shared-mode instance:
 - envelope shape is consistent
 - journal has meaningful entries
 
-## 6. Shared Add And Control Smoke
+## 5. Shared Add And Control Smoke
 
 ### Steps
-In shared mode using `./tmp`:
+In env-driven shared mode using `./tmp`, run through `cargo run`:
 - add a magnet or `.torrent`
 - pause
 - resume
@@ -471,8 +506,7 @@ Then verify using:
 ## Phase 1 Exit Criteria
 
 Proceed to Phase 2 only if:
-- launcher shared activation works
-- env precedence works
+- env-driven shared activation works
 - direct magnet in shared mode lands in `./tmp/superseedr-config/inbox/`
 - shared file-layout smoke works
 - shared status and journal smoke works
@@ -482,34 +516,21 @@ If any of the above fails critically, stop and write a focused defect report.
 
 ## Phase 2: Shared-Mode Deep Validation
 
-## 7. Shared Activation Precedence And Clearing
+## 6. Shared Env Activation Variants
 
 ### Steps
-1. Persist launcher config to the absolute path of `./tmp`.
-2. Confirm `show-shared-config` reports launcher.
-3. Clear persisted shared config.
-4. Confirm `show-shared-config` reports disabled when env is unset.
-5. Attempt `set-shared-config` with a relative path.
+1. Launch with `SUPERSEEDR_SHARED_CONFIG_DIR` set to the absolute path of `./tmp`.
+2. Launch again with both:
+   - `SUPERSEEDR_SHARED_CONFIG_DIR` set to the absolute path of `./tmp`
+   - `SUPERSEEDR_SHARED_HOST_ID=host-a`
+3. Run `show-shared-config` through the same env-driven `cargo run` approach each time.
 
 ### Expected
-- `clear-shared-config` disables launcher-based shared activation
-- relative path is rejected with a clear error
-- shared mode can be re-enabled against `./tmp` afterward
+- source remains `env`
+- mount root and config root stay correct
+- host-specific files are attributable to the provided host id when relevant
 
-## 8. Shared Root Normalization
-
-### Steps
-1. Run `set-shared-config` with the absolute path of `./tmp`.
-2. Clear it.
-3. Run `set-shared-config` with the absolute path of `./tmp/superseedr-config`.
-4. Inspect `show-shared-config` after each case.
-
-### Expected
-- both inputs normalize correctly
-- no duplicated nested config root
-- stored launcher path remains sensible
-
-## 9. Host-Only vs Shared Settings Persistence
+## 7. Host-Only vs Shared Settings Persistence
 
 ### Goal
 Verify that host-local values and shared values are written to the correct files under `./tmp/superseedr-config/`.
@@ -526,7 +547,7 @@ Verify that host-local values and shared values are written to the correct files
 - host-specific client id override
 
 ### Steps
-1. In shared mode, change one shared field.
+1. In env-driven shared mode, change one shared field.
 2. Inspect:
    - `./tmp/superseedr-config/settings.toml`
    - `./tmp/superseedr-config/hosts/<host>.toml`
@@ -540,19 +561,19 @@ Verify that host-local values and shared values are written to the correct files
 - host-only changes do not incorrectly rewrite shared global data
 - revision behavior matches branch design
 
-## 10. Sequential Shared-Role Check On One Machine
+## 8. Sequential Shared-Role Check On One Machine
 
 Use this when only one Superseedr instance can run on the computer.
 
 ### Steps
-1. Enable shared mode using the absolute path of `./tmp`.
+1. Enable shared mode using env vars pointing at the absolute path of `./tmp`.
 2. Set host id to `host-a`.
-3. Launch app and quit cleanly.
+3. Launch app through `cargo run` and quit cleanly.
 4. Inspect:
    - `./tmp/superseedr-config/hosts/host-a.toml`
    - `./tmp/superseedr-config/status/host-a.json` if produced
 5. Change host id to `host-b`.
-6. Relaunch against the same shared root and quit.
+6. Relaunch against the same shared root through `cargo run` and quit.
 7. Inspect:
    - `./tmp/superseedr-config/hosts/host-b.toml`
    - `./tmp/superseedr-config/status/host-b.json` if produced
@@ -567,10 +588,10 @@ Use this when only one Superseedr instance can run on the computer.
 - no corruption occurs when switching host identity sequentially
 - this validates host scoping without needing two concurrent runtimes
 
-## 11. Shared Add Flow Validation
+## 9. Shared Add Flow Validation
 
 ### Steps
-In shared mode on one machine using `./tmp`:
+In env-driven shared mode on one machine using `./tmp`, run through `cargo run`:
 - add magnet
 - add `.torrent`
 - add `.path` if supported in test setup
@@ -586,10 +607,10 @@ Then inspect:
 - metadata is updated
 - command routing uses shared sink
 
-## 12. Shared Pause, Resume, Remove, And Purge Validation
+## 10. Shared Pause, Resume, Remove, And Purge Validation
 
 ### Steps
-Execute in shared mode:
+Execute in env-driven shared mode through `cargo run`:
 - pause
 - resume
 - remove
@@ -597,7 +618,7 @@ Execute in shared mode:
 
 From:
 - running shared instance
-- offline shared CLI if practical
+- offline shared CLI if practical, still using env vars
 
 ### Expected
 - desired state is updated correctly
@@ -605,13 +626,13 @@ From:
 - purge removes payload when intended
 - no orphan config entries remain
 
-## 13. Shared File Priority Validation
+## 11. Shared File Priority Validation
 
 ### Preconditions
 - multi-file torrent active
 
 ### Steps
-Run:
+Run through `cargo run`:
 - `priority` against file index
 - `priority` against relative file path
 
@@ -624,15 +645,17 @@ Then inspect:
 - file priority updates persist
 - path and index targeting both work
 
-## 14. Shared Read-Path Validation
+## 12. Shared Read-Path Validation
 
 ### Steps
-Run in both text and JSON:
+Run in both text and JSON through `cargo run`:
 - `torrents`
 - `info` by info hash
 - `info` by path where supported
 - `files` by info hash
 - `files` by path where supported
+
+All shared-mode invocations in this section should be env-driven.
 
 ### Expected
 - read commands remain read-only
@@ -641,10 +664,10 @@ Run in both text and JSON:
 - `files` remains an array field
 - errors are helpful
 
-## 15. Shared Status Follow Validation
+## 13. Shared Status Follow Validation
 
 ### Steps
-With a running shared-mode instance:
+With a running env-driven shared-mode instance:
 - run `status --follow`
 - cause one or two state changes
 - stop as applicable using `status --stop`
@@ -654,7 +677,7 @@ With a running shared-mode instance:
 - stop command behaves correctly
 - behavior remains sane in shared mode
 
-## 16. Shared Event Journal Validation
+## 14. Shared Event Journal Validation
 
 ### Steps
 Generate:
@@ -672,12 +695,12 @@ Then inspect:
 - control outcomes are distinguishable
 - no malformed output
 
-## 17. Shared-Mode TUI Smoke
+## 15. Shared-Mode TUI Smoke
 
 This is not a full UX pass, only major-screen sanity.
 
 ### Steps
-Launch TUI in shared mode and visit:
+Launch TUI in env-driven shared mode through `cargo run` and visit:
 - help screen
 - browser screen
 - config screen
@@ -691,7 +714,7 @@ Launch TUI in shared mode and visit:
 - navigation works
 - obvious shared-mode restrictions are respected if present
 
-## 18. Migration Script Validation
+## 16. Migration Script Validation
 
 ### Script
 - `local_scripts/migrate_legacy_settings_to_layered.py`
@@ -712,11 +735,13 @@ Launch TUI in shared mode and visit:
 
 Run this phase only if two active instances are possible.
 
-## 19. Shared Leader And Follower Smoke
+## 17. Shared Leader And Follower Smoke
 
 ### Preconditions
 - a real shared root usable by two instances
 - default recommendation: use the same absolute path to `./tmp` for both runtimes
+- use env vars for both runtimes rather than `set-shared-config`
+- use `cargo run` for both runtimes unless the environment specifically requires another runner
 
 ### Steps
 1. Start instance A in shared mode on the shared root.
@@ -734,7 +759,7 @@ Run this phase only if two active instances are possible.
 - distinct host files and status files exist
 - follower does not behave like independent normal mode
 
-## 20. Follower Relay Validation
+## 18. Follower Relay Validation
 
 ### Steps
 On follower:
@@ -753,7 +778,7 @@ Observe:
 - requests are relayed through inbox or staging mechanism
 - leader performs shared-state write
 
-## 21. Live Convergence Validation
+## 19. Live Convergence Validation
 
 ### Steps
 With leader and follower both active:
@@ -767,7 +792,7 @@ With leader and follower both active:
 - timing may differ, final state should match
 - no duplicate or orphan desired state entries
 
-## 22. Lock Handoff And Promotion
+## 20. Lock Handoff And Promotion
 
 ### Steps
 1. Start leader and follower.
@@ -779,11 +804,31 @@ With leader and follower both active:
 - follower promotion or recovery matches design
 - cluster does not remain stuck or split incorrectly
 
-## Phase 4: Limited Normal-Mode And Docker Validation
+## Phase 4: Launcher-Config And Limited Normal-Mode Validation
 
-Normal mode is de-prioritized here. Do not expand this unless shared-mode validation is already strong.
+Launcher-config testing is intentionally separate from the main shared-mode flow.
 
-## 23. Manual Normal-Mode Sanity
+## 21. Launcher-Config Focused Validation
+
+### Goal
+Verify that launcher-config commands work, without using them as the default activation path for the rest of this plan.
+
+### Steps
+1. Record the current result of `cargo run -- show-shared-config`.
+2. Run `cargo run -- set-shared-config <absolute-path-to-tmp>`.
+3. Run `cargo run -- show-shared-config`.
+4. Run `cargo run -- clear-shared-config`.
+5. Run `cargo run -- show-shared-config` again.
+
+### Expected
+- launcher-config commands work
+- results are understandable
+- any preexisting persisted shared-config preference is treated carefully and called out in the report
+
+### Report requirement
+If this section is run, note whether it modified any previously persisted launcher shared-config setting.
+
+## 22. Manual Normal-Mode Sanity
 
 ### Optional
 If convenient, do only:
@@ -797,7 +842,7 @@ If convenient, do only:
 
 If not convenient, skip and note that fuller normal-mode coverage is manual.
 
-## 24. Docker Validation
+## 23. Docker Validation
 
 ### Minimum
 - run compose or documented container path once
@@ -816,35 +861,34 @@ If full Docker validation is not possible, note as skipped with reason.
 
 ## Phase 5: Resilience And Failure Tests
 
-## 25. Missing Shared Mount
+## 24. Missing Shared Mount
 
 ### Steps
-1. Persist launcher config to the absolute path of `./tmp`.
+1. Use env-driven shared mode pointed at the absolute path of `./tmp`.
 2. Make `./tmp` unavailable or temporarily move it aside.
-3. Launch app.
+3. Launch app through `cargo run`.
 
 ### Expected
 - clear failure or graceful handling
 - no silent wrong-mode fallback unless explicitly designed
 
-## 26. Corrupt Shared Config Files
+## 25. Corrupt Shared Config Files
 
 ### Steps
 Corrupt one at a time under `./tmp/superseedr-config/`:
-- launcher sidecar
 - shared `settings.toml`
 - shared `catalog.toml`
 - shared `torrent_metadata.toml`
 - host file
 
-Then try launch and read commands.
+Then try launch and read commands in env-driven shared mode through `cargo run`.
 
 ### Expected
 - useful error
 - no silent destructive overwrite
 - no crash loop
 
-## 27. Concurrent Shared Save Guard
+## 26. Concurrent Shared Save Guard
 
 ### Steps
 If practical:
@@ -857,13 +901,14 @@ If practical:
 
 ## Docs Validation
 
-## 28. README And Shared-Config Docs Review
+## 27. README And Shared-Config Docs Review
 
 Review:
 - `README.md`
 - `docs/shared-config.md`
 
 Confirm docs accurately describe:
+- env-driven activation
 - launcher-sidecar activation
 - env precedence
 - shared root layout
@@ -920,30 +965,31 @@ Choose one:
 
 1. create and prepare `./tmp`
 2. look for repo-local reusable torrent and payload assets
-3. shared launcher activation
-4. shared env override
-5. env-driven client launch using `SUPERSEEDR_SHARED_CONFIG_DIR`
-6. direct positional magnet in shared mode
-7. shared file-layout smoke under `./tmp/superseedr-config/`
-8. shared status and journal JSON smoke
-9. shared add and control smoke
-10. shared activation precedence and clearing
-11. host-only vs shared settings persistence
-12. sequential shared-role check on one machine
-13. shared add flow validation
-14. shared pause, resume, remove, and purge validation
-15. shared file priority validation
-16. shared read-path validation
-17. shared TUI smoke
-18. migration script
-19. concurrent shared-cluster validation if environment allows
-20. Docker validation if available
-21. resilience checks
-22. docs review
-23. final report
+3. run shared mode through `SUPERSEEDR_SHARED_CONFIG_DIR` using `cargo run`
+4. direct positional magnet in shared mode through `cargo run`
+5. shared file-layout smoke under `./tmp/superseedr-config/`
+6. shared status and journal JSON smoke through `cargo run`
+7. shared add and control smoke through `cargo run`
+8. host-only vs shared settings persistence
+9. sequential shared-role check on one machine
+10. shared add flow validation
+11. shared pause, resume, remove, and purge validation
+12. shared file priority validation
+13. shared read-path validation
+14. shared TUI smoke through `cargo run`
+15. migration script
+16. concurrent shared-cluster validation if environment allows
+17. focused launcher-config validation
+18. Docker validation if available
+19. resilience checks
+20. docs review
+21. final report
 
 ## Notes
 
+- The agent should test the current checked-out code through `cargo run`.
+- Do not use `set-shared-config` as the default shared-mode activation path for this plan.
+- Prefer env-driven launches so validation does not replace a previously persisted launcher shared-config setting.
 - Do not expand test permutations unnecessarily if a higher-priority shared-mode test already proves a critical defect.
 - Prefer file and command evidence over narrative.
 - When a failure happens, capture state immediately before continuing.
