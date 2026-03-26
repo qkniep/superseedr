@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::config::get_app_paths;
+use crate::config::runtime_persistence_dir;
 use crate::fs_atomic::write_bytes_atomically;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -251,14 +251,14 @@ pub fn sparse_state_for_persistence(
 
 #[allow(dead_code)]
 pub fn network_history_state_file_path() -> io::Result<PathBuf> {
-    let (_, data_dir) = get_app_paths().ok_or_else(|| {
+    let data_dir = runtime_persistence_dir().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             "Could not resolve app data directory for network history persistence",
         )
     })?;
 
-    Ok(data_dir.join("persistence").join(NETWORK_HISTORY_FILE_NAME))
+    Ok(data_dir.join(NETWORK_HISTORY_FILE_NAME))
 }
 
 #[allow(dead_code)]

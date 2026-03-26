@@ -190,8 +190,7 @@ pub fn host_status_file_path() -> io::Result<PathBuf> {
         return Ok(shared_path);
     }
 
-    let base_path = crate::config::get_app_paths()
-        .map(|(_, data_dir)| data_dir)
+    let base_path = crate::config::runtime_data_dir()
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,

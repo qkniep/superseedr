@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::config::get_app_paths;
+use crate::config::runtime_persistence_dir;
 use crate::fs_atomic::write_bytes_atomically;
 use crate::persistence::network_history::{
     HOUR_1H_CAP, MINUTE_15M_CAP, MINUTE_1M_CAP, SECOND_1S_CAP,
@@ -343,15 +343,13 @@ fn has_any_point(series: &ActivityHistorySeries) -> bool {
 }
 
 pub fn activity_history_state_file_path() -> io::Result<PathBuf> {
-    let (_, data_dir) = get_app_paths().ok_or_else(|| {
+    let data_dir = runtime_persistence_dir().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             "Could not resolve app data directory for activity history persistence",
         )
     })?;
-    Ok(data_dir
-        .join("persistence")
-        .join(ACTIVITY_HISTORY_FILE_NAME))
+    Ok(data_dir.join(ACTIVITY_HISTORY_FILE_NAME))
 }
 
 pub fn load_activity_history_state() -> ActivityHistoryPersistedState {

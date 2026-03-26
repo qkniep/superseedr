@@ -95,10 +95,8 @@ enum OutputMode {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let base_data_dir = config::get_app_paths()
-        .map(|(_, data_dir)| data_dir)
+    let log_dir = config::runtime_log_dir()
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let log_dir = base_data_dir.join("logs");
     let general_log = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .max_log_files(31)

@@ -431,6 +431,7 @@ struct SharedConfigPaths {
     settings_path: PathBuf,
     catalog_path: PathBuf,
     metadata_path: PathBuf,
+    host_dir: PathBuf,
     host_path: PathBuf,
     host_id: String,
 }
@@ -976,12 +977,14 @@ fn resolve_shared_config_paths() -> io::Result<Option<SharedConfigPaths>> {
     let mount_dir = selection.mount_root;
     let root_dir = selection.config_root;
     let host_id = resolve_host_id();
+    let host_dir = root_dir.join("hosts").join(&host_id);
     Ok(Some(SharedConfigPaths {
         mount_dir,
         settings_path: root_dir.join("settings.toml"),
         catalog_path: root_dir.join("catalog.toml"),
         metadata_path: root_dir.join("torrent_metadata.toml"),
-        host_path: root_dir.join("hosts").join(format!("{}.toml", host_id)),
+        host_dir: host_dir.clone(),
+        host_path: host_dir.join("config.toml"),
         root_dir,
         host_id,
     }))
@@ -1610,6 +1613,13 @@ pub fn shared_settings_path() -> Option<PathBuf> {
         .map(|paths| paths.settings_path)
 }
 
+pub fn shared_host_dir() -> Option<PathBuf> {
+    resolve_shared_config_paths()
+        .ok()
+        .flatten()
+        .map(|paths| paths.host_dir)
+}
+
 pub fn shared_torrents_path() -> Option<PathBuf> {
     shared_config_root().map(|root| root.join("torrents"))
 }
@@ -1635,12 +1645,27 @@ pub fn shared_processed_path() -> Option<PathBuf> {
 }
 
 pub fn shared_status_path() -> Option<PathBuf> {
-    let host_id = shared_host_id()?;
-    shared_config_root().map(|root| root.join("status").join(format!("{host_id}.json")))
+    shared_host_dir().map(|root| root.join("status.json"))
 }
 
 pub fn shared_leader_status_path() -> Option<PathBuf> {
     shared_config_root().map(|root| root.join("status").join("leader.json"))
+}
+
+pub fn runtime_data_dir() -> Option<PathBuf> {
+    if let Some(host_dir) = shared_host_dir() {
+        return Some(host_dir);
+    }
+
+    get_app_paths().map(|(_, data_dir)| data_dir)
+}
+
+pub fn runtime_log_dir() -> Option<PathBuf> {
+    runtime_data_dir().map(|data_dir| data_dir.join("logs"))
+}
+
+pub fn runtime_persistence_dir() -> Option<PathBuf> {
+    runtime_data_dir().map(|data_dir| data_dir.join("persistence"))
 }
 
 pub fn shared_cluster_revision_path() -> Option<PathBuf> {
@@ -1771,10 +1796,19 @@ pub fn ensure_watch_directories(settings: &Settings) -> io::Result<()> {
     if let Some(path) = shared_processed_path() {
         fs::create_dir_all(path)?;
     }
+    if let Some(path) = shared_host_dir() {
+        fs::create_dir_all(path)?;
+    }
     if let Some(path) = shared_data_path() {
         fs::create_dir_all(path)?;
     }
     if let Some(path) = shared_status_path().and_then(|p| p.parent().map(Path::to_path_buf)) {
+        fs::create_dir_all(path)?;
+    }
+    if let Some(path) = runtime_log_dir() {
+        fs::create_dir_all(path)?;
+    }
+    if let Some(path) = runtime_persistence_dir() {
         fs::create_dir_all(path)?;
     }
     if let Some(path) =
@@ -2427,6 +2461,7 @@ mod tests {
         clear_shared_config_state();
         let dir = tempdir().expect("create tempdir");
         let config_root = dir.path().join(SHARED_CONFIG_SUBDIR);
+        let host_dir = config_root.join("hosts").join("node-a");
         let backend = SharedConfigBackend {
             paths: SharedConfigPaths {
                 mount_dir: dir.path().to_path_buf(),
@@ -2434,7 +2469,8 @@ mod tests {
                 settings_path: config_root.join("settings.toml"),
                 catalog_path: config_root.join("catalog.toml"),
                 metadata_path: config_root.join("torrent_metadata.toml"),
-                host_path: config_root.join("hosts").join("node-a.toml"),
+                host_dir: host_dir.clone(),
+                host_path: host_dir.join("config.toml"),
                 host_id: "node-a".to_string(),
             },
         };
@@ -2513,6 +2549,7 @@ mod tests {
         clear_shared_config_state();
         let dir = tempdir().expect("create tempdir");
         let shared_root = dir.path().join("superseedr-config");
+        let host_dir = shared_root.join("hosts").join("windows-node");
         let backend = SharedConfigBackend {
             paths: SharedConfigPaths {
                 mount_dir: dir.path().to_path_buf(),
@@ -2520,7 +2557,8 @@ mod tests {
                 settings_path: shared_root.join("settings.toml"),
                 catalog_path: shared_root.join("catalog.toml"),
                 metadata_path: shared_root.join("torrent_metadata.toml"),
-                host_path: shared_root.join("hosts").join("windows-node.toml"),
+                host_dir: host_dir.clone(),
+                host_path: host_dir.join("config.toml"),
                 host_id: "windows-node".to_string(),
             },
         };
@@ -2543,6 +2581,7 @@ mod tests {
         clear_shared_config_state();
         let dir = tempdir().expect("create tempdir");
         let shared_root = dir.path().join("superseedr-config");
+        let host_dir = shared_root.join("hosts").join("node-a");
         let backend = SharedConfigBackend {
             paths: SharedConfigPaths {
                 mount_dir: dir.path().to_path_buf(),
@@ -2550,7 +2589,8 @@ mod tests {
                 settings_path: shared_root.join("settings.toml"),
                 catalog_path: shared_root.join("catalog.toml"),
                 metadata_path: shared_root.join("torrent_metadata.toml"),
-                host_path: shared_root.join("hosts").join("node-a.toml"),
+                host_dir: host_dir.clone(),
+                host_path: host_dir.join("config.toml"),
                 host_id: "node-a".to_string(),
             },
         };
@@ -2578,6 +2618,7 @@ mod tests {
         clear_shared_config_state();
         let dir = tempdir().expect("create tempdir");
         let config_root = dir.path().join(SHARED_CONFIG_SUBDIR);
+        let host_dir = config_root.join("hosts").join("node-a");
         let backend = SharedConfigBackend {
             paths: SharedConfigPaths {
                 mount_dir: dir.path().to_path_buf(),
@@ -2585,7 +2626,8 @@ mod tests {
                 settings_path: config_root.join("settings.toml"),
                 catalog_path: config_root.join("catalog.toml"),
                 metadata_path: config_root.join("torrent_metadata.toml"),
-                host_path: config_root.join("hosts").join("node-a.toml"),
+                host_dir: host_dir.clone(),
+                host_path: host_dir.join("config.toml"),
                 host_id: "node-a".to_string(),
             },
         };
@@ -2630,6 +2672,7 @@ mod tests {
         clear_shared_config_state();
         let dir = tempdir().expect("create tempdir");
         let config_root = dir.path().join(SHARED_CONFIG_SUBDIR);
+        let host_dir = config_root.join("hosts").join("node-a");
         let backend = SharedConfigBackend {
             paths: SharedConfigPaths {
                 mount_dir: dir.path().to_path_buf(),
@@ -2637,7 +2680,8 @@ mod tests {
                 settings_path: config_root.join("settings.toml"),
                 catalog_path: config_root.join("catalog.toml"),
                 metadata_path: config_root.join("torrent_metadata.toml"),
-                host_path: config_root.join("hosts").join("node-a.toml"),
+                host_dir: host_dir.clone(),
+                host_path: host_dir.join("config.toml"),
                 host_id: "node-a".to_string(),
             },
         };
@@ -2672,6 +2716,7 @@ mod tests {
         clear_shared_config_state();
         let dir = tempdir().expect("create tempdir");
         let config_root = dir.path().join(SHARED_CONFIG_SUBDIR);
+        let host_dir = config_root.join("hosts").join("node-a");
         let backend = SharedConfigBackend {
             paths: SharedConfigPaths {
                 mount_dir: dir.path().to_path_buf(),
@@ -2679,7 +2724,8 @@ mod tests {
                 settings_path: config_root.join("settings.toml"),
                 catalog_path: config_root.join("catalog.toml"),
                 metadata_path: config_root.join("torrent_metadata.toml"),
-                host_path: config_root.join("hosts").join("node-a.toml"),
+                host_dir: host_dir.clone(),
+                host_path: host_dir.join("config.toml"),
                 host_id: "node-a".to_string(),
             },
         };
@@ -2952,6 +2998,18 @@ mod tests {
         let expected_root = dir.path().join(SHARED_CONFIG_SUBDIR);
         assert_eq!(shared_root_path(), Some(expected_root.clone()));
         assert_eq!(shared_inbox_path(), Some(expected_root.join("inbox")));
+        assert_eq!(
+            shared_host_dir(),
+            Some(expected_root.join("hosts").join("node-a"))
+        );
+        assert_eq!(
+            shared_status_path(),
+            Some(expected_root.join("hosts").join("node-a").join("status.json"))
+        );
+        assert_eq!(
+            runtime_data_dir(),
+            Some(expected_root.join("hosts").join("node-a"))
+        );
 
         if let Some(value) = original_shared_dir {
             env::set_var(SHARED_CONFIG_DIR_ENV, value);

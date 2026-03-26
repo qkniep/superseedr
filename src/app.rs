@@ -17,7 +17,7 @@ use strum_macros::EnumIter;
 use crate::torrent_manager::DiskIoOperation;
 
 use crate::config::{
-    classify_shared_mode_settings_change, get_app_paths, resolve_host_watch_path,
+    classify_shared_mode_settings_change, resolve_host_watch_path,
     runtime_watch_paths, save_settings, shared_host_id, shared_inbox_path, shared_root_path,
     upsert_torrent_metadata, FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry,
     Settings, SettingsChangeScope, SortDirection, TorrentMetadataEntry, TorrentMetadataFileEntry,
@@ -4265,8 +4265,8 @@ impl App {
             }
         }
 
-        let torrent_files_dir = match get_app_paths() {
-            Some((_, data_dir)) => data_dir.join("torrents"),
+        let torrent_files_dir = match crate::config::runtime_data_dir() {
+            Some(data_dir) => data_dir.join("torrents"),
             None => {
                 let message = "Could not determine application data directory.".to_string();
                 tracing_event!(Level::ERROR, "{}", message);
@@ -7227,9 +7227,10 @@ mod tests {
         env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
         clear_shared_config_state_for_tests();
 
-        std::fs::create_dir_all(effective_root.join("hosts")).expect("create hosts dir");
+        std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
+            .expect("create hosts dir");
         std::fs::write(
-            effective_root.join("hosts").join("node-a.toml"),
+            effective_root.join("hosts").join("node-a").join("config.toml"),
             "client_port = 0\n",
         )
         .expect("write host config");
@@ -7334,9 +7335,10 @@ mod tests {
         env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
         clear_shared_config_state_for_tests();
 
-        std::fs::create_dir_all(effective_root.join("hosts")).expect("create hosts dir");
+        std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
+            .expect("create hosts dir");
         std::fs::write(
-            effective_root.join("hosts").join("node-a.toml"),
+            effective_root.join("hosts").join("node-a").join("config.toml"),
             "client_port = 0\n",
         )
         .expect("write host config");
@@ -7392,9 +7394,10 @@ mod tests {
         env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
         clear_shared_config_state_for_tests();
 
-        std::fs::create_dir_all(effective_root.join("hosts")).expect("create hosts dir");
+        std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
+            .expect("create hosts dir");
         std::fs::write(
-            effective_root.join("hosts").join("node-a.toml"),
+            effective_root.join("hosts").join("node-a").join("config.toml"),
             "client_port = 0\n",
         )
         .expect("write host config");
@@ -7434,9 +7437,10 @@ mod tests {
         env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
         clear_shared_config_state_for_tests();
 
-        std::fs::create_dir_all(effective_root.join("hosts")).expect("create hosts dir");
+        std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
+            .expect("create hosts dir");
         std::fs::write(
-            effective_root.join("hosts").join("node-a.toml"),
+            effective_root.join("hosts").join("node-a").join("config.toml"),
             "client_port = 0\n",
         )
         .expect("write host config");
@@ -7513,9 +7517,10 @@ mod tests {
         env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
         clear_shared_config_state_for_tests();
 
-        std::fs::create_dir_all(effective_root.join("hosts")).expect("create hosts dir");
+        std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
+            .expect("create hosts dir");
         std::fs::write(
-            effective_root.join("hosts").join("node-a.toml"),
+            effective_root.join("hosts").join("node-a").join("config.toml"),
             format!(
                 "client_port = 0\nwatch_folder = {:?}\n",
                 old_watch.to_string_lossy()

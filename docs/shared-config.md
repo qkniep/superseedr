@@ -34,7 +34,7 @@ Shared mode uses:
 - `settings.toml`
 - `catalog.toml`
 - `torrent_metadata.toml`
-- `hosts/<host-id>.toml`
+- `hosts/<host-id>/config.toml`
 
 Example:
 
@@ -45,7 +45,7 @@ SUPERSEEDR_SHARED_CONFIG_DIR=/mnt/shared-drive
 This still has highest precedence and overrides any persisted launcher config.
 
 ### `SUPERSEEDR_SHARED_HOST_ID`
-Optional explicit host id for selecting `hosts/<host-id>.toml`.
+Optional explicit host id for selecting `hosts/<host-id>/config.toml`.
 
 If unset, Superseedr falls back to a sanitized hostname.
 
@@ -94,15 +94,22 @@ superseedr set-shared-config /mnt/shared-drive/superseedr-config
     torrent_metadata.toml
     cluster.revision
     hosts/
-      seedbox-a.toml
-      desktop-a.toml
+      seedbox-a/
+        config.toml
+        logs/
+        persistence/
+        status.json
+      desktop-a/
+        config.toml
+        logs/
+        persistence/
+        status.json
     torrents/
     inbox/
     processed/
     staged-adds/
     status/
-      seedbox-a.json
-      desktop-a.json
+      leader.json
     superseedr.lock
   downloads/
   library/
@@ -152,7 +159,7 @@ All nodes:
 ### `torrent_metadata.toml`
 Leader-written derived torrent metadata.
 
-### `hosts/<host-id>.toml`
+### `hosts/<host-id>/config.toml`
 Host-local runtime settings.
 
 This file is bootstrapped automatically on first load if it does not exist yet.
@@ -164,6 +171,17 @@ Kept fields:
 
 Removed from shared mode:
 - `path_roots`
+
+### `hosts/<host-id>/`
+Host-local runtime artifacts stored on the shared root.
+
+Examples:
+- `hosts/<host-id>/logs/`
+- `hosts/<host-id>/persistence/network_history.bin`
+- `hosts/<host-id>/persistence/activity_history.bin`
+- `hosts/<host-id>/persistence/rss.toml`
+- `hosts/<host-id>/persistence/event_journal.toml`
+- `hosts/<host-id>/status.json`
 
 ## Leadership
 
@@ -285,13 +303,13 @@ Non-leader nodes never call direct shared `save_settings`.
 Follower config editing rules:
 
 - shared settings and RSS edits remain leader-only
-- host-local `client_id`, `client_port`, and `watch_folder` edits are allowed on followers and save only to `hosts/<host-id>.toml`
+- host-local `client_id`, `client_port`, and `watch_folder` edits are allowed on followers and save only to `hosts/<host-id>/config.toml`
 
 ## Status Files
 
 Shared mode now writes per-node status files:
 
-- `/shared-root/status/<host-id>.json`
+- `/shared-root/hosts/<host-id>/status.json`
 
 This avoids active nodes overwriting a single shared status snapshot.
 
@@ -309,14 +327,21 @@ Shared root:
     torrent_metadata.toml
     cluster.revision
     hosts/
-      seedbox-a.toml
-      desktop-a.toml
+      seedbox-a/
+        config.toml
+        logs/
+        persistence/
+        status.json
+      desktop-a/
+        config.toml
+        logs/
+        persistence/
+        status.json
     torrents/
     inbox/
     processed/
     status/
-      seedbox-a.json
-      desktop-a.json
+      leader.json
     data/
     superseedr.lock
 ```
@@ -343,7 +368,7 @@ download_path = "downloads/shared-collection"
 Host config:
 
 ```toml
-# hosts/seedbox-a.toml
+# hosts/seedbox-a/config.toml
 client_port = 6681
 watch_folder = "/srv/local-watch"
 ```
