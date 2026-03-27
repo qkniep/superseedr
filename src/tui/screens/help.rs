@@ -256,7 +256,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
-                        "n",
+                        "J",
                         ctx.apply(Style::default().fg(ctx.state_info())),
                     )),
                     Cell::from("Open event journal"),

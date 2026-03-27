@@ -2162,11 +2162,15 @@ impl App {
                 if self.is_host_watch_path(&path) {
                     self.app_state.pending_ingest_by_path.remove(&path);
                 }
-                if let Err(error) = self.dispatch_cluster_control_request(request).await {
-                    self.app_state.system_error = Some(error);
-                    self.app_state.ui.needs_redraw = true;
+                match self.dispatch_cluster_control_request(request).await {
+                    Ok(_message) => {
+                        self.archive_processed_ingest(source, &path);
+                    }
+                    Err(error) => {
+                        self.app_state.system_error = Some(error);
+                        self.app_state.ui.needs_redraw = true;
+                    }
                 }
-                self.archive_processed_ingest(source, &path);
             }
             AddIngressAction::ApplyDirectly {
                 payload,
