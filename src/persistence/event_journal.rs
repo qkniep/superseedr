@@ -57,6 +57,7 @@ pub enum IngestOrigin {
     RssManual,
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum IngestKind {
@@ -141,7 +142,9 @@ pub fn shared_event_journal_state_file_path() -> io::Result<PathBuf> {
         )
     })?;
 
-    Ok(root_dir.join("journal").join(SHARED_EVENT_JOURNAL_FILE_NAME))
+    Ok(root_dir
+        .join("journal")
+        .join(SHARED_EVENT_JOURNAL_FILE_NAME))
 }
 
 pub fn load_event_journal_state() -> EventJournalState {
@@ -162,11 +165,9 @@ pub fn load_event_journal_state() -> EventJournalState {
             Ok(path) => {
                 let shared = load_event_journal_state_from_path(&path);
                 merged.entries.extend(shared.entries);
-                merged.entries.sort_by(|a, b| {
-                    a.ts_iso
-                        .cmp(&b.ts_iso)
-                        .then_with(|| a.id.cmp(&b.id))
-                });
+                merged
+                    .entries
+                    .sort_by(|a, b| a.ts_iso.cmp(&b.ts_iso).then_with(|| a.id.cmp(&b.id)));
                 enforce_event_journal_retention(&mut merged);
                 merged.next_id = merged
                     .entries
@@ -441,9 +442,7 @@ mod tests {
             details: EventDetails::Control {
                 origin: ControlOrigin::CliOffline,
                 action: "pause".to_string(),
-                target_info_hash_hex: Some(
-                    "2222222222222222222222222222222222222222".to_string(),
-                ),
+                target_info_hash_hex: Some("2222222222222222222222222222222222222222".to_string()),
                 file_index: None,
                 file_path: None,
                 priority: None,
@@ -466,18 +465,14 @@ mod tests {
         assert_eq!(host_state.entries, vec![host_entry]);
         assert_eq!(shared_state.entries, vec![shared_entry]);
         assert_eq!(merged_state.entries.len(), 2);
-        assert!(
-            merged_state
-                .entries
-                .iter()
-                .any(|entry| entry.category == EventCategory::DataHealth)
-        );
-        assert!(
-            merged_state
-                .entries
-                .iter()
-                .any(|entry| entry.category == EventCategory::Control)
-        );
+        assert!(merged_state
+            .entries
+            .iter()
+            .any(|entry| entry.category == EventCategory::DataHealth));
+        assert!(merged_state
+            .entries
+            .iter()
+            .any(|entry| entry.category == EventCategory::Control));
         assert_eq!(merged_state.next_id, 3);
 
         if let Some(value) = original_shared_dir {

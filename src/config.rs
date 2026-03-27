@@ -916,7 +916,9 @@ fn load_launcher_shared_config() -> io::Result<Option<PathBuf>> {
     }
 
     let sidecar: LauncherSharedConfig = read_toml_or_default(&path)?;
-    Ok(sidecar.shared_config_dir.filter(|value| !value.as_os_str().is_empty()))
+    Ok(sidecar
+        .shared_config_dir
+        .filter(|value| !value.as_os_str().is_empty()))
 }
 
 fn load_launcher_host_id() -> io::Result<Option<String>> {
@@ -1959,7 +1961,8 @@ pub fn convert_standalone_to_shared(path: &Path) -> io::Result<SharedConfigSelec
     let normal_backend = local_normal_backend()?;
     let shared_backend = shared_backend_for_mount_root(path)?;
     let settings = normal_backend.load_settings()?;
-    let metadata: TorrentMetadataConfig = read_toml_or_default(&normal_backend.paths.metadata_path)?;
+    let metadata: TorrentMetadataConfig =
+        read_toml_or_default(&normal_backend.paths.metadata_path)?;
     validate_shared_runtime_settings(&settings, &shared_backend.paths.mount_dir)?;
     fs::create_dir_all(&shared_backend.paths.host_dir)?;
     let next_layered = LayeredConfig::from_shared_settings(
@@ -1976,8 +1979,10 @@ pub fn convert_standalone_to_shared(path: &Path) -> io::Result<SharedConfigSelec
         &shared_backend.paths.catalog_path,
         &next_layered.catalog,
     )?;
-    let _ =
-        write_toml_atomically_with_fingerprint(&shared_backend.paths.host_path, &next_layered.host)?;
+    let _ = write_toml_atomically_with_fingerprint(
+        &shared_backend.paths.host_path,
+        &next_layered.host,
+    )?;
     let next_metadata = sync_torrent_metadata_with_settings(metadata, &settings);
     let _ = write_toml_atomically_with_fingerprint(
         &shared_backend.paths.metadata_path,
@@ -2003,12 +2008,15 @@ pub fn convert_shared_to_standalone() -> io::Result<()> {
     let normal_backend = local_normal_backend()?;
     let shared_backend = shared_backend_for_mount_root(&shared_selection.mount_root)?;
     let settings = shared_backend.load_settings()?;
-    let metadata: TorrentMetadataConfig = read_toml_or_default(&shared_backend.paths.metadata_path)?;
+    let metadata: TorrentMetadataConfig =
+        read_toml_or_default(&shared_backend.paths.metadata_path)?;
 
     normal_backend.save_settings(&settings)?;
     let next_metadata = sync_torrent_metadata_with_settings(metadata, &settings);
-    let _ =
-        write_toml_atomically_with_fingerprint(&normal_backend.paths.metadata_path, &next_metadata)?;
+    let _ = write_toml_atomically_with_fingerprint(
+        &normal_backend.paths.metadata_path,
+        &next_metadata,
+    )?;
     clear_shared_config_state();
     Ok(())
 }
@@ -3092,7 +3100,9 @@ mod tests {
             "unexpected error: {error}"
         );
         assert!(
-            error.to_string().contains(&paths.host_dir.display().to_string()),
+            error
+                .to_string()
+                .contains(&paths.host_dir.display().to_string()),
             "unexpected error: {error}"
         );
         assert!(
@@ -3208,7 +3218,10 @@ mod tests {
         let original_shared_dir = env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
         clear_shared_config_state();
         let dir = tempdir().expect("create tempdir");
-        let nested = dir.path().join("shared-fixtures").join("sample-input.torrent");
+        let nested = dir
+            .path()
+            .join("shared-fixtures")
+            .join("sample-input.torrent");
         fs::create_dir_all(nested.parent().expect("parent")).expect("create nested dir");
         fs::write(&nested, "payload").expect("write fixture");
         env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", dir.path());
@@ -3235,12 +3248,15 @@ mod tests {
         let dir = tempdir().expect("create tempdir");
         env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", dir.path());
 
-        let resolved = resolve_shared_cli_torrent_path(Path::new("shared-fixtures/sample-input.torrent"))
-            .expect("resolve shared cli torrent path");
+        let resolved =
+            resolve_shared_cli_torrent_path(Path::new("shared-fixtures/sample-input.torrent"))
+                .expect("resolve shared cli torrent path");
 
         assert_eq!(
             resolved,
-            dir.path().join("shared-fixtures").join("sample-input.torrent")
+            dir.path()
+                .join("shared-fixtures")
+                .join("sample-input.torrent")
         );
 
         if let Some(value) = original_shared_dir {
@@ -3664,10 +3680,15 @@ mod tests {
         let selection = convert_standalone_to_shared(&shared_root).expect("convert to shared");
         assert_eq!(selection.mount_root, shared_root);
         let shared_backend = shared_backend_for_mount_root(&shared_root).expect("shared backend");
-        let shared_settings = shared_backend.load_settings().expect("load shared settings");
+        let shared_settings = shared_backend
+            .load_settings()
+            .expect("load shared settings");
         assert_eq!(shared_settings.client_id, "standalone-node");
         assert_eq!(shared_settings.client_port, 7788);
-        assert_eq!(shared_settings.watch_folder, Some(PathBuf::from("/watch-local")));
+        assert_eq!(
+            shared_settings.watch_folder,
+            Some(PathBuf::from("/watch-local"))
+        );
         assert_eq!(
             shared_settings.default_download_folder,
             Some(shared_root.join("downloads"))
@@ -3679,13 +3700,18 @@ mod tests {
         env::set_var(SHARED_CONFIG_DIR_ENV, &shared_root);
         clear_shared_config_state();
         convert_shared_to_standalone().expect("convert to standalone");
-        let reloaded_local = normal_backend.load_settings().expect("reload standalone settings");
+        let reloaded_local = normal_backend
+            .load_settings()
+            .expect("reload standalone settings");
         let reloaded_metadata: TorrentMetadataConfig =
             read_toml_or_default(&normal_backend.paths.metadata_path).expect("reload metadata");
 
         assert_eq!(reloaded_local.client_id, "standalone-node");
         assert_eq!(reloaded_local.client_port, 7788);
-        assert_eq!(reloaded_local.watch_folder, Some(PathBuf::from("/watch-local")));
+        assert_eq!(
+            reloaded_local.watch_folder,
+            Some(PathBuf::from("/watch-local"))
+        );
         assert_eq!(
             reloaded_local.default_download_folder,
             Some(shared_root.join("downloads"))
@@ -3814,7 +3840,12 @@ mod tests {
         );
         assert_eq!(
             shared_status_path(),
-            Some(expected_root.join("hosts").join("node-a").join("status.json"))
+            Some(
+                expected_root
+                    .join("hosts")
+                    .join("node-a")
+                    .join("status.json")
+            )
         );
         assert_eq!(
             runtime_data_dir(),

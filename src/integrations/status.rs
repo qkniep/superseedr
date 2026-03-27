@@ -190,13 +190,12 @@ pub fn host_status_file_path() -> io::Result<PathBuf> {
         return Ok(shared_path);
     }
 
-    let base_path = crate::config::runtime_data_dir()
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "Could not resolve app data directory",
-            )
-        })?;
+    let base_path = crate::config::runtime_data_dir().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Could not resolve app data directory",
+        )
+    })?;
     Ok(base_path.join("status_files").join("app_state.json"))
 }
 

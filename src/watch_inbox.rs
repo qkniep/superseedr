@@ -171,7 +171,7 @@ mod tests {
 
         let relayed = relay_watch_file_to_shared_inbox(&source).expect("relay watch file");
         assert!(!source.exists());
-        assert!(relayed.starts_with(&effective_root.join("inbox")));
+        assert!(relayed.starts_with(effective_root.join("inbox")));
         assert_eq!(
             fs::read_to_string(&relayed).expect("read relayed file"),
             "content"

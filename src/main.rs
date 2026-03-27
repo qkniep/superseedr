@@ -38,11 +38,10 @@ use std::time::Duration;
 use crate::config::Settings;
 use crate::config::{
     clear_persisted_host_id, clear_persisted_shared_config, convert_shared_to_standalone,
-    convert_standalone_to_shared, effective_host_id_selection,
-    effective_shared_config_selection, is_shared_config_mode, load_settings, load_settings_for_cli,
-    persisted_host_id_path, persisted_shared_config_path, resolve_command_watch_path,
-    set_persisted_host_id, set_persisted_shared_config, shared_lock_path, HostIdSource,
-    SharedConfigSource,
+    convert_standalone_to_shared, effective_host_id_selection, effective_shared_config_selection,
+    is_shared_config_mode, load_settings, load_settings_for_cli, persisted_host_id_path,
+    persisted_shared_config_path, resolve_command_watch_path, set_persisted_host_id,
+    set_persisted_shared_config, shared_lock_path, HostIdSource, SharedConfigSource,
 };
 use crate::control_service::{
     apply_offline_control_request, apply_offline_purge, control_event_details, list_torrent_files,
@@ -54,7 +53,9 @@ use crate::integrations::cli::{
     wait_for_status_json_after, write_control_command, write_input_command,
     write_path_command_payload, write_stop_command, Cli, Commands,
 };
-use crate::integrations::control::{ControlPriorityTarget, ControlRequest};
+#[cfg(test)]
+use crate::integrations::control::ControlPriorityTarget;
+use crate::integrations::control::ControlRequest;
 use crate::integrations::status::{offline_output_json, status_file_path};
 use crate::persistence::event_journal::{
     append_event_journal_entry, event_journal_json, load_event_journal_state,
@@ -165,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(dir) = config::local_runtime_data_dir() {
             dirs.push(dir);
         }
-        if let Some(dir) = env::current_dir().ok() {
+        if let Ok(dir) = env::current_dir() {
             dirs.push(dir);
         }
         dirs
@@ -179,7 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dirs.push(dir);
             }
         }
-        if let Some(dir) = env::current_dir().ok() {
+        if let Ok(dir) = env::current_dir() {
             if !dirs.iter().any(|existing| existing == &dir) {
                 dirs.push(dir);
             }
@@ -220,7 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if !has_cli_request {
         if let Err(e) = config::ensure_watch_directories(&loaded_settings) {
-        tracing::error!("Failed to create watch directories: {}", e);
+            tracing::error!("Failed to create watch directories: {}", e);
         }
     }
 
@@ -437,7 +438,10 @@ fn shared_config_selection_json(selection: &crate::config::SharedConfigSelection
     })
 }
 
-fn process_set_shared_config_command(path: &std::path::Path, output_mode: OutputMode) -> io::Result<()> {
+fn process_set_shared_config_command(
+    path: &std::path::Path,
+    output_mode: OutputMode,
+) -> io::Result<()> {
     let selection = set_persisted_shared_config(path)?;
     let sidecar_path = persisted_shared_config_path()?;
     print_success(
@@ -763,9 +767,10 @@ fn process_cli_request(
             Ok(())
         }
         _ => {
-            let requests = command_to_control_requests_with_resolver(command, |target, command_name| {
-                resolve_target_info_hash(settings, target, command_name)
-            })
+            let requests =
+                command_to_control_requests_with_resolver(command, |target, command_name| {
+                    resolve_target_info_hash(settings, target, command_name)
+                })
                 .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "Unsupported command")

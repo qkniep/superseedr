@@ -17,6 +17,8 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
+type TorrentFileList = Vec<(Vec<String>, u64)>;
+
 pub fn find_torrent_settings_index_by_info_hash(
     settings: &Settings,
     info_hash: &[u8],
@@ -128,7 +130,7 @@ pub fn load_torrent_file_list_for_settings(
 
 fn load_torrent_file_list_from_metadata(
     torrent_settings: &TorrentSettings,
-) -> Result<Option<Vec<(Vec<String>, u64)>>, String> {
+) -> Result<Option<TorrentFileList>, String> {
     let Some(info_hash) = info_hash_from_torrent_source(&torrent_settings.torrent_or_magnet) else {
         return Ok(None);
     };
@@ -542,6 +544,7 @@ pub fn apply_offline_purge(settings: &mut Settings, info_hash_hex: &str) -> Resu
     Ok(format!("Purged torrent '{}'", info_hash_hex))
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlExecutionPlan {
     StatusNow,

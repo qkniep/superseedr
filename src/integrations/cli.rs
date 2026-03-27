@@ -126,12 +126,10 @@ pub fn write_input_command(input_str: &str, watch_path: &Path) -> io::Result<Pat
             final_path
         );
         match write_bytes_atomically(&final_path, input_str.as_bytes()) {
-            Ok(_) => {
-                return Ok(final_path);
-            }
+            Ok(_) => Ok(final_path),
             Err(e) => {
                 tracing::error!("Failed to write magnet file atomically: {}", e);
-                return Err(e);
+                Err(e)
             }
         }
     } else {
@@ -139,11 +137,11 @@ pub fn write_input_command(input_str: &str, watch_path: &Path) -> io::Result<Pat
         match fs::canonicalize(&torrent_path) {
             Ok(absolute_path) => {
                 let absolute_path_cow = absolute_path.to_string_lossy();
-                return write_path_command_payload(
+                write_path_command_payload(
                     absolute_path_cow.as_ref(),
                     absolute_path_cow.as_ref(),
                     watch_path,
-                );
+                )
             }
             Err(e) => {
                 // Don't treat as error if launched by macOS without a valid path
@@ -155,7 +153,7 @@ pub fn write_input_command(input_str: &str, watch_path: &Path) -> io::Result<Pat
                         e
                     );
                 }
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, e));
+                Err(io::Error::new(io::ErrorKind::InvalidInput, e))
             }
         }
     }
@@ -193,6 +191,7 @@ pub fn write_stop_command(watch_path: &Path) -> io::Result<PathBuf> {
     Ok(file_path)
 }
 
+#[cfg(test)]
 pub fn command_to_control_requests(
     command: &Commands,
 ) -> Result<Option<Vec<ControlRequest>>, String> {
@@ -309,6 +308,7 @@ pub fn status_should_stream(command: &Commands) -> bool {
     matches!(command, Commands::Status { follow: true, .. })
 }
 
+#[cfg(test)]
 pub fn command_to_control_request(command: &Commands) -> Result<Option<ControlRequest>, String> {
     match command_to_control_requests(command)? {
         Some(mut requests) => {

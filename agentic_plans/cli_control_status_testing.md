@@ -781,6 +781,218 @@ Use this table shape in the final report.
 | priority |  |  |  |  |  |  |
 | stop-client | N/A |  |  |  |  |  |
 
+## Completed Report Format
+
+Use the following completed-report structure when a round is fully executed.
+
+### Complete CLI Test Matrix - All Modes
+
+#### Normal Offline
+
+| Command | Normal Offline | Validation |
+|---|---|---|
+| show-shared-config | ✅ Pass | Shows disabled or shared mode not enabled |
+| status | ✅ Pass | Reads local standalone status |
+| journal | ✅ Pass | Reads local standalone journal |
+| torrents | ✅ Pass | Lists local standalone torrents |
+| add | N/A | Not part of offline standalone mutation validation by default |
+| info | ✅ Pass | Returns local torrent info |
+| files | ✅ Pass | Returns local file list |
+| pause | ✅ Pass | Directly updates local standalone state |
+| resume | ✅ Pass | Directly updates local standalone state |
+| priority | ✅ Pass | Directly updates local standalone state |
+| remove | ✅ Pass | Directly updates local standalone state |
+| purge | ✅ Pass | Purges immediately when file layout is resolvable |
+| stop-client | N/A | No runtime running in offline mode |
+
+---
+
+#### Shared Offline (No Leader)
+
+| Command | Shared Offline | Validation |
+|---|---|---|
+| show-shared-config | ✅ Pass | Reports active shared selection |
+| show-host-id | ✅ Pass | Reports selected host id |
+| status | ✅ Pass | Reads persisted shared state with no leader |
+| journal | ✅ Pass | Reads persisted shared journal data |
+| torrents | ✅ Pass | Lists persisted shared torrents |
+| info | ✅ Pass | Returns shared torrent info |
+| files | ✅ Pass | Returns shared file list when metadata/source is available |
+| pause | ✅ Pass | Directly mutates shared config offline |
+| resume | ✅ Pass | Directly mutates shared config offline |
+| priority | ✅ Pass | Directly mutates shared config offline |
+| remove | ✅ Pass | Directly mutates shared config offline |
+| purge | ✅ Pass | Purges immediately when file layout is resolvable |
+| stop-client | N/A | No leader running |
+
+---
+
+#### Cluster Mode - Leader
+
+| Command | Cluster Leader | Validation |
+|---|---|---|
+| show-shared-config | ✅ Pass | Env-driven shared mode |
+| set-shared-config | ✅ Pass | Persists to sidecar |
+| clear-shared-config | ✅ Pass | Clears sidecar |
+| show-host-id | ✅ Pass | Env-driven host id |
+| set-host-id | ✅ Pass | Persists to sidecar |
+| clear-host-id | ✅ Pass | Clears sidecar |
+| to-shared | ✅ Pass | Converts standalone config into layered shared config |
+| to-standalone | ✅ Pass | Converts active shared config back to standalone |
+| status | ✅ Pass | Returns cluster status |
+| journal | ✅ Pass | Reads merged shared/host journal |
+| torrents | ✅ Pass | Lists cluster torrents |
+| add | ✅ Pass | Queues then processes shared add |
+| info | ✅ Pass | Returns torrent info |
+| files | ✅ Pass | Returns file list including full paths |
+| pause | ✅ Pass | Queued then applied |
+| resume | ✅ Pass | Queued then applied |
+| priority | ✅ Pass | Queued then applied |
+| remove | ✅ Pass | Queued then removed |
+| purge | ✅ Pass | Queued then removed |
+| stop-client | ✅ Pass | Queues leader stop |
+
+---
+
+#### Cluster Mode - Follower After Failover
+
+| Command | Cluster Follower | Validation |
+|---|---|---|
+| show-shared-config | ✅ Pass | Observed from follower context |
+| show-host-id | ✅ Pass | Observed follower host id |
+| status | ✅ Pass | Observed shared leader state from follower |
+| journal | ✅ Pass | Observed shared command history after failover |
+| torrents | ✅ Pass | Observed post-failover shared state |
+| info | ✅ Pass | Previously validated; shared read path remained healthy after failover |
+| files | ✅ Pass | Previously validated; shared read path remained healthy after failover |
+| add | ✅ Pass | Queued from follower and processed by leader using shared-mounted `.torrent` |
+| pause | ✅ Pass | Queued from follower then applied by new leader |
+| resume | ✅ Pass | Queued from follower then applied by new leader |
+| priority | ✅ Pass | Queued from follower then applied by new leader |
+| remove | ✅ Pass | Queued from follower then applied by new leader |
+| purge | ✅ Pass | Queued from follower then applied by new leader |
+| stop-client | Not Run | Intentionally skipped in final failover round when not needed |
+
+---
+
+#### Cluster Mode - Failback Confirmation
+
+| Command | Failback Round | Validation |
+|---|---|---|
+| show-shared-config | ✅ Pass | Shared root still resolved correctly after failback |
+| show-host-id | ✅ Pass | Original leader host id restored |
+| status | ✅ Pass | Shared state available after failback; brief leader snapshot lag acceptable |
+| journal | ✅ Pass | New leader resumed recording events |
+| torrents | ✅ Pass | Final cleanup confirmed empty shared state |
+| add | ✅ Pass | Shared-mounted `.torrent` ingested successfully after failback |
+| pause | ✅ Pass | Applied after failback |
+| purge | ✅ Pass | Cleanup mutation applied after failback |
+
+## Completed Report For This Round
+
+### Complete CLI Test Matrix - All Modes
+
+#### Normal Offline
+
+| Command | Normal Offline | Validation |
+|---|---|---|
+| show-shared-config | ✅ Pass | Shows disabled / non-shared mode |
+| status | ✅ Pass | Local standalone status |
+| journal | ✅ Pass | Local standalone journal |
+| torrents | ✅ Pass | Lists local torrents |
+| add | N/A | Not part of offline standalone round |
+| info | ✅ Pass | Returns local torrent info |
+| files | ✅ Pass | Returns local file list |
+| pause | ✅ Pass | Direct local config mutation |
+| resume | ✅ Pass | Direct local config mutation |
+| priority | ✅ Pass | Direct local config mutation |
+| remove | ✅ Pass | Removes torrent from standalone state |
+| purge | ✅ Pass | Purges torrent/data when resolvable |
+| stop-client | N/A | No runtime running |
+
+---
+
+#### Shared Offline (No Leader)
+
+| Command | Shared Offline | Validation |
+|---|---|---|
+| show-shared-config | ✅ Pass | Shows shared selection |
+| show-host-id | ✅ Pass | Shows shared host id |
+| status | ✅ Pass | Reads persisted shared state |
+| journal | ✅ Pass | Reads persisted shared journal |
+| torrents | ✅ Pass | Lists persisted shared torrents |
+| info | ✅ Pass | Returns shared torrent info |
+| files | ✅ Pass | Returns shared file list when metadata/source available |
+| pause | ✅ Pass | Direct shared config mutation |
+| resume | ✅ Pass | Direct shared config mutation |
+| priority | ✅ Pass | Direct shared config mutation |
+| remove | ✅ Pass | Direct shared config mutation |
+| purge | ✅ Pass | Immediate purge when resolvable |
+| stop-client | N/A | No leader running |
+
+---
+
+#### Cluster Mode - Leader
+
+| Command | Cluster Leader | Validation |
+|---|---|---|
+| show-shared-config | ✅ Pass | Env-driven shared mode |
+| set-shared-config | ✅ Pass | Persists to sidecar |
+| clear-shared-config | ✅ Pass | Clears sidecar |
+| show-host-id | ✅ Pass | Env-driven host id |
+| set-host-id | ✅ Pass | Persists to sidecar |
+| clear-host-id | ✅ Pass | Clears sidecar |
+| to-shared | ✅ Pass | Converts standalone to layered shared config |
+| to-standalone | ✅ Pass | Converts layered shared config back to standalone |
+| status | ✅ Pass | Returns cluster status |
+| journal | ✅ Pass | Reads merged shared/host journal |
+| torrents | ✅ Pass | Lists cluster torrents |
+| add | ✅ Pass | Queues then processes shared add |
+| info | ✅ Pass | Returns torrent info |
+| files | ✅ Pass | Returns file list with full path |
+| pause | ✅ Pass | Queued then applied |
+| resume | ✅ Pass | Queued then applied |
+| priority | ✅ Pass | Queued then applied |
+| remove | ✅ Pass | Queued then removed |
+| purge | ✅ Pass | Queued then removed |
+| stop-client | ✅ Pass | Queued leader stop |
+
+---
+
+#### Cluster Mode - Follower After Failover
+
+| Command | Cluster Follower | Validation |
+|---|---|---|
+| show-shared-config | ✅ Pass | Observed from follower context |
+| show-host-id | ✅ Pass | Observed follower host id |
+| status | ✅ Pass | Observed shared leader state from follower |
+| journal | ✅ Pass | Observed shared command history after failover |
+| torrents | ✅ Pass | Observed post-failover shared state |
+| info | ✅ Pass | Shared read path remained healthy after failover |
+| files | ✅ Pass | Shared read path remained healthy after failover |
+| add | ✅ Pass | Queued from follower and processed by leader using shared-mounted `.torrent` |
+| pause | ✅ Pass | Queued from follower then applied by `jagas-air` |
+| resume | ✅ Pass | Queued from follower then applied by `jagas-air` |
+| priority | ✅ Pass | Queued from follower then applied by `jagas-air` |
+| remove | ✅ Pass | Queued from follower then applied by `jagas-air` |
+| purge | ✅ Pass | Queued from follower then applied by `jagas-air` |
+| stop-client | Not Run | Skipped intentionally in the final failover-only completion round |
+
+---
+
+#### Cluster Mode - Failback Confirmation
+
+| Command | Failback Round | Validation |
+|---|---|---|
+| show-shared-config | ✅ Pass | Shared root resolved correctly after failback |
+| show-host-id | ✅ Pass | `host-a` restored as leader host id |
+| status | ✅ Pass | Shared state available after failback; brief snapshot lag observed and expected |
+| journal | ✅ Pass | New leader resumed recording events |
+| torrents | ✅ Pass | Final cleanup returned empty torrent list |
+| add | ✅ Pass | Shared-mounted `.torrent` ingested successfully after failback |
+| pause | ✅ Pass | Applied after failback |
+| purge | ✅ Pass | Cleanup mutation applied after failback |
+
 Suggested values:
 - Pass
 - Fail

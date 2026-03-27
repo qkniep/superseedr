@@ -17,11 +17,11 @@ use strum_macros::EnumIter;
 use crate::torrent_manager::DiskIoOperation;
 
 use crate::config::{
-    classify_shared_mode_settings_change, resolve_host_watch_path,
-    runtime_watch_paths, save_settings, shared_host_id, shared_inbox_path, shared_root_path,
-    upsert_torrent_metadata, FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry,
-    Settings, SettingsChangeScope, SortDirection, TorrentMetadataEntry, TorrentMetadataFileEntry,
-    TorrentSettings, TorrentSortColumn,
+    classify_shared_mode_settings_change, resolve_host_watch_path, runtime_watch_paths,
+    save_settings, shared_host_id, shared_inbox_path, shared_root_path, upsert_torrent_metadata,
+    FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SettingsChangeScope,
+    SortDirection, TorrentMetadataEntry, TorrentMetadataFileEntry, TorrentSettings,
+    TorrentSortColumn,
 };
 use crate::control_service::{
     control_event_details, online_control_success_message, plan_control_request,
@@ -34,8 +34,7 @@ use crate::persistence::activity_history::{
 use crate::persistence::event_journal::{
     append_event_journal_entry, load_event_journal_state, save_event_journal_state, ControlOrigin,
     EventCategory, EventDetails, EventJournalEntry, EventJournalState, EventScope, EventType,
-    IngestKind,
-    IngestOrigin,
+    IngestKind, IngestOrigin,
 };
 use crate::persistence::network_history::{
     load_network_history_state, save_network_history_state, NetworkHistoryPersistedState,
@@ -542,6 +541,7 @@ struct ClusterCapabilities {
     can_consume_shared_inbox: bool,
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IngestSource {
     TorrentFile,
@@ -654,6 +654,7 @@ pub(crate) enum CommandIngestResult {
     },
 }
 
+#[cfg(test)]
 fn move_file_with_fallback_impl<F>(
     source: &std::path::Path,
     destination: &std::path::Path,
@@ -1272,6 +1273,7 @@ fn spawn_persistence_writer(
 }
 
 impl App {
+    #[cfg(test)]
     pub async fn new(
         client_configs: Settings,
         runtime_mode: AppRuntimeMode,
@@ -1903,18 +1905,15 @@ impl App {
                         path, error
                     )
                 })?;
-                let source_path = crate::config::resolve_shared_cli_torrent_path(Path::new(
-                    payload.trim(),
-                ))
-                .map_err(|error| {
-                    format!(
-                        "Failed to resolve shared torrent path from file {:?}: {}",
-                        path, error
-                    )
-                })?;
-                Ok(ResolvedAddPayload::TorrentFile {
-                    source_path,
-                })
+                let source_path =
+                    crate::config::resolve_shared_cli_torrent_path(Path::new(payload.trim()))
+                        .map_err(|error| {
+                            format!(
+                                "Failed to resolve shared torrent path from file {:?}: {}",
+                                path, error
+                            )
+                        })?;
+                Ok(ResolvedAddPayload::TorrentFile { source_path })
             }
             IngestSource::MagnetFile => {
                 let payload = fs::read_to_string(path)
@@ -4771,10 +4770,10 @@ impl App {
         true
     }
 
-    fn record_watch_path_discovered(&mut self, path: &PathBuf) {
+    fn record_watch_path_discovered(&mut self, path: &Path) {
         if let Some(ingest_kind) = ingest_kind_from_path(path) {
             if self.record_ingest_queued(
-                path.clone(),
+                path.to_path_buf(),
                 IngestOrigin::WatchFolder,
                 ingest_kind,
                 self.source_watch_folder_for_path(path),
@@ -5953,6 +5952,8 @@ fn prune_rss_feed_errors(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::{
         apply_network_history_persist_result, build_persist_payload,
         clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
@@ -7250,7 +7251,10 @@ mod tests {
         std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
             .expect("create hosts dir");
         std::fs::write(
-            effective_root.join("hosts").join("node-a").join("config.toml"),
+            effective_root
+                .join("hosts")
+                .join("node-a")
+                .join("config.toml"),
             "client_port = 0\n",
         )
         .expect("write host config");
@@ -7358,7 +7362,10 @@ mod tests {
         std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
             .expect("create hosts dir");
         std::fs::write(
-            effective_root.join("hosts").join("node-a").join("config.toml"),
+            effective_root
+                .join("hosts")
+                .join("node-a")
+                .join("config.toml"),
             "client_port = 0\n",
         )
         .expect("write host config");
@@ -7417,7 +7424,10 @@ mod tests {
         std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
             .expect("create hosts dir");
         std::fs::write(
-            effective_root.join("hosts").join("node-a").join("config.toml"),
+            effective_root
+                .join("hosts")
+                .join("node-a")
+                .join("config.toml"),
             "client_port = 0\n",
         )
         .expect("write host config");
@@ -7460,7 +7470,10 @@ mod tests {
         std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
             .expect("create hosts dir");
         std::fs::write(
-            effective_root.join("hosts").join("node-a").join("config.toml"),
+            effective_root
+                .join("hosts")
+                .join("node-a")
+                .join("config.toml"),
             "client_port = 0\n",
         )
         .expect("write host config");
@@ -7540,7 +7553,10 @@ mod tests {
         std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
             .expect("create hosts dir");
         std::fs::write(
-            effective_root.join("hosts").join("node-a").join("config.toml"),
+            effective_root
+                .join("hosts")
+                .join("node-a")
+                .join("config.toml"),
             format!(
                 "client_port = 0\nwatch_folder = {:?}\n",
                 old_watch.to_string_lossy()

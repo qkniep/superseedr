@@ -24,7 +24,7 @@ pub fn create_watcher(
     )?;
 
     for path in watch_paths {
-        if let Err(e) = watcher.watch(&path, RecursiveMode::NonRecursive) {
+        if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
             tracing_event!(
                 Level::ERROR,
                 "Failed to watch command path {:?}: {}",
@@ -63,7 +63,7 @@ pub fn scan_watch_folder_paths(watch_paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     for watch_path in watch_paths {
-        if let Ok(entries) = fs::read_dir(&watch_path) {
+        if let Ok(entries) = fs::read_dir(watch_path) {
             for entry in entries.flatten() {
                 paths.push(entry.path());
             }
@@ -208,7 +208,7 @@ mod tests {
         let file_path = dir.join("queued-job.magnet");
         File::create(&file_path).unwrap();
 
-        let paths = scan_watch_folder_paths(&[dir.clone()]);
+        let paths = scan_watch_folder_paths(std::slice::from_ref(&dir));
         assert!(paths.contains(&file_path));
         let _ = fs::remove_dir_all(dir);
     }
