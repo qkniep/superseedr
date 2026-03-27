@@ -946,7 +946,7 @@ fn resolve_shared_config_selection() -> io::Result<Option<SharedConfigSelection>
         }));
     }
 
-    let Some(path) = load_launcher_shared_config()? else {
+    let Some(path) = load_launcher_shared_config().ok().flatten() else {
         return Ok(None);
     };
     let (mount_root, config_root) = resolve_shared_mount_and_config_root(path);
@@ -1496,10 +1496,7 @@ impl NormalConfigBackend {
 
     fn load_settings_for_cli(&self) -> io::Result<Settings> {
         if !self.paths.settings_path.exists() {
-            tracing_event!(
-                Level::INFO,
-                "No standalone settings found during CLI load."
-            );
+            tracing_event!(Level::INFO, "No standalone settings found during CLI load.");
             let settings = first_run_settings();
             if runtime_lock_is_held(local_lock_path().as_deref()) {
                 tracing_event!(
@@ -1861,11 +1858,33 @@ pub fn get_app_paths() -> Option<(PathBuf, PathBuf)> {
         let config_dir = proj_dirs.config_dir().to_path_buf();
         let data_dir = proj_dirs.data_local_dir().to_path_buf();
 
+        if fs::create_dir_all(&config_dir).is_ok() && fs::create_dir_all(&data_dir).is_ok() {
+            return Some((config_dir, data_dir));
+        }
+    }
+
+    fallback_app_paths()
+}
+
+fn fallback_app_paths() -> Option<(PathBuf, PathBuf)> {
+    #[cfg(windows)]
+    {
+        let config_base = env::var_os("APPDATA").map(PathBuf::from)?;
+        let data_base = env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("APPDATA").map(PathBuf::from))?;
+        let config_dir = config_base
+            .join("Jagalite")
+            .join("superseedr")
+            .join("config");
+        let data_dir = data_base.join("Jagalite").join("superseedr").join("data");
         fs::create_dir_all(&config_dir).ok()?;
         fs::create_dir_all(&data_dir).ok()?;
-
         Some((config_dir, data_dir))
-    } else {
+    }
+
+    #[cfg(not(windows))]
+    {
         None
     }
 }
@@ -3253,7 +3272,10 @@ mod tests {
             .load_settings_for_cli()
             .expect("missing host file should bootstrap for cli");
 
-        assert_eq!(loaded.default_download_folder, Some(dir.path().to_path_buf()));
+        assert_eq!(
+            loaded.default_download_folder,
+            Some(dir.path().to_path_buf())
+        );
         assert!(backend.paths.host_path.exists());
     }
 

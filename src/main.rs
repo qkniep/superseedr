@@ -438,6 +438,20 @@ fn shared_config_selection_json(selection: &crate::config::SharedConfigSelection
     })
 }
 
+fn optional_path_json(path: Option<PathBuf>) -> Value {
+    match path {
+        Some(path) => json!(path),
+        None => Value::Null,
+    }
+}
+
+fn print_optional_sidecar_path(sidecar_path: Option<&PathBuf>) {
+    match sidecar_path {
+        Some(sidecar_path) => println!("Sidecar Path: {}", sidecar_path.display()),
+        None => println!("Sidecar Path: <unavailable>"),
+    }
+}
+
 fn process_set_shared_config_command(
     path: &std::path::Path,
     output_mode: OutputMode,
@@ -483,7 +497,7 @@ fn process_clear_shared_config_command(output_mode: OutputMode) -> io::Result<()
 
 fn process_show_shared_config_command(output_mode: OutputMode) -> io::Result<()> {
     let selection = effective_shared_config_selection()?;
-    let sidecar_path = persisted_shared_config_path()?;
+    let sidecar_path = persisted_shared_config_path().ok();
 
     match (output_mode, selection) {
         (OutputMode::Json, Some(selection)) => {
@@ -494,7 +508,7 @@ fn process_show_shared_config_command(output_mode: OutputMode) -> io::Result<()>
                 json!({
                     "enabled": true,
                     "selection": shared_config_selection_json(&selection),
-                    "sidecar_path": sidecar_path,
+                    "sidecar_path": optional_path_json(sidecar_path.clone()),
                 }),
             );
         }
@@ -506,7 +520,7 @@ fn process_show_shared_config_command(output_mode: OutputMode) -> io::Result<()>
                 json!({
                     "enabled": false,
                     "selection": Value::Null,
-                    "sidecar_path": sidecar_path,
+                    "sidecar_path": optional_path_json(sidecar_path.clone()),
                 }),
             );
         }
@@ -521,11 +535,11 @@ fn process_show_shared_config_command(output_mode: OutputMode) -> io::Result<()>
             );
             println!("Mount Root: {}", selection.mount_root.display());
             println!("Config Root: {}", selection.config_root.display());
-            println!("Sidecar Path: {}", sidecar_path.display());
+            print_optional_sidecar_path(sidecar_path.as_ref());
         }
         (OutputMode::Text, None) => {
             println!("Shared config is disabled.");
-            println!("Sidecar Path: {}", sidecar_path.display());
+            print_optional_sidecar_path(sidecar_path.as_ref());
         }
     }
 
@@ -569,7 +583,7 @@ fn process_clear_host_id_command(output_mode: OutputMode) -> io::Result<()> {
 
 fn process_show_host_id_command(output_mode: OutputMode) -> io::Result<()> {
     let selection = effective_host_id_selection()?;
-    let sidecar_path = persisted_host_id_path()?;
+    let sidecar_path = persisted_host_id_path().ok();
 
     match output_mode {
         OutputMode::Json => {
@@ -580,7 +594,7 @@ fn process_show_host_id_command(output_mode: OutputMode) -> io::Result<()> {
                 json!({
                     "host_id": selection.host_id,
                     "source": selection.source,
-                    "sidecar_path": sidecar_path,
+                    "sidecar_path": optional_path_json(sidecar_path),
                 }),
             );
         }
@@ -596,7 +610,7 @@ fn process_show_host_id_command(output_mode: OutputMode) -> io::Result<()> {
                     HostIdSource::Default => "default",
                 }
             );
-            println!("Sidecar Path: {}", sidecar_path.display());
+            print_optional_sidecar_path(sidecar_path.as_ref());
         }
     }
 
@@ -1703,5 +1717,14 @@ mod tests {
             std::env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
         }
         clear_shared_config_state_for_tests();
+    }
+
+    #[test]
+    fn optional_path_json_serializes_path_or_null() {
+        assert_eq!(
+            optional_path_json(Some(PathBuf::from("C:\\sample\\sidecar.toml"))),
+            json!("C:\\sample\\sidecar.toml")
+        );
+        assert_eq!(optional_path_json(None), Value::Null);
     }
 }
