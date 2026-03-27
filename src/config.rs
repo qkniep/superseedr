@@ -1300,9 +1300,77 @@ fn write_shared_cluster_revision_marker(root_dir: &Path) -> io::Result<()> {
     write_string_atomically(&revision_path, &revision)
 }
 
-fn bootstrap_shared_host_config(host_path: &Path) -> io::Result<HostConfig> {
+fn validate_shared_runtime_root(paths: &SharedConfigPaths) -> io::Result<()> {
+    if !paths.mount_dir.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "Shared root '{}' does not exist. If this is a network share, make sure it is mounted.",
+                paths.mount_dir.display()
+            ),
+        ));
+    }
+
+    let mount_metadata = fs::metadata(&paths.mount_dir).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "Could not access shared root '{}': {}",
+                paths.mount_dir.display(),
+                error
+            ),
+        )
+    })?;
+    if !mount_metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Shared root '{}' is not a directory.",
+                paths.mount_dir.display()
+            ),
+        ));
+    }
+
+    fs::read_dir(&paths.mount_dir).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "Shared root '{}' is not readable: {}",
+                paths.mount_dir.display(),
+                error
+            ),
+        )
+    })?;
+
+    Ok(())
+}
+
+fn bootstrap_shared_host_config(paths: &SharedConfigPaths) -> io::Result<HostConfig> {
     let host = HostConfig::default();
-    write_toml_atomically(host_path, &host)?;
+    fs::create_dir_all(&paths.host_dir).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "Shared root '{}' is not writable for host '{}'; could not create '{}': {}",
+                paths.mount_dir.display(),
+                paths.host_id,
+                paths.host_dir.display(),
+                error
+            ),
+        )
+    })?;
+    write_toml_atomically(&paths.host_path, &host).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "Shared root '{}' is not writable for host '{}'; could not write '{}': {}",
+                paths.mount_dir.display(),
+                paths.host_id,
+                paths.host_path.display(),
+                error
+            ),
+        )
+    })?;
     Ok(host)
 }
 
@@ -1415,6 +1483,7 @@ impl NormalConfigBackend {
 
 impl SharedConfigBackend {
     fn load_settings(&self) -> io::Result<Settings> {
+        validate_shared_runtime_root(&self.paths)?;
         let settings_config: SharedSettingsConfig =
             read_toml_or_default(&self.paths.settings_path)?;
         let catalog: CatalogConfig = read_toml_or_default(&self.paths.catalog_path)?;
@@ -1427,7 +1496,7 @@ impl SharedConfigBackend {
                 "Bootstrapping missing shared host config at {:?}",
                 self.paths.host_path
             );
-            bootstrap_shared_host_config(&self.paths.host_path)?
+            bootstrap_shared_host_config(&self.paths)?
         };
 
         let layered = LayeredConfig {
@@ -2911,6 +2980,77 @@ mod tests {
         let host: HostConfig =
             read_toml_or_default(&backend.paths.host_path).expect("read bootstrapped host file");
         assert_eq!(host, HostConfig::default());
+    }
+
+    #[test]
+    fn test_shared_backend_reports_missing_mount_root_clearly() {
+        let _guard = shared_backend_guard().lock().unwrap();
+        clear_shared_config_state();
+        let dir = tempdir().expect("create tempdir");
+        let missing_mount = dir.path().join("missing-mount");
+        let shared_root = missing_mount.join("superseedr-config");
+        let host_dir = shared_root.join("hosts").join("node-a");
+        let backend = SharedConfigBackend {
+            paths: SharedConfigPaths {
+                mount_dir: missing_mount.clone(),
+                root_dir: shared_root.clone(),
+                settings_path: shared_root.join("settings.toml"),
+                catalog_path: shared_root.join("catalog.toml"),
+                metadata_path: shared_root.join("torrent_metadata.toml"),
+                host_dir: host_dir.clone(),
+                host_path: host_dir.join("config.toml"),
+                host_id: "node-a".to_string(),
+            },
+        };
+
+        let error = backend
+            .load_settings()
+            .expect_err("missing mount root should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            error.to_string().contains("does not exist"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains("network share"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_shared_host_config_error_mentions_host_and_path() {
+        let dir = tempdir().expect("create tempdir");
+        let shared_root = dir.path().join("superseedr-config");
+        let host_dir = shared_root.join("hosts").join("node-a");
+        let paths = SharedConfigPaths {
+            mount_dir: dir.path().to_path_buf(),
+            root_dir: shared_root.clone(),
+            settings_path: shared_root.join("settings.toml"),
+            catalog_path: shared_root.join("catalog.toml"),
+            metadata_path: shared_root.join("torrent_metadata.toml"),
+            host_dir: host_dir.clone(),
+            host_path: host_dir.join("config.toml"),
+            host_id: "node-a".to_string(),
+        };
+
+        fs::write(&shared_root, "not a directory").expect("create blocking file");
+
+        let error =
+            bootstrap_shared_host_config(&paths).expect_err("bootstrap should fail on bad parent");
+
+        assert!(
+            error.to_string().contains("node-a"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains(&paths.host_dir.display().to_string()),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains("not writable"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
