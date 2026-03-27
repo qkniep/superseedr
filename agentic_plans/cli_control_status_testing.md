@@ -36,6 +36,13 @@ This plan does not require:
 - Treat `./tmp/` as both scratch space and the shared-root mount for the local round.
 - Do not scatter temporary artifacts elsewhere in the repo.
 - Do not commit `./tmp/` contents.
+- If testing against a real mounted shared volume, create a dedicated test subfolder inside that mounted volume and use that subfolder as the shared mount root.
+- Do not point tests at the root of a production or long-lived shared volume.
+
+Examples of acceptable mounted-volume test roots:
+- `X:\superseedr-test-round\`
+- `/Volumes/seedbox/superseedr-test-round/`
+- `/mnt/shared-drive/superseedr-test-round/`
 
 Recommended layout:
 - `./tmp/superseedr-config/hosts/`
@@ -53,6 +60,7 @@ Before recording any results, the human operator should set up the cluster inten
 
 Required preflight checks:
 - pick one shared mount root and reuse it consistently for the whole round
+- if using a mounted volume, create a dedicated test folder inside that volume first
 - confirm every runtime can read and write that same shared root
 - assign distinct host ids for each runtime, for example `host-a` and `host-b`
 - decide whether the phase is testing:
