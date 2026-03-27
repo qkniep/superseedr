@@ -17,7 +17,7 @@ Superseedr is a modern Rust BitTorrent client featuring a high-performance termi
 | **Experience** | **Networking** | **Engineering** |
 | :--- | :--- | :--- |
 | 🎨 **60 FPS TUI + Themes**<br>Fluid, animated interface with heatmaps and 40 live-switchable built-in themes. | 🐳 **Docker + VPN**<br>Gluetun integration with dynamic port reloading. | 🧬 **BitTorrent v2**<br>Hybrid swarms & Merkle tree verification. |
-| 📊 **Deep Analytics**<br>Real-time bandwidth graphs & peer metrics. | 📰 **RSS Feeds**<br>In-app feed tracking, filtering, and ingest. | 🧠 **Self-Tuning**<br>Adaptive limits control for max speed and I/O Stability. |
+| 📰 **RSS Feeds**<br>In-app feed tracking, filtering, and ingest. | 🧩 **Cluster Mode**<br>OS-agnostic shared torrent catalog with automatic failover. | 🧠 **Self-Tuning**<br>Adaptive limits control for max speed and I/O Stability. |
 | 🧲 **Magnet Links**<br>Native OS-level handler support. | 👻 **Private Mode**<br>Optional builds disabling DHT/PEX. | 📡 **Integrity Prober**<br>Continuous lightweight background integrity checks with fast recovery reprobes. |
 
 ### Terminal Torrenting With Superseedr
@@ -25,7 +25,7 @@ Superseedr is a modern Rust BitTorrent client featuring a high-performance termi
 * **Pushing TUI Boundaries:** Experience a fluid, 60 FPS interface that feels like a native GUI, featuring smooth animations, high-density visualizations, and 40 built-in themes rarely seen in terminal apps.
 * **See What's Happening:** Diagnose slow downloads instantly with deep swarm analytics, heatmaps, and live bandwidth graphs.
 * **Set It and Forget It:** Automatic port forwarding and dynamic listener reloading in Docker ensure your connection stays alive, even if your VPN resets.
-* **Crash-Proof Design:** Leverages Rust's memory safety guarantees to run indefinitely on low-resource servers without leaks or instability.
+* **Crash-Proof Design:** Leverages Rust's memory safety guarantees to run indefinitely on low-resource servers without leaks or instability, and shared cluster mode adds automatic failover across hosts.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Jagalite/superseedr-assets/main/superseedr-matix.gif"/>
@@ -238,17 +238,39 @@ Check out the [Superseedr Plugins Repository](https://github.com/Jagalite/supers
 <summary><strong>Click to expand automation details</strong></summary>
 
 ### 1. File Watcher & Auto-Ingest
-The application automatically watches configured directories for new content. You can drop files into your watch folder to trigger actions immediately.
+Superseedr uses a file-based watch-folder architecture so local automation,
+scripts, containers, and other processes can control ingestion without needing a
+separate daemon protocol.
+
+Each node can watch a local `watch_folder`. In standalone mode, that watch
+folder feeds the local client directly. In shared mode, followers watch their
+own local folders and relay supported files into the shared inbox so the leader
+can process them and update the shared catalog.
+
+Processed watch files are archived after handling so the queue stays
+deterministic and auditable.
 
 | File Type | Action |
 | :--- | :--- |
-| **`.torrent`** | Automatically adds the torrent and begins downloading. |
-| **`.magnet`** | A text file containing a magnet link. Adds the magnet download. |
-| **`.path`** | A text file containing a local absolute path to a `.torrent` file. |
-| **`shutdown.cmd`** | If a file named `shutdown.cmd` appears, the client will initiate a graceful shutdown. |
+| **`.torrent`** | Adds a torrent from a torrent file. In shared mode, follower-side ingest may stage the torrent for leader processing. |
+| **`.magnet`** | Adds a torrent from a magnet link stored as text. |
+| **`.path`** | Adds a torrent from a referenced torrent-file path. In shared mode, cross-host handling uses portable shared-root-aware staging. |
+| **`.control`** | Applies queued control requests such as pause, resume, remove, purge, and priority changes. |
+| **`shutdown.cmd`** | Requests graceful shutdown of the running client or shared leader. |
+
+See [`docs/shared-config.md`](docs/shared-config.md) for shared inbox and
+leader/follower watch-folder behavior.
 
 ### 2. CLI Control
-You can control the running daemon using the built-in CLI commands. These commands write to the watch folder, allowing you to control the app from scripts or other containers.
+The CLI uses the same file-oriented control model. Depending on mode, commands
+either:
+
+- write control files for a running client
+- queue requests through the shared inbox for the leader
+- or apply offline mutations directly when no runtime is available
+
+That makes the CLI easy to script from shells, containers, task runners, and
+other local automation.
 
 ```bash
 # Add a magnet link
@@ -257,15 +279,15 @@ superseedr add "magnet:?xt=urn:btih:..."
 # Add a torrent file by path
 superseedr add "/path/to/linux.iso.torrent"
 
+# Inspect the current shared launcher selection
+superseedr show-shared-config
+superseedr show-host-id
+
 # Persist shared launcher config for installed/protocol launches
 superseedr set-shared-config "/path/to/seedbox"
 
 # Persist a launcher host id for shared mode
 superseedr set-host-id "desktop-a"
-
-# Inspect the effective shared launcher config
-superseedr show-shared-config
-superseedr show-host-id
 
 # Convert local config into layered shared config
 superseedr to-shared "/path/to/seedbox"
@@ -277,11 +299,16 @@ superseedr to-standalone
 superseedr stop-client
 ```
 
-### 3. Status API & Monitoring
-For external monitoring dashboards or health checks, Superseedr periodically dumps its full internal state to a JSON file.
+See [`docs/shared-config.md`](docs/shared-config.md) for shared CLI behavior,
+offline behavior, and leader/follower routing.
 
-* **Output Location:** `status_files/app_state.json` (inside your data directory).
-* **Content:** Contains CPU/RAM usage, total transfer stats, and detailed metrics for every active torrent.
+### 3. Status API & Monitoring
+For external dashboards, health checks, and lightweight automation, Superseedr
+periodically dumps runtime state to JSON.
+
+* **Output Location:** a status JSON file in the runtime data area.
+* **Shared Mode:** each host writes its own status file, and shared CLI status follows the current leader snapshot.
+* **Content:** includes transfer stats, runtime metrics, and torrent-level state.
 
 #### Configuration
 You can control how often this file is updated using the `output_status_interval` setting.
@@ -299,6 +326,33 @@ RSS download history is persisted for deduplication and UI metadata, but it is c
 * When the history grows past 1000, the **oldest entries are pruned** first.
 * This limit applies to persisted runtime history in `persistence/rss.toml`.
 </details>
+
+## 🧩 Shared Configurations & Cluster Mode
+
+Shared mode is built for people who want one portable torrent library and one
+shared desired-state catalog across multiple machines. Instead of manually
+keeping separate clients in sync, Superseedr stores shared configuration and the
+cluster torrent catalog on a mounted shared root so every node can converge on
+the same view of what should be running. See
+[`docs/shared-config.md`](docs/shared-config.md) for the full shared-mode guide.
+
+Cluster mode turns that shared catalog into an active multi-node setup. One node
+acts as leader and updates shared desired state, while other nodes stay online
+as followers that continue seeding and apply the leader-written catalog. If the
+leader goes away, another node can take over automatically, and each host can
+mount the same shared root at a different local path for cross-OS operation.
+
+Useful commands:
+
+```bash
+superseedr set-shared-config "/path/to/seedbox"
+superseedr set-host-id "desktop-a"
+superseedr show-shared-config
+superseedr show-host-id
+superseedr to-shared "/path/to/seedbox"
+superseedr to-standalone
+```
+
 
 ## 🧠 Advanced: Architecture & Engineering
 
