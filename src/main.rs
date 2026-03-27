@@ -37,9 +37,12 @@ use std::time::Duration;
 
 use crate::config::Settings;
 use crate::config::{
-    clear_persisted_shared_config, effective_shared_config_selection, is_shared_config_mode,
-    load_settings, persisted_shared_config_path, resolve_command_watch_path,
-    set_persisted_shared_config, shared_lock_path, SharedConfigSource,
+    clear_persisted_host_id, clear_persisted_shared_config, convert_shared_to_standalone,
+    convert_standalone_to_shared, effective_host_id_selection,
+    effective_shared_config_selection, is_shared_config_mode, load_settings,
+    persisted_host_id_path, persisted_shared_config_path, resolve_command_watch_path,
+    set_persisted_host_id, set_persisted_shared_config, shared_lock_path, HostIdSource,
+    SharedConfigSource,
 };
 use crate::control_service::{
     apply_offline_control_request, apply_offline_purge, control_event_details, list_torrent_files,
@@ -55,7 +58,8 @@ use crate::integrations::control::{ControlPriorityTarget, ControlRequest};
 use crate::integrations::status::{offline_output_json, status_file_path};
 use crate::persistence::event_journal::{
     append_event_journal_entry, event_journal_json, load_event_journal_state,
-    save_event_journal_state, ControlOrigin, EventCategory, EventJournalEntry, EventType,
+    save_event_journal_state, ControlOrigin, EventCategory, EventJournalEntry, EventScope,
+    EventType,
 };
 use crate::torrent_identity::info_hash_from_torrent_source;
 use serde_json::{json, Value};
@@ -134,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let has_cli_request = cli.input.is_some() || cli.command.is_some();
 
-    if let Some(result) = process_launcher_shared_config_command(&cli, output_mode) {
+    if let Some(result) = process_launcher_setup_command(&cli, output_mode) {
         if let Err(error) = result {
             if output_mode == OutputMode::Json {
                 print_json_error(cli_command_name(cli.command.as_ref()), &error.to_string());
@@ -143,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             std::process::exit(1);
         }
-        tracing::info!("Launcher shared config command processed, exiting temporary instance.");
+        tracing::info!("Launcher setup command processed, exiting temporary instance.");
         return Ok(());
     }
 
@@ -350,15 +354,19 @@ fn try_acquire_app_lock() -> io::Result<Option<File>> {
     }
 }
 
-fn process_launcher_shared_config_command(
-    cli: &Cli,
-    output_mode: OutputMode,
-) -> Option<io::Result<()>> {
+fn process_launcher_setup_command(cli: &Cli, output_mode: OutputMode) -> Option<io::Result<()>> {
     let command = cli.command.as_ref()?;
     match command {
-        Commands::SetSharedConfig { path } => Some(process_set_shared_config_command(path, output_mode)),
+        Commands::SetSharedConfig { path } => {
+            Some(process_set_shared_config_command(path, output_mode))
+        }
         Commands::ClearSharedConfig => Some(process_clear_shared_config_command(output_mode)),
         Commands::ShowSharedConfig => Some(process_show_shared_config_command(output_mode)),
+        Commands::SetHostId { host_id } => Some(process_set_host_id_command(host_id, output_mode)),
+        Commands::ClearHostId => Some(process_clear_host_id_command(output_mode)),
+        Commands::ShowHostId => Some(process_show_host_id_command(output_mode)),
+        Commands::ToShared { path } => Some(process_to_shared_command(path, output_mode)),
+        Commands::ToStandalone => Some(process_to_standalone_command(output_mode)),
         _ => None,
     }
 }
@@ -459,6 +467,104 @@ fn process_show_shared_config_command(output_mode: OutputMode) -> io::Result<()>
         }
     }
 
+    Ok(())
+}
+
+fn process_set_host_id_command(host_id: &str, output_mode: OutputMode) -> io::Result<()> {
+    let host_id = set_persisted_host_id(host_id)?;
+    let sidecar_path = persisted_host_id_path()?;
+    print_success(
+        output_mode,
+        "set-host-id",
+        &format!("Persisted host id '{}'.", host_id),
+        json!({
+            "host_id": host_id,
+            "sidecar_path": sidecar_path,
+        }),
+    );
+    Ok(())
+}
+
+fn process_clear_host_id_command(output_mode: OutputMode) -> io::Result<()> {
+    let cleared = clear_persisted_host_id()?;
+    let sidecar_path = persisted_host_id_path()?;
+    let message = if cleared {
+        "Cleared persisted host id."
+    } else {
+        "No persisted host id was set."
+    };
+    print_success(
+        output_mode,
+        "clear-host-id",
+        message,
+        json!({
+            "cleared": cleared,
+            "sidecar_path": sidecar_path,
+        }),
+    );
+    Ok(())
+}
+
+fn process_show_host_id_command(output_mode: OutputMode) -> io::Result<()> {
+    let selection = effective_host_id_selection()?;
+    let sidecar_path = persisted_host_id_path()?;
+
+    match output_mode {
+        OutputMode::Json => {
+            print_success(
+                output_mode,
+                "show-host-id",
+                "Resolved host id.",
+                json!({
+                    "host_id": selection.host_id,
+                    "source": selection.source,
+                    "sidecar_path": sidecar_path,
+                }),
+            );
+        }
+        OutputMode::Text => {
+            println!("Host ID: {}", selection.host_id);
+            println!(
+                "Source: {}",
+                match selection.source {
+                    HostIdSource::Env => "env",
+                    HostIdSource::Launcher => "launcher",
+                    HostIdSource::Hostname => "hostname",
+                    HostIdSource::System => "system",
+                    HostIdSource::Default => "default",
+                }
+            );
+            println!("Sidecar Path: {}", sidecar_path.display());
+        }
+    }
+
+    Ok(())
+}
+
+fn process_to_shared_command(path: &std::path::Path, output_mode: OutputMode) -> io::Result<()> {
+    let selection = convert_standalone_to_shared(path)?;
+    print_success(
+        output_mode,
+        "to-shared",
+        &format!(
+            "Converted standalone config to shared config at {}.",
+            selection.mount_root.display()
+        ),
+        json!({
+            "selection": shared_config_selection_json(&selection),
+        }),
+    );
+    Ok(())
+}
+
+fn process_to_standalone_command(output_mode: OutputMode) -> io::Result<()> {
+    convert_shared_to_standalone()?;
+    print_success(
+        output_mode,
+        "to-standalone",
+        "Converted shared config to standalone config.",
+        json!({}),
+    );
     Ok(())
 }
 
@@ -959,6 +1065,7 @@ fn process_journal_command(output_mode: OutputMode) -> io::Result<()> {
                 }
 
                 println!("#{} {} {:?}", entry.id, entry.ts_iso, entry.event_type);
+                println!("Scope: {:?}", entry.scope);
                 println!("Category: {:?}", entry.category);
                 if let Some(host_id) = &entry.host_id {
                     println!("Host: {}", host_id);
@@ -1165,6 +1272,11 @@ fn cli_command_name(command: Option<&Commands>) -> Option<&'static str> {
         Some(Commands::SetSharedConfig { .. }) => Some("set-shared-config"),
         Some(Commands::ClearSharedConfig) => Some("clear-shared-config"),
         Some(Commands::ShowSharedConfig) => Some("show-shared-config"),
+        Some(Commands::SetHostId { .. }) => Some("set-host-id"),
+        Some(Commands::ClearHostId) => Some("clear-host-id"),
+        Some(Commands::ShowHostId) => Some("show-host-id"),
+        Some(Commands::ToShared { .. }) => Some("to-shared"),
+        Some(Commands::ToStandalone) => Some("to-standalone"),
         Some(Commands::Torrents) => Some("torrents"),
         Some(Commands::Info { .. }) => Some("info"),
         Some(Commands::Status { .. }) => Some("status"),
@@ -1247,6 +1359,11 @@ fn record_offline_control_journal_entry(request: &ControlRequest, result: &Resul
     append_event_journal_entry(
         &mut journal,
         EventJournalEntry {
+            scope: if config::is_shared_config_mode() {
+                EventScope::Shared
+            } else {
+                EventScope::Host
+            },
             host_id: config::shared_host_id(),
             ts_iso: chrono::Utc::now().to_rfc3339(),
             category: EventCategory::Control,

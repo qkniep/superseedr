@@ -650,7 +650,7 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         "Tab / Shift+Tab",
                         ctx.apply(Style::default().fg(ctx.state_selected())),
                     )),
-                    Cell::from("Cycle between ALL, ADDED, COMPLETE, and HEALTH"),
+                    Cell::from("Cycle between ALL, QUEUE, COMMANDS, and HEALTH"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(

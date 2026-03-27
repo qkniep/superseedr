@@ -33,7 +33,8 @@ use crate::persistence::activity_history::{
 };
 use crate::persistence::event_journal::{
     append_event_journal_entry, load_event_journal_state, save_event_journal_state, ControlOrigin,
-    EventCategory, EventDetails, EventJournalEntry, EventJournalState, EventType, IngestKind,
+    EventCategory, EventDetails, EventJournalEntry, EventJournalState, EventScope, EventType,
+    IngestKind,
     IngestOrigin,
 };
 use crate::persistence::network_history::{
@@ -876,17 +877,17 @@ pub struct FileBrowserUiState {
 pub enum JournalFilter {
     #[default]
     All,
-    Added,
-    Complete,
+    Queue,
+    Commands,
     Health,
 }
 
 impl JournalFilter {
     pub fn next(self) -> Self {
         match self {
-            Self::All => Self::Added,
-            Self::Added => Self::Complete,
-            Self::Complete => Self::Health,
+            Self::All => Self::Queue,
+            Self::Queue => Self::Commands,
+            Self::Commands => Self::Health,
             Self::Health => Self::All,
         }
     }
@@ -894,17 +895,17 @@ impl JournalFilter {
     pub fn prev(self) -> Self {
         match self {
             Self::All => Self::Health,
-            Self::Added => Self::All,
-            Self::Complete => Self::Added,
-            Self::Health => Self::Complete,
+            Self::Queue => Self::All,
+            Self::Commands => Self::Queue,
+            Self::Health => Self::Commands,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::All => "ALL",
-            Self::Added => "ADDED",
-            Self::Complete => "COMPLETE",
+            Self::Queue => "QUEUE",
+            Self::Commands => "COMMANDS",
             Self::Health => "HEALTH",
         }
     }
@@ -4678,6 +4679,14 @@ impl App {
         append_event_journal_entry(&mut self.app_state.event_journal_state, entry);
     }
 
+    fn control_event_scope(&self) -> EventScope {
+        if crate::config::is_shared_config_mode() {
+            EventScope::Shared
+        } else {
+            EventScope::Host
+        }
+    }
+
     fn persist_torrent_metadata_snapshot(
         &self,
         info_hash: &[u8],
@@ -4789,6 +4798,7 @@ impl App {
             },
         );
         self.append_event_journal_entry(EventJournalEntry {
+            scope: self.control_event_scope(),
             host_id: self.event_journal_host_id.clone(),
             ts_iso: chrono::Utc::now().to_rfc3339(),
             category: EventCategory::Control,
@@ -4834,6 +4844,7 @@ impl App {
             Err(message) => (EventType::ControlFailed, Some(message)),
         };
         self.append_event_journal_entry(EventJournalEntry {
+            scope: self.control_event_scope(),
             host_id: self.event_journal_host_id.clone(),
             ts_iso: chrono::Utc::now().to_rfc3339(),
             category: EventCategory::Control,

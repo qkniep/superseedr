@@ -39,6 +39,17 @@ pub enum Commands {
     },
     ClearSharedConfig,
     ShowSharedConfig,
+    SetHostId {
+        #[arg(value_name = "HOST_ID")]
+        host_id: String,
+    },
+    ClearHostId,
+    ShowHostId,
+    ToShared {
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
+    ToStandalone,
     Torrents,
     Info {
         #[arg(value_name = "INFO_HASH_HEX_OR_PATH")]
@@ -244,6 +255,11 @@ where
         | Commands::SetSharedConfig { .. }
         | Commands::ClearSharedConfig
         | Commands::ShowSharedConfig
+        | Commands::SetHostId { .. }
+        | Commands::ClearHostId
+        | Commands::ShowHostId
+        | Commands::ToShared { .. }
+        | Commands::ToStandalone
         | Commands::Torrents
         | Commands::Info { .. }
         | Commands::Purge { .. }
@@ -668,6 +684,36 @@ mod tests {
         match parsed.command.expect("subcommand") {
             Commands::SetSharedConfig { path } => {
                 assert_eq!(path, PathBuf::from("C:\\shared-root\\superseedr-config"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_set_host_id_command_parses_without_panicking() {
+        Cli::command().debug_assert();
+
+        let parsed = Cli::try_parse_from(["superseedr", "set-host-id", "office-node"])
+            .expect("set-host-id command should parse");
+
+        match parsed.command.expect("subcommand") {
+            Commands::SetHostId { host_id } => {
+                assert_eq!(host_id, "office-node");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_to_shared_command_parses_without_panicking() {
+        Cli::command().debug_assert();
+
+        let parsed = Cli::try_parse_from(["superseedr", "to-shared", "C:\\shared-root"])
+            .expect("to-shared command should parse");
+
+        match parsed.command.expect("subcommand") {
+            Commands::ToShared { path } => {
+                assert_eq!(path, PathBuf::from("C:\\shared-root"));
             }
             other => panic!("unexpected command: {other:?}"),
         }

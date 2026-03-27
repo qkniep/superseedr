@@ -15,6 +15,12 @@ Shared mode is enabled from the first available source in this order:
 2. persisted launcher sidecar config set by the CLI
 3. normal mode
 
+Host id is resolved from:
+
+1. `SUPERSEEDR_SHARED_HOST_ID`
+2. persisted launcher host-id sidecar config
+3. sanitized hostname fallback
+
 This makes installed browser and OS protocol launches work even when they do not
 inherit your shell environment.
 
@@ -67,6 +73,9 @@ without editing runtime `settings.toml`:
 superseedr set-shared-config /mnt/shared-drive
 superseedr show-shared-config
 superseedr clear-shared-config
+superseedr set-host-id seedbox-a
+superseedr show-host-id
+superseedr clear-host-id
 ```
 
 Rules:
@@ -74,15 +83,34 @@ Rules:
 - `set-shared-config` requires an absolute path
 - the path may be either the mount root or an explicit `.../superseedr-config`
 - Superseedr normalizes and stores the mount root in a dedicated launcher sidecar file
+- `set-host-id` stores a sanitized host id in a separate launcher sidecar file
 - `show-shared-config` reports the effective source and resolved paths
+- `show-host-id` reports the effective host id and its source
 - `clear-shared-config` disables persisted shared mode unless the env var is still set
+- `clear-host-id` removes the persisted launcher host id unless the env var is still set
 
 Examples:
 
 ```bash
 superseedr set-shared-config /mnt/shared-drive
 superseedr set-shared-config /mnt/shared-drive/superseedr-config
+superseedr set-host-id desktop-a
 ```
+
+## Conversion Commands
+
+You can convert between standalone local config and layered shared config:
+
+```bash
+superseedr to-shared /mnt/shared-drive
+superseedr to-standalone
+```
+
+Notes:
+
+- `to-shared` reads the current standalone local config and writes layered shared files
+- `to-standalone` reads the currently active shared config selection and writes local standalone files
+- neither command changes the launcher sidecars by itself
 
 ## Shared Root Layout
 

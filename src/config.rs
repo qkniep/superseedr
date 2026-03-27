@@ -292,6 +292,7 @@ const LEGACY_SHARED_HOST_ID_ENV: &str = "SUPERSEEDR_HOST_ID";
 const SHARED_TORRENT_SOURCE_PREFIX: &str = "shared:";
 const SHARED_CONFIG_SUBDIR: &str = "superseedr-config";
 const LAUNCHER_SHARED_CONFIG_FILE: &str = "launcher_shared_config.toml";
+const LAUNCHER_HOST_ID_FILE: &str = "launcher_host_id.toml";
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
 #[serde(default)]
@@ -299,11 +300,33 @@ struct LauncherSharedConfig {
     shared_config_dir: Option<PathBuf>,
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+struct LauncherHostId {
+    host_id: Option<String>,
+}
+
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SharedConfigSource {
     Env,
     Launcher,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostIdSource {
+    Env,
+    Launcher,
+    Hostname,
+    System,
+    Default,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct HostIdSelection {
+    pub source: HostIdSource,
+    pub host_id: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -876,6 +899,16 @@ fn launcher_shared_config_path() -> io::Result<PathBuf> {
     Ok(config_dir.join(LAUNCHER_SHARED_CONFIG_FILE))
 }
 
+fn launcher_host_id_path() -> io::Result<PathBuf> {
+    let (config_dir, _) = get_app_paths().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Could not resolve application config directory",
+        )
+    })?;
+    Ok(config_dir.join(LAUNCHER_HOST_ID_FILE))
+}
+
 fn load_launcher_shared_config() -> io::Result<Option<PathBuf>> {
     let path = launcher_shared_config_path()?;
     if !path.exists() {
@@ -884,6 +917,18 @@ fn load_launcher_shared_config() -> io::Result<Option<PathBuf>> {
 
     let sidecar: LauncherSharedConfig = read_toml_or_default(&path)?;
     Ok(sidecar.shared_config_dir.filter(|value| !value.as_os_str().is_empty()))
+}
+
+fn load_launcher_host_id() -> io::Result<Option<String>> {
+    let path = launcher_host_id_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let sidecar: LauncherHostId = read_toml_or_default(&path)?;
+    Ok(sidecar
+        .host_id
+        .and_then(|value| sanitized_host_id_candidate(&value)))
 }
 
 fn resolve_shared_config_selection() -> io::Result<Option<SharedConfigSelection>> {
@@ -929,21 +974,38 @@ fn sanitized_host_id_candidate(raw: &str) -> Option<String> {
     (!sanitized.is_empty()).then_some(sanitized)
 }
 
-fn resolve_host_id_from_sources(
+fn resolve_host_id_selection_from_sources(
     explicit_host_id: Option<String>,
+    launcher_host_id: Option<String>,
     env_hostnames: Vec<String>,
     system_hostname: Option<String>,
-) -> String {
+) -> HostIdSelection {
     if let Some(host_id) = explicit_host_id
         .as_deref()
         .and_then(sanitized_host_id_candidate)
     {
-        return host_id;
+        return HostIdSelection {
+            source: HostIdSource::Env,
+            host_id,
+        };
+    }
+
+    if let Some(host_id) = launcher_host_id
+        .as_deref()
+        .and_then(sanitized_host_id_candidate)
+    {
+        return HostIdSelection {
+            source: HostIdSource::Launcher,
+            host_id,
+        };
     }
 
     for hostname in env_hostnames {
         if let Some(host_id) = sanitized_host_id_candidate(&hostname) {
-            return host_id;
+            return HostIdSelection {
+                source: HostIdSource::Hostname,
+                host_id,
+            };
         }
     }
 
@@ -951,23 +1013,39 @@ fn resolve_host_id_from_sources(
         .as_deref()
         .and_then(sanitized_host_id_candidate)
     {
-        return host_id;
+        return HostIdSelection {
+            source: HostIdSource::System,
+            host_id,
+        };
     }
 
-    "default-host".to_string()
+    HostIdSelection {
+        source: HostIdSource::Default,
+        host_id: "default-host".to_string(),
+    }
 }
 
 fn resolve_host_id() -> String {
+    resolve_host_id_selection().host_id
+}
+
+fn resolve_host_id_selection() -> HostIdSelection {
     let explicit_host_id = env::var(SHARED_HOST_ID_ENV)
         .ok()
         .or_else(|| env::var(LEGACY_SHARED_HOST_ID_ENV).ok());
+    let launcher_host_id = load_launcher_host_id().ok().flatten();
     let env_hostnames = ["HOSTNAME", "COMPUTERNAME"]
         .into_iter()
         .filter_map(|key| env::var(key).ok())
         .collect();
     let system_hostname = sysinfo::System::host_name();
 
-    resolve_host_id_from_sources(explicit_host_id, env_hostnames, system_hostname)
+    resolve_host_id_selection_from_sources(
+        explicit_host_id,
+        launcher_host_id,
+        env_hostnames,
+        system_hostname,
+    )
 }
 
 fn resolve_shared_config_paths() -> io::Result<Option<SharedConfigPaths>> {
@@ -1576,6 +1654,14 @@ pub fn persisted_shared_config_path() -> io::Result<PathBuf> {
     launcher_shared_config_path()
 }
 
+pub fn effective_host_id_selection() -> io::Result<HostIdSelection> {
+    Ok(resolve_host_id_selection())
+}
+
+pub fn persisted_host_id_path() -> io::Result<PathBuf> {
+    launcher_host_id_path()
+}
+
 pub fn set_persisted_shared_config(path: &Path) -> io::Result<SharedConfigSelection> {
     if !path.is_absolute() {
         return Err(io::Error::new(
@@ -1612,6 +1698,137 @@ pub fn clear_persisted_shared_config() -> io::Result<bool> {
     }
     clear_shared_config_state();
     Ok(existed)
+}
+
+pub fn set_persisted_host_id(host_id: &str) -> io::Result<String> {
+    let host_id = sanitized_host_id_candidate(host_id).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Host id must contain at least one letter or number",
+        )
+    })?;
+
+    let sidecar_path = launcher_host_id_path()?;
+    if let Some(parent) = sidecar_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_toml_atomically(
+        &sidecar_path,
+        &LauncherHostId {
+            host_id: Some(host_id.clone()),
+        },
+    )?;
+    clear_shared_config_state();
+    Ok(host_id)
+}
+
+pub fn clear_persisted_host_id() -> io::Result<bool> {
+    let sidecar_path = launcher_host_id_path()?;
+    let existed = sidecar_path.exists();
+    if existed {
+        fs::remove_file(&sidecar_path)?;
+    }
+    clear_shared_config_state();
+    Ok(existed)
+}
+
+fn local_normal_backend() -> io::Result<NormalConfigBackend> {
+    let (config_dir, _) = get_app_paths().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Could not resolve application config directory",
+        )
+    })?;
+    Ok(NormalConfigBackend {
+        paths: NormalConfigPaths {
+            settings_path: config_dir.join("settings.toml"),
+            metadata_path: config_dir.join("torrent_metadata.toml"),
+            backup_dir: config_dir.join("backups_settings_files"),
+        },
+    })
+}
+
+fn shared_backend_for_mount_root(path: &Path) -> io::Result<SharedConfigBackend> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Shared config path must be absolute",
+        ));
+    }
+
+    let (mount_dir, root_dir) = resolve_shared_mount_and_config_root(path.to_path_buf());
+    let host_id = resolve_host_id();
+    let host_dir = root_dir.join("hosts").join(&host_id);
+    Ok(SharedConfigBackend {
+        paths: SharedConfigPaths {
+            mount_dir,
+            root_dir: root_dir.clone(),
+            settings_path: root_dir.join("settings.toml"),
+            catalog_path: root_dir.join("catalog.toml"),
+            metadata_path: root_dir.join("torrent_metadata.toml"),
+            host_dir: host_dir.clone(),
+            host_path: host_dir.join("config.toml"),
+            host_id,
+        },
+    })
+}
+
+pub fn convert_standalone_to_shared(path: &Path) -> io::Result<SharedConfigSelection> {
+    let normal_backend = local_normal_backend()?;
+    let shared_backend = shared_backend_for_mount_root(path)?;
+    let settings = normal_backend.load_settings()?;
+    let metadata: TorrentMetadataConfig = read_toml_or_default(&normal_backend.paths.metadata_path)?;
+    validate_shared_runtime_settings(&settings, &shared_backend.paths.mount_dir)?;
+    fs::create_dir_all(&shared_backend.paths.host_dir)?;
+    let next_layered = LayeredConfig::from_shared_settings(
+        &settings,
+        &shared_backend.paths.mount_dir,
+        &shared_backend.paths.root_dir,
+        None,
+    )?;
+    let _ = write_toml_atomically_with_fingerprint(
+        &shared_backend.paths.settings_path,
+        &next_layered.settings,
+    )?;
+    let _ = write_toml_atomically_with_fingerprint(
+        &shared_backend.paths.catalog_path,
+        &next_layered.catalog,
+    )?;
+    let _ =
+        write_toml_atomically_with_fingerprint(&shared_backend.paths.host_path, &next_layered.host)?;
+    let next_metadata = sync_torrent_metadata_with_settings(metadata, &settings);
+    let _ = write_toml_atomically_with_fingerprint(
+        &shared_backend.paths.metadata_path,
+        &next_metadata,
+    )?;
+    write_shared_cluster_revision_marker(&shared_backend.paths.root_dir)?;
+
+    clear_shared_config_state();
+    Ok(SharedConfigSelection {
+        source: SharedConfigSource::Launcher,
+        mount_root: shared_backend.paths.mount_dir,
+        config_root: shared_backend.paths.root_dir,
+    })
+}
+
+pub fn convert_shared_to_standalone() -> io::Result<()> {
+    let shared_selection = resolve_shared_config_selection()?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Shared config is not enabled. Set shared config first or use SUPERSEEDR_SHARED_CONFIG_DIR.",
+        )
+    })?;
+    let normal_backend = local_normal_backend()?;
+    let shared_backend = shared_backend_for_mount_root(&shared_selection.mount_root)?;
+    let settings = shared_backend.load_settings()?;
+    let metadata: TorrentMetadataConfig = read_toml_or_default(&shared_backend.paths.metadata_path)?;
+
+    normal_backend.save_settings(&settings)?;
+    let next_metadata = sync_torrent_metadata_with_settings(metadata, &settings);
+    let _ =
+        write_toml_atomically_with_fingerprint(&normal_backend.paths.metadata_path, &next_metadata)?;
+    clear_shared_config_state();
+    Ok(())
 }
 
 pub fn is_shared_config_mode() -> bool {
@@ -2193,21 +2410,28 @@ mod tests {
 
     #[test]
     fn test_resolve_host_id_uses_system_hostname_fallback() {
-        let resolved =
-            resolve_host_id_from_sources(None, Vec::new(), Some("MacBook Pro.local".to_string()));
+        let resolved = resolve_host_id_selection_from_sources(
+            None,
+            None,
+            Vec::new(),
+            Some("MacBook Pro.local".to_string()),
+        );
 
-        assert_eq!(resolved, "macbook-pro.local");
+        assert_eq!(resolved.host_id, "macbook-pro.local");
+        assert_eq!(resolved.source, HostIdSource::System);
     }
 
     #[test]
     fn test_resolve_host_id_prefers_explicit_override() {
-        let resolved = resolve_host_id_from_sources(
+        let resolved = resolve_host_id_selection_from_sources(
             Some("Custom Laptop".to_string()),
+            None,
             vec!["IgnoredHost".to_string()],
             Some("IgnoredSystem".to_string()),
         );
 
-        assert_eq!(resolved, "custom-laptop");
+        assert_eq!(resolved.host_id, "custom-laptop");
+        assert_eq!(resolved.source, HostIdSource::Env);
     }
 
     #[test]
@@ -2915,6 +3139,177 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("absolute"));
 
+        set_app_paths_override_for_tests(None);
+        clear_shared_config_state();
+    }
+
+    #[test]
+    fn test_persisted_host_id_falls_back_after_env() {
+        let _guard = shared_backend_guard().lock().unwrap();
+        let temp = set_temp_app_paths();
+        let original_host_id = env::var_os(SHARED_HOST_ID_ENV);
+        let original_legacy_host_id = env::var_os(LEGACY_SHARED_HOST_ID_ENV);
+
+        set_persisted_host_id("Desk Node").expect("persist host id");
+        env::remove_var(SHARED_HOST_ID_ENV);
+        env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+
+        let selection = effective_host_id_selection().expect("resolve host id");
+        assert_eq!(selection.host_id, "desk-node");
+        assert_eq!(selection.source, HostIdSource::Launcher);
+        assert_eq!(
+            persisted_host_id_path().expect("persisted host id path"),
+            temp.path().join("config").join(LAUNCHER_HOST_ID_FILE)
+        );
+
+        if let Some(value) = original_host_id {
+            env::set_var(SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(SHARED_HOST_ID_ENV);
+        }
+        if let Some(value) = original_legacy_host_id {
+            env::set_var(LEGACY_SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        }
+        clear_persisted_host_id().expect("clear host id");
+        set_app_paths_override_for_tests(None);
+        clear_shared_config_state();
+    }
+
+    #[test]
+    fn test_host_id_env_takes_precedence_over_persisted_host_id() {
+        let _guard = shared_backend_guard().lock().unwrap();
+        let _temp = set_temp_app_paths();
+        let original_host_id = env::var_os(SHARED_HOST_ID_ENV);
+        let original_legacy_host_id = env::var_os(LEGACY_SHARED_HOST_ID_ENV);
+
+        set_persisted_host_id("desk-node").expect("persist host id");
+        env::set_var(SHARED_HOST_ID_ENV, "travel-node");
+        env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+
+        let selection = effective_host_id_selection().expect("resolve host id");
+        assert_eq!(selection.host_id, "travel-node");
+        assert_eq!(selection.source, HostIdSource::Env);
+
+        if let Some(value) = original_host_id {
+            env::set_var(SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(SHARED_HOST_ID_ENV);
+        }
+        if let Some(value) = original_legacy_host_id {
+            env::set_var(LEGACY_SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        }
+        clear_persisted_host_id().expect("clear host id");
+        set_app_paths_override_for_tests(None);
+        clear_shared_config_state();
+    }
+
+    #[test]
+    fn test_convert_standalone_to_shared_and_back_round_trips_settings() {
+        let _guard = shared_backend_guard().lock().unwrap();
+        let temp = set_temp_app_paths();
+        let shared_root = temp.path().join("shared-root");
+        let original_shared_dir = env::var_os(SHARED_CONFIG_DIR_ENV);
+        let original_host_id = env::var_os(SHARED_HOST_ID_ENV);
+        let original_legacy_host_id = env::var_os(LEGACY_SHARED_HOST_ID_ENV);
+
+        env::remove_var(SHARED_CONFIG_DIR_ENV);
+        env::set_var(SHARED_HOST_ID_ENV, "node-a");
+        env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        clear_shared_config_state();
+
+        let standalone_settings = Settings {
+            client_id: "standalone-node".to_string(),
+            client_port: 7788,
+            watch_folder: Some(PathBuf::from("/watch-local")),
+            default_download_folder: Some(shared_root.join("downloads")),
+            torrents: vec![TorrentSettings {
+                torrent_or_magnet: shared_root
+                    .join(SHARED_CONFIG_SUBDIR)
+                    .join("torrents")
+                    .join("1111111111111111111111111111111111111111.torrent")
+                    .to_string_lossy()
+                    .to_string(),
+                name: "Sample Convert".to_string(),
+                download_path: Some(shared_root.join("downloads").join("alpha")),
+                ..TorrentSettings::default()
+            }],
+            ..Settings::default()
+        };
+        let normal_backend = local_normal_backend().expect("local backend");
+        normal_backend
+            .save_settings(&standalone_settings)
+            .expect("save standalone settings");
+        let local_metadata = TorrentMetadataConfig {
+            torrents: vec![TorrentMetadataEntry {
+                info_hash_hex: "1111111111111111111111111111111111111111".to_string(),
+                torrent_name: "Sample Convert".to_string(),
+                total_size: 123,
+                is_multi_file: true,
+                files: vec![TorrentMetadataFileEntry {
+                    relative_path: "alpha.bin".to_string(),
+                    length: 123,
+                }],
+                file_priorities: HashMap::new(),
+            }],
+        };
+        let _ = write_toml_atomically_with_fingerprint(
+            &normal_backend.paths.metadata_path,
+            &local_metadata,
+        )
+        .expect("write local metadata");
+
+        let selection = convert_standalone_to_shared(&shared_root).expect("convert to shared");
+        assert_eq!(selection.mount_root, shared_root);
+        let shared_backend = shared_backend_for_mount_root(&shared_root).expect("shared backend");
+        let shared_settings = shared_backend.load_settings().expect("load shared settings");
+        assert_eq!(shared_settings.client_id, "standalone-node");
+        assert_eq!(shared_settings.client_port, 7788);
+        assert_eq!(shared_settings.watch_folder, Some(PathBuf::from("/watch-local")));
+        assert_eq!(
+            shared_settings.default_download_folder,
+            Some(shared_root.join("downloads"))
+        );
+        assert!(shared_backend.paths.host_path.exists());
+        assert!(shared_backend.paths.settings_path.exists());
+        assert!(shared_backend.paths.catalog_path.exists());
+
+        env::set_var(SHARED_CONFIG_DIR_ENV, &shared_root);
+        clear_shared_config_state();
+        convert_shared_to_standalone().expect("convert to standalone");
+        let reloaded_local = normal_backend.load_settings().expect("reload standalone settings");
+        let reloaded_metadata: TorrentMetadataConfig =
+            read_toml_or_default(&normal_backend.paths.metadata_path).expect("reload metadata");
+
+        assert_eq!(reloaded_local.client_id, "standalone-node");
+        assert_eq!(reloaded_local.client_port, 7788);
+        assert_eq!(reloaded_local.watch_folder, Some(PathBuf::from("/watch-local")));
+        assert_eq!(
+            reloaded_local.default_download_folder,
+            Some(shared_root.join("downloads"))
+        );
+        assert_eq!(reloaded_local.torrents.len(), 1);
+        assert_eq!(reloaded_metadata.torrents, local_metadata.torrents);
+
+        if let Some(value) = original_shared_dir {
+            env::set_var(SHARED_CONFIG_DIR_ENV, value);
+        } else {
+            env::remove_var(SHARED_CONFIG_DIR_ENV);
+        }
+        if let Some(value) = original_host_id {
+            env::set_var(SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(SHARED_HOST_ID_ENV);
+        }
+        if let Some(value) = original_legacy_host_id {
+            env::set_var(LEGACY_SHARED_HOST_ID_ENV, value);
+        } else {
+            env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        }
+        clear_persisted_host_id().ok();
         set_app_paths_override_for_tests(None);
         clear_shared_config_state();
     }

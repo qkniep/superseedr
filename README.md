@@ -71,12 +71,15 @@ root once:
 ```bash
 superseedr set-shared-config "/path/to/seedbox"
 superseedr show-shared-config
+superseedr set-host-id "desktop-a"
+superseedr show-host-id
 ```
 
 Clear it later with:
 
 ```bash
 superseedr clear-shared-config
+superseedr clear-host-id
 ```
 
 Startup precedence is:
@@ -84,6 +87,19 @@ Startup precedence is:
 1. `SUPERSEEDR_SHARED_CONFIG_DIR`
 2. persisted launcher shared config
 3. normal mode
+
+Host id precedence is:
+
+1. `SUPERSEEDR_SHARED_HOST_ID`
+2. persisted launcher host id
+3. hostname fallback
+
+You can also convert an existing local config:
+
+```bash
+superseedr to-shared "/path/to/seedbox"
+superseedr to-standalone
+```
 
 You can pass either the shared mount root or an explicit
 `/path/to/seedbox/superseedr-config`. Superseedr normalizes both forms.
@@ -244,8 +260,18 @@ superseedr add "/path/to/linux.iso.torrent"
 # Persist shared launcher config for installed/protocol launches
 superseedr set-shared-config "/path/to/seedbox"
 
+# Persist a launcher host id for shared mode
+superseedr set-host-id "desktop-a"
+
 # Inspect the effective shared launcher config
 superseedr show-shared-config
+superseedr show-host-id
+
+# Convert local config into layered shared config
+superseedr to-shared "/path/to/seedbox"
+
+# Convert the active shared config back into local standalone config
+superseedr to-standalone
 
 # Stop the client gracefully
 superseedr stop-client

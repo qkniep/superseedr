@@ -10,7 +10,16 @@ use std::path::{Path, PathBuf};
 use tracing::{event as tracing_event, Level};
 
 const EVENT_JOURNAL_FILE_NAME: &str = "event_journal.toml";
+const SHARED_EVENT_JOURNAL_FILE_NAME: &str = "shared_event_journal.toml";
 pub const EVENT_JOURNAL_CAP: usize = 5_000;
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EventScope {
+    #[default]
+    Host,
+    Shared,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +101,7 @@ pub enum EventDetails {
 #[serde(default)]
 pub struct EventJournalEntry {
     pub id: u64,
+    pub scope: EventScope,
     pub host_id: Option<String>,
     pub ts_iso: String,
     pub category: EventCategory,
@@ -123,8 +133,19 @@ pub fn event_journal_state_file_path() -> io::Result<PathBuf> {
     Ok(data_dir.join(EVENT_JOURNAL_FILE_NAME))
 }
 
+pub fn shared_event_journal_state_file_path() -> io::Result<PathBuf> {
+    let root_dir = crate::config::shared_root_path().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Could not resolve shared config root for shared event journal persistence",
+        )
+    })?;
+
+    Ok(root_dir.join("journal").join(SHARED_EVENT_JOURNAL_FILE_NAME))
+}
+
 pub fn load_event_journal_state() -> EventJournalState {
-    match event_journal_state_file_path() {
+    let mut merged = match event_journal_state_file_path() {
         Ok(path) => load_event_journal_state_from_path(&path),
         Err(e) => {
             tracing_event!(
@@ -134,12 +155,68 @@ pub fn load_event_journal_state() -> EventJournalState {
             );
             EventJournalState::default()
         }
+    };
+
+    if crate::config::is_shared_config_mode() {
+        match shared_event_journal_state_file_path() {
+            Ok(path) => {
+                let shared = load_event_journal_state_from_path(&path);
+                merged.entries.extend(shared.entries);
+                merged.entries.sort_by(|a, b| {
+                    a.ts_iso
+                        .cmp(&b.ts_iso)
+                        .then_with(|| a.id.cmp(&b.id))
+                });
+                enforce_event_journal_retention(&mut merged);
+                merged.next_id = merged
+                    .entries
+                    .iter()
+                    .map(|entry| entry.id)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+            }
+            Err(e) => {
+                tracing_event!(
+                    Level::WARN,
+                    "Failed to get shared event journal persistence path. Continuing with host journal only: {}",
+                    e
+                );
+            }
+        }
     }
+
+    merged
 }
 
 pub fn save_event_journal_state(state: &EventJournalState) -> io::Result<()> {
-    let path = event_journal_state_file_path()?;
-    save_event_journal_state_to_path(state, &path)
+    if crate::config::is_shared_config_mode() {
+        let host_path = event_journal_state_file_path()?;
+        let shared_path = shared_event_journal_state_file_path()?;
+        let host_state = EventJournalState {
+            next_id: state.next_id,
+            entries: state
+                .entries
+                .iter()
+                .filter(|entry| entry.scope == EventScope::Host)
+                .cloned()
+                .collect(),
+        };
+        let shared_state = EventJournalState {
+            next_id: state.next_id,
+            entries: state
+                .entries
+                .iter()
+                .filter(|entry| entry.scope == EventScope::Shared)
+                .cloned()
+                .collect(),
+        };
+        save_event_journal_state_to_path(&host_state, &host_path)?;
+        save_event_journal_state_to_path(&shared_state, &shared_path)
+    } else {
+        let path = event_journal_state_file_path()?;
+        save_event_journal_state_to_path(state, &path)
+    }
 }
 
 pub fn event_journal_json() -> io::Result<String> {
@@ -204,6 +281,10 @@ fn save_event_journal_state_to_path(state: &EventJournalState, path: &Path) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{
+        clear_shared_config_state_for_tests, set_app_paths_override_for_tests,
+        shared_env_guard_for_tests,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -234,6 +315,7 @@ mod tests {
             next_id: 2,
             entries: vec![EventJournalEntry {
                 id: 1,
+                scope: EventScope::Host,
                 host_id: Some("node-a".to_string()),
                 ts_iso: "2026-03-15T12:00:00Z".to_string(),
                 category: EventCategory::Ingest,
@@ -314,5 +396,101 @@ mod tests {
             .expect("serialize journal state");
         assert!(json.contains("\"next_id\""));
         assert!(json.contains("\"entries\""));
+    }
+
+    #[test]
+    fn shared_mode_saves_host_and_shared_entries_to_separate_files() {
+        let _guard = shared_env_guard_for_tests()
+            .lock()
+            .expect("shared env guard lock poisoned");
+        let shared_root = tempdir().expect("create shared root");
+        let local_paths = tempdir().expect("create local app paths");
+        let config_dir = local_paths.path().join("config");
+        let data_dir = local_paths.path().join("data");
+        set_app_paths_override_for_tests(Some((config_dir, data_dir)));
+
+        let original_shared_dir = std::env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let original_host_id = std::env::var_os("SUPERSEEDR_SHARED_HOST_ID");
+
+        std::env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", shared_root.path());
+        std::env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
+        clear_shared_config_state_for_tests();
+
+        let host_entry = EventJournalEntry {
+            id: 1,
+            scope: EventScope::Host,
+            host_id: Some("node-a".to_string()),
+            ts_iso: "2026-03-26T10:00:00Z".to_string(),
+            category: EventCategory::DataHealth,
+            event_type: EventType::DataUnavailable,
+            torrent_name: Some("Sample Fault".to_string()),
+            info_hash_hex: Some("1111111111111111111111111111111111111111".to_string()),
+            details: EventDetails::DataHealth {
+                issue_count: 1,
+                issue_files: vec!["missing.bin".to_string()],
+            },
+            ..Default::default()
+        };
+        let shared_entry = EventJournalEntry {
+            id: 2,
+            scope: EventScope::Shared,
+            host_id: Some("node-a".to_string()),
+            ts_iso: "2026-03-26T10:01:00Z".to_string(),
+            category: EventCategory::Control,
+            event_type: EventType::ControlApplied,
+            details: EventDetails::Control {
+                origin: ControlOrigin::CliOffline,
+                action: "pause".to_string(),
+                target_info_hash_hex: Some(
+                    "2222222222222222222222222222222222222222".to_string(),
+                ),
+                file_index: None,
+                file_path: None,
+                priority: None,
+            },
+            ..Default::default()
+        };
+        let state = EventJournalState {
+            next_id: 3,
+            entries: vec![host_entry.clone(), shared_entry.clone()],
+        };
+
+        save_event_journal_state(&state).expect("save split event journal");
+
+        let host_path = event_journal_state_file_path().expect("host journal path");
+        let shared_path = shared_event_journal_state_file_path().expect("shared journal path");
+        let host_state = load_event_journal_state_from_path(&host_path);
+        let shared_state = load_event_journal_state_from_path(&shared_path);
+        let merged_state = load_event_journal_state();
+
+        assert_eq!(host_state.entries, vec![host_entry]);
+        assert_eq!(shared_state.entries, vec![shared_entry]);
+        assert_eq!(merged_state.entries.len(), 2);
+        assert!(
+            merged_state
+                .entries
+                .iter()
+                .any(|entry| entry.category == EventCategory::DataHealth)
+        );
+        assert!(
+            merged_state
+                .entries
+                .iter()
+                .any(|entry| entry.category == EventCategory::Control)
+        );
+        assert_eq!(merged_state.next_id, 3);
+
+        if let Some(value) = original_shared_dir {
+            std::env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", value);
+        } else {
+            std::env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+        }
+        if let Some(value) = original_host_id {
+            std::env::set_var("SUPERSEEDR_SHARED_HOST_ID", value);
+        } else {
+            std::env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
+        }
+        clear_shared_config_state_for_tests();
+        set_app_paths_override_for_tests(None);
     }
 }

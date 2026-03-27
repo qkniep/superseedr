@@ -76,8 +76,8 @@ pub fn handle_event(event: CrosstermEvent, app_state: &mut AppState) {
 fn entry_matches_filter(entry: &EventJournalEntry, filter: JournalFilter) -> bool {
     match filter {
         JournalFilter::All => true,
-        JournalFilter::Added => matches!(entry.category, EventCategory::Ingest),
-        JournalFilter::Complete => matches!(entry.event_type, EventType::TorrentCompleted),
+        JournalFilter::Queue => matches!(entry.category, EventCategory::Ingest),
+        JournalFilter::Commands => matches!(entry.category, EventCategory::Control),
         JournalFilter::Health => matches!(entry.category, EventCategory::DataHealth),
     }
 }
@@ -184,8 +184,8 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
 
     let filter_spans = [
         JournalFilter::All,
-        JournalFilter::Added,
-        JournalFilter::Complete,
+        JournalFilter::Queue,
+        JournalFilter::Commands,
         JournalFilter::Health,
     ]
     .iter()
@@ -318,8 +318,8 @@ mod tests {
                 },
                 EventJournalEntry {
                     id: 2,
-                    category: EventCategory::TorrentLifecycle,
-                    event_type: EventType::TorrentCompleted,
+                    category: EventCategory::Control,
+                    event_type: EventType::ControlApplied,
                     torrent_name: Some("Sample Beta".to_string()),
                     ..Default::default()
                 },
@@ -343,28 +343,28 @@ mod tests {
             CrosstermEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             &mut app_state,
         );
-        assert_eq!(app_state.ui.journal.filter, JournalFilter::Added);
+        assert_eq!(app_state.ui.journal.filter, JournalFilter::Queue);
 
         handle_event(
             CrosstermEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             &mut app_state,
         );
-        assert_eq!(app_state.ui.journal.filter, JournalFilter::Complete);
+        assert_eq!(app_state.ui.journal.filter, JournalFilter::Commands);
     }
 
     #[test]
     fn filter_selection_matches_requested_groups() {
         let mut app_state = base_state();
 
-        app_state.ui.journal.filter = JournalFilter::Added;
+        app_state.ui.journal.filter = JournalFilter::Queue;
         let added = filtered_entries(&app_state);
         assert_eq!(added.len(), 1);
         assert_eq!(added[0].event_type, EventType::IngestAdded);
 
-        app_state.ui.journal.filter = JournalFilter::Complete;
-        let complete = filtered_entries(&app_state);
-        assert_eq!(complete.len(), 1);
-        assert_eq!(complete[0].event_type, EventType::TorrentCompleted);
+        app_state.ui.journal.filter = JournalFilter::Commands;
+        let commands = filtered_entries(&app_state);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].event_type, EventType::ControlApplied);
 
         app_state.ui.journal.filter = JournalFilter::Health;
         let health = filtered_entries(&app_state);
