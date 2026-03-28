@@ -1438,11 +1438,7 @@ fn record_offline_control_journal_entry(request: &ControlRequest, result: &Resul
     append_event_journal_entry(
         &mut journal,
         EventJournalEntry {
-            scope: if config::is_shared_config_mode() {
-                EventScope::Shared
-            } else {
-                EventScope::Host
-            },
+            scope: EventScope::Host,
             host_id: config::shared_host_id(),
             ts_iso: chrono::Utc::now().to_rfc3339(),
             category: EventCategory::Control,
@@ -1691,6 +1687,32 @@ mod tests {
         assert_eq!(
             inbox_entries, 0,
             "offline shared mutation should not queue inbox files"
+        );
+
+        let host_journal_path = crate::persistence::event_journal::event_journal_state_file_path()
+            .expect("host journal path");
+        let host_journal_raw =
+            std::fs::read_to_string(&host_journal_path).expect("read host journal");
+        let host_journal_state: crate::persistence::event_journal::EventJournalState =
+            toml::from_str(&host_journal_raw).expect("parse host journal");
+        assert!(host_journal_state.entries.iter().any(|entry| {
+            entry.scope == EventScope::Host
+                && entry.category == EventCategory::Control
+                && entry.event_type == EventType::ControlApplied
+        }));
+
+        let shared_journal_path =
+            crate::persistence::event_journal::shared_event_journal_state_file_path()
+                .expect("shared journal path");
+        let shared_journal_raw = std::fs::read_to_string(&shared_journal_path).unwrap_or_default();
+        let shared_journal_state = if shared_journal_raw.trim().is_empty() {
+            crate::persistence::event_journal::EventJournalState::default()
+        } else {
+            toml::from_str(&shared_journal_raw).expect("parse shared journal")
+        };
+        assert!(
+            shared_journal_state.entries.is_empty(),
+            "offline shared mutation should not write shared journal entries"
         );
 
         if let Some(value) = previous_shared_dir {
