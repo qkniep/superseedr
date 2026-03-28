@@ -284,6 +284,8 @@ RSS download history is persisted for deduplication and UI metadata, but it is c
 * When the history grows past 1000, the **oldest entries are pruned** first.
 * This limit applies to persisted runtime history in `persistence/rss.toml`.
 
+</details>
+
 ## 🧩 Shared Configurations & Cluster Mode
 
 Shared mode gives you an OS- and machine-agnostic torrent catalog and settings
