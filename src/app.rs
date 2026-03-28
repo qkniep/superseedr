@@ -4441,6 +4441,7 @@ impl App {
                 torrent_name: resolved_torrent_name.clone(),
                 download_path: download_path.clone(),
                 container_name: container_name.clone(),
+                is_complete: is_validated,
                 is_multi_file: !torrent.info.files.is_empty(),
                 file_count: Some(torrent_file_count(&torrent)),
                 number_of_pieces_total,
@@ -4594,6 +4595,7 @@ impl App {
                 torrent_name: resolved_name.clone(),
                 download_path: download_path.clone(),
                 container_name: container_name.clone(),
+                is_complete: is_validated,
                 is_multi_file: false,
                 file_count: None,
                 ..Default::default()
@@ -7398,6 +7400,61 @@ mod tests {
             .filter(|entry| entry.event_type == EventType::TorrentCompleted)
             .count();
         assert_eq!(completion_entries, 1);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn completed_torrents_restored_as_complete_do_not_rejournal_on_metrics_refresh() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        let info_hash = b"restored_complete_hash".to_vec();
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.info_hash = info_hash.clone();
+        display.latest_state.torrent_name = "Sample Restore".to_string();
+        display.latest_state.number_of_pieces_total = 10;
+        display.latest_state.number_of_pieces_completed = 10;
+        display.latest_state.is_complete = true;
+        display.latest_state.activity_message = "Seeding".to_string();
+        app.app_state.torrents.insert(info_hash.clone(), display);
+
+        let (tx, rx) = watch::channel(TorrentMetrics {
+            info_hash: info_hash.clone(),
+            torrent_name: "Sample Restore".to_string(),
+            number_of_pieces_total: 10,
+            number_of_pieces_completed: 10,
+            is_complete: true,
+            activity_message: "Seeding".to_string(),
+            ..Default::default()
+        });
+        app.torrent_metric_watch_rxs.insert(info_hash.clone(), rx);
+
+        tx.send(TorrentMetrics {
+            info_hash: info_hash.clone(),
+            torrent_name: "Sample Restore".to_string(),
+            number_of_pieces_total: 10,
+            number_of_pieces_completed: 10,
+            is_complete: true,
+            activity_message: "Seeding".to_string(),
+            ..Default::default()
+        })
+        .expect("send completed metrics");
+        app.drain_latest_torrent_metrics();
+
+        let completion_entries = app
+            .app_state
+            .event_journal_state
+            .entries
+            .iter()
+            .filter(|entry| entry.event_type == EventType::TorrentCompleted)
+            .count();
+        assert_eq!(completion_entries, 0);
 
         let _ = app.shutdown_tx.send(());
     }
