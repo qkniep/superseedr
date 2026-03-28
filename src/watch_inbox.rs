@@ -108,7 +108,7 @@ mod tests {
         archive_watch_file, is_cross_device_link_error, move_file_with_fallback_impl,
         relay_watch_file_to_shared_inbox,
     };
-    use crate::config::clear_shared_config_state_for_tests;
+    use crate::config::{clear_shared_config_state_for_tests, set_app_paths_override_for_tests};
     use std::fs;
 
     fn shared_env_guard() -> &'static std::sync::Mutex<()> {
@@ -146,7 +146,14 @@ mod tests {
 
     #[test]
     fn archive_watch_file_falls_back_to_local_rename_when_processed_dir_is_unavailable() {
+        let _guard = shared_env_guard().lock().unwrap();
         let dir = tempfile::tempdir().expect("create tempdir");
+        let config_dir = dir.path().join("config");
+        let data_dir = dir.path().join("data");
+        set_app_paths_override_for_tests(Some((config_dir, data_dir.clone())));
+        fs::create_dir_all(&data_dir).expect("create data dir");
+        fs::write(data_dir.join("processed_files"), "block directory creation")
+            .expect("write processed path blocker");
         let source = dir.path().join("sample.control");
         fs::write(&source, "content").expect("write source");
 
@@ -155,6 +162,7 @@ mod tests {
             archived.extension().and_then(|ext| ext.to_str()),
             Some("done")
         );
+        set_app_paths_override_for_tests(None);
     }
 
     #[test]

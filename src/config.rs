@@ -4087,10 +4087,13 @@ mod tests {
 
     #[test]
     fn test_resolve_host_watch_path_falls_back_to_local_app_watch_directory() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let _temp = set_temp_app_paths();
         let settings = Settings::default();
         let expected_watch = get_watch_path().map(|(watch_path, _)| watch_path);
 
         assert_eq!(resolve_host_watch_path(&settings), expected_watch);
+        set_app_paths_override_for_tests(None);
     }
 
     #[test]
