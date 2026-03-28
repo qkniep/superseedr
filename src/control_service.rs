@@ -833,6 +833,10 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    fn shared_env_guard() -> &'static std::sync::Mutex<()> {
+        crate::config::shared_env_guard_for_tests()
+    }
+
     fn write_sample_torrent_file() -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().expect("create tempdir");
         let torrent = crate::torrent_file::Torrent {
@@ -869,6 +873,7 @@ mod tests {
 
     #[test]
     fn offline_hybrid_magnet_lookup_prefers_btih_identity() {
+        let _guard = shared_env_guard().lock().unwrap();
         let magnet = concat!(
             "magnet:?xt=urn:btih:1111111111111111111111111111111111111111",
             "&xt=urn:btmh:1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -890,6 +895,7 @@ mod tests {
 
     #[test]
     fn offline_delete_targets_hybrid_magnet_by_btih() {
+        let _guard = shared_env_guard().lock().unwrap();
         let magnet = concat!(
             "magnet:?xt=urn:btih:1111111111111111111111111111111111111111",
             "&xt=urn:btmh:1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -917,6 +923,7 @@ mod tests {
 
     #[test]
     fn priority_file_path_resolution_still_requires_torrent_metadata() {
+        let _guard = shared_env_guard().lock().unwrap();
         let mut settings = Settings {
             torrents: vec![TorrentSettings {
                 torrent_or_magnet: "magnet:?xt=urn:btih:1111111111111111111111111111111111111111"
@@ -941,6 +948,7 @@ mod tests {
 
     #[test]
     fn files_list_uses_torrent_source_when_metadata_is_missing() {
+        let _guard = shared_env_guard().lock().unwrap();
         let (_dir, torrent_path) = write_sample_torrent_file();
         let settings = Settings {
             torrents: vec![TorrentSettings {
@@ -961,6 +969,7 @@ mod tests {
 
     #[test]
     fn purge_target_can_resolve_from_unique_file_path() {
+        let _guard = shared_env_guard().lock().unwrap();
         let dir = tempfile::tempdir().expect("create tempdir");
         let (_torrent_dir, torrent_path) = write_sample_torrent_file();
         let download_root = dir.path().join("downloads");
@@ -988,6 +997,7 @@ mod tests {
 
     #[test]
     fn command_specific_target_resolution_uses_callers_command_name() {
+        let _guard = shared_env_guard().lock().unwrap();
         let dir = tempfile::tempdir().expect("create tempdir");
         let (_torrent_dir, torrent_path) = write_sample_torrent_file();
         let download_root = dir.path().join("downloads");
@@ -1012,6 +1022,7 @@ mod tests {
 
     #[test]
     fn offline_purge_deletes_files_and_removes_torrent() {
+        let _guard = shared_env_guard().lock().unwrap();
         let dir = tempfile::tempdir().expect("create tempdir");
         let (_torrent_dir, torrent_path) = write_sample_torrent_file();
         let download_root = dir.path().join("downloads");
@@ -1048,6 +1059,7 @@ mod tests {
 
     #[test]
     fn control_plan_and_offline_apply_share_pause_and_purge_mutations() {
+        let _guard = shared_env_guard().lock().unwrap();
         let mut settings = Settings {
             torrents: vec![TorrentSettings {
                 torrent_or_magnet: "magnet:?xt=urn:btih:1111111111111111111111111111111111111111"
@@ -1095,6 +1107,7 @@ mod tests {
 
     #[test]
     fn files_and_path_resolution_surface_metadata_corruption() {
+        let _guard = shared_env_guard().lock().unwrap();
         let dir = tempfile::tempdir().expect("create tempdir");
         let config_dir = dir.path().join("config");
         let data_dir = dir.path().join("data");
