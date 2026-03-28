@@ -1,5 +1,21 @@
 # Changelog
 
+## Release v1.0.4
+### ðŸš€ New Features
+- **Shared Configurations & Cluster Mode**: Added layered shared configuration with leader/follower clustering, automatic failover, host-local runtime folders under `hosts/<host-id>/`, and shared desired state that can be reused across machines and operating systems.
+- **Launcher-Persistent Shared Setup**: Added launcher-side shared configuration commands so installed app and protocol launches can resolve shared mode and host identity without relying on shell environment variables.
+- **Expanded Shared CLI Surface**: Added `set-shared-config`, `clear-shared-config`, `show-shared-config`, `set-host-id`, `clear-host-id`, `show-host-id`, `to-shared`, `to-standalone`, `torrents`, `info`, and `files`.
+
+### âœ¨ Improvements
+- **Remove/Purge CLI Model**: Reworked deletion controls into `remove` and `purge`, added offline-capable purge behavior when file layout is resolvable, and unified reverse file-path lookup across hash-targeted CLI commands.
+- **Cross-Host Shared Ingest**: Shared-mode `.path` adds now use portable shared-root-relative handling so staged torrent ingest can work across mixed-OS clusters instead of leaking host-local absolute paths.
+- **Shared Runtime UX & Observability**: Improved shared journal/status semantics, added JSON envelope support across CLI commands, made journal human-readable by default, and clarified shared-mode startup and mount validation behavior.
+
+### ðŸ› Bug Fixes
+- **CLI Startup Robustness**: Fixed shared-mode CLI startup so logging failures fall back safely instead of blocking command handling, and improved mount/accessibility errors for missing or unavailable shared roots.
+- **Offline Shared Mutation Routing**: Fixed shared-mode offline CLI control so commands mutate shared config directly when no leader is running instead of only queueing requests.
+- **Welcome Screen Paste Handling**: Fixed explicit paste behavior so the welcome screen no longer routes pasted torrent input through the normal-mode paste handler.
+
 ## Release v1.0.3
 ### 🚀 New Features
 - **Persistent Activity History Charts**: Added on-disk activity history for per-torrent and system activity charts, so chart views can restore meaningful trend data after restart.

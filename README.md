@@ -62,48 +62,6 @@ superseedr
 > Add torrents by clicking magnet links in your browser or opening .torrent files.
 > Copying and pasting (ctrl + v) magnet links or paths to torrent files will also work.
 
-### Shared Config Launcher Setup
-
-If you use shared mode and want installed browser or OS magnet launches to keep
-working even when they do not inherit your shell environment, persist the shared
-root once:
-
-```bash
-superseedr set-shared-config "/path/to/seedbox"
-superseedr show-shared-config
-superseedr set-host-id "desktop-a"
-superseedr show-host-id
-```
-
-Clear it later with:
-
-```bash
-superseedr clear-shared-config
-superseedr clear-host-id
-```
-
-Startup precedence is:
-
-1. `SUPERSEEDR_SHARED_CONFIG_DIR`
-2. persisted launcher shared config
-3. normal mode
-
-Host id precedence is:
-
-1. `SUPERSEEDR_SHARED_HOST_ID`
-2. persisted launcher host id
-3. hostname fallback
-
-You can also convert an existing local config:
-
-```bash
-superseedr to-shared "/path/to/seedbox"
-superseedr to-standalone
-```
-
-You can pass either the shared mount root or an explicit
-`/path/to/seedbox/superseedr-config`. Superseedr normalizes both forms.
-
 ## Troubleshooting
 
 **Connection or Disk issues?**
@@ -325,7 +283,6 @@ RSS download history is persisted for deduplication and UI metadata, but it is c
 
 * When the history grows past 1000, the **oldest entries are pruned** first.
 * This limit applies to persisted runtime history in `persistence/rss.toml`.
-</details>
 
 ## 🧩 Shared Configurations & Cluster Mode
 
@@ -369,23 +326,31 @@ X:\superseedr-mount
 
 Cluster mode turns that shared catalog into an active multi-node setup. One node
 acts as leader and updates shared desired state, while other nodes stay online
-as followers that continue seeding and apply the leader-written catalog. If the
-leader goes away, another node can take over automatically, and each host can
-mount the same shared root at a different local path for cross-OS operation.
+as followers that continue seeding and apply the leader-written catalog in real
+time. If the leader goes away, another node can take over automatically, and
+each host can mount the same shared root at a different local path for cross-OS
+operation.
 
-<details>
-<summary><strong>Shared Config Launcher Setup</strong></summary>
+```text
+                    Shared Root / NAS
+                      /shared/superseedr
+                  ┌───────────────────────┐
+                  │ superseedr-config/    │
+                  │ settings.toml         │
+                  │ catalog.toml          │
+                  │ inbox/                │
+                  │ hosts/                │
+                  └───────────────────────┘
+                          ↑        ↑
+                          │        │
+                       Leader   Follower
 
-```bash
-superseedr set-shared-config "/path/to/seedbox"
-superseedr set-host-id "desktop-a"
-superseedr show-shared-config
-superseedr show-host-id
-superseedr to-shared "/path/to/seedbox"
-superseedr to-standalone
+       ┌──────────────────────┐    ┌──────────────────────┐
+       │ Windows              │    │ macOS                │
+       │ X:\superseedr-mount  │    │ /Volumes/superseedr- │
+       │                      │    │ mount                │
+       └──────────────────────┘    └──────────────────────┘
 ```
-
-</details>
 
 
 ## 🧠 Advanced: Architecture & Engineering
