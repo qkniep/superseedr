@@ -49,9 +49,9 @@ use crate::control_service::{
 };
 use crate::integrations::cli::{
     command_to_control_requests_with_resolver, expand_add_inputs, require_cli_targets,
-    status_control_request, status_file_modified_at, status_should_stream,
+    status_command_mode, status_control_request, status_file_modified_at,
     wait_for_status_json_after, write_control_command, write_input_command,
-    write_path_command_payload, write_stop_command, Cli, Commands,
+    write_path_command_payload, write_stop_command, Cli, Commands, StatusCommandMode,
 };
 #[cfg(test)]
 use crate::integrations::control::ControlPriorityTarget;
@@ -713,23 +713,14 @@ fn process_cli_request(
             process_files_command(settings, target, output_mode).map_err(io::Error::other)
         }
         Commands::Status { .. } => {
+            let status_mode = status_command_mode(command)
+                .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
             let request = status_control_request(command)
                 .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
             if shared_mode {
-                process_shared_status_request(
-                    settings,
-                    &request,
-                    status_should_stream(command),
-                    leader_is_running,
-                    output_mode,
-                )
+                process_shared_status_request(settings, status_mode, leader_is_running, output_mode)
             } else if leader_is_running {
-                process_online_status_request(
-                    settings,
-                    &request,
-                    status_should_stream(command),
-                    output_mode,
-                )
+                process_online_status_request(settings, &request, status_mode, output_mode)
             } else {
                 process_offline_control_request(settings, &request, output_mode)
             }
@@ -885,13 +876,12 @@ fn print_queued_control_message(
 
 fn process_shared_status_request(
     settings: &Settings,
-    request: &ControlRequest,
-    stream: bool,
+    mode: StatusCommandMode,
     leader_is_running: bool,
     output_mode: OutputMode,
 ) -> io::Result<()> {
-    match request {
-        ControlRequest::StatusNow => {
+    match mode {
+        StatusCommandMode::Snapshot => {
             if !leader_is_running {
                 let raw = offline_output_json(settings)?;
                 return print_json_passthrough(output_mode, "status", &raw);
@@ -905,7 +895,7 @@ fn process_shared_status_request(
                 }
             }
         }
-        ControlRequest::StatusFollowStart { interval_secs } if stream => {
+        StatusCommandMode::Follow { interval_secs } => {
             let mut last_modified_at = status_file_modified_at()?;
             loop {
                 let raw = wait_for_status_json_after(
@@ -917,29 +907,26 @@ fn process_shared_status_request(
                 last_modified_at = status_file_modified_at()?;
             }
         }
-        ControlRequest::StatusFollowStart { .. } | ControlRequest::StatusFollowStop => Err(
-            io::Error::other(
-                "Shared mode leader status snapshots are always enabled every 5 seconds; start/stop is not supported in shared mode",
-            ),
-        ),
-        _ => unreachable!("status request handler received non-status control request"),
+        StatusCommandMode::SetInterval { .. } | StatusCommandMode::Stop => Err(io::Error::other(
+            "Shared mode leader status snapshots are always enabled every 5 seconds; start/stop is not supported in shared mode",
+        )),
     }
 }
 
 fn process_online_status_request(
     settings: &Settings,
     request: &ControlRequest,
-    stream: bool,
+    mode: StatusCommandMode,
     output_mode: OutputMode,
 ) -> io::Result<()> {
-    match request {
-        ControlRequest::StatusNow => {
+    match mode {
+        StatusCommandMode::Snapshot => {
             let previous_modified_at = status_file_modified_at()?;
             let _ = queue_control_request_command(settings, request)?;
             let raw = wait_for_status_json_after(previous_modified_at, Duration::from_secs(15))?;
             print_json_passthrough(output_mode, "status", &raw)
         }
-        ControlRequest::StatusFollowStart { interval_secs } if stream => {
+        StatusCommandMode::Follow { interval_secs } => {
             let mut last_modified_at = status_file_modified_at()?;
             let _ = queue_control_request_command(settings, request)?;
             loop {
@@ -952,7 +939,7 @@ fn process_online_status_request(
                 last_modified_at = status_file_modified_at()?;
             }
         }
-        ControlRequest::StatusFollowStart { interval_secs } => {
+        StatusCommandMode::SetInterval { interval_secs } => {
             let _ = queue_control_request_command(settings, request)?;
             let status_path = status_file_path()?;
             print_success(
@@ -971,7 +958,7 @@ fn process_online_status_request(
             );
             Ok(())
         }
-        ControlRequest::StatusFollowStop => {
+        StatusCommandMode::Stop => {
             let _ = queue_control_request_command(settings, request)?;
             print_success(
                 output_mode,
@@ -981,7 +968,6 @@ fn process_online_status_request(
             );
             Ok(())
         }
-        _ => unreachable!("status request handler received non-status control request"),
     }
 }
 
@@ -990,47 +976,14 @@ fn process_online_control_request(
     request: &ControlRequest,
     output_mode: OutputMode,
 ) -> io::Result<()> {
-    match request {
-        ControlRequest::StatusNow => {
-            let previous_modified_at = status_file_modified_at()?;
-            let _ = queue_control_request_command(settings, request)?;
-            let raw = wait_for_status_json_after(previous_modified_at, Duration::from_secs(15))?;
-            print_json_passthrough(output_mode, "status", &raw)
-        }
-        ControlRequest::StatusFollowStart { interval_secs } => {
-            let mut last_modified_at = status_file_modified_at()?;
-            let _ = queue_control_request_command(settings, request)?;
-            loop {
-                let raw = wait_for_status_json_after(
-                    last_modified_at,
-                    Duration::from_secs(interval_secs.saturating_mul(3).max(15)),
-                )?;
-                print_json_passthrough(output_mode, "status", &raw)?;
-                io::stdout().flush()?;
-                last_modified_at = status_file_modified_at()?;
-            }
-        }
-        ControlRequest::StatusFollowStop => {
-            let _ = queue_control_request_command(settings, request)?;
-            print_success(
-                output_mode,
-                "status",
-                "Queued status streaming stop request.",
-                json!({ "queued": true, "follow": false }),
-            );
-            Ok(())
-        }
-        _ => {
-            let _ = queue_control_request_command(settings, request)?;
-            print_success(
-                output_mode,
-                request.action_name(),
-                &online_control_success_message(request),
-                json!({ "queued": true, "request": request }),
-            );
-            Ok(())
-        }
-    }
+    let _ = queue_control_request_command(settings, request)?;
+    print_success(
+        output_mode,
+        request.action_name(),
+        &online_control_success_message(request),
+        json!({ "queued": true, "request": request }),
+    );
+    Ok(())
 }
 
 fn process_shared_control_request(
@@ -1741,8 +1694,7 @@ mod tests {
     fn shared_status_follow_start_returns_error_for_non_stream_requests() {
         let error = process_shared_status_request(
             &Settings::default(),
-            &ControlRequest::StatusFollowStart { interval_secs: 5 },
-            false,
+            StatusCommandMode::SetInterval { interval_secs: 5 },
             true,
             OutputMode::Text,
         )
@@ -1757,8 +1709,7 @@ mod tests {
     fn shared_status_follow_stop_returns_error() {
         let error = process_shared_status_request(
             &Settings::default(),
-            &ControlRequest::StatusFollowStop,
-            false,
+            StatusCommandMode::Stop,
             true,
             OutputMode::Text,
         )
@@ -1789,8 +1740,7 @@ mod tests {
 
         let result = process_shared_status_request(
             &Settings::default(),
-            &ControlRequest::StatusNow,
-            false,
+            StatusCommandMode::Snapshot,
             false,
             OutputMode::Json,
         );

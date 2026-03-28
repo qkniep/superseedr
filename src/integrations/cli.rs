@@ -174,6 +174,14 @@ pub enum CliPriority {
     Skip,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusCommandMode {
+    Snapshot,
+    Follow { interval_secs: u64 },
+    SetInterval { interval_secs: u64 },
+    Stop,
+}
+
 impl From<CliPriority> for FilePriority {
     fn from(value: CliPriority) -> Self {
         match value {
@@ -349,7 +357,7 @@ where
     }
 }
 
-pub fn status_control_request(command: &Commands) -> Result<ControlRequest, String> {
+pub fn status_command_mode(command: &Commands) -> Result<StatusCommandMode, String> {
     let Commands::Status {
         follow,
         stop,
@@ -367,18 +375,29 @@ pub fn status_control_request(command: &Commands) -> Result<ControlRequest, Stri
     }
 
     Ok(if *stop {
-        ControlRequest::StatusFollowStop
-    } else if *follow || interval.is_some() {
-        ControlRequest::StatusFollowStart {
+        StatusCommandMode::Stop
+    } else if *follow {
+        StatusCommandMode::Follow {
             interval_secs: interval.unwrap_or(5),
         }
+    } else if let Some(interval_secs) = interval {
+        StatusCommandMode::SetInterval {
+            interval_secs: *interval_secs,
+        }
     } else {
-        ControlRequest::StatusNow
+        StatusCommandMode::Snapshot
     })
 }
 
-pub fn status_should_stream(command: &Commands) -> bool {
-    matches!(command, Commands::Status { follow: true, .. })
+pub fn status_control_request(command: &Commands) -> Result<ControlRequest, String> {
+    Ok(match status_command_mode(command)? {
+        StatusCommandMode::Snapshot => ControlRequest::StatusNow,
+        StatusCommandMode::Follow { interval_secs }
+        | StatusCommandMode::SetInterval { interval_secs } => {
+            ControlRequest::StatusFollowStart { interval_secs }
+        }
+        StatusCommandMode::Stop => ControlRequest::StatusFollowStop,
+    })
 }
 
 #[cfg(test)]
@@ -603,7 +622,10 @@ mod tests {
             request,
             ControlRequest::StatusFollowStart { interval_secs: 30 }
         );
-        assert!(!status_should_stream(&command));
+        assert_eq!(
+            status_command_mode(&command),
+            Ok(StatusCommandMode::SetInterval { interval_secs: 30 })
+        );
     }
 
     #[test]

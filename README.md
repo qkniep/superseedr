@@ -172,8 +172,8 @@ This runs the client directly without Gluetun. It is useful for advanced users w
 
     docker run --rm -it \
       -e SUPERSEEDR_DEFAULT_DOWNLOAD_FOLDER=/seedbox \
-      -e SUPERSEEDR_SHARED_CONFIG_DIR=/seedbox/superseedr-config \
-      -e SUPERSEEDR_HOST_ID=seedbox-docker \
+      -e SUPERSEEDR_SHARED_CONFIG_DIR=/seedbox \
+      -e SUPERSEEDR_SHARED_HOST_ID=seedbox-docker \
       -p 6881:6881/tcp \
       -p 6881:6881/udp \
       -v /your/seedbox:/seedbox \

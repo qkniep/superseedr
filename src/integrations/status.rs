@@ -3,6 +3,7 @@
 
 use crate::app::TorrentMetrics;
 use crate::config::Settings;
+use crate::fs_atomic::write_string_atomically;
 use serde::de::Error;
 use serde::ser::SerializeStruct;
 use serde::Deserialize;
@@ -168,12 +169,12 @@ pub fn dump(
                     let _ = std::fs::create_dir_all(parent);
                 }
                 let json = serde_json::to_string_pretty(&output_data).map_err(io::Error::other)?;
-                std::fs::write(&file_path, &json)?;
+                write_string_atomically(&file_path, &json)?;
                 if let Some(leader_path) = leader_path {
                     if let Some(parent) = leader_path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    std::fs::write(leader_path, &json)?;
+                    write_string_atomically(&leader_path, &json)?;
                 }
                 Ok::<(), io::Error>(())
             }) => {
