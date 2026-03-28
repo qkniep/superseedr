@@ -329,12 +329,43 @@ RSS download history is persisted for deduplication and UI metadata, but it is c
 
 ## 🧩 Shared Configurations & Cluster Mode
 
-Shared mode is built for people who want one portable torrent library and one
-shared desired-state catalog across multiple machines. Instead of manually
-keeping separate clients in sync, Superseedr stores shared configuration and the
-cluster torrent catalog on a mounted shared root so every node can converge on
-the same view of what should be running. See
+Shared mode gives you an OS- and machine-agnostic torrent catalog and settings
+that live alongside your data on the NAS or shared root. Any Superseedr client
+that mounts that shared root can connect and reuse the same catalog in real time.
+Superseedr CLI commands work against that shared config both online and offline. See
 [`docs/shared-config.md`](docs/shared-config.md) for the full shared-mode guide.
+
+```text
+Same shared root, different local mount paths
+
+NAS
+/shared/superseedr
+├─ superseedr-config/
+│  ├─ settings.toml
+│  ├─ catalog.toml
+│  └─ ...
+└─ video1.mkv
+
+macOS
+$ superseedr set-shared-config /Volumes/superseedr-mount
+$ superseedr
+/Volumes/superseedr-mount
+├─ superseedr-config/
+│  ├─ settings.toml
+│  ├─ catalog.toml
+│  └─ ...
+└─ video1.mkv
+
+Windows
+> superseedr set-shared-config "X:\superseedr-mount"
+> superseedr
+X:\superseedr-mount
+├─ superseedr-config\
+│  ├─ settings.toml
+│  ├─ catalog.toml
+│  └─ ...
+└─ video1.mkv
+```
 
 Cluster mode turns that shared catalog into an active multi-node setup. One node
 acts as leader and updates shared desired state, while other nodes stay online
@@ -342,7 +373,8 @@ as followers that continue seeding and apply the leader-written catalog. If the
 leader goes away, another node can take over automatically, and each host can
 mount the same shared root at a different local path for cross-OS operation.
 
-Useful commands:
+<details>
+<summary><strong>Shared Config Launcher Setup</strong></summary>
 
 ```bash
 superseedr set-shared-config "/path/to/seedbox"
@@ -352,6 +384,8 @@ superseedr show-host-id
 superseedr to-shared "/path/to/seedbox"
 superseedr to-standalone
 ```
+
+</details>
 
 
 ## 🧠 Advanced: Architecture & Engineering
