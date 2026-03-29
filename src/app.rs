@@ -7646,7 +7646,8 @@ mod tests {
         .expect("create status dir");
         std::fs::write(
             &leader_status_path,
-            serde_json::to_string_pretty(&snapshot).expect("serialize leader snapshot"),
+            crate::fs_atomic::serialize_versioned_json(&snapshot)
+                .expect("serialize leader snapshot"),
         )
         .expect("write leader snapshot");
 
@@ -7723,11 +7724,11 @@ mod tests {
         assert!(host_status_path.exists());
         assert!(leader_status_path.exists());
 
-        let host_snapshot: AppOutputState = serde_json::from_str(
+        let host_snapshot: AppOutputState = crate::fs_atomic::deserialize_versioned_json(
             &std::fs::read_to_string(&host_status_path).expect("read host status"),
         )
         .expect("parse host status");
-        let leader_snapshot: AppOutputState = serde_json::from_str(
+        let leader_snapshot: AppOutputState = crate::fs_atomic::deserialize_versioned_json(
             &std::fs::read_to_string(&leader_status_path).expect("read leader status"),
         )
         .expect("parse leader status");

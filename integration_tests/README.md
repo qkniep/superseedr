@@ -120,6 +120,35 @@ RUN_INTEROP=1 INTEROP_TIMEOUT_SECS=300 \
 python3 -m pytest integration_tests/harness/tests -m interop
 ```
 
+## Cluster CLI Harness
+
+The cluster CLI lane is separate from the Docker interop harness, but it follows
+the same Docker-first testing model. It runs two Linux Superseedr containers
+against one mounted shared root, reuses checked-in torrent fixtures, and
+exercises shared offline, leader, follower, failover, and failback CLI flows.
+
+Main entrypoints:
+
+```bash
+./integration_tests/run_cluster_cli.sh
+```
+
+or:
+
+```bash
+python3 -m integration_tests.cluster_cli.run
+```
+
+Pytest wrapper:
+
+```bash
+RUN_CLUSTER_CLI=1 python3 -m pytest integration_tests/cluster_cli/tests -m cluster_cli
+```
+
+Artifacts are written under:
+
+- `integration_tests/artifacts/cluster_cli/<run_id>/`
+
 ## Artifacts and Monitoring
 
 Per run output:
@@ -141,6 +170,7 @@ Monitoring model:
 GitHub Actions workflow:
 
 - `.github/workflows/integration-interop.yml`
+- `.github/workflows/integration-cluster-cli.yml`
 
 Behavior:
 

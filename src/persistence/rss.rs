@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::config::{runtime_persistence_dir, FeedSyncError, RssHistoryEntry};
-use crate::fs_atomic::write_string_atomically;
+use crate::fs_atomic::{
+    deserialize_versioned_toml, serialize_versioned_toml, write_string_atomically,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -57,7 +59,7 @@ fn load_rss_state_from_path(path: &Path) -> RssPersistedState {
     }
 
     match fs::read_to_string(path) {
-        Ok(content) => match toml::from_str::<RssPersistedState>(&content) {
+        Ok(content) => match deserialize_versioned_toml::<RssPersistedState>(&content) {
             Ok(state) => state,
             Err(e) => {
                 tracing_event!(
@@ -82,7 +84,7 @@ fn load_rss_state_from_path(path: &Path) -> RssPersistedState {
 }
 
 fn save_rss_state_to_path(state: &RssPersistedState, path: &Path) -> io::Result<()> {
-    let content = toml::to_string_pretty(state).map_err(io::Error::other)?;
+    let content = serialize_versioned_toml(state)?;
     write_string_atomically(path, &content)
 }
 

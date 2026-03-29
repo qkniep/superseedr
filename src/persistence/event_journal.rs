@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::config::runtime_persistence_dir;
-use crate::fs_atomic::write_string_atomically;
+use crate::fs_atomic::{
+    deserialize_versioned_toml, serialize_versioned_toml, write_string_atomically,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -278,7 +280,7 @@ fn load_event_journal_state_from_path(path: &Path) -> EventJournalState {
     }
 
     match fs::read_to_string(path) {
-        Ok(content) => match toml::from_str::<EventJournalState>(&content) {
+        Ok(content) => match deserialize_versioned_toml::<EventJournalState>(&content) {
             Ok(mut state) => {
                 enforce_event_journal_retention(&mut state);
                 state
@@ -309,7 +311,7 @@ fn save_event_journal_state_to_path(state: &EventJournalState, path: &Path) -> i
     let mut journal_state = state.clone();
     enforce_event_journal_retention(&mut journal_state);
 
-    let content = toml::to_string_pretty(&journal_state).map_err(io::Error::other)?;
+    let content = serialize_versioned_toml(&journal_state)?;
     write_string_atomically(path, &content)
 }
 

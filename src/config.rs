@@ -18,7 +18,10 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::app::FilePriority;
 use crate::app::TorrentControlState;
-use crate::fs_atomic::{write_string_atomically, write_toml_atomically};
+use crate::fs_atomic::{
+    deserialize_versioned_toml, serialize_versioned_toml, write_string_atomically,
+    write_toml_atomically,
+};
 use crate::theme::ThemeName;
 
 use strum_macros::EnumCount;
@@ -1265,7 +1268,7 @@ where
     }
 
     let content = fs::read_to_string(path)?;
-    toml::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    deserialize_versioned_toml(&content)
 }
 
 #[cfg(test)]
@@ -1298,7 +1301,7 @@ fn write_toml_atomically_with_fingerprint<T: Serialize>(
     path: &Path,
     value: &T,
 ) -> io::Result<Option<String>> {
-    let content = toml::to_string_pretty(value).map_err(io::Error::other)?;
+    let content = serialize_versioned_toml(value)?;
     write_string_atomically(path, &content)?;
     Ok(Some(hex::encode(Sha1::digest(content.as_bytes()))))
 }
@@ -1547,7 +1550,7 @@ impl NormalConfigBackend {
 
         let layered = LayeredConfig::from_flat_settings(settings);
         let flat_settings = layered.resolve_flat_settings()?;
-        let content = toml::to_string_pretty(&flat_settings).map_err(io::Error::other)?;
+        let content = serialize_versioned_toml(&flat_settings)?;
         write_string_atomically(&self.paths.settings_path, &content)?;
         fs::write(backup_path, content)?;
         cleanup_old_backups(&self.paths.backup_dir, 64)?;

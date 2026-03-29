@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::FilePriority;
-use crate::fs_atomic::write_string_atomically;
+use crate::fs_atomic::{
+    deserialize_versioned_toml, serialize_versioned_toml, write_string_atomically,
+};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::fs;
@@ -119,7 +121,7 @@ impl ControlRequest {
 
 pub fn write_control_request(request: &ControlRequest, watch_path: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(watch_path)?;
-    let content = toml::to_string_pretty(request).map_err(io::Error::other)?;
+    let content = serialize_versioned_toml(request)?;
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -133,7 +135,7 @@ pub fn write_control_request(request: &ControlRequest, watch_path: &Path) -> io:
 
 pub fn read_control_request(path: &Path) -> io::Result<ControlRequest> {
     let content = fs::read_to_string(path)?;
-    toml::from_str(&content).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    deserialize_versioned_toml(&content)
 }
 
 #[cfg(test)]

@@ -1,0 +1,73 @@
+services:
+  cluster_host_a:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: superseedr:cluster-cli
+    tty: true
+    stdin_open: true
+    init: true
+    environment:
+      - SUPERSEEDR_CLIENT_PORT=16881
+      - SUPERSEEDR_OUTPUT_STATUS_INTERVAL=2
+      - SUPERSEEDR_DEFAULT_DOWNLOAD_FOLDER=/cluster/downloads
+      - SUPERSEEDR_SHARED_CONFIG_DIR=/cluster
+      - SUPERSEEDR_SHARED_HOST_ID=host-a
+    volumes:
+      - cluster_shared_root:/cluster
+      - ${CLUSTER_ARTIFACTS_ROOT}:/artifacts
+      - ${CLUSTER_HOST_A_CONFIG}:/root/.config/jagalite.superseedr
+      - ${CLUSTER_HOST_A_SHARE}:/root/.local/share/jagalite.superseedr
+      - ../torrents/v1:/fixtures:ro
+
+  cluster_host_b:
+    image: superseedr:cluster-cli
+    tty: true
+    stdin_open: true
+    init: true
+    environment:
+      - SUPERSEEDR_CLIENT_PORT=16882
+      - SUPERSEEDR_OUTPUT_STATUS_INTERVAL=2
+      - SUPERSEEDR_DEFAULT_DOWNLOAD_FOLDER=/cluster/downloads
+      - SUPERSEEDR_SHARED_CONFIG_DIR=/cluster
+      - SUPERSEEDR_SHARED_HOST_ID=host-b
+    volumes:
+      - cluster_shared_root:/cluster
+      - ${CLUSTER_ARTIFACTS_ROOT}:/artifacts
+      - ${CLUSTER_HOST_B_CONFIG}:/root/.config/jagalite.superseedr
+      - ${CLUSTER_HOST_B_SHARE}:/root/.local/share/jagalite.superseedr
+      - ../torrents/v1:/fixtures:ro
+
+  cluster_bootstrap:
+    image: superseedr:cluster-cli
+    tty: true
+    stdin_open: true
+    init: true
+    environment:
+      - SUPERSEEDR_CLIENT_PORT=16883
+      - SUPERSEEDR_DEFAULT_DOWNLOAD_FOLDER=/cluster/downloads
+      - SUPERSEEDR_SHARED_HOST_ID=host-a
+    volumes:
+      - cluster_shared_root:/cluster
+      - ${CLUSTER_ARTIFACTS_ROOT}:/artifacts
+      - ${CLUSTER_HOST_A_CONFIG}:/root/.config/jagalite.superseedr
+      - ${CLUSTER_HOST_A_SHARE}:/root/.local/share/jagalite.superseedr
+      - ../torrents/v1:/fixtures:ro
+
+  cluster_standalone:
+    image: superseedr:cluster-cli
+    tty: true
+    stdin_open: true
+    init: true
+    environment:
+      - SUPERSEEDR_CLIENT_PORT=16884
+      - SUPERSEEDR_DEFAULT_DOWNLOAD_FOLDER=/root/.local/share/jagalite.superseedr/downloads
+    volumes:
+      - ${CLUSTER_ARTIFACTS_ROOT}:/artifacts
+      - ${CLUSTER_STANDALONE_CONFIG}:/root/.config/jagalite.superseedr
+      - ${CLUSTER_STANDALONE_SHARE}:/root/.local/share/jagalite.superseedr
+      - ../torrents/v1:/fixtures:ro
+
+volumes:
+  cluster_shared_root:
+    name: ${CLUSTER_SHARED_VOLUME}

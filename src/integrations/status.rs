@@ -3,7 +3,9 @@
 
 use crate::app::TorrentMetrics;
 use crate::config::Settings;
-use crate::fs_atomic::write_string_atomically;
+use crate::fs_atomic::{
+    deserialize_versioned_json, serialize_versioned_json, write_string_atomically,
+};
 use serde::de::Error;
 use serde::ser::SerializeStruct;
 use serde::Deserialize;
@@ -175,7 +177,7 @@ pub fn dump(
                 if let Some(parent) = file_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                let json = serde_json::to_string_pretty(&output_data).map_err(io::Error::other)?;
+                let json = serialize_versioned_json(&output_data)?;
                 if should_skip_status_dump(generation, &latest_generation) {
                     return Ok::<(), io::Error>(());
                 }
@@ -231,8 +233,7 @@ pub fn status_file_path() -> io::Result<PathBuf> {
 
 pub fn read_cluster_output_state() -> io::Result<AppOutputState> {
     let content = fs::read_to_string(cluster_status_file_path()?)?;
-    serde_json::from_str(&content)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    deserialize_versioned_json(&content)
 }
 
 pub fn offline_output_state(settings: &Settings) -> AppOutputState {

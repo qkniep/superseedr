@@ -1,0 +1,40 @@
+{
+  "fixtures": [
+    {
+      "id": "single_4k_v1",
+      "mode": "v1",
+      "torrent": "integration_tests/torrents/v1/single_4k.bin.torrent",
+      "payload": "integration_tests/test_data/single/single_4k.bin",
+      "info_hash_hex": "332af9a80531c7392c51f50e52d15e0cf8fe7b0f",
+      "magnet_uri": "magnet:?xt=urn:btih:332af9a80531c7392c51f50e52d15e0cf8fe7b0f&dn=single_4k.bin",
+      "representative_relative_path": "single_4k.bin"
+    },
+    {
+      "id": "single_8k_v1",
+      "mode": "v1",
+      "torrent": "integration_tests/torrents/v1/single_8k.bin.torrent",
+      "payload": "integration_tests/test_data/single/single_8k.bin",
+      "info_hash_hex": "bee22d859dd045de2dea1fc92f8f5bbad7acf69e",
+      "magnet_uri": "magnet:?xt=urn:btih:bee22d859dd045de2dea1fc92f8f5bbad7acf69e&dn=single_8k.bin",
+      "representative_relative_path": "single_8k.bin"
+    },
+    {
+      "id": "single_16k_v1",
+      "mode": "v1",
+      "torrent": "integration_tests/torrents/v1/single_16k.bin.torrent",
+      "payload": "integration_tests/test_data/single/single_16k.bin",
+      "info_hash_hex": "96da14e076b2242802c1eb84de5030774ef7c42c",
+      "magnet_uri": "magnet:?xt=urn:btih:96da14e076b2242802c1eb84de5030774ef7c42c&dn=single_16k.bin",
+      "representative_relative_path": "single_16k.bin"
+    },
+    {
+      "id": "single_25k_v1",
+      "mode": "v1",
+      "torrent": "integration_tests/torrents/v1/single_25k.bin.torrent",
+      "payload": "integration_tests/test_data/single/single_25k.bin",
+      "info_hash_hex": "64f1587ba14daf031b3c00a33b978f15d2df9c6f",
+      "magnet_uri": "magnet:?xt=urn:btih:64f1587ba14daf031b3c00a33b978f15d2df9c6f&dn=single_25k.bin",
+      "representative_relative_path": "single_25k.bin"
+    }
+  ]
+}
