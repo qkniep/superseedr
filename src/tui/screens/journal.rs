@@ -358,7 +358,13 @@ fn columns_for_filter(filter: JournalFilter) -> Vec<JournalColumn> {
             JournalColumn::Torrent,
             JournalColumn::Source,
         ],
-        JournalFilter::Commands => vec![JournalColumn::Time, JournalColumn::Event],
+        JournalFilter::Commands => {
+            vec![
+                JournalColumn::Time,
+                JournalColumn::Event,
+                JournalColumn::Source,
+            ]
+        }
         JournalFilter::Health => vec![
             JournalColumn::Time,
             JournalColumn::Event,
@@ -380,12 +386,13 @@ fn column_header(column: JournalColumn) -> &'static str {
 fn column_constraint(column: JournalColumn, filter: JournalFilter) -> Constraint {
     match (filter, column) {
         (_, JournalColumn::Time) => Constraint::Length(17),
-        (JournalFilter::Commands, JournalColumn::Event) => Constraint::Min(10),
+        (JournalFilter::Commands, JournalColumn::Event) => Constraint::Percentage(34),
         (JournalFilter::Health, JournalColumn::Event) => Constraint::Length(10),
         (_, JournalColumn::Event) => Constraint::Length(10),
         (_, JournalColumn::Done) => Constraint::Length(8),
         (JournalFilter::Health, JournalColumn::Torrent) => Constraint::Min(10),
         (_, JournalColumn::Torrent) => Constraint::Percentage(41),
+        (JournalFilter::Commands, JournalColumn::Source) => Constraint::Percentage(46),
         (_, JournalColumn::Source) => Constraint::Percentage(24),
     }
 }
@@ -724,10 +731,14 @@ mod tests {
         };
 
         assert_eq!(command_action_label(&entry), "pause");
-        assert_eq!(columns_for_filter(JournalFilter::Commands).len(), 2);
+        assert_eq!(columns_for_filter(JournalFilter::Commands).len(), 3);
         assert_eq!(
             column_header(columns_for_filter(JournalFilter::Commands)[1]),
             "Event"
+        );
+        assert_eq!(
+            column_header(columns_for_filter(JournalFilter::Commands)[2]),
+            "Source"
         );
         assert_eq!(command_action_label(&entry), "pause");
     }
