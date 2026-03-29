@@ -82,7 +82,7 @@ use crate::torrent_manager::TorrentManager;
 use crate::torrent_manager::TorrentParameters;
 use crate::watch_inbox::{archive_watch_file, relay_watch_file_to_shared_inbox};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::io::AsyncReadExt;
 use tokio::signal;
 use tokio::sync::broadcast;
@@ -919,6 +919,7 @@ impl JournalFilter {
 pub struct JournalUiState {
     pub filter: JournalFilter,
     pub selected_index: usize,
+    pub status_message: Option<String>,
 }
 
 #[derive(Default)]
@@ -1139,6 +1140,7 @@ pub struct App {
     pub status_dump_generation: Arc<AtomicU64>,
     pub app_lock_handle: Option<File>,
     pub leader_status_snapshot: Option<AppOutputState>,
+    pub startup_completion_suppressed_hashes: HashSet<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -1485,6 +1487,7 @@ impl App {
             status_dump_generation: Arc::new(AtomicU64::new(0)),
             app_lock_handle,
             leader_status_snapshot: None,
+            startup_completion_suppressed_hashes: HashSet::new(),
         };
         app.sync_cluster_role_label();
         app.refresh_system_warning();
@@ -2856,6 +2859,7 @@ impl App {
 
     fn remove_torrent_runtime(&mut self, info_hash: &[u8]) {
         self.app_state.torrents.remove(info_hash);
+        self.startup_completion_suppressed_hashes.remove(info_hash);
         self.torrent_manager_command_txs.remove(info_hash);
         self.torrent_manager_incoming_peer_txs.remove(info_hash);
         self.torrent_metric_watch_rxs.remove(info_hash);
@@ -2876,6 +2880,21 @@ impl App {
                 "Skipping persisted torrent left in transient Deleting state during startup or convergence"
             );
             return;
+        }
+
+        tracing_event!(
+            Level::INFO,
+            torrent = %torrent_config.torrent_or_magnet,
+            torrent_name = %torrent_config.name,
+            validation_status = torrent_config.validation_status,
+            "Restoring persisted torrent into runtime"
+        );
+        if torrent_config.validation_status {
+            if let Some(info_hash) =
+                info_hash_from_torrent_source(&torrent_config.torrent_or_magnet)
+            {
+                self.startup_completion_suppressed_hashes.insert(info_hash);
+            }
         }
 
         if self.should_suppress_follower_runtime_for_torrent(&torrent_config) {
@@ -3984,6 +4003,22 @@ impl App {
                             torrent.latest_state.torrent_name.clone(),
                         )
                     });
+                    if let Some(torrent) = self.app_state.torrents.get(info_hash) {
+                        let metrics = &torrent.latest_state;
+                        let info_hash_hex = hex::encode(info_hash.as_slice());
+                        tracing_event!(
+                            Level::INFO,
+                            info_hash = %info_hash_hex,
+                            torrent_name = %metrics.torrent_name,
+                            was_complete,
+                            is_complete = !torrent_is_effectively_incomplete(metrics),
+                            metrics_is_complete = metrics.is_complete,
+                            pieces_complete = metrics.number_of_pieces_completed,
+                            pieces_total = metrics.number_of_pieces_total,
+                            activity = %metrics.activity_message,
+                            "Processing torrent metrics update for completion journaling"
+                        );
+                    }
                     if let Some((is_complete, torrent_name)) = completion_record {
                         if !was_complete && is_complete {
                             completion_events.push((info_hash.clone(), torrent_name));
@@ -5085,13 +5120,48 @@ impl App {
     }
 
     fn record_torrent_completed_event(&mut self, info_hash: &[u8], torrent_name: Option<String>) {
+        let info_hash_hex = hex::encode(info_hash);
+        if self.startup_completion_suppressed_hashes.remove(info_hash) {
+            tracing_event!(
+                Level::INFO,
+                info_hash = %info_hash_hex,
+                torrent_name = %torrent_name.clone().unwrap_or_default(),
+                "Skipping startup TorrentCompleted journal entry for restored complete torrent"
+            );
+            return;
+        }
+        if self
+            .app_state
+            .event_journal_state
+            .entries
+            .iter()
+            .any(|entry| {
+                entry.event_type == EventType::TorrentCompleted
+                    && entry.info_hash_hex.as_deref() == Some(info_hash_hex.as_str())
+            })
+        {
+            tracing_event!(
+                Level::INFO,
+                info_hash = %info_hash_hex,
+                torrent_name = %torrent_name.clone().unwrap_or_default(),
+                "Skipping duplicate TorrentCompleted journal entry"
+            );
+            return;
+        }
+
+        tracing_event!(
+            Level::INFO,
+            info_hash = %info_hash_hex,
+            torrent_name = %torrent_name.clone().unwrap_or_default(),
+            "Recording TorrentCompleted journal entry"
+        );
         self.append_event_journal_entry(EventJournalEntry {
             host_id: self.event_journal_host_id.clone(),
             ts_iso: chrono::Utc::now().to_rfc3339(),
             category: EventCategory::TorrentLifecycle,
             event_type: EventType::TorrentCompleted,
             torrent_name,
-            info_hash_hex: Some(hex::encode(info_hash)),
+            info_hash_hex: Some(info_hash_hex),
             message: Some("Torrent completed".to_string()),
             ..Default::default()
         });
@@ -5606,17 +5676,22 @@ impl App {
     }
 }
 
-fn persisted_validation_status_from_piece_completion(
-    total_pieces: u32,
-    completed_pieces: u32,
+fn persisted_validation_status_from_metrics(
+    metrics: &TorrentMetrics,
     previous_validation_status: bool,
 ) -> bool {
     // Metadata may not be available yet for magnet sessions; preserve prior validation
-    // only for the unknown 0/0 snapshot.
-    if total_pieces == 0 && completed_pieces == 0 {
+    // only for the unknown 0/0 snapshot when we also have no explicit completion signal.
+    if metrics.number_of_pieces_total == 0
+        && metrics.number_of_pieces_completed == 0
+        && !metrics.is_complete
+        && !activity_marks_torrent_complete(&metrics.activity_message)
+        && !torrent_has_skipped_files(metrics)
+    {
         return previous_validation_status;
     }
-    total_pieces > 0 && completed_pieces == total_pieces
+
+    metrics.is_complete || !torrent_is_effectively_incomplete(metrics)
 }
 
 fn activity_marks_torrent_complete(activity_message: &str) -> bool {
@@ -5932,11 +6007,8 @@ fn build_persist_payload(
                 .copied()
                 .unwrap_or(false);
 
-            let final_validation_status = persisted_validation_status_from_piece_completion(
-                torrent_state.number_of_pieces_total,
-                torrent_state.number_of_pieces_completed,
-                previous_validation_status,
-            );
+            let final_validation_status =
+                persisted_validation_status_from_metrics(torrent_state, previous_validation_status);
 
             TorrentSettings {
                 torrent_or_magnet: torrent_state.torrent_or_magnet.clone(),
@@ -6075,14 +6147,13 @@ mod tests {
         apply_network_history_persist_result, build_persist_payload,
         clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
         flush_persistence_writer_parts, move_file_with_fallback_impl, parse_hybrid_hashes,
-        persisted_validation_status_from_piece_completion, prune_rss_feed_errors,
-        queue_persistence_payload, resolve_magnet_torrent_name, rss_settings_changed,
-        should_load_persisted_torrent, should_persist_network_history_on_interval,
-        sort_and_filter_torrent_list_state, torrent_completion_percent,
-        torrent_is_effectively_incomplete, App, AppClusterRole, AppCommand, AppMode,
-        AppRuntimeMode, AppState, CommandIngestResult, FilePriority, PeerInfo, PersistPayload,
-        SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState, TorrentMetrics,
-        TorrentSortColumn, UiState,
+        persisted_validation_status_from_metrics, prune_rss_feed_errors, queue_persistence_payload,
+        resolve_magnet_torrent_name, rss_settings_changed, should_load_persisted_torrent,
+        should_persist_network_history_on_interval, sort_and_filter_torrent_list_state,
+        torrent_completion_percent, torrent_is_effectively_incomplete, App, AppClusterRole,
+        AppCommand, AppMode, AppRuntimeMode, AppState, CommandIngestResult, FilePriority, PeerInfo,
+        PersistPayload, SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState,
+        TorrentMetrics, TorrentSortColumn, UiState,
     };
     use crate::config::{
         clear_shared_config_state_for_tests, set_app_paths_override_for_tests, TorrentSettings,
@@ -6094,6 +6165,7 @@ mod tests {
     use crate::persistence::event_journal::{
         ControlOrigin, EventDetails, EventJournalState, EventType, IngestKind, IngestOrigin,
     };
+    use crate::persistence::event_journal::{EventCategory, EventJournalEntry};
     use crate::telemetry::ui_telemetry::UiTelemetry;
     use crate::torrent_manager::{
         FileProbeBatchResult, FileProbeEntry, ManagerCommand, ManagerEvent, TorrentFileProbeStatus,
@@ -6161,21 +6233,39 @@ mod tests {
 
     #[test]
     fn persisted_validation_status_is_true_only_when_complete() {
-        assert!(!persisted_validation_status_from_piece_completion(
-            0, 0, false
+        assert!(!persisted_validation_status_from_metrics(
+            &TorrentMetrics::default(),
+            false
         ));
-        assert!(!persisted_validation_status_from_piece_completion(
-            10, 9, false
+        assert!(!persisted_validation_status_from_metrics(
+            &TorrentMetrics {
+                number_of_pieces_total: 10,
+                number_of_pieces_completed: 9,
+                ..Default::default()
+            },
+            false
         ));
-        assert!(persisted_validation_status_from_piece_completion(
-            10, 10, false
+        assert!(persisted_validation_status_from_metrics(
+            &TorrentMetrics {
+                number_of_pieces_total: 10,
+                number_of_pieces_completed: 10,
+                ..Default::default()
+            },
+            false
         ));
     }
 
     #[test]
     fn persisted_validation_status_downgrades_when_incomplete() {
         assert!(
-            !persisted_validation_status_from_piece_completion(10, 8, true),
+            !persisted_validation_status_from_metrics(
+                &TorrentMetrics {
+                    number_of_pieces_total: 10,
+                    number_of_pieces_completed: 8,
+                    ..Default::default()
+                },
+                true
+            ),
             "Validation status must not stay true once piece completion regresses"
         );
     }
@@ -6183,9 +6273,29 @@ mod tests {
     #[test]
     fn persisted_validation_status_preserves_prior_true_for_metadata_unavailable_snapshot() {
         assert!(
-            persisted_validation_status_from_piece_completion(0, 0, true),
+            persisted_validation_status_from_metrics(&TorrentMetrics::default(), true),
             "0/0 snapshot should preserve prior validated status (magnet metadata pending)"
         );
+    }
+
+    #[test]
+    fn persisted_validation_status_treats_effectively_complete_torrents_as_complete() {
+        assert!(persisted_validation_status_from_metrics(
+            &TorrentMetrics {
+                activity_message: "Seeding".to_string(),
+                ..Default::default()
+            },
+            false
+        ));
+        assert!(persisted_validation_status_from_metrics(
+            &TorrentMetrics {
+                file_priorities: HashMap::from([(0, FilePriority::Skip)]),
+                number_of_pieces_total: 10,
+                number_of_pieces_completed: 8,
+                ..Default::default()
+            },
+            false
+        ));
     }
 
     #[test]
@@ -7497,6 +7607,189 @@ mod tests {
             .filter(|entry| entry.event_type == EventType::TorrentCompleted)
             .count();
         assert_eq!(completion_entries, 0);
+
+        let _ = app.shutdown_tx.send(());
+        set_app_paths_override_for_tests(None);
+    }
+
+    #[tokio::test]
+    async fn completed_torrents_do_not_duplicate_existing_completion_journal_entries() {
+        let _guard = lock_shared_env();
+        let _temp_paths = configure_temp_app_paths_for_test();
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        let info_hash = b"existing_complete_hash".to_vec();
+        let info_hash_hex = hex::encode(&info_hash);
+
+        app.app_state
+            .event_journal_state
+            .entries
+            .push(EventJournalEntry {
+                id: 1,
+                category: EventCategory::TorrentLifecycle,
+                event_type: EventType::TorrentCompleted,
+                torrent_name: Some("Sample Existing".to_string()),
+                info_hash_hex: Some(info_hash_hex.clone()),
+                ..Default::default()
+            });
+        app.app_state.event_journal_state.next_id = 2;
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.info_hash = info_hash.clone();
+        display.latest_state.torrent_name = "Sample Existing".to_string();
+        display.latest_state.number_of_pieces_total = 10;
+        display.latest_state.number_of_pieces_completed = 0;
+        display.latest_state.is_complete = false;
+        app.app_state.torrents.insert(info_hash.clone(), display);
+
+        let (tx, rx) = watch::channel(TorrentMetrics {
+            info_hash: info_hash.clone(),
+            torrent_name: "Sample Existing".to_string(),
+            number_of_pieces_total: 10,
+            number_of_pieces_completed: 0,
+            is_complete: false,
+            ..Default::default()
+        });
+        app.torrent_metric_watch_rxs.insert(info_hash.clone(), rx);
+
+        tx.send(TorrentMetrics {
+            info_hash: info_hash.clone(),
+            torrent_name: "Sample Existing".to_string(),
+            number_of_pieces_total: 10,
+            number_of_pieces_completed: 10,
+            is_complete: true,
+            activity_message: "Seeding".to_string(),
+            ..Default::default()
+        })
+        .expect("send completed metrics");
+        app.drain_latest_torrent_metrics();
+
+        let completion_entries = app
+            .app_state
+            .event_journal_state
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.event_type == EventType::TorrentCompleted
+                    && entry.info_hash_hex.as_deref() == Some(info_hash_hex.as_str())
+            })
+            .count();
+        assert_eq!(completion_entries, 1);
+
+        let _ = app.shutdown_tx.send(());
+        set_app_paths_override_for_tests(None);
+    }
+
+    #[tokio::test]
+    async fn restored_completed_torrents_skip_startup_recompletion_once() {
+        let _guard = lock_shared_env();
+        let _temp_paths = configure_temp_app_paths_for_test();
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        let info_hash = b"startup_recompletion_hash".to_vec();
+
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.info_hash = info_hash.clone();
+        display.latest_state.torrent_name = "Sample Startup Restore".to_string();
+        display.latest_state.number_of_pieces_total = 10;
+        display.latest_state.number_of_pieces_completed = 10;
+        display.latest_state.is_complete = true;
+        display.latest_state.activity_message = "Seeding".to_string();
+        app.app_state.torrents.insert(info_hash.clone(), display);
+        app.startup_completion_suppressed_hashes
+            .insert(info_hash.clone());
+
+        let (tx, rx) = watch::channel(TorrentMetrics {
+            info_hash: info_hash.clone(),
+            torrent_name: "Sample Startup Restore".to_string(),
+            number_of_pieces_total: 10,
+            number_of_pieces_completed: 10,
+            is_complete: true,
+            activity_message: "Seeding".to_string(),
+            ..Default::default()
+        });
+        app.torrent_metric_watch_rxs.insert(info_hash.clone(), rx);
+
+        tx.send(TorrentMetrics {
+            info_hash: info_hash.clone(),
+            torrent_name: "Sample Startup Restore".to_string(),
+            number_of_pieces_total: 10,
+            number_of_pieces_completed: 0,
+            is_complete: false,
+            activity_message: "Validating 0% (0/10)".to_string(),
+            ..Default::default()
+        })
+        .expect("send startup validating metrics");
+        app.drain_latest_torrent_metrics();
+
+        tx.send(TorrentMetrics {
+            info_hash: info_hash.clone(),
+            torrent_name: "Sample Startup Restore".to_string(),
+            number_of_pieces_total: 10,
+            number_of_pieces_completed: 10,
+            is_complete: true,
+            activity_message: "Seeding".to_string(),
+            ..Default::default()
+        })
+        .expect("send recovered complete metrics");
+        app.drain_latest_torrent_metrics();
+
+        let completion_entries = app
+            .app_state
+            .event_journal_state
+            .entries
+            .iter()
+            .filter(|entry| entry.event_type == EventType::TorrentCompleted)
+            .count();
+        assert_eq!(completion_entries, 0);
+        assert!(
+            !app.startup_completion_suppressed_hashes
+                .contains(&info_hash),
+            "startup suppression should clear after the first skipped re-completion"
+        );
+
+        tx.send(TorrentMetrics {
+            info_hash: info_hash.clone(),
+            torrent_name: "Sample Startup Restore".to_string(),
+            number_of_pieces_total: 10,
+            number_of_pieces_completed: 0,
+            is_complete: false,
+            activity_message: "Checking".to_string(),
+            ..Default::default()
+        })
+        .expect("send later incomplete metrics");
+        app.drain_latest_torrent_metrics();
+
+        tx.send(TorrentMetrics {
+            info_hash: info_hash.clone(),
+            torrent_name: "Sample Startup Restore".to_string(),
+            number_of_pieces_total: 10,
+            number_of_pieces_completed: 10,
+            is_complete: true,
+            activity_message: "Seeding".to_string(),
+            ..Default::default()
+        })
+        .expect("send later complete metrics");
+        app.drain_latest_torrent_metrics();
+
+        let completion_entries = app
+            .app_state
+            .event_journal_state
+            .entries
+            .iter()
+            .filter(|entry| entry.event_type == EventType::TorrentCompleted)
+            .count();
+        assert_eq!(completion_entries, 1);
 
         let _ = app.shutdown_tx.send(());
         set_app_paths_override_for_tests(None);

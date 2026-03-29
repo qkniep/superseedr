@@ -184,7 +184,7 @@ async fn dispatch_mode_event(event: CrosstermEvent, app: &mut App) {
             help::handle_event(event, &mut app.app_state);
         }
         AppMode::Journal => {
-            journal::handle_event(event, &mut app.app_state);
+            journal::handle_event(event, &mut app.app_state, &app.app_command_tx);
         }
         AppMode::Welcome => {
             welcome::handle_event(event, &mut app.app_state);

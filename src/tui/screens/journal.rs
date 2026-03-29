@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::app::{AppMode, AppState, JournalFilter};
+use crate::app::{AppCommand, AppMode, AppState, JournalFilter};
 use crate::persistence::event_journal::{
     EventCategory, EventDetails, EventJournalEntry, EventType,
 };
@@ -10,18 +10,20 @@ use crate::tui::formatters::sanitize_text;
 use crate::tui::screen_context::ScreenContext;
 use chrono::{DateTime, Local};
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
-use ratatui::prelude::{
-    Alignment, Constraint, Direction, Frame, Line, Modifier, Span, Style, Stylize,
-};
+use ratatui::prelude::{Alignment, Constraint, Frame, Line, Modifier, Span, Style, Stylize};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use std::path::{Component, Path};
+use tokio::sync::mpsc;
 
 const JOURNAL_CLOSE_KEYS_LABEL: &str = "Esc / q";
 const JOURNAL_FILTER_KEYS_LABEL: &str = "Tab / Shift+Tab";
-const JOURNAL_MOVE_KEYS_LABEL: &str = "↑ / ↓ / k / j";
+const JOURNAL_MOVE_KEYS_LABEL: &str = "Up / Down / k / j";
+const JOURNAL_REPLAY_KEYS_LABEL: &str = "Shift+Y";
 const JOURNAL_CLOSE_DESCRIPTION: &str = "Close the event journal";
 const JOURNAL_FILTER_DESCRIPTION: &str = "Cycle between ALL, QUEUE, COMMANDS, and HEALTH";
 const JOURNAL_MOVE_DESCRIPTION: &str = "Move selection through journal entries";
+const JOURNAL_REPLAY_DESCRIPTION: &str =
+    "Replay the selected archived .torrent, .magnet, or .path source";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JournalAction {
@@ -30,6 +32,7 @@ enum JournalAction {
     FilterPrev,
     MoveUp,
     MoveDown,
+    ReplaySelected,
 }
 
 fn map_key_to_journal_action(key_code: KeyCode, key_kind: KeyEventKind) -> Option<JournalAction> {
@@ -43,11 +46,16 @@ fn map_key_to_journal_action(key_code: KeyCode, key_kind: KeyEventKind) -> Optio
         KeyCode::BackTab => Some(JournalAction::FilterPrev),
         KeyCode::Up | KeyCode::Char('k') => Some(JournalAction::MoveUp),
         KeyCode::Down | KeyCode::Char('j') => Some(JournalAction::MoveDown),
+        KeyCode::Char('Y') => Some(JournalAction::ReplaySelected),
         _ => None,
     }
 }
 
-pub fn handle_event(event: CrosstermEvent, app_state: &mut AppState) {
+pub fn handle_event(
+    event: CrosstermEvent,
+    app_state: &mut AppState,
+    app_command_tx: &mpsc::Sender<AppCommand>,
+) {
     if !matches!(app_state.mode, AppMode::Journal) {
         return;
     }
@@ -59,6 +67,8 @@ pub fn handle_event(event: CrosstermEvent, app_state: &mut AppState) {
     let Some(action) = map_key_to_journal_action(key.code, key.kind) else {
         return;
     };
+
+    app_state.ui.journal.status_message = None;
 
     match action {
         JournalAction::ToNormal => app_state.mode = AppMode::Normal,
@@ -81,6 +91,7 @@ pub fn handle_event(event: CrosstermEvent, app_state: &mut AppState) {
                     (app_state.ui.journal.selected_index + 1).min(len - 1);
             }
         }
+        JournalAction::ReplaySelected => replay_selected_entry(app_state, app_command_tx),
     }
 }
 
@@ -186,31 +197,17 @@ fn progress_label(entry: &EventJournalEntry, app_state: &AppState) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn live_torrent_source(entry: &EventJournalEntry, app_state: &AppState) -> Option<String> {
-    if let Some(info_hash_hex) = entry.info_hash_hex.as_deref() {
-        if let Some(display) = app_state
-            .torrents
-            .iter()
-            .find(|(info_hash, _)| hex::encode(info_hash.as_slice()) == info_hash_hex)
-            .map(|(_, display)| display)
-        {
-            let source = display.latest_state.torrent_or_magnet.trim();
-            if !source.is_empty() {
-                return Some(source.to_string());
-            }
-        }
-    }
-
-    entry.torrent_name.as_ref().and_then(|torrent_name| {
-        app_state
-            .torrents
-            .values()
-            .find(|display| display.latest_state.torrent_name == *torrent_name)
-            .and_then(|display| {
-                let source = display.latest_state.torrent_or_magnet.trim();
-                (!source.is_empty()).then(|| source.to_string())
-            })
-    })
+fn preferred_source_text(entry: &EventJournalEntry) -> Option<String> {
+    entry
+        .source_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .or_else(|| {
+            entry
+                .source_watch_folder
+                .as_ref()
+                .map(|path| path.display().to_string())
+        })
 }
 
 fn pretty_timestamp(ts_iso: &str) -> String {
@@ -280,18 +277,7 @@ fn selected_detail_text(app_state: &AppState, entry: Option<&EventJournalEntry>)
         return "No journal entries yet.".to_string();
     };
 
-    let source_text = live_torrent_source(entry, app_state).or_else(|| {
-        entry
-            .source_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .or_else(|| {
-                entry
-                    .source_watch_folder
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-            })
-    });
+    let source_text = preferred_source_text(entry);
 
     if let Some(source_text) = source_text {
         if app_state.anonymize_torrent_names {
@@ -301,10 +287,6 @@ fn selected_detail_text(app_state: &AppState, entry: Option<&EventJournalEntry>)
     }
 
     detail_text(Some(entry), app_state.anonymize_torrent_names)
-}
-
-pub fn journal_footer_hint() -> &'static str {
-    "[Tab] Filter  [Shift+Tab] Back  [j/k] Move  [q] Close"
 }
 
 pub fn journal_help_rows(ctx: &ThemeContext) -> Vec<Row<'static>> {
@@ -330,7 +312,65 @@ pub fn journal_help_rows(ctx: &ThemeContext) -> Vec<Row<'static>> {
             )),
             Cell::from(JOURNAL_MOVE_DESCRIPTION),
         ]),
+        Row::new(vec![
+            Cell::from(Span::styled(
+                JOURNAL_REPLAY_KEYS_LABEL,
+                ctx.apply(Style::default().fg(ctx.state_success())),
+            )),
+            Cell::from(JOURNAL_REPLAY_DESCRIPTION),
+        ]),
     ]
+}
+
+fn replay_command_for_path(path: &Path) -> Option<AppCommand> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("torrent") => {
+            Some(AppCommand::AddTorrentFromFile(path.to_path_buf()))
+        }
+        Some(ext) if ext.eq_ignore_ascii_case("magnet") => {
+            Some(AppCommand::AddMagnetFromFile(path.to_path_buf()))
+        }
+        Some(ext) if ext.eq_ignore_ascii_case("path") => {
+            Some(AppCommand::AddTorrentFromPathFile(path.to_path_buf()))
+        }
+        _ => None,
+    }
+}
+
+fn replay_selected_entry(app_state: &mut AppState, app_command_tx: &mpsc::Sender<AppCommand>) {
+    let entries = filtered_entries(app_state);
+    let Some(entry) = entries.get(app_state.ui.journal.selected_index).copied() else {
+        app_state.ui.journal.status_message = Some("No journal entry selected".to_string());
+        return;
+    };
+
+    let Some(source_path) = entry.source_path.as_ref() else {
+        app_state.ui.journal.status_message =
+            Some("Selected entry has no replayable source file".to_string());
+        return;
+    };
+
+    let Some(command) = replay_command_for_path(source_path) else {
+        app_state.ui.journal.status_message =
+            Some("Selected entry does not point to a replayable source file".to_string());
+        return;
+    };
+
+    if !source_path.exists() {
+        app_state.ui.journal.status_message =
+            Some("Replay source file is no longer available".to_string());
+        return;
+    }
+
+    match app_command_tx.try_send(command) {
+        Ok(()) => {
+            app_state.ui.journal.status_message =
+                Some(format!("Replayed {}", compact_path_label(source_path, 2)));
+        }
+        Err(_) => {
+            app_state.ui.journal.status_message = Some("Replay request queue is busy".to_string());
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -424,11 +464,11 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
     let app_state = screen.app.state;
     let ctx = screen.theme;
     let area = f.area();
-    let layout = ratatui::layout::Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(area);
-    let popup = crate::tui::formatters::centered_rect(92, 84, layout[0]);
+    let popup = crate::tui::formatters::centered_rect(92, 84, area);
+    let popup_layout =
+        ratatui::layout::Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(popup);
+    let body_area = popup_layout[0];
+    let footer_area = popup_layout[1];
     f.render_widget(Clear, popup);
 
     let outer = Block::default()
@@ -438,14 +478,14 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
         ))
         .borders(Borders::ALL)
         .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)));
-    let inner = outer.inner(popup);
-    f.render_widget(outer, popup);
+    let inner = outer.inner(body_area);
+    f.render_widget(outer, body_area);
 
     let rows = ratatui::layout::Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(8),
-        Constraint::Length(3),
+        Constraint::Length(4),
     ])
     .split(inner);
 
@@ -480,7 +520,13 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
     f.render_widget(Paragraph::new(Line::from(filter_spans)), rows[0]);
 
     let entries = filtered_entries(app_state);
-    let status_line = format!("{} entries", entries.len());
+    let status_line = app_state
+        .ui
+        .journal
+        .status_message
+        .as_ref()
+        .map(|message| format!("{} entries  |  {}", entries.len(), sanitize_text(message)))
+        .unwrap_or_else(|| format!("{} entries", entries.len()));
     f.render_widget(
         Paragraph::new(status_line)
             .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1))),
@@ -552,10 +598,50 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
         rows[3],
     );
 
-    let footer_hint = Paragraph::new(journal_footer_hint())
-        .alignment(Alignment::Center)
-        .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
-    f.render_widget(footer_hint, layout[1]);
+    let footer_hint = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "[Tab]",
+            ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
+        ),
+        Span::styled(
+            " Filter  ",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
+        ),
+        Span::styled(
+            "[Shift+Tab]",
+            ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
+        ),
+        Span::styled(
+            " Back  ",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
+        ),
+        Span::styled(
+            "[j/k]",
+            ctx.apply(Style::default().fg(ctx.state_info()).bold()),
+        ),
+        Span::styled(
+            " Move  ",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
+        ),
+        Span::styled(
+            "[Shift+Y]",
+            ctx.apply(Style::default().fg(ctx.state_success()).bold()),
+        ),
+        Span::styled(
+            " Replay  ",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
+        ),
+        Span::styled(
+            "[q]",
+            ctx.apply(Style::default().fg(ctx.state_error()).bold()),
+        ),
+        Span::styled(
+            " Close",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
+        ),
+    ]))
+    .alignment(Alignment::Center);
+    f.render_widget(footer_hint, footer_area);
 }
 
 #[cfg(test)]
@@ -564,7 +650,9 @@ mod tests {
     use crate::app::{TorrentDisplayState, TorrentMetrics};
     use crate::persistence::event_journal::{EventCategory, EventJournalState};
     use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+    use std::fs;
     use std::path::Path;
+    use tokio::sync::mpsc;
 
     fn base_state() -> AppState {
         let mut state = AppState {
@@ -603,16 +691,19 @@ mod tests {
     #[test]
     fn tab_cycles_filters() {
         let mut app_state = base_state();
+        let (tx, _rx) = mpsc::channel(1);
 
         handle_event(
             CrosstermEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             &mut app_state,
+            &tx,
         );
         assert_eq!(app_state.ui.journal.filter, JournalFilter::Queue);
 
         handle_event(
             CrosstermEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             &mut app_state,
+            &tx,
         );
         assert_eq!(app_state.ui.journal.filter, JournalFilter::Commands);
     }
@@ -694,10 +785,12 @@ mod tests {
     }
 
     #[test]
-    fn selected_detail_text_prefers_live_torrent_source() {
+    fn selected_detail_text_prefers_recorded_source_path_over_live_magnet() {
         let mut app_state = base_state();
         let info_hash = vec![0x22; 20];
         app_state.event_journal_state.entries[0].info_hash_hex = Some(hex::encode(&info_hash));
+        app_state.event_journal_state.entries[0].source_path =
+            Some(Path::new("/alpha/archive/sample.magnet").to_path_buf());
         app_state.torrents.insert(
             info_hash,
             TorrentDisplayState {
@@ -713,7 +806,7 @@ mod tests {
 
         let details =
             selected_detail_text(&app_state, Some(&app_state.event_journal_state.entries[0]));
-        assert!(details.starts_with("magnet:?xt=urn:btih:2222222222222222222222222222222222222222"));
+        assert_eq!(details, "/alpha/archive/sample.magnet");
     }
 
     #[test]
@@ -750,5 +843,53 @@ mod tests {
         assert!(columns
             .iter()
             .all(|column| !matches!(column, JournalColumn::Source)));
+    }
+
+    #[test]
+    fn shift_y_replays_selected_magnet_source() {
+        let mut app_state = base_state();
+        app_state.ui.journal.filter = JournalFilter::Queue;
+        let replay_path = std::env::temp_dir().join(format!(
+            "superseedr-journal-replay-{}.magnet",
+            std::process::id()
+        ));
+        fs::write(
+            &replay_path,
+            "magnet:?xt=urn:btih:4444444444444444444444444444444444444444",
+        )
+        .expect("write replay file");
+        app_state.event_journal_state.entries[0].source_path = Some(replay_path.clone());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT)),
+            &mut app_state,
+            &tx,
+        );
+
+        match rx.try_recv() {
+            Ok(AppCommand::AddMagnetFromFile(path)) => assert_eq!(path, replay_path),
+            Ok(_) => panic!("expected replayed magnet command"),
+            Err(error) => panic!("expected replay command, got {error:?}"),
+        }
+
+        fs::remove_file(&replay_path).ok();
+    }
+
+    #[test]
+    fn shift_y_reports_missing_replay_source() {
+        let mut app_state = base_state();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT)),
+            &mut app_state,
+            &tx,
+        );
+
+        assert_eq!(
+            app_state.ui.journal.status_message.as_deref(),
+            Some("Selected entry has no replayable source file")
+        );
     }
 }
