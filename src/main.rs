@@ -98,7 +98,10 @@ enum OutputMode {
 
 // CLI types and process_input moved to integrations::cli
 
-fn init_tracing(log_dirs: Vec<PathBuf>, filename_prefix: &str) {
+fn init_tracing(
+    log_dirs: Vec<PathBuf>,
+    filename_prefix: &str,
+) -> Vec<tracing_appender::non_blocking::WorkerGuard> {
     let quiet_filter = Targets::new()
         .with_default(DEFAULT_LOG_FILTER)
         .with_target("mainline::rpc::socket", LevelFilter::ERROR);
@@ -119,7 +122,7 @@ fn init_tracing(log_dirs: Vec<PathBuf>, filename_prefix: &str) {
                 .build(&log_dir)
             {
                 Ok(general_log) => {
-                    let (non_blocking_general, _guard_general) =
+                    let (non_blocking_general, guard_general) =
                         tracing_appender::non_blocking(general_log);
                     let general_layer = fmt::layer()
                         .with_writer(non_blocking_general)
@@ -130,7 +133,7 @@ fn init_tracing(log_dirs: Vec<PathBuf>, filename_prefix: &str) {
                         .try_init()
                         .is_ok()
                     {
-                        return;
+                        return vec![guard_general];
                     }
                 }
                 Err(error) => {
@@ -147,6 +150,8 @@ fn init_tracing(log_dirs: Vec<PathBuf>, filename_prefix: &str) {
     let _ = tracing_subscriber::registry()
         .with(fmt::layer().with_filter(quiet_filter))
         .try_init();
+
+    Vec::new()
 }
 
 #[tokio::main]
@@ -187,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         dirs
     };
-    init_tracing(log_dirs, if has_cli_request { "cli" } else { "app" });
+    let _tracing_guards = init_tracing(log_dirs, if has_cli_request { "cli" } else { "app" });
 
     tracing::info!("STARTING SUPERSEEDR");
 
