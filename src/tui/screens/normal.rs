@@ -4146,9 +4146,25 @@ pub fn draw_torrent_files_panel(
         anonymized = app_state.anonymize_torrent_names,
         "Rendering torrent files panel"
     );
+    let shaped_root_preview = shape_root_path_for_viewport(
+        &torrent_root_path_label(&torrent.latest_state, app_state.anonymize_torrent_names),
+        area.width.saturating_sub(6) as usize,
+        area.height.saturating_sub(2) as usize,
+    );
+    tracing::info!(
+        target: "superseedr",
+        info_hash = %hex::encode(&torrent.latest_state.info_hash),
+        shaped_root_rows = shaped_root_preview.len(),
+        "Computed draft root-path shaping preview"
+    );
 
-    let list_items =
-        build_torrent_file_list_items(torrent, area.width, app_state.anonymize_torrent_names, ctx);
+    let list_items = build_torrent_file_list_items(
+        torrent,
+        area.width,
+        area.height.saturating_sub(2),
+        app_state.anonymize_torrent_names,
+        ctx,
+    );
     tracing::info!(
         target: "superseedr",
         info_hash = %hex::encode(&torrent.latest_state.info_hash),
@@ -4184,6 +4200,7 @@ pub fn draw_torrent_files_panel(
 fn build_torrent_file_list_items(
     torrent: &TorrentDisplayState,
     width: u16,
+    height: u16,
     anonymize: bool,
     ctx: &ThemeContext,
 ) -> Vec<ListItem<'static>> {
@@ -4195,11 +4212,19 @@ fn build_torrent_file_list_items(
     );
     let root_path = torrent_root_path_label(&torrent.latest_state, anonymize);
     let root_width = width.saturating_sub(6) as usize;
-    let root_label = truncate_with_ellipsis(&root_path, root_width.max(1));
-    list_items.push(ListItem::new(Line::from(vec![
-        Span::styled(ASCII_TREE_DIR_ICON, root_style),
-        Span::styled(root_label, root_style),
-    ])));
+    let root_rows = shape_root_path_for_viewport(&root_path, root_width.max(1), height as usize);
+    list_items.extend(root_rows.into_iter().enumerate().map(|(idx, row)| {
+        let indent = "  ".repeat(idx);
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                indent,
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+            ),
+            Span::styled(ASCII_TREE_DIR_ICON, root_style),
+            Span::styled(row, root_style),
+        ]))
+    }));
+    let root_depth = list_items.len();
 
     if torrent.file_preview_tree.is_empty() {
         tracing::info!(
@@ -4212,9 +4237,10 @@ fn build_torrent_file_list_items(
         if !torrent.latest_state.torrent_name.is_empty() {
             let child_name =
                 anonymize_tree_name(&torrent.latest_state.torrent_name, false, anonymize);
+            let child_indent = "  ".repeat(root_depth);
             let mut spans = vec![
                 Span::styled(
-                    "  ",
+                    child_indent,
                     ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                 ),
                 Span::styled(
@@ -4256,7 +4282,7 @@ fn build_torrent_file_list_items(
     );
 
     list_items.extend(visible_rows.iter().map(|item| {
-        let indent = "  ".repeat(item.depth + 1);
+        let indent = "  ".repeat(item.depth + root_depth);
         let icon = if item.node.is_dir {
             ASCII_TREE_DIR_ICON
         } else {
@@ -4343,13 +4369,158 @@ fn torrent_root_path_label(metrics: &crate::app::TorrentMetrics, anonymize: bool
         return metrics.torrent_name.clone();
     };
 
-    let path = match metrics.container_name.as_deref() {
-        Some(container_name) if !container_name.is_empty() => download_path.join(container_name),
-        Some(_) if metrics.is_multi_file => download_path.clone(),
-        _ => download_path.clone(),
+    download_path.to_string_lossy().to_string()
+}
+
+fn split_path_components(path: &str) -> Vec<String> {
+    let normalized = path.replace('/', "\\");
+    normalized
+        .split('\\')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
+        .collect()
+}
+
+fn truncate_path_component(component: &str, width: usize) -> String {
+    truncate_with_ellipsis(component, width.max(1))
+}
+
+fn middle_ellipsize_path(path: &str, width: usize) -> String {
+    if path.chars().count() <= width {
+        return path.to_string();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let components = split_path_components(path);
+    if components.len() <= 1 {
+        return truncate_with_ellipsis(path, width);
+    }
+
+    let render = |left: &[String], right: &[String]| {
+        format!("{}\\...\\{}", left.join("\\"), right.join("\\"))
     };
 
-    path.to_string_lossy().to_string()
+    let mut left = vec![components[0].clone()];
+    let mut right = vec![components[components.len() - 1].clone()];
+    let mut left_idx = 1usize;
+    let mut right_idx = components.len() - 1;
+
+    let initial = render(&left, &right);
+    if initial.chars().count() > width {
+        return truncate_with_ellipsis(&initial, width);
+    }
+
+    let mut best = initial;
+    while left_idx < right_idx {
+        let try_left = {
+            let mut next_left = left.clone();
+            next_left.push(components[left_idx].clone());
+            render(&next_left, &right)
+        };
+        let try_right = {
+            let mut next_right = right.clone();
+            next_right.insert(0, components[right_idx - 1].clone());
+            render(&left, &next_right)
+        };
+
+        let left_fits = try_left.chars().count() <= width;
+        let right_fits = try_right.chars().count() <= width;
+
+        match (left_fits, right_fits) {
+            (false, false) => break,
+            (true, false) => {
+                left.push(components[left_idx].clone());
+                left_idx += 1;
+                best = try_left;
+            }
+            (false, true) => {
+                right_idx -= 1;
+                right.insert(0, components[right_idx].clone());
+                best = try_right;
+            }
+            (true, true) => {
+                if try_left.chars().count() >= try_right.chars().count() {
+                    left.push(components[left_idx].clone());
+                    left_idx += 1;
+                    best = try_left;
+                } else {
+                    right_idx -= 1;
+                    right.insert(0, components[right_idx].clone());
+                    best = try_right;
+                }
+            }
+        }
+    }
+
+    best
+}
+
+fn shape_root_path_for_viewport(path: &str, width: usize, height: usize) -> Vec<String> {
+    if path.is_empty() || width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    if path.chars().count() <= width {
+        return vec![path.to_string()];
+    }
+
+    let components = split_path_components(path);
+    if components.is_empty() {
+        return vec![truncate_with_ellipsis(path, width.max(1))];
+    }
+
+    if height == 1 {
+        return vec![middle_ellipsize_path(path, width)];
+    }
+
+    let mut rows: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for component in components {
+        let candidate = if current.is_empty() {
+            component.clone()
+        } else {
+            format!("{}\\{}", current, component)
+        };
+
+        if candidate.chars().count() <= width {
+            current = candidate;
+            continue;
+        }
+
+        if !current.is_empty() {
+            rows.push(std::mem::take(&mut current));
+            if rows.len() == height {
+                break;
+            }
+        }
+
+        if component.chars().count() <= width {
+            current = component;
+        } else {
+            rows.push(truncate_path_component(&component, width));
+            current = String::new();
+            if rows.len() == height {
+                break;
+            }
+        }
+    }
+
+    if rows.len() < height && !current.is_empty() {
+        rows.push(current);
+    }
+
+    if rows.len() > height {
+        rows.truncate(height);
+    }
+
+    if rows.is_empty() {
+        vec![truncate_with_ellipsis(path, width.max(1))]
+    } else {
+        rows
+    }
 }
 
 fn anonymize_tree_name(name: &str, is_dir: bool, anonymize: bool) -> String {
@@ -5050,6 +5221,219 @@ mod tests {
 
         reduce_ui_action(&mut app_state, UiAction::ToggleTorrentFiles);
         assert!(!app_state.ui.show_torrent_files);
+    }
+
+    #[test]
+    fn split_path_components_handles_windows_paths() {
+        assert_eq!(
+            split_path_components(r"C:\Users\jagat\Documents\seedbox"),
+            vec!["C:", "Users", "jagat", "Documents", "seedbox"]
+        );
+    }
+
+    #[test]
+    fn middle_ellipsize_path_preserves_path_ends() {
+        let shaped = middle_ellipsize_path(r"C:\Users\jagat\Documents\seedbox", 18);
+        assert!(shaped.chars().count() <= 18, "{shaped}");
+        assert!(shaped.starts_with("C:"), "{shaped}");
+        assert!(shaped.ends_with("seedbox"), "{shaped}");
+        assert!(shaped.contains("..."), "{shaped}");
+    }
+
+    #[test]
+    fn torrent_root_path_label_uses_download_root_only() {
+        let metrics = TorrentMetrics {
+            download_path: Some(PathBuf::from(r"C:\Users\jagat\Documents\seedbox")),
+            container_name: Some("[Group] Sample Release".to_string()),
+            is_multi_file: true,
+            torrent_name: "Episode 01.mkv".to_string(),
+            info_hash: vec![1, 2, 3, 4],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            torrent_root_path_label(&metrics, false),
+            r"C:\Users\jagat\Documents\seedbox"
+        );
+    }
+
+    #[test]
+    fn shape_root_path_for_viewport_keeps_single_line_when_it_fits() {
+        let path = r"C:\Users\jagat\Documents";
+        assert_eq!(
+            shape_root_path_for_viewport(path, path.len(), 4),
+            vec![path.to_string()]
+        );
+    }
+
+    #[test]
+    fn shape_root_path_for_viewport_uses_middle_ellipsis_when_only_one_row_is_available() {
+        let rows = shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 18, 1);
+        assert_eq!(rows.len(), 1);
+        assert!(rows_fit_in_box(&rows, 18, 1), "{rows:?}");
+        assert!(rows[0].starts_with("C:"), "{rows:?}");
+        assert!(rows[0].ends_with("seedbox"), "{rows:?}");
+        assert!(rows[0].contains("..."), "{rows:?}");
+    }
+
+    #[test]
+    fn shape_root_path_for_viewport_splits_into_vertical_segments_when_narrow() {
+        assert_eq!(
+            shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 10, 5),
+            vec!["C:\\Users", "jagat", "Documents", "seedbox"]
+        );
+    }
+
+    #[test]
+    fn shape_root_path_for_viewport_regroups_segments_to_match_height_budget() {
+        assert_eq!(
+            shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 16, 3),
+            vec!["C:\\Users\\jagat", "Documents", "seedbox"]
+        );
+    }
+
+    #[test]
+    fn shape_root_path_for_viewport_truncates_overwide_group_when_needed() {
+        assert_eq!(
+            shape_root_path_for_viewport(
+                r"C:\Users\jagat\[251226][longlonglonglong] release",
+                12,
+                2
+            ),
+            vec!["C:\\Users", "jagat"]
+        );
+    }
+
+    fn rows_fit_in_box(rows: &[String], width: usize, height: usize) -> bool {
+        rows.len() <= height && rows.iter().all(|row| row.chars().count() <= width)
+    }
+
+    fn visible_signal(rows: &[String]) -> usize {
+        rows.iter()
+            .map(|row| row.replace("...", "").chars().count())
+            .sum()
+    }
+
+    #[test]
+    fn shaped_paths_fit_vertical_square_and_landscape_boxes() {
+        let cases = [
+            r"C:\Users\jagat\Documents\seedbox",
+            r"C:\Users\jagat\Documents\seedbox\[251226][long-release-name] Episode 01.mkv",
+            r"C:\seedbox\anime\season-01\episode-01.mkv",
+            r"D:\dl\onefile.mkv",
+            r"C:\very\deep\path\with\many\segments\and\a\long\final\component",
+        ];
+        let viewports = [
+            (10, 8), // vertical
+            (16, 4), // square-ish
+            (40, 2), // landscape
+            (12, 3),
+            (20, 5),
+        ];
+
+        for path in cases {
+            for (width, height) in viewports {
+                let rows = shape_root_path_for_viewport(path, width, height);
+                assert!(
+                    rows_fit_in_box(&rows, width, height),
+                    "rows should fit box for path={path:?} width={width} height={height}: {rows:?}"
+                );
+                assert!(
+                    !rows.is_empty(),
+                    "shape helper should produce at least one row for path={path:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wider_viewports_do_not_increase_row_count_or_truncation_for_same_height() {
+        let path = r"C:\Users\jagat\Documents\seedbox\[251226][long-release-name]\Episode 01.mkv";
+
+        let narrow = shape_root_path_for_viewport(path, 12, 3);
+        let medium = shape_root_path_for_viewport(path, 18, 3);
+        let wide = shape_root_path_for_viewport(path, 28, 3);
+
+        assert!(rows_fit_in_box(&narrow, 12, 3));
+        assert!(rows_fit_in_box(&medium, 18, 3));
+        assert!(rows_fit_in_box(&wide, 28, 3));
+        assert!(
+            visible_signal(&medium) >= visible_signal(&narrow),
+            "{medium:?} vs {narrow:?}"
+        );
+        assert!(
+            visible_signal(&wide) >= visible_signal(&medium),
+            "{wide:?} vs {medium:?}"
+        );
+    }
+
+    #[test]
+    fn taller_viewports_do_not_increase_truncation_for_same_width() {
+        let path =
+            r"C:\Users\jagat\Documents\seedbox\[251226][long-release-name]\subdir\Episode 01.mkv";
+
+        let short = shape_root_path_for_viewport(path, 14, 2);
+        let medium = shape_root_path_for_viewport(path, 14, 4);
+        let tall = shape_root_path_for_viewport(path, 14, 8);
+
+        assert!(
+            visible_signal(&medium) >= visible_signal(&short),
+            "{medium:?} vs {short:?}"
+        );
+        assert!(
+            visible_signal(&tall) >= visible_signal(&medium),
+            "{tall:?} vs {medium:?}"
+        );
+        assert!(rows_fit_in_box(&short, 14, 2));
+        assert!(rows_fit_in_box(&medium, 14, 4));
+        assert!(rows_fit_in_box(&tall, 14, 8));
+    }
+
+    #[test]
+    fn shallow_paths_prefer_horizontal_layouts_when_space_allows() {
+        let path = r"D:\dl\onefile.mkv";
+
+        assert_eq!(
+            shape_root_path_for_viewport(path, 40, 2),
+            vec![path.to_string()]
+        );
+        assert_eq!(
+            shape_root_path_for_viewport(path, 8, 3),
+            vec!["D:\\dl", "onefi..."]
+        );
+    }
+
+    #[test]
+    fn deep_paths_prefer_vertical_layouts_when_width_is_constrained() {
+        let path = r"C:\a\b\c\d\e\f\g\h\i";
+        let rows = shape_root_path_for_viewport(path, 4, 9);
+        assert!(rows_fit_in_box(&rows, 4, 9), "{rows:?}");
+        assert_eq!(rows.len(), 5);
+        assert!(
+            rows.first().is_some_and(|row| row.starts_with("C:")),
+            "{rows:?}"
+        );
+        assert_eq!(rows.last().map(String::as_str), Some("i"));
+    }
+
+    #[test]
+    fn root_path_shaping_peels_from_deepest_parent_first() {
+        assert_eq!(
+            shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 24, 4),
+            vec!["C:\\Users\\jagat\\Documents", "seedbox"]
+        );
+        assert_eq!(
+            shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 18, 4),
+            vec!["C:\\Users\\jagat", "Documents\\seedbox"]
+        );
+    }
+
+    #[test]
+    fn long_single_component_paths_are_truncated_to_fit() {
+        let path = r"C:\[251226][veryveryveryveryverylong-name]";
+        let rows = shape_root_path_for_viewport(path, 10, 2);
+        assert!(rows_fit_in_box(&rows, 10, 2));
+        assert!(rows.iter().any(|row| row.contains("...")), "{rows:?}");
     }
 
     #[test]
