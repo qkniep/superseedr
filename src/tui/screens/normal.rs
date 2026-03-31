@@ -7,6 +7,7 @@ use crate::app::AppCommand;
 use crate::app::BrowserPane;
 use crate::app::ChartPanelView;
 use crate::app::FileBrowserMode;
+use crate::app::FilePriority;
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
 use crate::app::{
@@ -38,7 +39,7 @@ use crate::tui::layout::normal::LayoutContext;
 use crate::tui::layout::normal::LayoutPlan;
 use crate::tui::layout::normal::DEFAULT_SIDEBAR_PERCENT;
 use crate::tui::screen_context::ScreenContext;
-use crate::tui::tree::TreeViewState;
+use crate::tui::tree::{TreeFilter, TreeMathHelper, TreeViewState};
 use chrono::{DateTime, Utc};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -56,7 +57,8 @@ use ratatui::prelude::{
     Stylize,
 };
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, Gauge, LineGauge, Padding, Paragraph, Row, Table, TableState, Wrap,
+    Block, Borders, Cell, Clear, Gauge, LineGauge, List, ListItem, Padding, Paragraph, Row, Table,
+    TableState, Wrap,
 };
 use strum::IntoEnumIterator;
 use tracing::{event as tracing_event, Level};
@@ -65,6 +67,8 @@ static APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SECONDS_HISTORY_MAX: usize = 3600;
 const MINUTES_HISTORY_MAX: usize = 48 * 60;
 const TUNING_LABEL_WIDTH: usize = 14;
+const ASCII_TREE_DIR_ICON: &str = "> ";
+const ASCII_TREE_FILE_ICON: &str = "  ";
 
 fn build_time_aligned_window(
     points: &[NetworkHistoryPoint],
@@ -337,6 +341,7 @@ pub enum UiAction {
     ClearSystemError,
     StartSearch,
     Navigate(KeyCode),
+    ToggleTorrentFiles,
     ToggleAnonymizeNames,
     EnterPowerSaving,
     RequestQuit,
@@ -401,6 +406,13 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
         }
         UiAction::Navigate(key_code) => {
             handle_navigation(app_state, key_code);
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+        UiAction::ToggleTorrentFiles => {
+            app_state.ui.show_torrent_files = !app_state.ui.show_torrent_files;
             ReduceResult {
                 redraw: true,
                 effects: Vec::new(),
@@ -623,6 +635,7 @@ fn map_key_to_ui_action(key: KeyEvent) -> Option<UiAction> {
     match key.code {
         KeyCode::Esc => Some(UiAction::ClearSystemError),
         KeyCode::Char('/') => Some(UiAction::StartSearch),
+        KeyCode::Char('f') => Some(UiAction::ToggleTorrentFiles),
         KeyCode::Char('x') => Some(UiAction::ToggleAnonymizeNames),
         KeyCode::Char('z') => Some(UiAction::EnterPowerSaving),
         KeyCode::Char('Q') => Some(UiAction::RequestQuit),
@@ -662,7 +675,11 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
     draw_torrent_list(f, app_state, plan.list, ctx);
     draw_footer(f, app_state, settings, plan.footer, ctx);
     draw_details_panel(f, app_state, plan.details, ctx);
-    draw_peers_table(f, app_state, plan.peers, ctx);
+    if app_state.ui.show_torrent_files {
+        draw_torrent_files_panel(f, app_state, plan.peers, ctx);
+    } else {
+        draw_peers_table(f, app_state, plan.peers, ctx);
+    }
 
     if let Some(r) = plan.chart {
         draw_network_chart(f, app_state, r, ctx);
@@ -1146,6 +1163,11 @@ pub fn draw_footer(
         "[a]",
         "dd",
         ctx.apply(Style::default().fg(ctx.state_success())),
+    );
+    push_if_fits(
+        "[f]",
+        "iles",
+        ctx.apply(Style::default().fg(ctx.accent_teal())),
     );
     push_if_fits(
         "[d]",
@@ -4074,6 +4096,274 @@ pub fn draw_peers_table(
     }
 }
 
+pub fn draw_torrent_files_panel(
+    f: &mut Frame,
+    app_state: &AppState,
+    area: Rect,
+    ctx: &ThemeContext,
+) {
+    const MIN_HEATMAP_HEIGHT: u16 = 4;
+
+    if area.height < 2 || area.width < 2 {
+        return;
+    }
+
+    let selected_torrent = app_state
+        .torrent_list_order
+        .get(app_state.ui.selected_torrent_index)
+        .and_then(|info_hash| app_state.torrents.get(info_hash));
+
+    let block = Block::default()
+        .title(Span::styled(
+            "Files",
+            ctx.apply(Style::default().fg(ctx.state_selected())),
+        ))
+        .borders(Borders::ALL)
+        .padding(Padding::new(1, 1, 0, 0))
+        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)));
+
+    let Some(torrent) = selected_torrent else {
+        let inner_area = block.inner(area);
+        f.render_widget(block, area);
+        let empty = Paragraph::new("No torrent selected")
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true });
+        f.render_widget(empty, inner_area);
+        return;
+    };
+
+    tracing::info!(
+        target: "superseedr",
+        info_hash = %hex::encode(&torrent.latest_state.info_hash),
+        torrent_name = %torrent.latest_state.torrent_name,
+        total_size = torrent.latest_state.total_size,
+        file_count = torrent.latest_state.file_count.unwrap_or(0),
+        is_multi_file = torrent.latest_state.is_multi_file,
+        preview_tree_roots = torrent.file_preview_tree.len(),
+        show_torrent_files = app_state.ui.show_torrent_files,
+        panel_width = area.width,
+        panel_height = area.height,
+        anonymized = app_state.anonymize_torrent_names,
+        "Rendering torrent files panel"
+    );
+
+    let list_items =
+        build_torrent_file_list_items(torrent, area.width, app_state.anonymize_torrent_names, ctx);
+    tracing::info!(
+        target: "superseedr",
+        info_hash = %hex::encode(&torrent.latest_state.info_hash),
+        rendered_rows = list_items.len(),
+        "Built torrent files panel rows"
+    );
+    let file_block_height_needed = (list_items.len() as u16).saturating_add(2);
+    let remaining_height = area.height.saturating_sub(file_block_height_needed);
+
+    if remaining_height >= MIN_HEATMAP_HEIGHT {
+        let layout_chunks = Layout::vertical([
+            Constraint::Length(file_block_height_needed),
+            Constraint::Min(0),
+        ])
+        .split(area);
+        let inner_area = block.inner(layout_chunks[0]);
+        f.render_widget(block, layout_chunks[0]);
+        f.render_widget(List::new(list_items), inner_area);
+        draw_swarm_heatmap(
+            f,
+            ctx,
+            &torrent.latest_state.peers,
+            torrent.latest_state.number_of_pieces_total,
+            layout_chunks[1],
+        );
+    } else {
+        let inner_area = block.inner(area);
+        f.render_widget(block, area);
+        f.render_widget(List::new(list_items), inner_area);
+    }
+}
+
+fn build_torrent_file_list_items(
+    torrent: &TorrentDisplayState,
+    width: u16,
+    anonymize: bool,
+    ctx: &ThemeContext,
+) -> Vec<ListItem<'static>> {
+    let mut list_items = Vec::new();
+    let root_style = ctx.apply(
+        Style::default()
+            .fg(ctx.state_info())
+            .add_modifier(Modifier::BOLD),
+    );
+    let root_path = torrent_root_path_label(&torrent.latest_state, anonymize);
+    let root_width = width.saturating_sub(6) as usize;
+    let root_label = truncate_with_ellipsis(&root_path, root_width.max(1));
+    list_items.push(ListItem::new(Line::from(vec![
+        Span::styled(ASCII_TREE_DIR_ICON, root_style),
+        Span::styled(root_label, root_style),
+    ])));
+
+    if torrent.file_preview_tree.is_empty() {
+        tracing::info!(
+            target: "superseedr",
+            info_hash = %hex::encode(&torrent.latest_state.info_hash),
+            torrent_name = %torrent.latest_state.torrent_name,
+            total_size = torrent.latest_state.total_size,
+            "Torrent files panel using empty-tree fallback"
+        );
+        if !torrent.latest_state.torrent_name.is_empty() {
+            let child_name =
+                anonymize_tree_name(&torrent.latest_state.torrent_name, false, anonymize);
+            let mut spans = vec![
+                Span::styled(
+                    "  ",
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+                ),
+                Span::styled(
+                    ASCII_TREE_FILE_ICON,
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+                ),
+                Span::styled(
+                    child_name,
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+                ),
+            ];
+            if torrent.latest_state.total_size > 0 {
+                spans.push(Span::styled(
+                    format!(" ({})", format_bytes(torrent.latest_state.total_size)),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+                ));
+            }
+            list_items.push(ListItem::new(Line::from(spans)));
+        }
+        return list_items;
+    }
+
+    let mut expanded_state = TreeViewState::default();
+    for node in &torrent.file_preview_tree {
+        node.expand_all(&mut expanded_state);
+    }
+
+    let visible_rows = TreeMathHelper::get_visible_slice(
+        &torrent.file_preview_tree,
+        &expanded_state,
+        TreeFilter::default(),
+        usize::MAX,
+    );
+    tracing::info!(
+        target: "superseedr",
+        info_hash = %hex::encode(&torrent.latest_state.info_hash),
+        visible_rows = visible_rows.len(),
+        "Torrent files panel using preview tree rows"
+    );
+
+    list_items.extend(visible_rows.iter().map(|item| {
+        let indent = "  ".repeat(item.depth + 1);
+        let icon = if item.node.is_dir {
+            ASCII_TREE_DIR_ICON
+        } else {
+            ASCII_TREE_FILE_ICON
+        };
+
+        let (name_style, suffix) = match item.node.payload.priority {
+            FilePriority::Skip => (
+                ctx.apply(
+                    Style::default()
+                        .fg(ctx.theme.semantic.surface1)
+                        .add_modifier(Modifier::CROSSED_OUT),
+                ),
+                Some(" [S]".to_string()),
+            ),
+            FilePriority::High => (
+                ctx.apply(
+                    Style::default()
+                        .fg(ctx.state_success())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Some(" [H]".to_string()),
+            ),
+            FilePriority::Mixed => (
+                ctx.apply(
+                    Style::default()
+                        .fg(ctx.state_warning())
+                        .add_modifier(Modifier::ITALIC),
+                ),
+                Some(" [*]".to_string()),
+            ),
+            FilePriority::Normal => (
+                ctx.apply(Style::default().fg(if item.node.is_dir {
+                    ctx.state_info()
+                } else {
+                    ctx.theme.semantic.text
+                })),
+                None,
+            ),
+        };
+
+        let mut spans = vec![
+            Span::styled(
+                indent,
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+            ),
+            Span::styled(
+                icon,
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+            ),
+            Span::styled(
+                anonymize_tree_name(&item.node.name, item.node.is_dir, anonymize),
+                name_style,
+            ),
+        ];
+
+        if !item.node.is_dir {
+            spans.push(Span::styled(
+                format!(" ({})", format_bytes(item.node.payload.size)),
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+            ));
+        }
+
+        if let Some(suffix) = suffix {
+            spans.push(Span::styled(
+                suffix,
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface1)),
+            ));
+        }
+
+        ListItem::new(Line::from(spans))
+    }));
+
+    list_items
+}
+
+fn torrent_root_path_label(metrics: &crate::app::TorrentMetrics, anonymize: bool) -> String {
+    if anonymize {
+        let key = hex::encode(&metrics.info_hash);
+        return format!("torrent-{}", &key[..key.len().min(6)]);
+    }
+
+    let Some(download_path) = metrics.download_path.as_ref() else {
+        return metrics.torrent_name.clone();
+    };
+
+    let path = match metrics.container_name.as_deref() {
+        Some(container_name) if !container_name.is_empty() => download_path.join(container_name),
+        Some(_) if metrics.is_multi_file => download_path.clone(),
+        _ => download_path.clone(),
+    };
+
+    path.to_string_lossy().to_string()
+}
+
+fn anonymize_tree_name(name: &str, is_dir: bool, anonymize: bool) -> String {
+    if !anonymize {
+        return name.to_string();
+    }
+
+    if is_dir {
+        return "folder".to_string();
+    }
+
+    "file".to_string()
+}
+
 fn draw_swarm_heatmap(
     f: &mut Frame,
     ctx: &ThemeContext,
@@ -4751,6 +5041,18 @@ mod tests {
     }
 
     #[test]
+    fn reducer_toggle_torrent_files_flips_flag() {
+        let mut app_state = AppState::default();
+        assert!(!app_state.ui.show_torrent_files);
+
+        reduce_ui_action(&mut app_state, UiAction::ToggleTorrentFiles);
+        assert!(app_state.ui.show_torrent_files);
+
+        reduce_ui_action(&mut app_state, UiAction::ToggleTorrentFiles);
+        assert!(!app_state.ui.show_torrent_files);
+    }
+
+    #[test]
     fn reducer_enter_power_saving_emits_mode_effect() {
         let mut app_state = AppState {
             mode: AppMode::Normal,
@@ -4991,6 +5293,10 @@ mod tests {
         assert_eq!(
             map_key_to_ui_action(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)),
             None
+        );
+        assert_eq!(
+            map_key_to_ui_action(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
+            Some(UiAction::ToggleTorrentFiles)
         );
     }
 

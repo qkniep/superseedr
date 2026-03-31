@@ -805,6 +805,7 @@ impl Default for TorrentMetrics {
 #[derive(Default, Debug)]
 pub struct TorrentDisplayState {
     pub latest_state: TorrentMetrics,
+    pub file_preview_tree: Vec<RawNode<TorrentPreviewPayload>>,
     pub latest_file_probe_status: Option<TorrentFileProbeStatus>,
     pub integrity_next_probe_in: Option<Duration>,
     pub download_history: Vec<u64>,
@@ -843,6 +844,7 @@ pub struct UiState {
     pub selected_header: SelectedHeader,
     pub selected_torrent_index: usize,
     pub selected_peer_index: usize,
+    pub show_torrent_files: bool,
     pub is_searching: bool,
     pub search_query: String,
     pub config: ConfigUiState,
@@ -875,6 +877,39 @@ pub struct FileBrowserUiState {
     pub browser_mode: FileBrowserMode,
     pub is_searching: bool,
     pub search_query: String,
+}
+
+pub fn build_torrent_preview_tree(
+    file_list: Vec<(Vec<String>, u64)>,
+    file_priorities: &HashMap<usize, FilePriority>,
+) -> Vec<RawNode<TorrentPreviewPayload>> {
+    let file_count = file_list.len();
+    let preview_payloads: Vec<(Vec<String>, TorrentPreviewPayload)> = file_list
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (parts, size))| {
+            (
+                parts,
+                TorrentPreviewPayload {
+                    file_index: Some(idx),
+                    size,
+                    priority: file_priorities
+                        .get(&idx)
+                        .copied()
+                        .unwrap_or(FilePriority::Normal),
+                },
+            )
+        })
+        .collect();
+
+    let tree = RawNode::from_path_list(None, preview_payloads);
+    tracing::info!(
+        target: "superseedr",
+        file_count,
+        tree_roots = tree.len(),
+        "Built torrent preview tree"
+    );
+    tree
 }
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -3680,6 +3715,8 @@ impl App {
                     display.latest_state.file_count = Some(torrent_file_count(&torrent));
                     display.latest_state.total_size = torrent.info.total_length().max(0) as u64;
                     file_priorities = display.latest_state.file_priorities.clone();
+                    display.file_preview_tree =
+                        build_torrent_preview_tree(torrent.file_list(), &file_priorities);
                 }
 
                 self.persist_torrent_metadata_snapshot(&info_hash, &torrent, &file_priorities);
@@ -4500,6 +4537,7 @@ impl App {
                 file_priorities: file_priorities.clone(),
                 ..Default::default()
             },
+            file_preview_tree: build_torrent_preview_tree(torrent.file_list(), &file_priorities),
             ..Default::default()
         };
         self.app_state
