@@ -138,9 +138,9 @@ pub async fn consume_tokens(bucket: &TokenBucket, amount_tokens: f64) {
             if required_duration < Duration::from_secs(60 * 5) {
                 tokio::time::sleep(required_duration).await;
             } else {
-                eprintln!(
-                    "Warning: Calculated sleep time for large request exceeds limit ({:?}).",
-                    required_duration
+                tracing::warn!(
+                    ?required_duration,
+                    "Calculated sleep time for large token-bucket request exceeds limit"
                 );
             }
             return;

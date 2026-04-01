@@ -101,6 +101,7 @@ enum OutputMode {
 fn init_tracing(
     log_dirs: Vec<PathBuf>,
     filename_prefix: &str,
+    emit_stderr: bool,
 ) -> Vec<tracing_appender::non_blocking::WorkerGuard> {
     let quiet_filter = Targets::new()
         .with_default(DEFAULT_LOG_FILTER)
@@ -108,11 +109,13 @@ fn init_tracing(
 
     for log_dir in log_dirs {
         if let Err(error) = fs::create_dir_all(&log_dir) {
-            eprintln!(
-                "[Warn] Failed to create log directory at {}: {}",
-                log_dir.display(),
-                error
-            );
+            if emit_stderr {
+                eprintln!(
+                    "[Warn] Failed to create log directory at {}: {}",
+                    log_dir.display(),
+                    error
+                );
+            }
         } else {
             match RollingFileAppender::builder()
                 .rotation(Rotation::DAILY)
@@ -137,18 +140,28 @@ fn init_tracing(
                     }
                 }
                 Err(error) => {
-                    eprintln!(
-                        "[Warn] Failed to initialize file logging at {}: {}",
-                        log_dir.display(),
-                        error
-                    );
+                    if emit_stderr {
+                        eprintln!(
+                            "[Warn] Failed to initialize file logging at {}: {}",
+                            log_dir.display(),
+                            error
+                        );
+                    }
                 }
             }
         }
     }
 
+    let fallback_layer = if emit_stderr {
+        fmt::layer().with_filter(quiet_filter).boxed()
+    } else {
+        fmt::layer()
+            .with_writer(std::io::sink)
+            .with_filter(quiet_filter)
+            .boxed()
+    };
     let _ = tracing_subscriber::registry()
-        .with(fmt::layer().with_filter(quiet_filter))
+        .with(fallback_layer)
         .try_init();
 
     Vec::new()
@@ -192,7 +205,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         dirs
     };
-    let _tracing_guards = init_tracing(log_dirs, if has_cli_request { "cli" } else { "app" });
+    let _tracing_guards = init_tracing(
+        log_dirs,
+        if has_cli_request { "cli" } else { "app" },
+        has_cli_request,
+    );
 
     tracing::info!("STARTING SUPERSEEDR");
 

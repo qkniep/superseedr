@@ -2437,7 +2437,7 @@ impl TorrentManager {
             tokio::select! {
                 biased;
                 _ = signal::ctrl_c() => {
-                    println!("Ctrl+C received, initiating clean shutdown...");
+                    tracing::info!("Ctrl+C received, initiating clean shutdown...");
                     break Ok(());
                 }
                 _ = tick.tick(), if !self.state.is_paused => {
@@ -2948,8 +2948,7 @@ impl TorrentManager {
                         },
 
                         _ => {
-
-                            println!("UNIMPLEMENTED TORRENT COMMEND {:?}",  command);
+                            tracing::warn!(?command, "Unhandled torrent command");
                         }
                     }
                 }
