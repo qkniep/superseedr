@@ -7,6 +7,7 @@ use tracing::Level;
 use crate::command::TorrentCommand;
 use crate::networking::BlockInfo;
 use crate::storage::MultiFileInfo;
+use crate::torrent_manager::FileActivityDirection;
 use crate::torrent_manager::ManagerEvent;
 
 use crate::app::FilePriority;
@@ -1208,6 +1209,15 @@ impl TorrentState {
                 effects.push(Effect::EmitManagerEvent(ManagerEvent::BlockReceived {
                     info_hash: self.info_hash.clone(),
                 }));
+                effects.push(Effect::EmitManagerEvent(ManagerEvent::FileActivity {
+                    info_hash: self.info_hash.clone(),
+                    touched_relative_paths: self.touched_relative_paths_for_activity(
+                        piece_index,
+                        block_offset,
+                        data.len() as u32,
+                    ),
+                    direction: FileActivityDirection::Download,
+                }));
 
                 if is_piece_done {
                     return effects;
@@ -1582,14 +1592,25 @@ impl TorrentState {
                 }
 
                 if allowed {
-                    vec![Effect::ReadFromDisk {
-                        peer_id,
-                        block_info: BlockInfo {
-                            piece_index,
-                            offset: block_offset,
-                            length,
+                    vec![
+                        Effect::EmitManagerEvent(ManagerEvent::FileActivity {
+                            info_hash: self.info_hash.clone(),
+                            touched_relative_paths: self.touched_relative_paths_for_activity(
+                                piece_index,
+                                block_offset,
+                                length,
+                            ),
+                            direction: FileActivityDirection::Upload,
+                        }),
+                        Effect::ReadFromDisk {
+                            peer_id,
+                            block_info: BlockInfo {
+                                piece_index,
+                                offset: block_offset,
+                                length,
+                            },
                         },
-                    }]
+                    ]
                 } else {
                     vec![Effect::DoNothing]
                 }
@@ -2199,6 +2220,75 @@ impl TorrentState {
             }
         }
         (data_len, 0, data_len)
+    }
+
+    fn touched_relative_paths_for_activity(
+        &self,
+        piece_index: u32,
+        block_offset: u32,
+        length: u32,
+    ) -> Vec<String> {
+        if length == 0 {
+            Vec::new()
+        } else {
+            self.multi_file_info
+                .as_ref()
+                .and_then(|multi_file_info| {
+                    self.torrent.as_ref().map(|torrent| {
+                        let global_offset = (piece_index as u64 * torrent.info.piece_length as u64)
+                            + block_offset as u64;
+                        let range_end = global_offset.saturating_add(length as u64);
+                        let effective_root = match &self.container_name {
+                            Some(name) if !name.is_empty() => self
+                                .torrent_data_path
+                                .as_ref()
+                                .map(|path| path.join(name)),
+                            _ => self.torrent_data_path.clone(),
+                        };
+                        multi_file_info
+                            .files
+                            .iter()
+                            .filter_map(|file_info| {
+                                let file_start = file_info.global_start_offset;
+                                let file_end = file_start.saturating_add(file_info.length);
+                                if global_offset < file_end && range_end > file_start {
+                                    Some(
+                                        effective_root
+                                            .as_ref()
+                                            .and_then(|root| {
+                                                file_info
+                                                    .path
+                                                    .strip_prefix(root)
+                                                    .ok()
+                                                    .map(|relative| {
+                                                        relative
+                                                            .iter()
+                                                            .map(|part| {
+                                                                part.to_string_lossy().into_owned()
+                                                            })
+                                                            .collect::<Vec<_>>()
+                                                            .join("/")
+                                                    })
+                                            })
+                                            .unwrap_or_else(|| {
+                                                file_info
+                                                    .path
+                                                    .file_name()
+                                                    .map(|name| name.to_string_lossy().into_owned())
+                                                    .unwrap_or_else(|| {
+                                                        file_info.path.to_string_lossy().into_owned()
+                                                    })
+                                            }),
+                                    )
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    })
+                })
+                .unwrap_or_default()
+        }
     }
 
     pub fn rebuild_multi_file_info(&mut self) {
@@ -7385,6 +7475,80 @@ mod tests {
             e,
             Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { .. })
         )));
+    }
+
+    #[test]
+    fn touched_relative_paths_for_activity_handles_single_file() {
+        let mut state = create_empty_state();
+        state.torrent_data_path = Some(PathBuf::from("/downloads"));
+        state.torrent = Some(Torrent {
+            info: crate::torrent_file::Info {
+                piece_length: 100,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        state.multi_file_info = Some(MultiFileInfo {
+            files: vec![crate::storage::FileInfo {
+                path: PathBuf::from("sample.bin"),
+                length: 100,
+                global_start_offset: 0,
+                is_padding: false,
+                is_skipped: false,
+            }],
+            total_size: 100,
+        });
+
+        assert_eq!(
+            state.touched_relative_paths_for_activity(0, 0, 10),
+            vec!["sample.bin".to_string()]
+        );
+        assert_eq!(
+            state.touched_relative_paths_for_activity(0, 90, 10),
+            vec!["sample.bin".to_string()]
+        );
+        assert!(state.touched_relative_paths_for_activity(0, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn touched_relative_paths_for_activity_handles_boundary_spans() {
+        let mut state = create_empty_state();
+        state.torrent_data_path = Some(PathBuf::from("/downloads"));
+        state.torrent = Some(Torrent {
+            info: crate::torrent_file::Info {
+                piece_length: 100,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        state.multi_file_info = Some(MultiFileInfo {
+            files: vec![
+                crate::storage::FileInfo {
+                    path: PathBuf::from("one.bin"),
+                    length: 50,
+                    global_start_offset: 0,
+                    is_padding: false,
+                    is_skipped: false,
+                },
+                crate::storage::FileInfo {
+                    path: PathBuf::from("two.bin"),
+                    length: 70,
+                    global_start_offset: 50,
+                    is_padding: false,
+                    is_skipped: false,
+                },
+            ],
+            total_size: 120,
+        });
+
+        assert_eq!(
+            state.touched_relative_paths_for_activity(0, 40, 30),
+            vec!["one.bin".to_string(), "two.bin".to_string()]
+        );
+        assert_eq!(
+            state.touched_relative_paths_for_activity(0, 50, 10),
+            vec!["two.bin".to_string()]
+        );
     }
 
     #[test]

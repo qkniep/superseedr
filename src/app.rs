@@ -75,6 +75,7 @@ use crate::integrity_scheduler::{
 use crate::torrent_file::parser::from_bytes;
 use crate::torrent_identity::info_hash_from_torrent_source;
 use crate::torrent_manager::data_availability_from_file_probe_result;
+use crate::torrent_manager::FileActivityDirection;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
 use crate::torrent_manager::TorrentFileProbeStatus;
@@ -586,6 +587,9 @@ enum AddIngressAction {
     OpenManualBrowser {
         payload: ResolvedAddPayload,
     },
+    IgnoreMissingSharedInboxItem {
+        message: String,
+    },
     Fail {
         message: String,
     },
@@ -806,6 +810,7 @@ impl Default for TorrentMetrics {
 pub struct TorrentDisplayState {
     pub latest_state: TorrentMetrics,
     pub file_preview_tree: Vec<RawNode<TorrentPreviewPayload>>,
+    pub recent_file_activity: HashMap<String, (FileActivityDirection, Instant)>,
     pub latest_file_probe_status: Option<TorrentFileProbeStatus>,
     pub integrity_next_probe_in: Option<Duration>,
     pub download_history: Vec<u64>,
@@ -2003,7 +2008,12 @@ impl App {
 
         let payload = match self.resolve_add_payload(source, path) {
             Ok(payload) => payload,
-            Err(message) => return AddIngressAction::Fail { message },
+            Err(message) => {
+                if is_shared_inbox_path && !path.exists() {
+                    return AddIngressAction::IgnoreMissingSharedInboxItem { message };
+                }
+                return AddIngressAction::Fail { message };
+            }
         };
 
         if self.is_current_shared_follower()
@@ -2315,6 +2325,16 @@ impl App {
                 if !matches!(source, IngestSource::TorrentFile) {
                     self.archive_processed_ingest(source, &path);
                 }
+            }
+            AddIngressAction::IgnoreMissingSharedInboxItem { message } => {
+                tracing_event!(
+                    Level::INFO,
+                    path = ?path,
+                    "{}",
+                    message
+                );
+                self.app_state.pending_ingest_by_path.remove(&path);
+                self.save_state_to_disk();
             }
             AddIngressAction::Fail { message } => {
                 tracing_event!(Level::ERROR, "{}", message);
@@ -3780,6 +3800,21 @@ impl App {
                     // 7. Force UI redraw
                     self.app_state.ui.needs_redraw = true;
                     tracing::info!(target: "superseedr", "Magnet preview tree hydrated (first arrival)");
+                }
+            }
+            ManagerEvent::FileActivity {
+                info_hash,
+                touched_relative_paths,
+                direction,
+            } => {
+                if let Some(display) = self.app_state.torrents.get_mut(&info_hash) {
+                    let now = Instant::now();
+                    for relative_path in touched_relative_paths {
+                        display
+                            .recent_file_activity
+                            .insert(relative_path, (direction, now));
+                    }
+                    self.app_state.ui.needs_redraw = true;
                 }
             }
             ManagerEvent::DiskReadStarted { .. }

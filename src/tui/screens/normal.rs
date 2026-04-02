@@ -20,7 +20,7 @@ use crate::integrations::control::ControlRequest;
 use crate::persistence::activity_history::{ActivityHistoryPoint, ActivityHistorySeries};
 use crate::persistence::network_history::NetworkHistoryPoint;
 use crate::theme::{ThemeContext, ThemeName};
-use crate::torrent_manager::{ManagerCommand, TorrentFileProbeStatus};
+use crate::torrent_manager::{FileActivityDirection, ManagerCommand, TorrentFileProbeStatus};
 use crate::tui::formatters::{
     calculate_nice_upper_bound, format_bytes, format_countdown, format_duration, format_iops,
     format_latency, format_limit_bps, format_memory, format_speed, format_time,
@@ -46,7 +46,7 @@ use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{
     Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -69,6 +69,7 @@ const MINUTES_HISTORY_MAX: usize = 48 * 60;
 const TUNING_LABEL_WIDTH: usize = 14;
 const ASCII_TREE_DIR_ICON: &str = "> ";
 const ASCII_TREE_FILE_ICON: &str = "  ";
+const FILE_ACTIVITY_HIGHLIGHT_WINDOW: Duration = Duration::from_millis(1800);
 
 fn build_time_aligned_window(
     points: &[NetworkHistoryPoint],
@@ -4238,6 +4239,8 @@ fn build_torrent_file_list_items(
             let child_name =
                 anonymize_tree_name(&torrent.latest_state.torrent_name, false, anonymize);
             let child_indent = "  ".repeat(root_depth);
+            let child_style = file_tree_activity_style(torrent, &child_name, false, ctx)
+                .unwrap_or_else(|| ctx.apply(Style::default().fg(ctx.theme.semantic.text)));
             let mut spans = vec![
                 Span::styled(
                     child_indent,
@@ -4247,10 +4250,7 @@ fn build_torrent_file_list_items(
                     ASCII_TREE_FILE_ICON,
                     ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                 ),
-                Span::styled(
-                    child_name,
-                    ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
-                ),
+                Span::styled(child_name, child_style),
             ];
             if torrent.latest_state.total_size > 0 {
                 spans.push(Span::styled(
@@ -4288,8 +4288,9 @@ fn build_torrent_file_list_items(
         } else {
             ASCII_TREE_FILE_ICON
         };
+        let relative_path = normalize_tree_relative_path(item.path.as_path());
 
-        let (name_style, suffix) = match item.node.payload.priority {
+        let (mut name_style, suffix) = match item.node.payload.priority {
             FilePriority::Skip => (
                 ctx.apply(
                     Style::default()
@@ -4323,6 +4324,11 @@ fn build_torrent_file_list_items(
                 None,
             ),
         };
+        if let Some(activity_style) =
+            file_tree_activity_style(torrent, &relative_path, item.node.is_dir, ctx)
+        {
+            name_style = activity_style;
+        }
 
         let mut spans = vec![
             Span::styled(
@@ -4357,6 +4363,48 @@ fn build_torrent_file_list_items(
     }));
 
     list_items
+}
+
+fn normalize_tree_relative_path(path: &Path) -> String {
+    path.iter()
+        .map(|part| part.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn file_tree_activity_style(
+    torrent: &TorrentDisplayState,
+    relative_path: &str,
+    is_dir: bool,
+    ctx: &ThemeContext,
+) -> Option<Style> {
+    let latest_direction = torrent
+        .recent_file_activity
+        .iter()
+        .filter(|(activity_path, (_, seen_at))| {
+            seen_at.elapsed() <= FILE_ACTIVITY_HIGHLIGHT_WINDOW
+                && if is_dir {
+                    *activity_path == relative_path
+                        || activity_path.starts_with(&format!("{relative_path}/"))
+                } else {
+                    *activity_path == relative_path
+                }
+        })
+        .max_by_key(|(_, (_, seen_at))| *seen_at)
+        .map(|(_, (direction, _))| *direction)?;
+
+    Some(match latest_direction {
+        FileActivityDirection::Download => ctx.apply(
+            Style::default()
+                .fg(ctx.state_info())
+                .add_modifier(Modifier::BOLD),
+        ),
+        FileActivityDirection::Upload => ctx.apply(
+            Style::default()
+                .fg(ctx.state_success())
+                .add_modifier(Modifier::BOLD),
+        ),
+    })
 }
 
 fn torrent_root_path_label(metrics: &crate::app::TorrentMetrics, anonymize: bool) -> String {
