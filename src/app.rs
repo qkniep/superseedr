@@ -134,6 +134,9 @@ const RSS_MANUAL_DOWNLOAD_TIMEOUT_SECS: u64 = 20;
 const NETWORK_HISTORY_PERSIST_INTERVAL_SECS: u64 = 15 * 60;
 const WATCH_FOLDER_RESCAN_INTERVAL_SECS: u64 = 5;
 const SHARED_ROLE_RETRY_INTERVAL_SECS: u64 = 2;
+const STARTUP_ROLLING_BATCH_SIZE: usize = 1;
+const STARTUP_ROLLING_BATCH_INTERVAL_SECS: u64 = 1;
+const STARTUP_ROLLING_LOADS_PER_INTERVAL: usize = 1;
 
 const SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 const INCOMING_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
@@ -1189,6 +1192,8 @@ pub struct App {
     pub app_lock_handle: Option<File>,
     pub leader_status_snapshot: Option<AppOutputState>,
     pub startup_completion_suppressed_hashes: HashSet<Vec<u8>>,
+    pub startup_deferred_load_queue: VecDeque<Vec<u8>>,
+    pub next_startup_load_at: Option<time::Instant>,
 }
 
 #[derive(Clone)]
@@ -1536,6 +1541,8 @@ impl App {
             app_lock_handle,
             leader_status_snapshot: None,
             startup_completion_suppressed_hashes: HashSet::new(),
+            startup_deferred_load_queue: VecDeque::new(),
+            next_startup_load_at: None,
         };
         app.sync_cluster_role_label();
         app.refresh_system_warning();
@@ -1544,9 +1551,42 @@ impl App {
 
         let mut torrents_to_load = app.client_configs.torrents.clone();
         torrents_to_load.sort_by_key(|t| !t.validation_status);
+        let mut startup_running_torrents_started = 0usize;
         for torrent_config in torrents_to_load {
-            app.load_runtime_torrent_from_settings(torrent_config).await;
+            let should_defer_running_torrent = matches!(
+                torrent_config.torrent_control_state,
+                TorrentControlState::Running
+            ) && startup_running_torrents_started
+                >= STARTUP_ROLLING_BATCH_SIZE
+                && !app.should_suppress_follower_runtime_for_torrent(&torrent_config);
+
+            if should_defer_running_torrent {
+                if let Some(info_hash) =
+                    info_hash_from_torrent_source(&torrent_config.torrent_or_magnet)
+                {
+                    app.startup_deferred_load_queue.push_back(info_hash);
+                } else {
+                    tracing_event!(
+                        Level::WARN,
+                        torrent = %torrent_config.torrent_or_magnet,
+                        "Could not derive info hash for deferred startup torrent; restoring immediately"
+                    );
+                    app.load_runtime_torrent_from_settings(torrent_config).await;
+                    startup_running_torrents_started =
+                        startup_running_torrents_started.saturating_add(1);
+                }
+            } else {
+                if matches!(
+                    torrent_config.torrent_control_state,
+                    TorrentControlState::Running
+                ) {
+                    startup_running_torrents_started =
+                        startup_running_torrents_started.saturating_add(1);
+                }
+                app.load_runtime_torrent_from_settings(torrent_config).await;
+            }
         }
+        app.reschedule_startup_load_deadline();
 
         if app.app_state.torrents.is_empty() && app.app_state.lifetime_downloaded_from_config == 0 {
             app.app_state.mode = AppMode::Welcome;
@@ -2511,6 +2551,7 @@ impl App {
             let next_tuning_at = self.next_tuning_at;
             let next_paste_flush_at = self.app_state.ui.normal_paste_burst.next_deadline();
             let next_status_dump_at = self.next_status_dump_at;
+            let next_startup_load_at = self.next_startup_load_at;
 
             tokio::select! {
                 _ = signal::ctrl_c() => {
@@ -2582,6 +2623,15 @@ impl App {
                     }
                 } => {
                     self.trigger_status_dump_now();
+                }
+                _ = async {
+                    if let Some(deadline) = next_startup_load_at {
+                        time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    self.load_next_startup_batch().await;
                 }
                 _ = network_history_persist_interval.tick() => {
                     if should_persist_network_history_on_interval(&self.app_state) {
@@ -4227,7 +4277,11 @@ impl App {
             return;
         }
 
-        let payload = build_persist_payload(&mut self.client_configs, &mut self.app_state);
+        let payload = build_persist_payload(
+            &mut self.client_configs,
+            &mut self.app_state,
+            &self.startup_deferred_load_queue,
+        );
         let network_history_request_id = payload
             .network_history
             .as_ref()
@@ -5773,6 +5827,67 @@ impl App {
         self.status_dump_interval_override_secs = interval_secs;
         self.reschedule_status_dump_deadline();
     }
+
+    fn reschedule_startup_load_deadline(&mut self) {
+        self.next_startup_load_at = if self.startup_deferred_load_queue.is_empty() {
+            None
+        } else {
+            Some(time::Instant::now() + Duration::from_secs(STARTUP_ROLLING_BATCH_INTERVAL_SECS))
+        };
+    }
+
+    async fn load_next_startup_batch(&mut self) {
+        let mut loaded_count = 0usize;
+
+        for _ in 0..STARTUP_ROLLING_LOADS_PER_INTERVAL {
+            let Some(info_hash) = self.startup_deferred_load_queue.pop_front() else {
+                break;
+            };
+
+            if self.has_live_runtime_for_torrent(&info_hash) {
+                continue;
+            }
+
+            let Some(torrent_config) = self
+                .client_configs
+                .torrents
+                .iter()
+                .find(|torrent| {
+                    info_hash_from_torrent_source(&torrent.torrent_or_magnet).as_deref()
+                        == Some(info_hash.as_slice())
+                })
+                .cloned()
+            else {
+                tracing_event!(
+                    Level::WARN,
+                    info_hash = %hex::encode(&info_hash),
+                    "Skipping deferred startup torrent because it is no longer configured"
+                );
+                continue;
+            };
+
+            if !should_load_persisted_torrent(&torrent_config) {
+                continue;
+            }
+
+            self.load_runtime_torrent_from_settings(torrent_config)
+                .await;
+            loaded_count = loaded_count.saturating_add(1);
+        }
+
+        self.reschedule_startup_load_deadline();
+
+        if loaded_count > 0 {
+            tracing_event!(
+                Level::INFO,
+                loaded = loaded_count,
+                remaining = self.startup_deferred_load_queue.len(),
+                "Loaded deferred startup torrent batch"
+            );
+            self.app_state.ui.needs_redraw = true;
+            self.save_state_to_disk();
+        }
+    }
 }
 
 fn persisted_validation_status_from_metrics(
@@ -6102,6 +6217,7 @@ fn should_load_persisted_torrent(torrent_settings: &TorrentSettings) -> bool {
 fn build_persist_payload(
     client_configs: &mut Settings,
     app_state: &mut AppState,
+    startup_deferred_load_queue: &VecDeque<Vec<u8>>,
 ) -> PersistPayload {
     client_configs.lifetime_downloaded =
         app_state.lifetime_downloaded_from_config + app_state.session_total_downloaded;
@@ -6117,8 +6233,11 @@ fn build_persist_payload(
         .iter()
         .map(|cfg| (cfg.torrent_or_magnet.clone(), cfg.validation_status))
         .collect();
+    let previous_torrents = client_configs.torrents.clone();
+    let deferred_hashes: HashSet<Vec<u8>> = startup_deferred_load_queue.iter().cloned().collect();
+    let mut persisted_info_hashes: HashSet<Vec<u8>> = app_state.torrents.keys().cloned().collect();
 
-    client_configs.torrents = app_state
+    let mut persisted_torrents: Vec<TorrentSettings> = app_state
         .torrents
         .values()
         .map(|torrent| {
@@ -6143,6 +6262,18 @@ fn build_persist_payload(
             }
         })
         .collect();
+
+    for torrent in previous_torrents {
+        let Some(info_hash) = info_hash_from_torrent_source(&torrent.torrent_or_magnet) else {
+            continue;
+        };
+
+        if deferred_hashes.contains(&info_hash) && persisted_info_hashes.insert(info_hash) {
+            persisted_torrents.push(torrent);
+        }
+    }
+
+    client_configs.torrents = persisted_torrents;
 
     const RSS_HISTORY_LIMIT: usize = 1000;
     if app_state.rss_runtime.history.len() > RSS_HISTORY_LIMIT {
@@ -6288,10 +6419,10 @@ mod tests {
         persisted_validation_status_from_metrics, prune_rss_feed_errors, queue_persistence_payload,
         resolve_magnet_torrent_name, rss_settings_changed, should_load_persisted_torrent,
         should_persist_network_history_on_interval, sort_and_filter_torrent_list_state,
-        torrent_completion_percent, torrent_is_effectively_incomplete, watched_parent_matches, App,
-        AppClusterRole, AppCommand, AppMode, AppRuntimeMode, AppState, CommandIngestResult,
-        FilePriority, IngestSource, PeerInfo, PersistPayload, SelectedHeader, SortDirection,
-        TorrentControlState, TorrentDisplayState, TorrentMetrics, TorrentSortColumn, UiState,
+        torrent_completion_percent, torrent_is_effectively_incomplete, App, AppClusterRole,
+        AppCommand, AppMode, AppRuntimeMode, AppState, CommandIngestResult, FilePriority, PeerInfo,
+        PersistPayload, SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState,
+        TorrentMetrics, TorrentSortColumn, UiState,
     };
     use crate::config::{
         clear_shared_config_state_for_tests, set_app_paths_override_for_tests, TorrentSettings,
@@ -6305,10 +6436,11 @@ mod tests {
     };
     use crate::persistence::event_journal::{EventCategory, EventJournalEntry};
     use crate::telemetry::ui_telemetry::UiTelemetry;
+    use crate::torrent_identity::info_hash_from_torrent_source;
     use crate::torrent_manager::{
         FileProbeBatchResult, FileProbeEntry, ManagerCommand, ManagerEvent, TorrentFileProbeStatus,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::env;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -6434,6 +6566,56 @@ mod tests {
             },
             false
         ));
+    }
+
+    #[test]
+    fn build_persist_payload_keeps_deferred_startup_torrents_in_settings() {
+        let deferred_hash = vec![0x55; 20];
+        let loaded_hash = vec![0x66; 20];
+        let deferred_magnet =
+            "magnet:?xt=urn:btih:5555555555555555555555555555555555555555".to_string();
+        let loaded_magnet =
+            "magnet:?xt=urn:btih:6666666666666666666666666666666666666666".to_string();
+        let mut settings = crate::config::Settings {
+            torrents: vec![
+                TorrentSettings {
+                    torrent_or_magnet: deferred_magnet.clone(),
+                    name: "sample-deferred".to_string(),
+                    torrent_control_state: TorrentControlState::Running,
+                    ..Default::default()
+                },
+                TorrentSettings {
+                    torrent_or_magnet: loaded_magnet.clone(),
+                    name: "sample-loaded".to_string(),
+                    torrent_control_state: TorrentControlState::Running,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut app_state = AppState::default();
+        app_state.torrents.insert(
+            loaded_hash,
+            TorrentDisplayState {
+                latest_state: TorrentMetrics {
+                    info_hash: vec![0x66; 20],
+                    torrent_or_magnet: loaded_magnet,
+                    torrent_name: "sample-loaded".to_string(),
+                    torrent_control_state: TorrentControlState::Running,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let deferred_queue = VecDeque::from([deferred_hash]);
+        let payload = build_persist_payload(&mut settings, &mut app_state, &deferred_queue);
+
+        assert_eq!(payload.settings.torrents.len(), 2);
+        assert!(payload.settings.torrents.iter().any(|torrent| {
+            torrent.torrent_or_magnet == deferred_magnet
+                && torrent.torrent_control_state == TorrentControlState::Running
+        }));
     }
 
     #[test]
@@ -6848,6 +7030,50 @@ mod tests {
             TorrentControlState::Running
         );
         assert!(app.app_state.ui.needs_redraw);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn load_next_startup_batch_loads_only_one_deferred_torrent() {
+        let mut settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        for index in 0..6 {
+            let hash_digit = char::from_digit((index + 1) as u32, 16).expect("hex digit");
+            settings.torrents.push(TorrentSettings {
+                torrent_or_magnet: format!(
+                    "magnet:?xt=urn:btih:{}",
+                    hash_digit.to_string().repeat(40)
+                ),
+                name: format!("sample-start-{}", index),
+                torrent_control_state: TorrentControlState::Running,
+                ..Default::default()
+            });
+        }
+
+        let mut app = App::new(
+            crate::config::Settings {
+                client_port: 0,
+                ..Default::default()
+            },
+            AppRuntimeMode::Normal,
+        )
+        .await
+        .expect("build app");
+        app.client_configs.torrents = settings.torrents.clone();
+        app.startup_deferred_load_queue = settings
+            .torrents
+            .iter()
+            .filter_map(|torrent| info_hash_from_torrent_source(&torrent.torrent_or_magnet))
+            .collect();
+
+        app.load_next_startup_batch().await;
+
+        assert_eq!(app.app_state.torrents.len(), 1);
+        assert_eq!(app.startup_deferred_load_queue.len(), 5);
+        assert!(app.next_startup_load_at.is_some());
 
         let _ = app.shutdown_tx.send(());
     }
@@ -8742,7 +8968,7 @@ mod tests {
         app_state.torrents.insert(info_hash.clone(), display);
         app_state.torrent_list_order.push(info_hash);
 
-        let payload = build_persist_payload(&mut settings, &mut app_state);
+        let payload = build_persist_payload(&mut settings, &mut app_state, &VecDeque::new());
         assert_eq!(payload.settings.torrents.len(), 1);
         assert!(payload.settings.torrents[0].validation_status);
     }
@@ -8803,7 +9029,7 @@ mod tests {
             },
         );
 
-        let payload = build_persist_payload(&mut settings, &mut app_state);
+        let payload = build_persist_payload(&mut settings, &mut app_state, &VecDeque::new());
 
         assert!(payload.network_history.is_none());
         assert_eq!(app_state.network_history_state.updated_at_unix, 0);
@@ -8830,7 +9056,7 @@ mod tests {
             ..Default::default()
         };
 
-        let payload = build_persist_payload(&mut settings, &mut app_state);
+        let payload = build_persist_payload(&mut settings, &mut app_state, &VecDeque::new());
         let network_history = payload
             .network_history
             .expect("network history payload should be present");
