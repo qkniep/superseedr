@@ -235,6 +235,45 @@ fn torrent_period_traffic(
         .sum()
 }
 
+fn torrent_current_traffic(
+    app_state: &AppState,
+    info_hash: &[u8],
+    tier: HistoryTier,
+    step_secs: u64,
+    points_to_show: usize,
+    now_unix: u64,
+    alpha: f64,
+) -> u64 {
+    let key = hex::encode(info_hash);
+    let points = app_state
+        .activity_history_state
+        .torrents
+        .get(&key)
+        .map(|series| activity_points_for_tier(series, tier))
+        .unwrap_or(&[]);
+    let (dl_hist, ul_hist) =
+        build_time_aligned_pair_window(points, step_secs, points_to_show, now_unix);
+    let net_hist: Vec<u64> = dl_hist
+        .iter()
+        .zip(ul_hist.iter())
+        .map(|(dl, ul)| dl.saturating_add(*ul))
+        .collect();
+    smoothed_last_value(&net_hist, alpha)
+}
+
+fn smoothed_last_value(data: &[u64], alpha: f64) -> u64 {
+    if data.is_empty() {
+        return 0;
+    }
+
+    let mut last_ema = data[0] as f64;
+    for &value in data.iter().skip(1) {
+        last_ema = (value as f64 * alpha) + (last_ema * (1.0 - alpha));
+    }
+
+    last_ema as u64
+}
+
 fn chart_hidden_legend_constraints(view: ChartPanelView) -> (Constraint, Constraint) {
     if matches!(
         view,
@@ -2251,12 +2290,21 @@ pub fn draw_network_chart(
             ];
         }
         ChartPanelView::MultiTorrentOverlay => {
-            let mut ranked: Vec<(Vec<u8>, u64)> = app_state
+            let mut ranked: Vec<(Vec<u8>, u64, u64)> = app_state
                 .torrent_list_order
                 .iter()
                 .map(|info_hash| {
                     (
                         info_hash.clone(),
+                        torrent_current_traffic(
+                            app_state,
+                            info_hash,
+                            tier,
+                            step_secs,
+                            points_to_show,
+                            now_unix,
+                            alpha,
+                        ),
                         torrent_period_traffic(
                             app_state,
                             info_hash,
@@ -2267,26 +2315,48 @@ pub fn draw_network_chart(
                         ),
                     )
                 })
-                .filter(|(_, total)| *total > 0)
+                .filter(|(_, _, period_total)| *period_total > 0)
                 .collect();
-            ranked.sort_by(|a, b| b.1.cmp(&a.1));
+            ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
 
-            let mut chosen_hashes: Vec<Vec<u8>> =
-                ranked.into_iter().take(5).map(|(hash, _)| hash).collect();
+            let mut chosen_hashes: Vec<Vec<u8>> = ranked
+                .into_iter()
+                .take(5)
+                .map(|(hash, _, _)| hash)
+                .collect();
 
             let mut seen = HashSet::new();
             chosen_hashes.retain(|hash| seen.insert(hash.clone()));
             chosen_hashes.sort_by(|a, b| {
-                torrent_period_traffic(app_state, b, tier, step_secs, points_to_show, now_unix).cmp(
-                    &torrent_period_traffic(
-                        app_state,
-                        a,
-                        tier,
-                        step_secs,
-                        points_to_show,
-                        now_unix,
-                    ),
+                torrent_current_traffic(
+                    app_state,
+                    b,
+                    tier,
+                    step_secs,
+                    points_to_show,
+                    now_unix,
+                    alpha,
                 )
+                .cmp(&torrent_current_traffic(
+                    app_state,
+                    a,
+                    tier,
+                    step_secs,
+                    points_to_show,
+                    now_unix,
+                    alpha,
+                ))
+                .then_with(|| {
+                    torrent_period_traffic(app_state, b, tier, step_secs, points_to_show, now_unix)
+                        .cmp(&torrent_period_traffic(
+                            app_state,
+                            a,
+                            tier,
+                            step_secs,
+                            points_to_show,
+                            now_unix,
+                        ))
+                })
             });
 
             let palette = [
@@ -6017,6 +6087,85 @@ mod tests {
         assert_eq!(
             torrent_period_traffic(&app_state, &info_hash, HistoryTier::Second1s, 1, 4, 9),
             180
+        );
+    }
+
+    #[test]
+    fn torrent_current_traffic_uses_latest_point_only() {
+        let mut app_state = AppState::default();
+        let info_hash = vec![8; 20];
+        let key = hex::encode(&info_hash);
+        app_state.activity_history_state.torrents.insert(
+            key,
+            ActivityHistorySeries {
+                tiers: crate::persistence::activity_history::ActivityHistoryTiers {
+                    second_1s: vec![
+                        ActivityHistoryPoint {
+                            ts_unix: 8,
+                            primary: 100,
+                            secondary: 50,
+                        },
+                        ActivityHistoryPoint {
+                            ts_unix: 9,
+                            primary: 25,
+                            secondary: 5,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            torrent_current_traffic(
+                &app_state,
+                &info_hash,
+                HistoryTier::Second1s,
+                1,
+                4,
+                9,
+                2.0 / 6.0
+            ),
+            43
+        );
+    }
+
+    #[test]
+    fn torrent_current_traffic_preserves_recent_activity_when_latest_bucket_is_zero() {
+        let mut app_state = AppState::default();
+        let info_hash = vec![7; 20];
+        let key = hex::encode(&info_hash);
+        app_state.activity_history_state.torrents.insert(
+            key,
+            ActivityHistorySeries {
+                tiers: crate::persistence::activity_history::ActivityHistoryTiers {
+                    second_1s: vec![ActivityHistoryPoint {
+                        ts_unix: 8,
+                        primary: 100,
+                        secondary: 50,
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            torrent_current_traffic(
+                &app_state,
+                &info_hash,
+                HistoryTier::Second1s,
+                1,
+                4,
+                9,
+                2.0 / 6.0
+            ),
+            33
+        );
+        assert_eq!(
+            torrent_period_traffic(&app_state, &info_hash, HistoryTier::Second1s, 1, 4, 9),
+            150
         );
     }
 
