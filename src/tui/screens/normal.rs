@@ -47,7 +47,7 @@ use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{
     Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -4434,9 +4434,12 @@ fn file_tree_activity_paths<'a>(
     torrent: &'a TorrentDisplayState,
     relative_path: &str,
     is_dir: bool,
+    download_wave: FileActivityWaveProfile,
+    upload_wave: FileActivityWaveProfile,
 ) -> (Vec<&'a str>, Vec<&'a str>) {
     let mut download_paths = Vec::new();
     let mut upload_paths = Vec::new();
+    let root_path_char_len = torrent_root_logical_len(torrent);
 
     for (activity_path, activity) in &torrent.recent_file_activity {
         let matches_row = if is_dir && relative_path.is_empty() {
@@ -4452,15 +4455,22 @@ fn file_tree_activity_paths<'a>(
             continue;
         }
 
+        let total_len = root_path_char_len
+            + if activity_path.is_empty() {
+                0
+            } else {
+                1 + activity_path.chars().count()
+            };
+
         if activity
             .download_at
-            .is_some_and(|seen_at| seen_at.elapsed() <= FILE_ACTIVITY_HIGHLIGHT_WINDOW)
+            .is_some_and(|seen_at| file_activity_is_visible(seen_at, total_len, download_wave))
         {
             download_paths.push(activity_path.as_str());
         }
         if activity
             .upload_at
-            .is_some_and(|seen_at| seen_at.elapsed() <= FILE_ACTIVITY_HIGHLIGHT_WINDOW)
+            .is_some_and(|seen_at| file_activity_is_visible(seen_at, total_len, upload_wave))
         {
             upload_paths.push(activity_path.as_str());
         }
@@ -4485,23 +4495,21 @@ fn render_file_tree_name_spans(
     is_dir: bool,
     render_ctx: FileTreeNameRenderContext<'_>,
 ) -> Vec<Span<'static>> {
-    let (download_paths, upload_paths) = file_tree_activity_paths(torrent, relative_path, is_dir);
-    let row_active = !download_paths.is_empty() || !upload_paths.is_empty();
-
-    if !row_active {
-        return vec![Span::styled(
-            display_name.to_string(),
-            render_ctx.ctx.apply(render_ctx.base_style),
-        )];
-    }
-
     let chars: Vec<char> = display_name.chars().collect();
     let len = chars.len().max(1);
     let download_wave = file_activity_wave_profile(torrent.smoothed_download_speed_bps, len);
     let upload_wave = file_activity_wave_profile(torrent.smoothed_upload_speed_bps, len);
+    let (download_paths, upload_paths) =
+        file_tree_activity_paths(torrent, relative_path, is_dir, download_wave, upload_wave);
+    let row_active = !download_paths.is_empty() || !upload_paths.is_empty();
+    let active_base_style = render_ctx.ctx.apply(render_ctx.base_style);
+
+    if !row_active {
+        return vec![Span::styled(display_name.to_string(), active_base_style)];
+    }
+
     let download_step = render_ctx.download_phase.floor() as usize;
     let upload_step = render_ctx.upload_phase.floor() as usize;
-    let active_base_style = render_ctx.ctx.apply(render_ctx.base_style);
     let root_path_char_len = torrent_root_logical_len(torrent);
 
     chars
@@ -4568,6 +4576,19 @@ fn torrent_root_logical_len(torrent: &TorrentDisplayState) -> usize {
 struct FileActivityWaveProfile {
     band_width: usize,
     steps_per_second: f64,
+}
+
+fn file_activity_wave_cycle_duration(total_len: usize, wave: FileActivityWaveProfile) -> Duration {
+    Duration::from_secs_f64((total_len + wave.band_width) as f64 / wave.steps_per_second.max(1.0))
+}
+
+fn file_activity_is_visible(
+    seen_at: Instant,
+    total_len: usize,
+    wave: FileActivityWaveProfile,
+) -> bool {
+    seen_at.elapsed()
+        <= FILE_ACTIVITY_HIGHLIGHT_WINDOW + file_activity_wave_cycle_duration(total_len, wave)
 }
 
 fn file_activity_wave_profile(speed_bps: u64, text_len: usize) -> FileActivityWaveProfile {
@@ -5664,6 +5685,34 @@ mod tests {
     }
 
     #[test]
+    fn file_activity_visibility_lingers_for_one_wave_cycle() {
+        let wave = FileActivityWaveProfile {
+            band_width: 4,
+            steps_per_second: 12.0,
+        };
+        let total_len = 24usize;
+        let linger = file_activity_wave_cycle_duration(total_len, wave);
+        let seen_at =
+            Instant::now() - FILE_ACTIVITY_HIGHLIGHT_WINDOW - linger + Duration::from_millis(50);
+
+        assert!(file_activity_is_visible(seen_at, total_len, wave));
+    }
+
+    #[test]
+    fn file_activity_visibility_expires_after_wave_cycle_finishes() {
+        let wave = FileActivityWaveProfile {
+            band_width: 4,
+            steps_per_second: 12.0,
+        };
+        let total_len = 24usize;
+        let linger = file_activity_wave_cycle_duration(total_len, wave);
+        let seen_at =
+            Instant::now() - FILE_ACTIVITY_HIGHLIGHT_WINDOW - linger - Duration::from_millis(50);
+
+        assert!(!file_activity_is_visible(seen_at, total_len, wave));
+    }
+
+    #[test]
     fn shape_root_path_for_viewport_keeps_single_line_when_it_fits() {
         let path = r"C:\Users\jagat\Documents";
         assert_eq!(
@@ -6500,6 +6549,34 @@ mod tests {
         assert!(alpha < cycle_len);
         assert!(beta < cycle_len);
         assert_ne!(alpha, beta);
+    }
+
+    #[test]
+    fn render_file_tree_name_spans_keeps_inactive_rows_at_base_style() {
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let base_style = Style::default()
+            .fg(ctx.theme.semantic.text)
+            .add_modifier(Modifier::BOLD);
+
+        let spans = render_file_tree_name_spans(
+            &torrent,
+            "folder/file.bin",
+            "file.bin",
+            false,
+            FileTreeNameRenderContext {
+                download_phase: 0.0,
+                upload_phase: 0.0,
+                row_start_offset: 0,
+                base_style,
+                ctx: &ctx,
+            },
+        );
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "file.bin");
+        assert_eq!(spans[0].style, ctx.apply(base_style));
     }
 
     #[test]
