@@ -27,4 +27,4 @@ git push origin "$TAG_NAME"
 
 echo "Successfully created and pushed $TAG_NAME."
 
-# local_scripts/git_tag.sh v0.9.9l
+# scripts/git_tag.sh v0.9.9l

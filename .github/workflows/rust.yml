@@ -217,7 +217,7 @@ jobs:
       - name: Execute Custom macOS Build Script
         id: build_pkg
         run: |
-          SCRIPT_PATH="build_scripts/build_osx_universal_pkg.sh"
+          SCRIPT_PATH="scripts/build_osx_universal_pkg.sh"
           chmod +x "$SCRIPT_PATH"
           
           set -o pipefail
@@ -528,4 +528,3 @@ jobs:
         run: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-

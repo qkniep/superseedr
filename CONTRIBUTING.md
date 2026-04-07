@@ -218,7 +218,7 @@ Create descriptive branch names following these patterns:
 
 ### Contributing to Roadmap Items
 
-The [[ROADMAP.md]](ROADMAP.md) outlines the project's planned features and future direction. Contributors are encouraged to:
+The [ROADMAP.md](docs/ROADMAP.md) outlines the project's planned features and future direction. Contributors are encouraged to:
 
 - **Review upcoming features:** Check the roadmap to see what features are planned but not yet started
 - **Start discussions:** If you're interested in working on a roadmap item, open a discussion to explore implementation ideas
@@ -329,9 +329,9 @@ All contributors will be acknowledged in release notes. Thank you for making sup
 
 ## Additional Resources
 
-- 📖 [FAQ](FAQ.md) - Common questions and answers
-- 🗺️ [Roadmap](ROADMAP.md) - Future plans and features
-- 📜 [Changelog](CHANGELOG.md) - Recent changes and version history
+- 📖 [FAQ](docs/FAQ.md) - Common questions and answers
+- 🗺️ [Roadmap](docs/ROADMAP.md) - Future plans and features
+- 📜 [Changelog](docs/CHANGELOG.md) - Recent changes and version history
 - 🤝 [Code of Conduct](CODE_OF_CONDUCT.md) - Community standards
 - 💬 [[Discussions](https://github.com/Jagalite/superseedr/discussions)](https://github.com/Jagalite/superseedr/discussions) - General questions and ideas
 - 📚 [[Ratatui Documentation](https://ratatui.rs/)](https://ratatui.rs/) - TUI framework reference
@@ -344,4 +344,3 @@ If you're unsure about anything, don't hesitate to:
 - Reach out to maintainers
 
 We're here to help and appreciate your interest in contributing! 🚀
-

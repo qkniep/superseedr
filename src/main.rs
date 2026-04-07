@@ -28,7 +28,7 @@ use app::{App, AppRuntimeMode};
 use rand::Rng;
 
 use std::fs;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::Write;
 
@@ -106,6 +106,33 @@ fn init_tracing(
     let quiet_filter = Targets::new()
         .with_default(DEFAULT_LOG_FILTER)
         .with_target("mainline::rpc::socket", LevelFilter::ERROR);
+
+    if !emit_stderr {
+        for log_dir in &log_dirs {
+            if fs::create_dir_all(log_dir).is_err() {
+                continue;
+            }
+
+            let log_path = log_dir.join(format!("{}.log", filename_prefix));
+            let file = match OpenOptions::new().create(true).append(true).open(&log_path) {
+                Ok(file) => file,
+                Err(_) => continue,
+            };
+
+            let (non_blocking_general, guard_general) = tracing_appender::non_blocking(file);
+            let general_layer = fmt::layer()
+                .with_writer(non_blocking_general)
+                .with_ansi(false)
+                .with_filter(quiet_filter.clone());
+            if tracing_subscriber::registry()
+                .with(general_layer)
+                .try_init()
+                .is_ok()
+            {
+                return vec![guard_general];
+            }
+        }
+    }
 
     for log_dir in log_dirs {
         if let Err(error) = fs::create_dir_all(&log_dir) {
@@ -279,7 +306,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if lock_file_handle.is_some() {
         AppRuntimeMode::Normal
     } else {
-        println!("superseedr is already running.");
+        tracing::info!("superseedr is already running.");
         return Ok(());
     };
 
@@ -289,31 +316,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(all(feature = "dht", feature = "pex"))]
     {
         if client_configs.private_client {
-            eprintln!("\n!!!ERROR: POTENTIAL LEAK!!!");
-            eprintln!("---------------------------------");
-            eprintln!("You are running the normal build of superseedr (with DHT/PEX enabled),");
-            eprintln!("but your configuration file indicates you last used a private build.");
-            eprintln!("\nThis safety check prevents accidental use of forbidden features on private trackers.");
-
             let config_path_str = config::shared_settings_path()
                 .or_else(config::local_settings_path)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unable to determine config path.".to_string());
 
-            eprintln!("\nChoose an option:");
-            eprintln!("  1. If you want to use the PRIVATE build (for private trackers):");
-            eprintln!("     Install and run it:");
-            eprintln!("       cargo install superseedr --no-default-features");
-            eprintln!("       superseedr");
-            eprintln!(
-                "\n  2. If you want to switch back to the NORMAL build (for public trackers):"
+            tracing::error!(
+                config_path = %config_path_str,
+                "Potential leak guard triggered. You are running the normal build with DHT/PEX enabled, but your configuration indicates the private build was used previously. To continue safely, either install and run the private build with `cargo install superseedr --no-default-features`, or edit the configuration at {} and change `private_client = true` to `private_client = false`. Exiting to prevent potential tracker issues.",
+                config_path_str
             );
-            eprintln!("     Manually edit your configuration file:");
-            eprintln!("       {}", config_path_str);
-            eprintln!("     Change the line `private_client = true` to `private_client = false`");
-            eprintln!("     Then, run this normal build again.");
-
-            eprintln!("\nExiting to prevent potential tracker issues.");
             std::process::exit(1);
         }
     }

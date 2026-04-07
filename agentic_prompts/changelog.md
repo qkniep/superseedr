@@ -11,12 +11,12 @@ Before generating content, you must verify that the project is ready for a new c
 
 1.  **Get Target Version:** Read `Cargo.toml` and extract the `version` string.
     * *Let's call this `[Target Version]`.*
-2.  **Get Previous Version:** Read `CHANGELOG.md` and find the most recent Release header (e.g., `## Release v0.9.35`).
+2.  **Get Previous Version:** Read `docs/CHANGELOG.md` and find the most recent Release header (e.g., `## Release v0.9.35`).
     * *Let's call this `[Last Logged Version]`.*
 3.  **Compare & Decide:**
     * **IF `[Target Version]` is equal to `[Last Logged Version]**`:
         * 🛑 **STOP IMMEDIATELY.**
-        * **Output Message:** "Version in Cargo.toml ([Target Version]) matches the latest entry in CHANGELOG.md. Please increment the version in Cargo.toml before running this task."
+        * **Output Message:** "Version in Cargo.toml ([Target Version]) matches the latest entry in docs/CHANGELOG.md. Please increment the version in Cargo.toml before running this task."
     * **IF `[Target Version]` is newer than `[Last Logged Version]`**:
         * ✅ **PROCEED.**
         * Set your git comparison range to: `[Last Logged Version]..HEAD`.
@@ -52,9 +52,9 @@ If Phase 1 passed, generate the output strictly following this structure (only t
 ### 🐛 Bug Fixes
 - **[Fix Area]**: [Description of what was fixed]
 
-Add this to CHANGELOG.md
+Add this to `docs/CHANGELOG.md`
 
 ---
 
 # Action
-**Start by comparing the version in `Cargo.toml` against the top entry in `CHANGELOG.md`.**
+**Start by comparing the version in `Cargo.toml` against the top entry in `docs/CHANGELOG.md`.**

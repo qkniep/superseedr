@@ -118,6 +118,25 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use tokio::time;
+
+fn format_filesystem_path_error(action: &str, path: &Path, error: &io::Error) -> String {
+    let detail = match error.kind() {
+        ErrorKind::NotFound => "file or directory was not found".to_string(),
+        ErrorKind::PermissionDenied => "permission denied".to_string(),
+        ErrorKind::IsADirectory => {
+            "expected a file here, but the path points to a directory".to_string()
+        }
+        ErrorKind::NotADirectory => {
+            "expected a directory component in the path, but found a file".to_string()
+        }
+        _ if path.is_dir() => {
+            "expected a file here, but the path points to a directory".to_string()
+        }
+        _ => error.to_string(),
+    };
+
+    format!("{} {:?}: {}", action, path, detail)
+}
 use tokio::time::MissedTickBehavior;
 
 use directories::UserDirs;
@@ -1952,9 +1971,10 @@ impl App {
             let staged_path =
                 staging_dir.join(format!("staged-{}-{}.torrent", now_ms, &hash[..12]));
             fs::copy(&source_path, &staged_path).map_err(|error| {
-                format!(
-                    "Failed to stage torrent file {:?} for leader processing: {}",
-                    source_path, error
+                format_filesystem_path_error(
+                    "Failed to stage torrent file for leader processing",
+                    &source_path,
+                    &error,
                 )
             })?;
             staged_path
@@ -1996,10 +2016,7 @@ impl App {
             }),
             IngestSource::TorrentPathFile => {
                 let payload = fs::read_to_string(path).map_err(|error| {
-                    format!(
-                        "Failed to read torrent path from file {:?}: {}",
-                        path, error
-                    )
+                    format_filesystem_path_error("Failed to read torrent path file", path, &error)
                 })?;
                 let source_path =
                     crate::config::resolve_shared_cli_torrent_path(Path::new(payload.trim()))
@@ -2156,7 +2173,9 @@ impl App {
     }
 
     fn open_manual_browser_for_torrent_file(&mut self, path: PathBuf) -> Result<(), String> {
-        let buffer = fs::read(&path).map_err(|_| "Failed to read torrent file.".to_string())?;
+        let buffer = fs::read(&path).map_err(|error| {
+            format_filesystem_path_error("Failed to read torrent file", &path, &error)
+        })?;
         let torrent = from_bytes(&buffer)
             .map_err(|_| "Failed to parse torrent file for preview.".to_string())?;
 
@@ -4442,7 +4461,8 @@ impl App {
         let buffer = match fs::read(&path) {
             Ok(buf) => buf,
             Err(e) => {
-                let message = format!("Failed to read torrent file {:?}: {}", &path, e);
+                let message =
+                    format_filesystem_path_error("Failed to read torrent file", &path, &e);
                 tracing_event!(Level::ERROR, "{}", message);
                 return CommandIngestResult::Failed {
                     info_hash: None,
@@ -6415,14 +6435,15 @@ mod tests {
     use super::{
         apply_network_history_persist_result, build_persist_payload,
         clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
-        flush_persistence_writer_parts, move_file_with_fallback_impl, parse_hybrid_hashes,
-        persisted_validation_status_from_metrics, prune_rss_feed_errors, queue_persistence_payload,
-        resolve_magnet_torrent_name, rss_settings_changed, should_load_persisted_torrent,
-        should_persist_network_history_on_interval, sort_and_filter_torrent_list_state,
-        torrent_completion_percent, torrent_is_effectively_incomplete, App, AppClusterRole,
-        AppCommand, AppMode, AppRuntimeMode, AppState, CommandIngestResult, FilePriority, PeerInfo,
-        PersistPayload, SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState,
-        TorrentMetrics, TorrentSortColumn, UiState,
+        flush_persistence_writer_parts, format_filesystem_path_error, move_file_with_fallback_impl,
+        parse_hybrid_hashes, persisted_validation_status_from_metrics, prune_rss_feed_errors,
+        queue_persistence_payload, resolve_magnet_torrent_name, rss_settings_changed,
+        should_load_persisted_torrent, should_persist_network_history_on_interval,
+        sort_and_filter_torrent_list_state, torrent_completion_percent,
+        torrent_is_effectively_incomplete, App, AppClusterRole, AppCommand, AppMode,
+        AppRuntimeMode, AppState, CommandIngestResult, FilePriority, PeerInfo, PersistPayload,
+        SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState, TorrentMetrics,
+        TorrentSortColumn, UiState,
     };
     use crate::config::{
         clear_shared_config_state_for_tests, set_app_paths_override_for_tests, TorrentSettings,
@@ -6442,6 +6463,7 @@ mod tests {
     };
     use std::collections::{HashMap, VecDeque};
     use std::env;
+    use std::io;
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -6476,6 +6498,28 @@ mod tests {
         let data_dir = dir.path().join("data");
         set_app_paths_override_for_tests(Some((config_dir, data_dir)));
         dir
+    }
+
+    #[test]
+    fn format_filesystem_path_error_reports_directory_as_file_mismatch() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("folder");
+        std::fs::create_dir(&path).expect("create folder");
+
+        let error = io::Error::new(io::ErrorKind::Other, "raw os text");
+        let message = format_filesystem_path_error("Failed to read torrent file", &path, &error);
+
+        assert!(message.contains("Failed to read torrent file"));
+        assert!(message.contains("expected a file here, but the path points to a directory"));
+    }
+
+    #[test]
+    fn format_filesystem_path_error_reports_missing_path_clearly() {
+        let path = PathBuf::from("/tmp/superseedr-missing-sample.torrent");
+        let error = io::Error::new(io::ErrorKind::NotFound, "No such file or directory");
+        let message = format_filesystem_path_error("Failed to read torrent file", &path, &error);
+
+        assert!(message.contains("file or directory was not found"));
     }
 
     #[test]
