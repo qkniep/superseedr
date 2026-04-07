@@ -2239,10 +2239,9 @@ impl TorrentState {
                             + block_offset as u64;
                         let range_end = global_offset.saturating_add(length as u64);
                         let effective_root = match &self.container_name {
-                            Some(name) if !name.is_empty() => self
-                                .torrent_data_path
-                                .as_ref()
-                                .map(|path| path.join(name)),
+                            Some(name) if !name.is_empty() => {
+                                self.torrent_data_path.as_ref().map(|path| path.join(name))
+                            }
                             _ => self.torrent_data_path.clone(),
                         };
                         multi_file_info
@@ -2256,11 +2255,8 @@ impl TorrentState {
                                         effective_root
                                             .as_ref()
                                             .and_then(|root| {
-                                                file_info
-                                                    .path
-                                                    .strip_prefix(root)
-                                                    .ok()
-                                                    .map(|relative| {
+                                                file_info.path.strip_prefix(root).ok().map(
+                                                    |relative| {
                                                         relative
                                                             .iter()
                                                             .map(|part| {
@@ -2268,7 +2264,8 @@ impl TorrentState {
                                                             })
                                                             .collect::<Vec<_>>()
                                                             .join("/")
-                                                    })
+                                                    },
+                                                )
                                             })
                                             .unwrap_or_else(|| {
                                                 file_info
@@ -2276,7 +2273,10 @@ impl TorrentState {
                                                     .file_name()
                                                     .map(|name| name.to_string_lossy().into_owned())
                                                     .unwrap_or_else(|| {
-                                                        file_info.path.to_string_lossy().into_owned()
+                                                        file_info
+                                                            .path
+                                                            .to_string_lossy()
+                                                            .into_owned()
                                                     })
                                             }),
                                     )
@@ -7507,7 +7507,9 @@ mod tests {
             state.touched_relative_paths_for_activity(0, 90, 10),
             vec!["sample.bin".to_string()]
         );
-        assert!(state.touched_relative_paths_for_activity(0, 0, 0).is_empty());
+        assert!(state
+            .touched_relative_paths_for_activity(0, 0, 0)
+            .is_empty());
     }
 
     #[test]
