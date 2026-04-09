@@ -171,7 +171,7 @@ pub fn get_peer_columns() -> Vec<PeerColumnDefinition> {
         PeerColumnDefinition {
             id: PeerColumnId::Address,
             header: "Address",
-            min_width: 24,
+            min_width: 25,
             priority: 0,
             default_constraint: Constraint::Fill(2),
             sort_enum: Some(PeerSortColumn::Address),
@@ -211,18 +211,83 @@ pub fn get_peer_columns() -> Vec<PeerColumnDefinition> {
     ]
 }
 
-pub fn compute_visible_peer_columns(available_width: u16) -> (Vec<Constraint>, Vec<usize>) {
-    let peer_cols = get_peer_columns();
-    let smart_peer_cols: Vec<SmartCol> = peer_cols
+pub fn peer_has_download_activity(app_state: &AppState) -> bool {
+    app_state
+        .torrent_list_order
+        .get(app_state.ui.selected_torrent_index)
+        .and_then(|info_hash| app_state.torrents.get(info_hash))
+        .is_some_and(|torrent| {
+            torrent
+                .latest_state
+                .peers
+                .iter()
+                .any(|peer| peer.download_speed_bps > 0)
+        })
+}
+
+pub fn peer_has_upload_activity(app_state: &AppState) -> bool {
+    app_state
+        .torrent_list_order
+        .get(app_state.ui.selected_torrent_index)
+        .and_then(|info_hash| app_state.torrents.get(info_hash))
+        .is_some_and(|torrent| {
+            torrent
+                .latest_state
+                .peers
+                .iter()
+                .any(|peer| peer.upload_speed_bps > 0)
+        })
+}
+
+pub fn active_peer_column_indices(app_state: &AppState) -> Vec<usize> {
+    let has_dl_activity = peer_has_download_activity(app_state);
+    let has_ul_activity = peer_has_upload_activity(app_state);
+
+    get_peer_columns()
         .iter()
-        .map(|c| SmartCol {
-            min_width: c.min_width,
-            priority: c.priority,
-            constraint: c.default_constraint,
+        .enumerate()
+        .filter_map(|(idx, col)| {
+            let is_active = match col.id {
+                PeerColumnId::DownSpeed => has_dl_activity,
+                PeerColumnId::UpSpeed => has_ul_activity,
+                PeerColumnId::Flags
+                | PeerColumnId::Address
+                | PeerColumnId::Client
+                | PeerColumnId::Action
+                | PeerColumnId::Progress => true,
+            };
+            is_active.then_some(idx)
+        })
+        .collect()
+}
+
+pub fn compute_visible_peer_columns(
+    app_state: &AppState,
+    available_width: u16,
+) -> (Vec<Constraint>, Vec<usize>) {
+    let all_cols = get_peer_columns();
+    let active_indices = active_peer_column_indices(app_state);
+
+    let smart_peer_cols: Vec<SmartCol> = active_indices
+        .iter()
+        .map(|&idx| {
+            let c = &all_cols[idx];
+            SmartCol {
+                min_width: c.min_width,
+                priority: c.priority,
+                constraint: c.default_constraint,
+            }
         })
         .collect();
 
-    compute_smart_table_layout(&smart_peer_cols, available_width, 1)
+    let (constraints, visible_active_indices) =
+        compute_smart_table_layout(&smart_peer_cols, available_width, 1);
+    let visible_real_indices: Vec<usize> = visible_active_indices
+        .into_iter()
+        .filter_map(|idx| active_indices.get(idx).copied())
+        .collect();
+
+    (constraints, visible_real_indices)
 }
 
 #[derive(Clone, Debug)]
@@ -286,7 +351,32 @@ pub fn compute_smart_table_layout(
 #[cfg(test)]
 mod tests {
     use super::{compute_visible_peer_columns, get_peer_columns, PeerColumnId};
+    use crate::app::{AppState, PeerInfo, TorrentDisplayState, TorrentMetrics};
     use ratatui::layout::Constraint;
+
+    fn peer_test_app_state() -> AppState {
+        let mut app_state = AppState::default();
+        let torrent = TorrentDisplayState {
+            latest_state: TorrentMetrics {
+                peers: vec![
+                    PeerInfo {
+                        address: "127.0.0.1:6881".to_string(),
+                        ..Default::default()
+                    },
+                    PeerInfo {
+                        address: "127.0.0.1:6882".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let info_hash = b"hash_a".to_vec();
+        app_state.torrents.insert(info_hash.clone(), torrent);
+        app_state.torrent_list_order = vec![info_hash];
+        app_state
+    }
 
     #[test]
     fn peer_address_column_reserves_more_width_for_ipv6_addresses() {
@@ -296,15 +386,41 @@ mod tests {
             .find(|column| column.id == PeerColumnId::Address)
             .expect("address column");
 
-        assert_eq!(address.min_width, 24);
+        assert_eq!(address.min_width, 25);
         assert_eq!(address.default_constraint, Constraint::Fill(2));
     }
 
     #[test]
     fn peer_columns_drop_low_priority_fields_before_address_on_medium_widths() {
-        let (_constraints, visible) = compute_visible_peer_columns(90);
+        let mut app_state = peer_test_app_state();
+        if let Some(torrent) = app_state.torrents.get_mut(b"hash_a".as_slice()) {
+            torrent.latest_state.peers[0].download_speed_bps = 1;
+            torrent.latest_state.peers[0].upload_speed_bps = 1;
+        }
+        let (_constraints, visible) = compute_visible_peer_columns(&app_state, 90);
 
         assert!(visible.contains(&2), "address column should stay visible");
         assert!(!visible.contains(&6), "action column should drop first");
+    }
+
+    #[test]
+    fn peer_columns_hide_dl_and_ul_when_selected_torrent_has_no_activity() {
+        let app_state = peer_test_app_state();
+        let (_constraints, visible) = compute_visible_peer_columns(&app_state, 120);
+
+        assert!(!visible.contains(&3), "upload column should be hidden");
+        assert!(!visible.contains(&4), "download column should be hidden");
+    }
+
+    #[test]
+    fn peer_columns_show_only_active_direction() {
+        let mut app_state = peer_test_app_state();
+        if let Some(torrent) = app_state.torrents.get_mut(b"hash_a".as_slice()) {
+            torrent.latest_state.peers[0].download_speed_bps = 32;
+        }
+        let (_constraints, visible) = compute_visible_peer_columns(&app_state, 120);
+
+        assert!(!visible.contains(&3), "upload column should stay hidden");
+        assert!(visible.contains(&4), "download column should be visible");
     }
 }

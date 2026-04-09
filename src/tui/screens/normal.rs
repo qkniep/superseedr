@@ -28,13 +28,12 @@ use crate::tui::formatters::{
     generate_x_axis_labels, ip_to_color, parse_peer_id, sanitize_text, speed_to_style,
     truncate_with_ellipsis,
 };
-use crate::tui::layout::common::compute_smart_table_layout;
 use crate::tui::layout::common::compute_visible_peer_columns;
 use crate::tui::layout::common::compute_visible_torrent_columns;
 use crate::tui::layout::common::get_peer_columns;
 use crate::tui::layout::common::get_torrent_columns;
 use crate::tui::layout::common::ColumnId;
-use crate::tui::layout::common::{PeerColumnId, SmartCol};
+use crate::tui::layout::common::PeerColumnId;
 use crate::tui::layout::normal::calculate_layout;
 use crate::tui::layout::normal::LayoutContext;
 use crate::tui::layout::normal::LayoutPlan;
@@ -46,6 +45,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -600,7 +600,8 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
             let layout_plan = calculate_layout(app_state.screen_area, &layout_ctx);
             let (_, visible_torrent_columns) =
                 compute_visible_torrent_columns(app_state, layout_plan.list.width);
-            let (_, visible_peer_columns) = compute_visible_peer_columns(layout_plan.peers.width);
+            let (_, visible_peer_columns) =
+                compute_visible_peer_columns(app_state, layout_plan.peers.width);
 
             match app_state.ui.selected_header {
                 SelectedHeader::Torrent(i) => {
@@ -949,7 +950,7 @@ pub fn draw_footer(
     let show_branding = footer_chunk.width >= 80;
     let any_port_open =
         app_state.externally_accessable_port_v4 || app_state.externally_accessable_port_v6;
-    let overall_port_status = if any_port_open { "Open" } else { "Closed" };
+    let overall_port_status = if any_port_open { "OPEN" } else { "CLOSED" };
     let now = Instant::now();
     let v4_highlight_active = app_state
         .externally_accessable_port_v4_highlight_until
@@ -957,11 +958,9 @@ pub fn draw_footer(
     let v6_highlight_active = app_state
         .externally_accessable_port_v6_highlight_until
         .is_some_and(|deadline| deadline > now);
-    let status_width = format!(
-        "Port: {} [{}] [IPv4/IPv6]",
-        settings.client_port, overall_port_status
-    )
-    .len() as u16;
+    let status_width =
+        format!("Port {} | IPv4/IPv6 | {}", settings.client_port, overall_port_status).len()
+            as u16;
 
     let is_update = app_state.update_available.is_some();
     let (left_constraint, right_constraint) = if show_branding {
@@ -1319,7 +1318,7 @@ pub fn draw_footer(
     let port_style = if any_port_open {
         ctx.apply(Style::default().fg(ctx.state_success()))
     } else {
-        ctx.apply(Style::default().fg(ctx.state_error()))
+        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
     };
     let v4_port_style = if app_state.externally_accessable_port_v4 {
         let style = Style::default().fg(ctx.state_success());
@@ -1329,7 +1328,7 @@ pub fn draw_footer(
             ctx.apply(style)
         }
     } else {
-        ctx.apply(Style::default().fg(ctx.state_error()))
+        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
     };
     let v6_port_style = if app_state.externally_accessable_port_v6 {
         let style = Style::default().fg(ctx.state_success());
@@ -1339,25 +1338,32 @@ pub fn draw_footer(
             ctx.apply(style)
         }
     } else {
-        ctx.apply(Style::default().fg(ctx.state_error()))
+        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
     };
 
     let footer_status_spans = vec![
-        Span::raw("Port: "),
+        Span::raw("Port "),
         Span::styled(settings.client_port.to_string(), port_style),
-        Span::raw(" ["),
-        Span::styled(overall_port_status, port_style),
-        Span::raw("] ["),
+        Span::raw(" | "),
         Span::styled("IPv4", v4_port_style),
         Span::raw("/"),
         Span::styled("IPv6", v6_port_style),
-        Span::raw("]"),
+        Span::raw(" | "),
+        Span::styled(overall_port_status, port_style),
     ];
     let footer_status = Line::from(footer_status_spans).alignment(Alignment::Right);
 
     let status_paragraph = Paragraph::new(footer_status)
         .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
     f.render_widget(status_paragraph, status_chunk);
+}
+
+fn format_peer_address_for_table(address: &str) -> String {
+    match address.parse::<SocketAddr>() {
+        Ok(SocketAddr::V4(addr)) => addr.to_string(),
+        Ok(SocketAddr::V6(addr)) => format!("{}:{}", addr.ip(), addr.port()),
+        Err(_) => address.to_string(),
+    }
 }
 
 pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
@@ -3961,17 +3967,8 @@ pub fn draw_peers_table(
                 });
 
                 let all_peer_cols = get_peer_columns();
-                let smart_cols: Vec<SmartCol> = all_peer_cols
-                    .iter()
-                    .map(|c| SmartCol {
-                        min_width: c.min_width,
-                        priority: c.priority,
-                        constraint: c.default_constraint,
-                    })
-                    .collect();
-
                 let (constraints, visible_indices) =
-                    compute_smart_table_layout(&smart_cols, peers_chunk.width, 1);
+                    compute_visible_peer_columns(app_state, peers_chunk.width);
 
                 let peer_border_style =
                     if matches!(app_state.ui.selected_header, SelectedHeader::Peer(_)) {
@@ -4076,11 +4073,11 @@ pub fn draw_peers_table(
                                     .into(),
                                     PeerColumnId::Address => {
                                         let display = if app_state.anonymize_torrent_names {
-                                            "xxx.xxx.xxx"
+                                            "xxx.xxx.xxx".to_string()
                                         } else {
-                                            &peer.address
+                                            format_peer_address_for_table(&peer.address)
                                         };
-                                        Cell::from(display.to_string())
+                                        Cell::from(display)
                                     }
                                     PeerColumnId::Client => {
                                         let raw_client = parse_peer_id(&peer.peer_id);
@@ -5125,7 +5122,7 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     let layout_plan = calculate_layout(app_state.screen_area, &layout_ctx);
     let (_, visible_torrent_columns) =
         compute_visible_torrent_columns(app_state, layout_plan.list.width);
-    let (_, visible_peer_columns) = compute_visible_peer_columns(layout_plan.peers.width);
+    let (_, visible_peer_columns) = compute_visible_peer_columns(app_state, layout_plan.peers.width);
     let torrent_col_count = visible_torrent_columns.len();
     let peer_col_count = visible_peer_columns.len();
 
@@ -5554,6 +5551,18 @@ mod tests {
             vec!["hash_a".as_bytes().to_vec(), "hash_b".as_bytes().to_vec()];
 
         app_state
+    }
+
+    #[test]
+    fn peer_address_formatter_omits_ipv6_brackets_in_table() {
+        assert_eq!(
+            format_peer_address_for_table("[2001:db8::1]:51413"),
+            "2001:db8::1:51413"
+        );
+        assert_eq!(
+            format_peer_address_for_table("127.0.0.1:6881"),
+            "127.0.0.1:6881"
+        );
     }
 
     #[test]
