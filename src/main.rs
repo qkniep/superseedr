@@ -194,6 +194,16 @@ fn init_tracing(
     Vec::new()
 }
 
+fn already_running_message() -> &'static str {
+    "superseedr is already running."
+}
+
+fn private_client_leak_guard_message(config_path: &str) -> String {
+    format!(
+        "\n!!!ERROR: POTENTIAL LEAK!!!\n---------------------------------\nYou are running the normal build of superseedr (with DHT/PEX enabled),\nbut your configuration file indicates you last used a private build.\n\nThis safety check prevents accidental use of forbidden features on private trackers.\n\nChoose an option:\n  1. If you want to use the PRIVATE build (for private trackers):\n     Install and run it:\n       cargo install superseedr --no-default-features\n       superseedr\n\n  2. If you want to switch back to the NORMAL build (for public trackers):\n     Manually edit your configuration file:\n       {config_path}\n     Change the line `private_client = true` to `private_client = false`\n     Then, run this normal build again.\n\nExiting to prevent potential tracker issues."
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -306,7 +316,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if lock_file_handle.is_some() {
         AppRuntimeMode::Normal
     } else {
-        tracing::info!("superseedr is already running.");
+        let message = already_running_message();
+        println!("{message}");
+        tracing::info!("{message}");
         return Ok(());
     };
 
@@ -320,7 +332,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .or_else(config::local_settings_path)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unable to determine config path.".to_string());
+            let message = private_client_leak_guard_message(&config_path_str);
 
+            eprintln!("{message}");
             tracing::error!(
                 config_path = %config_path_str,
                 "Potential leak guard triggered. You are running the normal build with DHT/PEX enabled, but your configuration indicates the private build was used previously. To continue safely, either install and run the private build with `cargo install superseedr --no-default-features`, or edit the configuration at {} and change `private_client = true` to `private_client = false`. Exiting to prevent potential tracker issues.",
@@ -1542,6 +1556,21 @@ mod tests {
             settings.torrents[0].torrent_control_state,
             app::TorrentControlState::Paused
         );
+    }
+
+    #[test]
+    fn already_running_message_matches_terminal_text() {
+        assert_eq!(already_running_message(), "superseedr is already running.");
+    }
+
+    #[test]
+    fn private_client_leak_guard_message_includes_recovery_steps() {
+        let message = private_client_leak_guard_message("/tmp/config.toml");
+
+        assert!(message.contains("!!!ERROR: POTENTIAL LEAK!!!"));
+        assert!(message.contains("cargo install superseedr --no-default-features"));
+        assert!(message.contains("/tmp/config.toml"));
+        assert!(message.contains("private_client = true"));
     }
 
     #[test]

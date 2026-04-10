@@ -1032,6 +1032,34 @@ pub fn build_torrent_preview_tree(
     tree
 }
 
+fn collect_torrent_preview_files(
+    node: &RawNode<TorrentPreviewPayload>,
+    path: &mut Vec<String>,
+    files: &mut Vec<(Vec<String>, u64)>,
+) {
+    path.push(node.name.clone());
+    if node.is_dir {
+        for child in &node.children {
+            collect_torrent_preview_files(child, path, files);
+        }
+    } else {
+        files.push((path.clone(), node.payload.size));
+    }
+    path.pop();
+}
+
+fn rebuild_torrent_preview_tree(
+    existing_tree: &[RawNode<TorrentPreviewPayload>],
+    file_priorities: &HashMap<usize, FilePriority>,
+) -> Vec<RawNode<TorrentPreviewPayload>> {
+    let mut files = Vec::new();
+    let mut path = Vec::new();
+    for node in existing_tree {
+        collect_torrent_preview_files(node, &mut path, &mut files);
+    }
+    build_torrent_preview_tree(files, file_priorities)
+}
+
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JournalFilter {
     #[default]
@@ -3230,7 +3258,14 @@ impl App {
                     .clone()
                     .or_else(|| new_settings.default_download_folder.clone());
                 runtime.latest_state.container_name = torrent.container_name.clone();
-                runtime.latest_state.file_priorities = torrent.file_priorities.clone();
+                let updated_file_priorities = torrent.file_priorities.clone();
+                runtime.latest_state.file_priorities = updated_file_priorities.clone();
+                if !runtime.file_preview_tree.is_empty() {
+                    runtime.file_preview_tree = rebuild_torrent_preview_tree(
+                        &runtime.file_preview_tree,
+                        &updated_file_priorities,
+                    );
+                }
                 runtime.latest_state.torrent_control_state = torrent.torrent_control_state.clone();
                 runtime.latest_state.delete_files = torrent.delete_files;
             }
@@ -6588,7 +6623,7 @@ mod tests {
     #![allow(clippy::await_holding_lock)]
 
     use super::{
-        apply_network_history_persist_result, build_persist_payload,
+        apply_network_history_persist_result, build_persist_payload, build_torrent_preview_tree,
         clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
         flush_persistence_writer_parts, format_filesystem_path_error,
         is_valid_incoming_bittorrent_handshake, move_file_with_fallback_impl, parse_hybrid_hashes,
@@ -8544,6 +8579,61 @@ mod tests {
         assert_eq!(
             metrics.latest_state.torrent_control_state,
             TorrentControlState::Paused
+        );
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn apply_settings_update_refreshes_file_preview_tree_priorities() {
+        let magnet = "magnet:?xt=urn:btih:3333333333333333333333333333333333333333".to_string();
+        let settings = crate::config::Settings {
+            client_port: 0,
+            torrents: vec![crate::config::TorrentSettings {
+                torrent_or_magnet: magnet.clone(),
+                name: "Sample Foxtrot".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        let info_hash = info_hash_from_torrent_source(&magnet).expect("info hash");
+        let runtime = app
+            .app_state
+            .torrents
+            .get_mut(&info_hash)
+            .expect("torrent runtime should exist");
+        runtime.file_preview_tree = build_torrent_preview_tree(
+            vec![
+                (vec!["folder".to_string(), "alpha.bin".to_string()], 10),
+                (vec!["folder".to_string(), "beta.bin".to_string()], 20),
+            ],
+            &HashMap::new(),
+        );
+
+        let mut next_settings = app.client_configs.clone();
+        next_settings.torrents[0].file_priorities =
+            HashMap::from([(0, FilePriority::Skip), (1, FilePriority::High)]);
+        app.apply_settings_update(next_settings, false).await;
+
+        let runtime = app
+            .app_state
+            .torrents
+            .get(&info_hash)
+            .expect("torrent runtime should remain present");
+        let mut priorities = HashMap::new();
+        for node in &runtime.file_preview_tree {
+            node.collect_priorities(&mut priorities);
+        }
+        assert_eq!(
+            priorities,
+            HashMap::from([(0, FilePriority::Skip), (1, FilePriority::High)])
+        );
+        assert_eq!(
+            runtime.file_preview_tree[0].payload.priority,
+            FilePriority::Mixed
         );
 
         let _ = app.shutdown_tx.send(());

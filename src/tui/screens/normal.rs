@@ -4208,32 +4208,6 @@ pub fn draw_torrent_files_panel(
         return;
     };
 
-    tracing::info!(
-        target: "superseedr",
-        info_hash = %hex::encode(&torrent.latest_state.info_hash),
-        torrent_name = %torrent.latest_state.torrent_name,
-        total_size = torrent.latest_state.total_size,
-        file_count = torrent.latest_state.file_count.unwrap_or(0),
-        is_multi_file = torrent.latest_state.is_multi_file,
-        preview_tree_roots = torrent.file_preview_tree.len(),
-        show_torrent_files = app_state.ui.show_torrent_files,
-        panel_width = area.width,
-        panel_height = area.height,
-        anonymized = app_state.anonymize_torrent_names,
-        "Rendering torrent files panel"
-    );
-    let shaped_root_preview = shape_root_path_for_viewport(
-        &torrent_root_path_label(&torrent.latest_state, app_state.anonymize_torrent_names),
-        area.width.saturating_sub(6) as usize,
-        area.height.saturating_sub(2) as usize,
-    );
-    tracing::info!(
-        target: "superseedr",
-        info_hash = %hex::encode(&torrent.latest_state.info_hash),
-        shaped_root_rows = shaped_root_preview.len(),
-        "Computed draft root-path shaping preview"
-    );
-
     let list_items = build_torrent_file_list_items(
         torrent,
         area.width,
@@ -4242,12 +4216,6 @@ pub fn draw_torrent_files_panel(
         app_state.ui.file_activity_download_phase,
         app_state.ui.file_activity_upload_phase,
         ctx,
-    );
-    tracing::info!(
-        target: "superseedr",
-        info_hash = %hex::encode(&torrent.latest_state.info_hash),
-        rendered_rows = list_items.len(),
-        "Built torrent files panel rows"
     );
     let file_block_height_needed = (list_items.len() as u16).saturating_add(2);
     let remaining_height = area.height.saturating_sub(file_block_height_needed);
@@ -4324,13 +4292,6 @@ fn build_torrent_file_list_items(
     let root_depth = list_items.len();
 
     if torrent.file_preview_tree.is_empty() {
-        tracing::info!(
-            target: "superseedr",
-            info_hash = %hex::encode(&torrent.latest_state.info_hash),
-            torrent_name = %torrent.latest_state.torrent_name,
-            total_size = torrent.latest_state.total_size,
-            "Torrent files panel using empty-tree fallback"
-        );
         if !torrent.latest_state.torrent_name.is_empty() {
             let child_name =
                 anonymize_tree_name(&torrent.latest_state.torrent_name, false, anonymize);
@@ -4381,12 +4342,6 @@ fn build_torrent_file_list_items(
         &expanded_state,
         TreeFilter::default(),
         usize::MAX,
-    );
-    tracing::info!(
-        target: "superseedr",
-        info_hash = %hex::encode(&torrent.latest_state.info_hash),
-        visible_rows = visible_rows.len(),
-        "Torrent files panel using preview tree rows"
     );
 
     list_items.extend(visible_rows.iter().map(|item| {
