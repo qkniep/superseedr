@@ -182,7 +182,7 @@ pub struct TorrentManager {
 
 impl TorrentManager {
     fn should_accept_new_peers(&self) -> bool {
-        self.state.accepting_new_peers
+        !self.state.is_paused && self.state.accepting_new_peers
     }
 
     fn init_base(
@@ -451,6 +451,15 @@ impl TorrentManager {
                     )
                     .await;
                 });
+            }
+
+            Effect::DisconnectPeerSession { peer_id, peer_tx } => {
+                let _ = peer_tx.try_send(TorrentCommand::Disconnect(peer_id.clone()));
+                if let Some(handles) = self.in_flight_uploads.remove(&peer_id) {
+                    for handle in handles.values() {
+                        handle.abort();
+                    }
+                }
             }
 
             Effect::DisconnectPeer { peer_id } => {
@@ -3488,6 +3497,25 @@ mod resource_tests {
         assert!(
             manager.state.peers.contains_key(&peer_id),
             "peer admission guard should allow new outgoing peers when open"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peer_admission_guard_blocks_new_outgoing_connection_while_paused() {
+        let (mut manager, _torrent_tx, _cmd_tx, _shutdown_tx, _resource_manager) =
+            setup_test_harness();
+
+        manager.state.accepting_new_peers = true;
+        manager.state.is_paused = true;
+
+        let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let peer_id = addr.to_string();
+
+        manager.handle_effect(Effect::ConnectToPeer { addr });
+
+        assert!(
+            !manager.state.peers.contains_key(&peer_id),
+            "paused torrents should block new outgoing peers"
         );
     }
 

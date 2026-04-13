@@ -188,6 +188,10 @@ pub enum Effect {
         peer_id: String,
         cmd: Box<TorrentCommand>,
     },
+    DisconnectPeerSession {
+        peer_id: String,
+        peer_tx: Sender<TorrentCommand>,
+    },
     DisconnectPeer {
         peer_id: String,
     },
@@ -1042,7 +1046,7 @@ impl TorrentState {
             }
 
             Action::PeerDisconnected { peer_id, force } => {
-                if !peer_id.is_empty() {
+                if !peer_id.is_empty() && self.peers.contains_key(&peer_id) {
                     self.pending_disconnects.push(peer_id);
                 }
 
@@ -1952,25 +1956,46 @@ impl TorrentState {
                     self.piece_manager.need_queue.push(piece_index);
                 }
 
-                self.peers.clear();
+                let mut peer_disconnects = Vec::new();
+                let peer_ids: Vec<String> = self.peers.keys().cloned().collect();
+                for peer_id in peer_ids {
+                    if let Some(removed_peer) = self.peers.remove(&peer_id) {
+                        for piece_index in removed_peer.pending_requests {
+                            if self.piece_manager.bitfield.get(piece_index as usize)
+                                != Some(&PieceStatus::Done)
+                            {
+                                self.piece_manager.requeue_pending_to_need(piece_index);
+                            }
+                        }
 
-                self.number_of_successfully_connected_peers = 0;
+                        peer_disconnects.push(Effect::DisconnectPeerSession {
+                            peer_id: peer_id.clone(),
+                            peer_tx: removed_peer.peer_tx,
+                        });
+                        peer_disconnects.push(Effect::EmitManagerEvent(
+                            ManagerEvent::PeerDisconnected {
+                                info_hash: self.info_hash.clone(),
+                            },
+                        ));
+                    }
+                }
+
+                self.number_of_successfully_connected_peers = self.peers.len();
 
                 self.bytes_downloaded_in_interval = 0;
                 self.bytes_uploaded_in_interval = 0;
                 self.total_dl_prev_avg_ema = 0.0;
                 self.total_ul_prev_avg_ema = 0.0;
 
-                vec![
+                let mut effects = vec![
                     Effect::EmitMetrics {
                         bytes_dl: self.bytes_downloaded_in_interval,
                         bytes_ul: self.bytes_uploaded_in_interval,
                     },
                     Effect::ClearAllUploads,
-                    Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected {
-                        info_hash: self.info_hash.clone(),
-                    }),
-                ]
+                ];
+                effects.extend(peer_disconnects);
+                effects
             }
 
             Action::Resume => {
@@ -4522,6 +4547,39 @@ mod tests {
     }
 
     #[test]
+    fn test_pause_disconnects_live_peers_and_clears_state() {
+        let mut state = create_empty_state();
+        let (peer_a_tx, _peer_a_rx) = mpsc::channel(1);
+        let (peer_b_tx, _peer_b_rx) = mpsc::channel(1);
+
+        state.update(Action::RegisterPeer {
+            peer_id: "127.0.0.1:4101".into(),
+            tx: peer_a_tx,
+        });
+        state.update(Action::RegisterPeer {
+            peer_id: "127.0.0.1:4102".into(),
+            tx: peer_b_tx,
+        });
+
+        let effects = state.update(Action::Pause);
+
+        assert!(state.is_paused);
+        assert!(
+            state.peers.is_empty(),
+            "pause should clear peer state immediately"
+        );
+
+        let disconnect_count = effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::DisconnectPeerSession { .. }))
+            .count();
+        assert_eq!(
+            disconnect_count, 2,
+            "pause should disconnect every live peer"
+        );
+    }
+
+    #[test]
     fn test_state_scale_2k_blocks_simulation() {
         let num_pieces = 2000;
         let piece_len = 16_384;
@@ -4655,7 +4713,7 @@ mod tests {
                             println!("Progress: {}/{}", pieces_completed, num_pieces);
                         }
                     }
-                    Effect::DisconnectPeer { .. } => {
+                    Effect::DisconnectPeer { .. } | Effect::DisconnectPeerSession { .. } => {
                         panic!("Unexpected Peer Disconnect! Validation likely failed.");
                     }
                     _ => {}
@@ -8371,6 +8429,9 @@ mod prop_tests {
                 if state.peers.contains_key(&peer_id) {
                     pending_manager_commands.push(SimulatedManagerCommand::Disconnect(peer_id));
                 }
+            }
+            Effect::DisconnectPeerSession { peer_id, .. } => {
+                pending_manager_commands.push(SimulatedManagerCommand::Disconnect(peer_id));
             }
             _ => {}
         }
