@@ -2295,73 +2295,6 @@ impl TorrentState {
         pending.push(FileActivityInterval { start, end });
     }
 
-    fn touched_relative_paths_for_activity(
-        &self,
-        piece_index: u32,
-        block_offset: u32,
-        length: u32,
-    ) -> Vec<String> {
-        let piece_length = match self
-            .torrent
-            .as_ref()
-            .map(|torrent| torrent.info.piece_length as u64)
-        {
-            Some(piece_length) if length > 0 && piece_length > 0 => piece_length,
-            _ => return Vec::new(),
-        };
-        let global_offset = (piece_index as u64)
-            .saturating_mul(piece_length)
-            .saturating_add(block_offset as u64);
-        let range_end = global_offset.saturating_add(length as u64);
-
-        let effective_root = match &self.container_name {
-            Some(name) if !name.is_empty() => {
-                self.torrent_data_path.as_ref().map(|path| path.join(name))
-            }
-            _ => self.torrent_data_path.clone(),
-        };
-
-        self.multi_file_info
-            .as_ref()
-            .map(|multi_file_info| {
-                multi_file_info
-                    .files
-                    .iter()
-                    .filter_map(|file_info| {
-                        let file_start = file_info.global_start_offset;
-                        let file_end = file_start.saturating_add(file_info.length);
-                        if global_offset >= file_end || range_end <= file_start {
-                            return None;
-                        }
-
-                        Some(
-                            effective_root
-                                .as_ref()
-                                .and_then(|root| {
-                                    file_info.path.strip_prefix(root).ok().map(|relative| {
-                                        relative
-                                            .iter()
-                                            .map(|part| part.to_string_lossy().into_owned())
-                                            .collect::<Vec<_>>()
-                                            .join("/")
-                                    })
-                                })
-                                .unwrap_or_else(|| {
-                                    file_info
-                                        .path
-                                        .file_name()
-                                        .map(|name| name.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| {
-                                            file_info.path.to_string_lossy().into_owned()
-                                        })
-                                }),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     fn drain_file_activity_updates(&mut self) -> Vec<FileActivityUpdate> {
         let mut updates = Vec::with_capacity(2);
         let effective_root = match &self.container_name {
@@ -2789,6 +2722,27 @@ mod tests {
         // Assume peer has handshake
         peer.peer_id = id.as_bytes().to_vec();
         state.peers.insert(id.to_string(), peer);
+    }
+
+    fn drained_download_paths_for_activity(
+        state: &mut TorrentState,
+        piece_index: u32,
+        block_offset: u32,
+        length: u32,
+    ) -> Vec<String> {
+        state.record_pending_file_activity(
+            piece_index,
+            block_offset,
+            length,
+            FileActivityDirection::Download,
+        );
+
+        state
+            .drain_file_activity_updates()
+            .into_iter()
+            .find(|update| update.direction == FileActivityDirection::Download)
+            .map(|update| update.touched_relative_paths)
+            .unwrap_or_default()
     }
 
     #[test]
@@ -7744,16 +7698,14 @@ mod tests {
         });
 
         assert_eq!(
-            state.touched_relative_paths_for_activity(0, 0, 10),
+            drained_download_paths_for_activity(&mut state, 0, 0, 10),
             vec!["sample.bin".to_string()]
         );
         assert_eq!(
-            state.touched_relative_paths_for_activity(0, 90, 10),
+            drained_download_paths_for_activity(&mut state, 0, 90, 10),
             vec!["sample.bin".to_string()]
         );
-        assert!(state
-            .touched_relative_paths_for_activity(0, 0, 0)
-            .is_empty());
+        assert!(drained_download_paths_for_activity(&mut state, 0, 0, 0).is_empty());
     }
 
     #[test]
@@ -7788,11 +7740,11 @@ mod tests {
         });
 
         assert_eq!(
-            state.touched_relative_paths_for_activity(0, 40, 30),
+            drained_download_paths_for_activity(&mut state, 0, 40, 30),
             vec!["one.bin".to_string(), "two.bin".to_string()]
         );
         assert_eq!(
-            state.touched_relative_paths_for_activity(0, 50, 10),
+            drained_download_paths_for_activity(&mut state, 0, 50, 10),
             vec!["two.bin".to_string()]
         );
     }
