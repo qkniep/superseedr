@@ -3169,13 +3169,16 @@ impl App {
                 if let Some(torrent_manager_tx) =
                     torrent_manager_incoming_peer_txs_clone.get(peer_info_hash)
                 {
-                    if let Some(peer_addr) = peer_addr {
-                        let _ = app_command_tx
-                            .send(AppCommand::MarkPortOpen(peer_addr))
-                            .await;
-                    }
                     let torrent_manager_tx_clone = torrent_manager_tx.clone();
-                    let _ = torrent_manager_tx_clone.send((stream, buffer)).await;
+                    if torrent_manager_tx_clone
+                        .send((stream, buffer))
+                        .await
+                        .is_ok()
+                    {
+                        if let Some(peer_addr) = peer_addr {
+                            let _ = app_command_tx.try_send(AppCommand::MarkPortOpen(peer_addr));
+                        }
+                    }
                 } else {
                     tracing::trace!(
                         "ROUTING FAIL: No manager registered for hash: {}",
