@@ -4166,16 +4166,17 @@ impl App {
                     match ListenerSet::bind(new_port).await {
                         Ok(new_listener) => {
                             self.listener = Some(new_listener);
-                            self.client_configs.client_port = self
+                            let bound_port = self
                                 .listener
                                 .as_ref()
                                 .and_then(ListenerSet::local_port)
                                 .unwrap_or(new_port);
+                            self.client_configs.client_port = bound_port;
 
                             tracing_event!(
                                 Level::INFO,
                                 "Successfully bound to new port {}",
-                                new_port
+                                bound_port
                             );
 
                             // Persist the new port immediately
@@ -4183,8 +4184,8 @@ impl App {
 
                             // Notify all running managers
                             for manager_tx in self.torrent_manager_command_txs.values() {
-                                let _ =
-                                    manager_tx.try_send(ManagerCommand::UpdateListenPort(new_port));
+                                let _ = manager_tx
+                                    .try_send(ManagerCommand::UpdateListenPort(bound_port));
                             }
 
                             // Rebuild DHT if enabled
@@ -4200,7 +4201,7 @@ impl App {
 
                                 match Dht::builder()
                                     .bootstrap(&bootstrap_nodes)
-                                    .port(new_port)
+                                    .port(bound_port)
                                     .server_mode()
                                     .build()
                                 {
@@ -5716,21 +5717,22 @@ impl App {
                 self.listener = Some(new_listener);
                 // Note: client_configs.client_port is likely already updated by the caller (UpdateConfig)
                 // but we ensure consistency here just in case.
-                self.client_configs.client_port = self
+                let bound_port = self
                     .listener
                     .as_ref()
                     .and_then(ListenerSet::local_port)
                     .unwrap_or(new_port);
+                self.client_configs.client_port = bound_port;
 
                 tracing_event!(
                     Level::INFO,
                     "Successfully rebound listener to port {}",
-                    new_port
+                    bound_port
                 );
 
                 // Notify all running managers of the new port
                 for manager_tx in self.torrent_manager_command_txs.values() {
-                    let _ = manager_tx.try_send(ManagerCommand::UpdateListenPort(new_port));
+                    let _ = manager_tx.try_send(ManagerCommand::UpdateListenPort(bound_port));
                 }
 
                 // Re-initialize DHT if enabled (Logic copied from handle_port_change)
@@ -5745,7 +5747,7 @@ impl App {
 
                     match Dht::builder()
                         .bootstrap(&bootstrap_nodes)
-                        .port(new_port)
+                        .port(bound_port)
                         .server_mode()
                         .build()
                     {
@@ -7237,6 +7239,36 @@ mod tests {
 
         assert!(app.app_state.externally_accessable_port_v4);
         assert!(app.app_state.externally_accessable_port_v6);
+    }
+
+    #[tokio::test]
+    async fn rebind_listener_with_ephemeral_port_notifies_managers_with_bound_port() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("create app");
+        let (manager_tx, mut manager_rx) = mpsc::channel(4);
+        app.torrent_manager_command_txs
+            .insert(b"port-update-test".to_vec(), manager_tx);
+
+        app.rebind_listener(0).await;
+
+        let bound_port = app.client_configs.client_port;
+        assert_ne!(bound_port, 0);
+
+        let command = manager_rx
+            .recv()
+            .await
+            .expect("manager should receive update");
+        assert!(matches!(
+            command,
+            ManagerCommand::UpdateListenPort(port) if port == bound_port
+        ));
+
+        let _ = app.shutdown_tx.send(());
     }
 
     #[test]
