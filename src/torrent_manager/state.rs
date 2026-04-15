@@ -4550,7 +4550,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_received_renormalizes_existing_trackers_with_udp_preference() {
+    fn metadata_received_renormalizes_existing_trackers_and_keeps_http_fallback() {
         let mut state = create_empty_state();
         state.trackers.insert(
             "http://tracker.local:6969/announce".to_string(),
@@ -4575,6 +4575,7 @@ mod tests {
         assert_eq!(
             tracker_urls,
             vec![
+                "http://tracker.local:6969/announce".to_string(),
                 "https://tracker-alt.local/announce".to_string(),
                 "udp://tracker.local:6969/announce".to_string(),
             ]

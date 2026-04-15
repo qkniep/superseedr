@@ -327,15 +327,15 @@ async fn try_udp_announce_to_addr(
     params: &AnnounceParams,
     tracker_addr: SocketAddr,
 ) -> Result<TrackerResponse, TrackerError> {
-    let bind_addr = match tracker_addr {
-        SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
-        SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
-    };
-    let socket = UdpSocket::bind(bind_addr).await?;
-    socket.connect(tracker_addr).await?;
-
     let mut last_error = None;
     for _ in 0..UDP_REQUEST_RETRIES {
+        let bind_addr = match tracker_addr {
+            SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+            SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        };
+        let socket = UdpSocket::bind(bind_addr).await?;
+        socket.connect(tracker_addr).await?;
+
         match try_udp_announce_once(&socket, params, tracker_addr).await {
             Ok(response) => return Ok(response),
             Err(error) => last_error = Some(error),
@@ -601,7 +601,9 @@ mod tests {
     use crate::errors::TrackerError;
     use reqwest::StatusCode;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::sync::Arc;
     use tokio::net::UdpSocket;
+    use tokio::time::{sleep, Duration};
 
     #[tokio::test]
     async fn parse_http_tracker_response_supports_ipv6_compact_peers() {
@@ -794,5 +796,95 @@ mod tests {
 
         assert_eq!(response.complete, 1);
         assert!(response.peers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn announce_started_retries_udp_with_fresh_socket_after_timeout() {
+        let socket = Arc::new(
+            UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("bind fake tracker"),
+        );
+        let tracker_addr = socket.local_addr().expect("fake tracker addr");
+
+        let server_socket = Arc::clone(&socket);
+        let server = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let mut delayed_peer = None;
+            let mut delayed_connect_task = None;
+
+            loop {
+                let (len, peer) = server_socket
+                    .recv_from(&mut buf)
+                    .await
+                    .expect("recv packet");
+
+                if len == 16 {
+                    let connect_transaction_id =
+                        u32::from_be_bytes(buf[12..16].try_into().unwrap());
+                    let mut connect_response = [0u8; 16];
+                    connect_response[..4].copy_from_slice(&0u32.to_be_bytes());
+                    connect_response[4..8].copy_from_slice(&connect_transaction_id.to_be_bytes());
+                    connect_response[8..16]
+                        .copy_from_slice(&0x0102_0304_0506_0708u64.to_be_bytes());
+
+                    if delayed_peer.is_none() {
+                        delayed_peer = Some(peer);
+                        let delayed_socket = Arc::clone(&server_socket);
+                        delayed_connect_task = Some(tokio::spawn(async move {
+                            sleep(Duration::from_secs(6)).await;
+                            delayed_socket
+                                .send_to(&connect_response, peer)
+                                .await
+                                .expect("send delayed connect response");
+                        }));
+                    } else {
+                        server_socket
+                            .send_to(&connect_response, peer)
+                            .await
+                            .expect("send connect response");
+                    }
+                    continue;
+                }
+
+                assert_eq!(len, 98, "expected UDP announce packet");
+                let announce_transaction_id = u32::from_be_bytes(buf[12..16].try_into().unwrap());
+                let mut announce_response = Vec::with_capacity(26);
+                announce_response.extend_from_slice(&1u32.to_be_bytes());
+                announce_response.extend_from_slice(&announce_transaction_id.to_be_bytes());
+                announce_response.extend_from_slice(&30u32.to_be_bytes());
+                announce_response.extend_from_slice(&4u32.to_be_bytes());
+                announce_response.extend_from_slice(&9u32.to_be_bytes());
+                announce_response.extend_from_slice(&[127, 0, 0, 1]);
+                announce_response.extend_from_slice(&6881u16.to_be_bytes());
+                server_socket
+                    .send_to(&announce_response, peer)
+                    .await
+                    .expect("send announce response");
+                break;
+            }
+
+            if let Some(task) = delayed_connect_task {
+                task.await.expect("delayed connect task");
+            }
+        });
+
+        let response = announce_started(
+            format!("udp://{}/announce", tracker_addr),
+            &[0x11; 20],
+            "-SS0001-123456789012".to_string(),
+            51413,
+            4096,
+        )
+        .await
+        .expect("udp announce should recover after a timeout");
+
+        server.await.expect("fake tracker task");
+
+        assert_eq!(response.interval, 30);
+        assert_eq!(
+            response.peers,
+            vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6881)]
+        );
     }
 }

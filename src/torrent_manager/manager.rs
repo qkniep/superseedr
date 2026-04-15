@@ -3413,7 +3413,7 @@ mod resource_tests {
     }
 
     #[tokio::test]
-    async fn test_from_magnet_prefers_udp_tracker_and_keeps_distinct_tracker() {
+    async fn test_from_magnet_keeps_http_tracker_fallback_alongside_udp() {
         let magnet_link = concat!(
             "magnet:?xt=urn:btih:0000000000000000000000000000000000000000",
             "&tr=http%3A%2F%2Ftracker.local%3A6969%2Fannounce",
@@ -3431,6 +3431,7 @@ mod resource_tests {
         assert_eq!(
             trackers,
             vec![
+                "http://tracker.local:6969/announce".to_string(),
                 "https://tracker-alt.local/announce".to_string(),
                 "udp://tracker.local:6969/announce".to_string(),
             ]
@@ -3438,7 +3439,7 @@ mod resource_tests {
     }
 
     #[tokio::test]
-    async fn test_from_torrent_uses_announce_list_with_udp_preference() {
+    async fn test_from_torrent_uses_announce_list_and_keeps_http_fallback() {
         let mut torrent = create_dummy_torrent(1);
         torrent.announce = Some("http://tracker.local:6969/announce".to_string());
         torrent.announce_list = Some(vec![vec![
@@ -3455,6 +3456,7 @@ mod resource_tests {
         assert_eq!(
             trackers,
             vec![
+                "http://tracker.local:6969/announce".to_string(),
                 "https://tracker-alt.local/announce".to_string(),
                 "udp://tracker.local:6969/announce".to_string(),
             ]

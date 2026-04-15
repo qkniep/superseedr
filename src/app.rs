@@ -115,6 +115,7 @@ use sysinfo::System;
 use tracing::{event as tracing_event, Level};
 
 use crate::resource_manager::{ResourceManager, ResourceManagerClient};
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
@@ -170,9 +171,7 @@ pub struct ListenerSet {
 
 impl ListenerSet {
     async fn bind(port: u16) -> io::Result<Self> {
-        let ipv6 = match TcpListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port))
-            .await
-        {
+        let ipv6 = match bind_ipv6_listener(port) {
             Ok(listener) => Some(listener),
             Err(error) => {
                 tracing_event!(
@@ -196,7 +195,7 @@ impl ListenerSet {
         .await
         {
             Ok(listener) => Some(listener),
-            Err(error) if ipv6.is_some() && error.kind() == io::ErrorKind::AddrInUse => None,
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => return Err(error),
             Err(error) if ipv6.is_some() => {
                 tracing_event!(
                     Level::WARN,
@@ -244,6 +243,15 @@ impl ListenerSet {
     }
 }
 
+fn bind_ipv6_listener(port: u16) -> io::Result<TcpListener> {
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_only_v6(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port).into())?;
+    socket.listen(1024)?;
+    TcpListener::from_std(socket.into())
+}
+
 #[derive(serde::Deserialize)]
 struct CratesResponse {
     #[serde(rename = "crate")]
@@ -280,6 +288,12 @@ pub struct TorrentPreviewPayload {
     pub file_index: Option<usize>, // None for folders
     pub size: u64,
     pub priority: FilePriority,
+}
+
+struct TorrentPreviewFileEntry {
+    parts: Vec<String>,
+    file_index: usize,
+    size: u64,
 }
 
 // Implement AddAssign so RawNode::from_path_list can aggregate folder sizes
@@ -1007,18 +1021,34 @@ pub fn build_torrent_preview_tree(
     file_list: Vec<(Vec<String>, u64)>,
     file_priorities: &HashMap<usize, FilePriority>,
 ) -> Vec<RawNode<TorrentPreviewPayload>> {
-    let file_count = file_list.len();
-    let preview_payloads: Vec<(Vec<String>, TorrentPreviewPayload)> = file_list
+    let entries = file_list
         .into_iter()
         .enumerate()
-        .map(|(idx, (parts, size))| {
+        .map(|(idx, (parts, size))| TorrentPreviewFileEntry {
+            parts,
+            file_index: idx,
+            size,
+        })
+        .collect();
+
+    build_torrent_preview_tree_from_entries(entries, file_priorities)
+}
+
+fn build_torrent_preview_tree_from_entries(
+    file_entries: Vec<TorrentPreviewFileEntry>,
+    file_priorities: &HashMap<usize, FilePriority>,
+) -> Vec<RawNode<TorrentPreviewPayload>> {
+    let file_count = file_entries.len();
+    let preview_payloads: Vec<(Vec<String>, TorrentPreviewPayload)> = file_entries
+        .into_iter()
+        .map(|entry| {
             (
-                parts,
+                entry.parts,
                 TorrentPreviewPayload {
-                    file_index: Some(idx),
-                    size,
+                    file_index: Some(entry.file_index),
+                    size: entry.size,
                     priority: file_priorities
-                        .get(&idx)
+                        .get(&entry.file_index)
                         .copied()
                         .unwrap_or(FilePriority::Normal),
                 },
@@ -1039,15 +1069,19 @@ pub fn build_torrent_preview_tree(
 fn collect_torrent_preview_files(
     node: &RawNode<TorrentPreviewPayload>,
     path: &mut Vec<String>,
-    files: &mut Vec<(Vec<String>, u64)>,
+    files: &mut Vec<TorrentPreviewFileEntry>,
 ) {
     path.push(node.name.clone());
     if node.is_dir {
         for child in &node.children {
             collect_torrent_preview_files(child, path, files);
         }
-    } else {
-        files.push((path.clone(), node.payload.size));
+    } else if let Some(file_index) = node.payload.file_index {
+        files.push(TorrentPreviewFileEntry {
+            parts: path.clone(),
+            file_index,
+            size: node.payload.size,
+        });
     }
     path.pop();
 }
@@ -1061,7 +1095,7 @@ fn rebuild_torrent_preview_tree(
     for node in existing_tree {
         collect_torrent_preview_files(node, &mut path, &mut files);
     }
-    build_torrent_preview_tree(files, file_priorities)
+    build_torrent_preview_tree_from_entries(files, file_priorities)
 }
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -6615,9 +6649,10 @@ mod tests {
         resolve_magnet_torrent_name, rss_settings_changed, should_load_persisted_torrent,
         should_persist_network_history_on_interval, sort_and_filter_torrent_list_state,
         torrent_completion_percent, torrent_is_effectively_incomplete, App, AppClusterRole,
-        AppCommand, AppMode, AppRuntimeMode, AppState, CommandIngestResult, FilePriority, PeerInfo,
-        PersistPayload, SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState,
-        TorrentMetrics, TorrentSortColumn, UiState, BITTORRENT_PROTOCOL_STR,
+        AppCommand, AppMode, AppRuntimeMode, AppState, CommandIngestResult, FilePriority,
+        ListenerSet, PeerInfo, PersistPayload, SelectedHeader, SortDirection, TorrentControlState,
+        TorrentDisplayState, TorrentMetrics, TorrentPreviewPayload, TorrentSortColumn, UiState,
+        BITTORRENT_PROTOCOL_STR,
     };
     use crate::config::{
         clear_shared_config_state_for_tests, set_app_paths_override_for_tests, TorrentSettings,
@@ -8624,6 +8659,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_settings_update_preserves_preview_file_indices_for_nonlexical_order() {
+        fn collect_preview_files(
+            node: &crate::tui::tree::RawNode<TorrentPreviewPayload>,
+            path: &mut Vec<String>,
+            files: &mut Vec<(Vec<String>, usize, FilePriority)>,
+        ) {
+            path.push(node.name.clone());
+            if node.is_dir {
+                for child in &node.children {
+                    collect_preview_files(child, path, files);
+                }
+            } else if let Some(file_index) = node.payload.file_index {
+                files.push((path.clone(), file_index, node.payload.priority));
+            }
+            path.pop();
+        }
+
+        let magnet = "magnet:?xt=urn:btih:4444444444444444444444444444444444444444".to_string();
+        let settings = crate::config::Settings {
+            client_port: 0,
+            torrents: vec![crate::config::TorrentSettings {
+                torrent_or_magnet: magnet.clone(),
+                name: "Sample Golf".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        let info_hash = info_hash_from_torrent_source(&magnet).expect("info hash");
+        let runtime = app
+            .app_state
+            .torrents
+            .get_mut(&info_hash)
+            .expect("torrent runtime should exist");
+        runtime.file_preview_tree = build_torrent_preview_tree(
+            vec![
+                (vec!["folder".to_string(), "beta.bin".to_string()], 20),
+                (vec!["folder".to_string(), "alpha.bin".to_string()], 10),
+            ],
+            &HashMap::new(),
+        );
+
+        let mut next_settings = app.client_configs.clone();
+        next_settings.torrents[0].file_priorities =
+            HashMap::from([(0, FilePriority::Skip), (1, FilePriority::High)]);
+        app.apply_settings_update(next_settings, false).await;
+
+        let runtime = app
+            .app_state
+            .torrents
+            .get(&info_hash)
+            .expect("torrent runtime should remain present");
+        let mut files = Vec::new();
+        let mut path = Vec::new();
+        for node in &runtime.file_preview_tree {
+            collect_preview_files(node, &mut path, &mut files);
+        }
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(
+            files,
+            vec![
+                (
+                    vec!["folder".to_string(), "alpha.bin".to_string()],
+                    1,
+                    FilePriority::High,
+                ),
+                (
+                    vec!["folder".to_string(), "beta.bin".to_string()],
+                    0,
+                    FilePriority::Skip,
+                ),
+            ]
+        );
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn shared_follower_promotion_starts_previously_suppressed_runtime() {
         let settings = crate::config::Settings {
             client_port: 0,
@@ -9473,5 +9589,20 @@ mod tests {
 
         assert!(tx_opt.is_none());
         assert!(task_opt.is_none());
+    }
+
+    #[tokio::test]
+    async fn listener_set_bind_fails_when_ipv4_port_is_already_in_use() {
+        let occupied = tokio::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .expect("bind occupied IPv4 port");
+        let port = occupied.local_addr().expect("occupied local addr").port();
+
+        let error = match ListenerSet::bind(port).await {
+            Ok(_) => panic!("bind should fail when IPv4 port is already in use"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
     }
 }
