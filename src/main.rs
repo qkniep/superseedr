@@ -106,15 +106,22 @@ fn init_tracing(
     let quiet_filter = Targets::new()
         .with_default(DEFAULT_LOG_FILTER)
         .with_target("mainline::rpc::socket", LevelFilter::ERROR);
+    let stderr_fallback_filter = Targets::new()
+        .with_default(LevelFilter::WARN)
+        .with_target("mainline::rpc::socket", LevelFilter::ERROR);
+    let mut suppressed_failures = Vec::new();
 
     for log_dir in log_dirs {
         if let Err(error) = fs::create_dir_all(&log_dir) {
+            let message = format!(
+                "Failed to create log directory at {}: {}",
+                log_dir.display(),
+                error
+            );
             if emit_stderr {
-                eprintln!(
-                    "[Warn] Failed to create log directory at {}: {}",
-                    log_dir.display(),
-                    error
-                );
+                eprintln!("[Warn] {}", message);
+            } else {
+                suppressed_failures.push(message);
             }
         } else {
             match RollingFileAppender::builder()
@@ -137,28 +144,51 @@ fn init_tracing(
                         .is_ok()
                     {
                         return vec![guard_general];
+                    } else {
+                        let message = format!(
+                            "Failed to initialize tracing subscriber for file logging at {}",
+                            log_dir.display()
+                        );
+                        if emit_stderr {
+                            eprintln!("[Warn] {}", message);
+                        } else {
+                            suppressed_failures.push(message);
+                        }
                     }
                 }
                 Err(error) => {
+                    let message = format!(
+                        "Failed to initialize file logging at {}: {}",
+                        log_dir.display(),
+                        error
+                    );
                     if emit_stderr {
-                        eprintln!(
-                            "[Warn] Failed to initialize file logging at {}: {}",
-                            log_dir.display(),
-                            error
-                        );
+                        eprintln!("[Warn] {}", message);
+                    } else {
+                        suppressed_failures.push(message);
                     }
                 }
             }
         }
     }
 
+    if !emit_stderr && !suppressed_failures.is_empty() {
+        eprintln!(
+            "[Warn] File logging unavailable; falling back to stderr logging. {}",
+            suppressed_failures[0]
+        );
+        if suppressed_failures.len() > 1 {
+            eprintln!(
+                "[Warn] {} additional logging setup failure(s) were suppressed.",
+                suppressed_failures.len() - 1
+            );
+        }
+    }
+
     let fallback_layer = if emit_stderr {
         fmt::layer().with_filter(quiet_filter).boxed()
     } else {
-        fmt::layer()
-            .with_writer(std::io::sink)
-            .with_filter(quiet_filter)
-            .boxed()
+        fmt::layer().with_filter(stderr_fallback_filter).boxed()
     };
     let _ = tracing_subscriber::registry()
         .with(fallback_layer)
