@@ -3413,7 +3413,10 @@ impl App {
                 "Config update: Port changed to {}",
                 new_settings.client_port
             );
-            self.rebind_listener(new_settings.client_port).await;
+            if !self.rebind_listener(new_settings.client_port).await {
+                self.client_configs.client_port = old_settings.client_port;
+                let _ = self.rss_settings_tx.send(self.client_configs.clone());
+            }
         }
 
         if new_settings.global_download_limit_bps != old_settings.global_download_limit_bps {
@@ -5711,7 +5714,7 @@ impl App {
         }
     }
 
-    async fn rebind_listener(&mut self, new_port: u16) {
+    async fn rebind_listener(&mut self, new_port: u16) -> bool {
         match ListenerSet::bind(new_port).await {
             Ok(new_listener) => {
                 self.listener = Some(new_listener);
@@ -5777,6 +5780,8 @@ impl App {
                         }
                     }
                 }
+
+                true
             }
             Err(e) => {
                 tracing_event!(
@@ -5785,6 +5790,8 @@ impl App {
                     new_port,
                     e
                 );
+
+                false
             }
         }
     }
@@ -7254,7 +7261,7 @@ mod tests {
         app.torrent_manager_command_txs
             .insert(b"port-update-test".to_vec(), manager_tx);
 
-        app.rebind_listener(0).await;
+        assert!(app.rebind_listener(0).await);
 
         let bound_port = app.client_configs.client_port;
         assert_ne!(bound_port, 0);
@@ -7267,6 +7274,37 @@ mod tests {
             command,
             ManagerCommand::UpdateListenPort(port) if port == bound_port
         ));
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn apply_settings_update_restores_previous_port_when_rebind_fails() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("create app");
+        let original_port = app.client_configs.client_port;
+        let occupied = tokio::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .expect("bind occupied IPv4 port");
+        let occupied_port = occupied.local_addr().expect("occupied local addr").port();
+
+        let mut next_settings = app.client_configs.clone();
+        next_settings.client_port = occupied_port;
+
+        app.apply_settings_update(next_settings, false).await;
+
+        let rebound_port = app
+            .listener
+            .as_ref()
+            .and_then(ListenerSet::local_port)
+            .expect("listener should remain bound");
+        assert_eq!(app.client_configs.client_port, original_port);
+        assert_eq!(rebound_port, original_port);
 
         let _ = app.shutdown_tx.send(());
     }
