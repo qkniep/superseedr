@@ -7315,14 +7315,16 @@ mod tests {
                 .await
                 .is_ok()
             {
-                Some(
-                    TcpListener::bind(SocketAddr::new(
-                        IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-                        occupied_port,
-                    ))
-                    .await
-                    .expect("bind occupied IPv6 port"),
-                )
+                match TcpListener::bind(SocketAddr::new(
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                    occupied_port,
+                ))
+                .await
+                {
+                    Ok(listener) => Some(listener),
+                    Err(error) if error.kind() == io::ErrorKind::AddrInUse => None,
+                    Err(error) => panic!("bind occupied IPv6 port: {error}"),
+                }
             } else {
                 None
             };
@@ -9753,17 +9755,33 @@ mod tests {
             .await
             .expect("bind occupied IPv4 port");
         let port = occupied.local_addr().expect("occupied local addr").port();
+        let ipv6_can_bind_alongside_ipv4 = if ipv6_supported {
+            match TcpListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port)).await
+            {
+                Ok(listener) => {
+                    drop(listener);
+                    true
+                }
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => false,
+                Err(error) => panic!("probe IPv6 bind with occupied IPv4 port: {error}"),
+            }
+        } else {
+            false
+        };
 
         match ListenerSet::bind(port).await {
             Ok(listener_set) => {
-                assert!(ipv6_supported, "IPv6-only fallback requires IPv6 support");
+                assert!(
+                    ipv6_can_bind_alongside_ipv4,
+                    "expected full bind failure when IPv4 occupancy also blocks IPv6"
+                );
                 assert!(listener_set.ipv6.is_some());
                 assert!(listener_set.ipv4.is_none());
                 assert_eq!(listener_set.local_port(), Some(port));
             }
             Err(error) => {
                 assert!(
-                    !ipv6_supported,
+                    !ipv6_can_bind_alongside_ipv4,
                     "expected degraded IPv6-only bind, got {error}"
                 );
                 assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
