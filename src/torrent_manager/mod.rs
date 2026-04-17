@@ -96,6 +96,18 @@ pub enum TorrentFileProbeStatus {
     Files(Vec<FileProbeEntry>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileActivityDirection {
+    Download,
+    Upload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileActivityUpdate {
+    pub touched_relative_paths: Vec<String>,
+    pub direction: FileActivityDirection,
+}
+
 #[derive(Debug)]
 pub enum ManagerEvent {
     DeletionComplete(Vec<u8>, Result<(), String>),

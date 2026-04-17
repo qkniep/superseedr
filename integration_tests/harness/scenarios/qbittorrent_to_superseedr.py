@@ -355,11 +355,11 @@ def run_mode(
 
 def generate_fixtures_and_torrents(root: Path, announce_url: str) -> Path:
     generated_torrents = root / "integration_tests" / "artifacts" / "generated_torrents"
-    subprocess.run(["python3", "local_scripts/generate_integration_bins.py"], cwd=root, check=True)
+    subprocess.run(["python3", "scripts/generate_integration_bins.py"], cwd=root, check=True)
     subprocess.run(
         [
             "python3",
-            "local_scripts/generate_integration_torrents.py",
+            "scripts/generate_integration_torrents.py",
             "--announce-url",
             announce_url,
             "--output-root",

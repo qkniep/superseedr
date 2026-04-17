@@ -4,6 +4,7 @@
 use std::fs;
 use std::fs::File;
 use std::io::{self, ErrorKind, Stdout};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use std::collections::VecDeque;
@@ -75,6 +76,7 @@ use crate::integrity_scheduler::{
 use crate::torrent_file::parser::from_bytes;
 use crate::torrent_identity::info_hash_from_torrent_source;
 use crate::torrent_manager::data_availability_from_file_probe_result;
+use crate::torrent_manager::FileActivityUpdate;
 use crate::torrent_manager::ManagerCommand;
 use crate::torrent_manager::ManagerEvent;
 use crate::torrent_manager::TorrentFileProbeStatus;
@@ -113,10 +115,29 @@ use sysinfo::System;
 use tracing::{event as tracing_event, Level};
 
 use crate::resource_manager::{ResourceManager, ResourceManagerClient};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use tokio::time;
+
+fn format_filesystem_path_error(action: &str, path: &Path, error: &io::Error) -> String {
+    let detail = match error.kind() {
+        ErrorKind::NotFound => "file or directory was not found".to_string(),
+        ErrorKind::PermissionDenied => "permission denied".to_string(),
+        ErrorKind::IsADirectory => {
+            "expected a file here, but the path points to a directory".to_string()
+        }
+        ErrorKind::NotADirectory => {
+            "expected a directory component in the path, but found a file".to_string()
+        }
+        _ if path.is_dir() => {
+            "expected a file here, but the path points to a directory".to_string()
+        }
+        _ => error.to_string(),
+    };
+
+    format!("{} {:?}: {}", action, path, detail)
+}
 use tokio::time::MissedTickBehavior;
 
 use directories::UserDirs;
@@ -133,9 +154,95 @@ const RSS_MANUAL_DOWNLOAD_TIMEOUT_SECS: u64 = 20;
 const NETWORK_HISTORY_PERSIST_INTERVAL_SECS: u64 = 15 * 60;
 const WATCH_FOLDER_RESCAN_INTERVAL_SECS: u64 = 5;
 const SHARED_ROLE_RETRY_INTERVAL_SECS: u64 = 2;
+const STARTUP_ROLLING_BATCH_SIZE: usize = 1;
+const STARTUP_ROLLING_BATCH_INTERVAL_SECS: u64 = 1;
+const STARTUP_ROLLING_LOADS_PER_INTERVAL: usize = 1;
 
 const SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 const INCOMING_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
+const PORT_FAMILY_HIGHLIGHT_DURATION: Duration = Duration::from_secs(2);
+const BITTORRENT_PROTOCOL_STR: &[u8] = b"BitTorrent protocol";
+
+pub struct ListenerSet {
+    ipv4: Option<TcpListener>,
+    ipv6: Option<TcpListener>,
+}
+
+impl ListenerSet {
+    async fn bind(port: u16) -> io::Result<Self> {
+        let ipv6 = match TcpListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port))
+            .await
+        {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                tracing_event!(
+                    Level::WARN,
+                    error = %error,
+                    "IPv6 listener bind failed; continuing without IPv6 listener."
+                );
+                None
+            }
+        };
+
+        let ipv4_port = match (port, ipv6.as_ref()) {
+            (0, Some(listener)) => listener.local_addr()?.port(),
+            _ => port,
+        };
+
+        let ipv4 = match TcpListener::bind(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            ipv4_port,
+        ))
+        .await
+        {
+            Ok(listener) => Some(listener),
+            Err(error) if ipv6.is_some() && error.kind() == io::ErrorKind::AddrInUse => None,
+            Err(error) if ipv6.is_some() => {
+                tracing_event!(
+                    Level::WARN,
+                    error = %error,
+                    "IPv4 listener bind failed; continuing with IPv6 listener only."
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
+
+        if ipv4.is_none() && ipv6.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "failed to bind IPv4 or IPv6 listener",
+            ));
+        }
+
+        Ok(Self { ipv4, ipv6 })
+    }
+
+    async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+        match (&self.ipv4, &self.ipv6) {
+            (Some(ipv4), Some(ipv6)) => {
+                tokio::select! {
+                    res = ipv4.accept() => res,
+                    res = ipv6.accept() => res,
+                }
+            }
+            (Some(ipv4), None) => ipv4.accept().await,
+            (None, Some(ipv6)) => ipv6.accept().await,
+            (None, None) => Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "no listener is currently bound",
+            )),
+        }
+    }
+
+    fn local_port(&self) -> Option<u16> {
+        self.ipv4
+            .as_ref()
+            .or(self.ipv6.as_ref())
+            .and_then(|listener| listener.local_addr().ok())
+            .map(|addr| addr.port())
+    }
+}
 
 #[derive(serde::Deserialize)]
 struct CratesResponse {
@@ -173,6 +280,12 @@ pub struct TorrentPreviewPayload {
     pub file_index: Option<usize>, // None for folders
     pub size: u64,
     pub priority: FilePriority,
+}
+
+struct TorrentPreviewFileEntry {
+    parts: Vec<String>,
+    file_index: usize,
+    size: u64,
 }
 
 // Implement AddAssign so RawNode::from_path_list can aggregate folder sizes
@@ -465,6 +578,7 @@ pub enum AppCommand {
     AddTorrentFromFile(PathBuf),
     AddTorrentFromPathFile(PathBuf),
     AddMagnetFromFile(PathBuf),
+    MarkPortOpen(SocketAddr),
     ReloadClusterState(PathBuf),
     SubmitControlRequest(ControlRequest),
     ControlRequest {
@@ -585,6 +699,9 @@ enum AddIngressAction {
     },
     OpenManualBrowser {
         payload: ResolvedAddPayload,
+    },
+    IgnoreMissingSharedInboxItem {
+        message: String,
     },
     Fail {
         message: String,
@@ -760,6 +877,9 @@ pub struct TorrentMetrics {
     #[serde(skip)]
     pub blocks_out_history: Vec<u64>,
 
+    #[serde(skip)]
+    pub file_activity_updates: Vec<FileActivityUpdate>,
+
     pub blocks_in_this_tick: u64,
     pub blocks_out_this_tick: u64,
 }
@@ -796,6 +916,7 @@ impl Default for TorrentMetrics {
             bytes_written: 0,
             blocks_in_history: Vec::new(),
             blocks_out_history: Vec::new(),
+            file_activity_updates: Vec::new(),
             blocks_in_this_tick: 0,
             blocks_out_this_tick: 0,
         }
@@ -805,6 +926,8 @@ impl Default for TorrentMetrics {
 #[derive(Default, Debug)]
 pub struct TorrentDisplayState {
     pub latest_state: TorrentMetrics,
+    pub file_preview_tree: Vec<RawNode<TorrentPreviewPayload>>,
+    pub recent_file_activity: HashMap<String, RecentFileActivity>,
     pub latest_file_probe_status: Option<TorrentFileProbeStatus>,
     pub integrity_next_probe_in: Option<Duration>,
     pub download_history: Vec<u64>,
@@ -834,15 +957,24 @@ pub struct TorrentDisplayState {
     pub last_seen_session_total_uploaded: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RecentFileActivity {
+    pub download_at: Option<Instant>,
+    pub upload_at: Option<Instant>,
+}
+
 #[derive(Default)]
 pub struct UiState {
     pub needs_redraw: bool,
     pub effects_phase_time: f64,
     pub effects_last_wall_time: f64,
     pub effects_speed_multiplier: f64,
+    pub file_activity_download_phase: f64,
+    pub file_activity_upload_phase: f64,
     pub selected_header: SelectedHeader,
     pub selected_torrent_index: usize,
     pub selected_peer_index: usize,
+    pub show_torrent_files: bool,
     pub is_searching: bool,
     pub search_query: String,
     pub config: ConfigUiState,
@@ -875,6 +1007,87 @@ pub struct FileBrowserUiState {
     pub browser_mode: FileBrowserMode,
     pub is_searching: bool,
     pub search_query: String,
+}
+
+pub fn build_torrent_preview_tree(
+    file_list: Vec<(Vec<String>, u64)>,
+    file_priorities: &HashMap<usize, FilePriority>,
+) -> Vec<RawNode<TorrentPreviewPayload>> {
+    let entries = file_list
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (parts, size))| TorrentPreviewFileEntry {
+            parts,
+            file_index: idx,
+            size,
+        })
+        .collect();
+
+    build_torrent_preview_tree_from_entries(entries, file_priorities)
+}
+
+fn build_torrent_preview_tree_from_entries(
+    file_entries: Vec<TorrentPreviewFileEntry>,
+    file_priorities: &HashMap<usize, FilePriority>,
+) -> Vec<RawNode<TorrentPreviewPayload>> {
+    let file_count = file_entries.len();
+    let preview_payloads: Vec<(Vec<String>, TorrentPreviewPayload)> = file_entries
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.parts,
+                TorrentPreviewPayload {
+                    file_index: Some(entry.file_index),
+                    size: entry.size,
+                    priority: file_priorities
+                        .get(&entry.file_index)
+                        .copied()
+                        .unwrap_or(FilePriority::Normal),
+                },
+            )
+        })
+        .collect();
+
+    let tree = RawNode::from_path_list(None, preview_payloads);
+    tracing::info!(
+        target: "superseedr",
+        file_count,
+        tree_roots = tree.len(),
+        "Built torrent preview tree"
+    );
+    tree
+}
+
+fn collect_torrent_preview_files(
+    node: &RawNode<TorrentPreviewPayload>,
+    path: &mut Vec<String>,
+    files: &mut Vec<TorrentPreviewFileEntry>,
+) {
+    path.push(node.name.clone());
+    if node.is_dir {
+        for child in &node.children {
+            collect_torrent_preview_files(child, path, files);
+        }
+    } else if let Some(file_index) = node.payload.file_index {
+        files.push(TorrentPreviewFileEntry {
+            parts: path.clone(),
+            file_index,
+            size: node.payload.size,
+        });
+    }
+    path.pop();
+}
+
+fn rebuild_torrent_preview_tree(
+    existing_tree: &[RawNode<TorrentPreviewPayload>],
+    file_priorities: &HashMap<usize, FilePriority>,
+) -> Vec<RawNode<TorrentPreviewPayload>> {
+    let mut files = Vec::new();
+    let mut path = Vec::new();
+    for node in existing_tree {
+        collect_torrent_preview_files(node, &mut path, &mut files);
+    }
+    build_torrent_preview_tree_from_entries(files, file_priorities)
 }
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -992,7 +1205,10 @@ pub struct AppState {
 
     pub screen_area: Rect,
     pub mode: AppMode,
-    pub externally_accessable_port: bool,
+    pub externally_accessable_port_v4: bool,
+    pub externally_accessable_port_v6: bool,
+    pub externally_accessable_port_v4_highlight_until: Option<Instant>,
+    pub externally_accessable_port_v6_highlight_until: Option<Instant>,
     pub anonymize_torrent_names: bool,
 
     pub pending_torrent_path: Option<PathBuf>,
@@ -1102,7 +1318,7 @@ pub struct App {
     #[cfg(feature = "dht")]
     pub dht_bootstrap_warning: Option<String>,
 
-    pub listener: Option<tokio::net::TcpListener>,
+    pub listener: Option<ListenerSet>,
 
     pub torrent_manager_incoming_peer_txs: HashMap<Vec<u8>, Sender<(TcpStream, Vec<u8>)>>,
     pub torrent_manager_command_txs: HashMap<Vec<u8>, Sender<ManagerCommand>>,
@@ -1141,6 +1357,8 @@ pub struct App {
     pub app_lock_handle: Option<File>,
     pub leader_status_snapshot: Option<AppOutputState>,
     pub startup_completion_suppressed_hashes: HashSet<Vec<u8>>,
+    pub startup_deferred_load_queue: VecDeque<Vec<u8>>,
+    pub next_startup_load_at: Option<time::Instant>,
 }
 
 #[derive(Clone)]
@@ -1288,14 +1506,16 @@ impl App {
     }
 
     pub async fn new_with_lock(
-        client_configs: Settings,
+        mut client_configs: Settings,
         runtime_mode: AppRuntimeMode,
         app_lock_handle: Option<File>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let listener = Some(
-            tokio::net::TcpListener::bind(format!("0.0.0.0:{}", client_configs.client_port))
-                .await?,
-        );
+        let listener = Some(ListenerSet::bind(client_configs.client_port).await?);
+        if client_configs.client_port == 0 {
+            if let Some(bound_port) = listener.as_ref().and_then(ListenerSet::local_port) {
+                client_configs.client_port = bound_port;
+            }
+        }
 
         let (manager_event_tx, manager_event_rx) = mpsc::channel::<ManagerEvent>(1000);
         let (app_command_tx, app_command_rx) = mpsc::channel::<AppCommand>(10);
@@ -1488,6 +1708,8 @@ impl App {
             app_lock_handle,
             leader_status_snapshot: None,
             startup_completion_suppressed_hashes: HashSet::new(),
+            startup_deferred_load_queue: VecDeque::new(),
+            next_startup_load_at: None,
         };
         app.sync_cluster_role_label();
         app.refresh_system_warning();
@@ -1496,9 +1718,42 @@ impl App {
 
         let mut torrents_to_load = app.client_configs.torrents.clone();
         torrents_to_load.sort_by_key(|t| !t.validation_status);
+        let mut startup_running_torrents_started = 0usize;
         for torrent_config in torrents_to_load {
-            app.load_runtime_torrent_from_settings(torrent_config).await;
+            let should_defer_running_torrent = matches!(
+                torrent_config.torrent_control_state,
+                TorrentControlState::Running
+            ) && startup_running_torrents_started
+                >= STARTUP_ROLLING_BATCH_SIZE
+                && !app.should_suppress_follower_runtime_for_torrent(&torrent_config);
+
+            if should_defer_running_torrent {
+                if let Some(info_hash) =
+                    info_hash_from_torrent_source(&torrent_config.torrent_or_magnet)
+                {
+                    app.startup_deferred_load_queue.push_back(info_hash);
+                } else {
+                    tracing_event!(
+                        Level::WARN,
+                        torrent = %torrent_config.torrent_or_magnet,
+                        "Could not derive info hash for deferred startup torrent; restoring immediately"
+                    );
+                    app.load_runtime_torrent_from_settings(torrent_config).await;
+                    startup_running_torrents_started =
+                        startup_running_torrents_started.saturating_add(1);
+                }
+            } else {
+                if matches!(
+                    torrent_config.torrent_control_state,
+                    TorrentControlState::Running
+                ) {
+                    startup_running_torrents_started =
+                        startup_running_torrents_started.saturating_add(1);
+                }
+                app.load_runtime_torrent_from_settings(torrent_config).await;
+            }
         }
+        app.reschedule_startup_load_deadline();
 
         if app.app_state.torrents.is_empty() && app.app_state.lifetime_downloaded_from_config == 0 {
             app.app_state.mode = AppMode::Welcome;
@@ -1864,9 +2119,10 @@ impl App {
             let staged_path =
                 staging_dir.join(format!("staged-{}-{}.torrent", now_ms, &hash[..12]));
             fs::copy(&source_path, &staged_path).map_err(|error| {
-                format!(
-                    "Failed to stage torrent file {:?} for leader processing: {}",
-                    source_path, error
+                format_filesystem_path_error(
+                    "Failed to stage torrent file for leader processing",
+                    &source_path,
+                    &error,
                 )
             })?;
             staged_path
@@ -1908,10 +2164,7 @@ impl App {
             }),
             IngestSource::TorrentPathFile => {
                 let payload = fs::read_to_string(path).map_err(|error| {
-                    format!(
-                        "Failed to read torrent path from file {:?}: {}",
-                        path, error
-                    )
+                    format_filesystem_path_error("Failed to read torrent path file", path, &error)
                 })?;
                 let source_path =
                     crate::config::resolve_shared_cli_torrent_path(Path::new(payload.trim()))
@@ -1968,7 +2221,12 @@ impl App {
 
         let payload = match self.resolve_add_payload(source, path) {
             Ok(payload) => payload,
-            Err(message) => return AddIngressAction::Fail { message },
+            Err(message) => {
+                if is_shared_inbox_path && matches!(path.try_exists(), Ok(false)) {
+                    return AddIngressAction::IgnoreMissingSharedInboxItem { message };
+                }
+                return AddIngressAction::Fail { message };
+            }
         };
 
         if self.is_current_shared_follower()
@@ -2063,7 +2321,9 @@ impl App {
     }
 
     fn open_manual_browser_for_torrent_file(&mut self, path: PathBuf) -> Result<(), String> {
-        let buffer = fs::read(&path).map_err(|_| "Failed to read torrent file.".to_string())?;
+        let buffer = fs::read(&path).map_err(|error| {
+            format_filesystem_path_error("Failed to read torrent file", &path, &error)
+        })?;
         let torrent = from_bytes(&buffer)
             .map_err(|_| "Failed to parse torrent file for preview.".to_string())?;
 
@@ -2281,6 +2541,16 @@ impl App {
                     self.archive_processed_ingest(source, &path);
                 }
             }
+            AddIngressAction::IgnoreMissingSharedInboxItem { message } => {
+                tracing_event!(
+                    Level::INFO,
+                    path = ?path,
+                    "{}",
+                    message
+                );
+                self.app_state.pending_ingest_by_path.remove(&path);
+                self.save_state_to_disk();
+            }
             AddIngressAction::Fail { message } => {
                 tracing_event!(Level::ERROR, "{}", message);
                 self.app_state.system_error = Some(message.clone());
@@ -2448,6 +2718,7 @@ impl App {
             let next_tuning_at = self.next_tuning_at;
             let next_paste_flush_at = self.app_state.ui.normal_paste_burst.next_deadline();
             let next_status_dump_at = self.next_status_dump_at;
+            let next_startup_load_at = self.next_startup_load_at;
 
             tokio::select! {
                 _ = signal::ctrl_c() => {
@@ -2520,6 +2791,15 @@ impl App {
                 } => {
                     self.trigger_status_dump_now();
                 }
+                _ = async {
+                    if let Some(deadline) = next_startup_load_at {
+                        time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    self.load_next_startup_batch().await;
+                }
                 _ = network_history_persist_interval.tick() => {
                     if should_persist_network_history_on_interval(&self.app_state) {
                         self.save_state_to_disk();
@@ -2589,6 +2869,28 @@ impl App {
     }
 
     fn tick_ui_effects_clock(&mut self) {
+        let now = Instant::now();
+        let mut cleared_port_highlight = false;
+        if self
+            .app_state
+            .externally_accessable_port_v4_highlight_until
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.app_state.externally_accessable_port_v4_highlight_until = None;
+            cleared_port_highlight = true;
+        }
+        if self
+            .app_state
+            .externally_accessable_port_v6_highlight_until
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.app_state.externally_accessable_port_v6_highlight_until = None;
+            cleared_port_highlight = true;
+        }
+        if cleared_port_highlight {
+            self.app_state.ui.needs_redraw = true;
+        }
+
         let frame_wall_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -2605,6 +2907,19 @@ impl App {
         self.app_state.ui.effects_last_wall_time = frame_wall_time;
         self.app_state.ui.effects_speed_multiplier = activity_speed_multiplier;
         self.app_state.ui.effects_phase_time += frame_dt * activity_speed_multiplier;
+        let selected_torrent = self
+            .app_state
+            .torrent_list_order
+            .get(self.app_state.ui.selected_torrent_index)
+            .and_then(|info_hash| self.app_state.torrents.get(info_hash));
+        let download_steps_per_second = selected_torrent
+            .map(|torrent| file_activity_wave_steps_per_second(torrent.smoothed_download_speed_bps))
+            .unwrap_or_else(|| file_activity_wave_steps_per_second(0));
+        let upload_steps_per_second = selected_torrent
+            .map(|torrent| file_activity_wave_steps_per_second(torrent.smoothed_upload_speed_bps))
+            .unwrap_or_else(|| file_activity_wave_steps_per_second(0));
+        self.app_state.ui.file_activity_download_phase += frame_dt * download_steps_per_second;
+        self.app_state.ui.file_activity_upload_phase += frame_dt * upload_steps_per_second;
 
         let disk_activity = self
             .app_state
@@ -2802,15 +3117,13 @@ impl App {
     }
 
     async fn handle_incoming_peer(&mut self, mut stream: TcpStream) {
-        if !self.app_state.externally_accessable_port {
-            self.app_state.externally_accessable_port = true;
-        }
-
         let torrent_manager_incoming_peer_txs_clone =
             self.torrent_manager_incoming_peer_txs.clone();
         let resource_manager_clone = self.resource_manager.clone();
+        let app_command_tx = self.app_command_tx.clone();
         let mut permit_shutdown_rx = self.shutdown_tx.subscribe();
         tokio::spawn(async move {
+            let peer_addr = stream.peer_addr().ok();
             let Some(_session_permit) = (tokio::select! {
                 permit_result = resource_manager_clone.acquire_peer_connection() => {
                     match permit_result {
@@ -2836,13 +3149,28 @@ impl App {
                 .await,
                 Ok(Ok(_))
             ) {
+                if !is_valid_incoming_bittorrent_handshake(&buffer) {
+                    tracing::trace!(
+                        "Rejected inbound TCP connection with invalid BitTorrent handshake."
+                    );
+                    return;
+                }
+
                 let peer_info_hash = &buffer[28..48];
 
                 if let Some(torrent_manager_tx) =
                     torrent_manager_incoming_peer_txs_clone.get(peer_info_hash)
                 {
                     let torrent_manager_tx_clone = torrent_manager_tx.clone();
-                    let _ = torrent_manager_tx_clone.send((stream, buffer)).await;
+                    if torrent_manager_tx_clone
+                        .send((stream, buffer))
+                        .await
+                        .is_ok()
+                    {
+                        if let Some(peer_addr) = peer_addr {
+                            let _ = app_command_tx.try_send(AppCommand::MarkPortOpen(peer_addr));
+                        }
+                    }
                 } else {
                     tracing::trace!(
                         "ROUTING FAIL: No manager registered for hash: {}",
@@ -2872,14 +3200,17 @@ impl App {
         self.dispatch_integrity_probe_batches();
     }
 
-    async fn load_runtime_torrent_from_settings(&mut self, torrent_config: TorrentSettings) {
+    async fn load_runtime_torrent_from_settings(
+        &mut self,
+        torrent_config: TorrentSettings,
+    ) -> bool {
         if !should_load_persisted_torrent(&torrent_config) {
             tracing_event!(
                 Level::WARN,
                 torrent = %torrent_config.torrent_or_magnet,
                 "Skipping persisted torrent left in transient Deleting state during startup or convergence"
             );
-            return;
+            return false;
         }
 
         tracing_event!(
@@ -2899,10 +3230,10 @@ impl App {
 
         if self.should_suppress_follower_runtime_for_torrent(&torrent_config) {
             self.ensure_display_only_torrent_from_settings(&torrent_config);
-            return;
+            return true;
         }
 
-        if torrent_config.torrent_or_magnet.starts_with("magnet:") {
+        let ingest_result = if torrent_config.torrent_or_magnet.starts_with("magnet:") {
             self.add_magnet_torrent(
                 torrent_config.name.clone(),
                 torrent_config.torrent_or_magnet.clone(),
@@ -2912,7 +3243,7 @@ impl App {
                 torrent_config.file_priorities,
                 torrent_config.container_name,
             )
-            .await;
+            .await
         } else {
             self.add_torrent_from_file(
                 PathBuf::from(&torrent_config.torrent_or_magnet),
@@ -2922,8 +3253,13 @@ impl App {
                 torrent_config.file_priorities.clone(),
                 torrent_config.container_name,
             )
-            .await;
-        }
+            .await
+        };
+
+        matches!(
+            ingest_result,
+            CommandIngestResult::Added { .. } | CommandIngestResult::Duplicate { .. }
+        )
     }
 
     async fn sync_runtime_torrents_from_settings(
@@ -2963,7 +3299,14 @@ impl App {
                     .clone()
                     .or_else(|| new_settings.default_download_folder.clone());
                 runtime.latest_state.container_name = torrent.container_name.clone();
-                runtime.latest_state.file_priorities = torrent.file_priorities.clone();
+                let updated_file_priorities = torrent.file_priorities.clone();
+                runtime.latest_state.file_priorities = updated_file_priorities.clone();
+                if !runtime.file_preview_tree.is_empty() {
+                    runtime.file_preview_tree = rebuild_torrent_preview_tree(
+                        &runtime.file_preview_tree,
+                        &updated_file_priorities,
+                    );
+                }
                 runtime.latest_state.torrent_control_state = torrent.torrent_control_state.clone();
                 runtime.latest_state.delete_files = torrent.delete_files;
             }
@@ -3070,7 +3413,10 @@ impl App {
                 "Config update: Port changed to {}",
                 new_settings.client_port
             );
-            self.rebind_listener(new_settings.client_port).await;
+            if !self.rebind_listener(new_settings.client_port).await {
+                self.client_configs.client_port = old_settings.client_port;
+                let _ = self.rss_settings_tx.send(self.client_configs.clone());
+            }
         }
 
         if new_settings.global_download_limit_bps != old_settings.global_download_limit_bps {
@@ -3119,6 +3465,30 @@ impl App {
                 let action = self.resolve_add_ingress_action(IngestSource::MagnetFile, &path);
                 self.execute_add_ingress_action(IngestSource::MagnetFile, path, action)
                     .await;
+            }
+            AppCommand::MarkPortOpen(peer_addr) => {
+                let highlight_until = Some(Instant::now() + PORT_FAMILY_HIGHLIGHT_DURATION);
+                let open_flag = match peer_addr {
+                    SocketAddr::V4(_) => {
+                        self.app_state.externally_accessable_port_v4_highlight_until =
+                            highlight_until;
+                        &mut self.app_state.externally_accessable_port_v4
+                    }
+                    SocketAddr::V6(addr) if addr.ip().to_ipv4_mapped().is_some() => {
+                        self.app_state.externally_accessable_port_v4_highlight_until =
+                            highlight_until;
+                        &mut self.app_state.externally_accessable_port_v4
+                    }
+                    SocketAddr::V6(_) => {
+                        self.app_state.externally_accessable_port_v6_highlight_until =
+                            highlight_until;
+                        &mut self.app_state.externally_accessable_port_v6
+                    }
+                };
+                if !*open_flag {
+                    *open_flag = true;
+                }
+                self.app_state.ui.needs_redraw = true;
             }
             AppCommand::SubmitControlRequest(request) => {
                 if let Err(error) = self
@@ -3230,7 +3600,7 @@ impl App {
                         });
 
                         if !has_target_files {
-                            data.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                            data.sort_by_key(|node| node.name.to_lowercase());
                         } else {
                             data.sort_by(|a, b| {
                                 let a_matches = target_exts
@@ -3680,6 +4050,8 @@ impl App {
                     display.latest_state.file_count = Some(torrent_file_count(&torrent));
                     display.latest_state.total_size = torrent.info.total_length().max(0) as u64;
                     file_priorities = display.latest_state.file_priorities.clone();
+                    display.file_preview_tree =
+                        build_torrent_preview_tree(torrent.file_list(), &file_priorities);
                 }
 
                 self.persist_torrent_metadata_snapshot(&info_hash, &torrent, &file_priorities);
@@ -3799,15 +4171,20 @@ impl App {
                         new_port
                     );
 
-                    match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", new_port)).await {
+                    match ListenerSet::bind(new_port).await {
                         Ok(new_listener) => {
                             self.listener = Some(new_listener);
-                            self.client_configs.client_port = new_port;
+                            let bound_port = self
+                                .listener
+                                .as_ref()
+                                .and_then(ListenerSet::local_port)
+                                .unwrap_or(new_port);
+                            self.client_configs.client_port = bound_port;
 
                             tracing_event!(
                                 Level::INFO,
                                 "Successfully bound to new port {}",
-                                new_port
+                                bound_port
                             );
 
                             // Persist the new port immediately
@@ -3815,8 +4192,8 @@ impl App {
 
                             // Notify all running managers
                             for manager_tx in self.torrent_manager_command_txs.values() {
-                                let _ =
-                                    manager_tx.try_send(ManagerCommand::UpdateListenPort(new_port));
+                                let _ = manager_tx
+                                    .try_send(ManagerCommand::UpdateListenPort(bound_port));
                             }
 
                             // Rebuild DHT if enabled
@@ -3832,7 +4209,7 @@ impl App {
 
                                 match Dht::builder()
                                     .bootstrap(&bootstrap_nodes)
-                                    .port(new_port)
+                                    .port(bound_port)
                                     .server_mode()
                                     .build()
                                 {
@@ -4129,7 +4506,11 @@ impl App {
             return;
         }
 
-        let payload = build_persist_payload(&mut self.client_configs, &mut self.app_state);
+        let payload = build_persist_payload(
+            &mut self.client_configs,
+            &mut self.app_state,
+            &self.startup_deferred_load_queue,
+        );
         let network_history_request_id = payload
             .network_history
             .as_ref()
@@ -4290,7 +4671,8 @@ impl App {
         let buffer = match fs::read(&path) {
             Ok(buf) => buf,
             Err(e) => {
-                let message = format!("Failed to read torrent file {:?}: {}", &path, e);
+                let message =
+                    format_filesystem_path_error("Failed to read torrent file", &path, &e);
                 tracing_event!(Level::ERROR, "{}", message);
                 return CommandIngestResult::Failed {
                     info_hash: None,
@@ -4500,6 +4882,7 @@ impl App {
                 file_priorities: file_priorities.clone(),
                 ..Default::default()
             },
+            file_preview_tree: build_torrent_preview_tree(torrent.file_list(), &file_priorities),
             ..Default::default()
         };
         self.app_state
@@ -4757,14 +5140,14 @@ impl App {
         let Some(host_watch) = resolve_host_watch_path(&self.client_configs) else {
             return false;
         };
-        path.parent() == Some(host_watch.as_path())
+        watched_parent_matches(path, &host_watch)
     }
 
     fn is_shared_inbox_path(&self, path: &Path) -> bool {
         let Some(shared_inbox) = shared_inbox_path() else {
             return false;
         };
-        path.parent() == Some(shared_inbox.as_path())
+        watched_parent_matches(path, &shared_inbox)
     }
 
     fn relay_local_watch_file(&mut self, path: &Path, fallback_extension: &str) {
@@ -5313,11 +5696,7 @@ impl App {
     }
 
     fn flush_pending_watch_commands(&mut self) {
-        loop {
-            let Some(cmd) = self.app_state.pending_watch_commands.pop_front() else {
-                break;
-            };
-
+        while let Some(cmd) = self.app_state.pending_watch_commands.pop_front() {
             if let Err(error) = self.app_command_tx.try_send(cmd) {
                 match error {
                     tokio::sync::mpsc::error::TrySendError::Full(cmd) => {
@@ -5336,23 +5715,28 @@ impl App {
         }
     }
 
-    async fn rebind_listener(&mut self, new_port: u16) {
-        match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", new_port)).await {
+    async fn rebind_listener(&mut self, new_port: u16) -> bool {
+        match ListenerSet::bind(new_port).await {
             Ok(new_listener) => {
                 self.listener = Some(new_listener);
                 // Note: client_configs.client_port is likely already updated by the caller (UpdateConfig)
                 // but we ensure consistency here just in case.
-                self.client_configs.client_port = new_port;
+                let bound_port = self
+                    .listener
+                    .as_ref()
+                    .and_then(ListenerSet::local_port)
+                    .unwrap_or(new_port);
+                self.client_configs.client_port = bound_port;
 
                 tracing_event!(
                     Level::INFO,
                     "Successfully rebound listener to port {}",
-                    new_port
+                    bound_port
                 );
 
                 // Notify all running managers of the new port
                 for manager_tx in self.torrent_manager_command_txs.values() {
-                    let _ = manager_tx.try_send(ManagerCommand::UpdateListenPort(new_port));
+                    let _ = manager_tx.try_send(ManagerCommand::UpdateListenPort(bound_port));
                 }
 
                 // Re-initialize DHT if enabled (Logic copied from handle_port_change)
@@ -5367,7 +5751,7 @@ impl App {
 
                     match Dht::builder()
                         .bootstrap(&bootstrap_nodes)
-                        .port(new_port)
+                        .port(bound_port)
                         .server_mode()
                         .build()
                     {
@@ -5397,6 +5781,8 @@ impl App {
                         }
                     }
                 }
+
+                true
             }
             Err(e) => {
                 tracing_event!(
@@ -5405,6 +5791,8 @@ impl App {
                     new_port,
                     e
                 );
+
+                false
             }
         }
     }
@@ -5674,6 +6062,90 @@ impl App {
         self.status_dump_interval_override_secs = interval_secs;
         self.reschedule_status_dump_deadline();
     }
+
+    fn reschedule_startup_load_deadline(&mut self) {
+        self.next_startup_load_at = if self.startup_deferred_load_queue.is_empty() {
+            None
+        } else {
+            Some(time::Instant::now() + Duration::from_secs(STARTUP_ROLLING_BATCH_INTERVAL_SECS))
+        };
+    }
+
+    async fn load_next_startup_batch(&mut self) {
+        let mut loaded_count = 0usize;
+
+        for _ in 0..STARTUP_ROLLING_LOADS_PER_INTERVAL {
+            let Some(info_hash) = self.startup_deferred_load_queue.front().cloned() else {
+                break;
+            };
+
+            if self.has_live_runtime_for_torrent(&info_hash) {
+                self.startup_deferred_load_queue.pop_front();
+                continue;
+            }
+
+            let Some(torrent_config) = self
+                .client_configs
+                .torrents
+                .iter()
+                .find(|torrent| {
+                    info_hash_from_torrent_source(&torrent.torrent_or_magnet).as_deref()
+                        == Some(info_hash.as_slice())
+                })
+                .cloned()
+            else {
+                tracing_event!(
+                    Level::WARN,
+                    info_hash = %hex::encode(&info_hash),
+                    "Skipping deferred startup torrent because it is no longer configured"
+                );
+                self.startup_deferred_load_queue.pop_front();
+                continue;
+            };
+
+            if !should_load_persisted_torrent(&torrent_config) {
+                self.startup_deferred_load_queue.pop_front();
+                continue;
+            }
+
+            if self
+                .load_runtime_torrent_from_settings(torrent_config)
+                .await
+            {
+                self.startup_deferred_load_queue.pop_front();
+                loaded_count = loaded_count.saturating_add(1);
+            } else {
+                if let Some(failed_info_hash) = self.startup_deferred_load_queue.pop_front() {
+                    self.startup_deferred_load_queue.push_back(failed_info_hash);
+                }
+                tracing_event!(
+                    Level::WARN,
+                    info_hash = %hex::encode(&info_hash),
+                    "Deferred startup torrent restore failed; moving it to the back of the queue"
+                );
+                continue;
+            }
+        }
+
+        self.reschedule_startup_load_deadline();
+
+        if loaded_count > 0 {
+            tracing_event!(
+                Level::INFO,
+                loaded = loaded_count,
+                remaining = self.startup_deferred_load_queue.len(),
+                "Loaded deferred startup torrent batch"
+            );
+            self.app_state.ui.needs_redraw = true;
+            self.save_state_to_disk();
+        }
+    }
+}
+
+fn is_valid_incoming_bittorrent_handshake(buffer: &[u8]) -> bool {
+    buffer.len() >= 48
+        && buffer[0] as usize == BITTORRENT_PROTOCOL_STR.len()
+        && buffer[1..(1 + BITTORRENT_PROTOCOL_STR.len())] == *BITTORRENT_PROTOCOL_STR
 }
 
 fn persisted_validation_status_from_metrics(
@@ -5872,6 +6344,28 @@ pub(crate) fn clamp_selected_indices_in_state(app_state: &mut AppState) {
     }
 }
 
+pub(crate) fn file_activity_wave_steps_per_second(speed_bps: u64) -> f64 {
+    if speed_bps == 0 {
+        12.0
+    } else if speed_bps < 50_000 {
+        11.0
+    } else if speed_bps < 500_000 {
+        12.5
+    } else if speed_bps < 2_000_000 {
+        14.0
+    } else if speed_bps < 10_000_000 {
+        16.0
+    } else if speed_bps < 20_000_000 {
+        17.5
+    } else if speed_bps < 50_000_000 {
+        19.0
+    } else if speed_bps < 100_000_000 {
+        21.0
+    } else {
+        23.0
+    }
+}
+
 pub(crate) fn sort_and_filter_torrent_list_state(app_state: &mut AppState) {
     let torrents_map = &app_state.torrents;
     let (sort_by, sort_direction) = app_state.torrent_sort;
@@ -5981,6 +6475,7 @@ fn should_load_persisted_torrent(torrent_settings: &TorrentSettings) -> bool {
 fn build_persist_payload(
     client_configs: &mut Settings,
     app_state: &mut AppState,
+    startup_deferred_load_queue: &VecDeque<Vec<u8>>,
 ) -> PersistPayload {
     client_configs.lifetime_downloaded =
         app_state.lifetime_downloaded_from_config + app_state.session_total_downloaded;
@@ -5996,8 +6491,11 @@ fn build_persist_payload(
         .iter()
         .map(|cfg| (cfg.torrent_or_magnet.clone(), cfg.validation_status))
         .collect();
+    let previous_torrents = client_configs.torrents.clone();
+    let deferred_hashes: HashSet<Vec<u8>> = startup_deferred_load_queue.iter().cloned().collect();
+    let mut persisted_info_hashes: HashSet<Vec<u8>> = app_state.torrents.keys().cloned().collect();
 
-    client_configs.torrents = app_state
+    let mut persisted_torrents: Vec<TorrentSettings> = app_state
         .torrents
         .values()
         .map(|torrent| {
@@ -6022,6 +6520,18 @@ fn build_persist_payload(
             }
         })
         .collect();
+
+    for torrent in previous_torrents {
+        let Some(info_hash) = info_hash_from_torrent_source(&torrent.torrent_or_magnet) else {
+            continue;
+        };
+
+        if deferred_hashes.contains(&info_hash) && persisted_info_hashes.insert(info_hash) {
+            persisted_torrents.push(torrent);
+        }
+    }
+
+    client_configs.torrents = persisted_torrents;
 
     const RSS_HISTORY_LIMIT: usize = 1000;
     if app_state.rss_runtime.history.len() > RSS_HISTORY_LIMIT {
@@ -6139,21 +6649,40 @@ fn prune_rss_feed_errors(
     feed_errors.len() != before
 }
 
+fn watched_parent_matches(path: &Path, watch_dir: &Path) -> bool {
+    path.parent()
+        .is_some_and(|parent| normalized_watch_path(parent) == normalized_watch_path(watch_dir))
+}
+
+#[cfg(windows)]
+fn normalized_watch_path(path: &Path) -> PathBuf {
+    let raw = path.as_os_str().to_string_lossy();
+    let stripped = raw.strip_prefix(r"\\?\").unwrap_or(raw.as_ref());
+    PathBuf::from(stripped.to_ascii_lowercase())
+}
+
+#[cfg(not(windows))]
+fn normalized_watch_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::await_holding_lock)]
 
     use super::{
-        apply_network_history_persist_result, build_persist_payload,
+        apply_network_history_persist_result, build_persist_payload, build_torrent_preview_tree,
         clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
-        flush_persistence_writer_parts, move_file_with_fallback_impl, parse_hybrid_hashes,
+        flush_persistence_writer_parts, format_filesystem_path_error,
+        is_valid_incoming_bittorrent_handshake, move_file_with_fallback_impl, parse_hybrid_hashes,
         persisted_validation_status_from_metrics, prune_rss_feed_errors, queue_persistence_payload,
         resolve_magnet_torrent_name, rss_settings_changed, should_load_persisted_torrent,
         should_persist_network_history_on_interval, sort_and_filter_torrent_list_state,
         torrent_completion_percent, torrent_is_effectively_incomplete, App, AppClusterRole,
-        AppCommand, AppMode, AppRuntimeMode, AppState, CommandIngestResult, FilePriority, PeerInfo,
-        PersistPayload, SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState,
-        TorrentMetrics, TorrentSortColumn, UiState,
+        AppCommand, AppMode, AppRuntimeMode, AppState, CommandIngestResult, FilePriority,
+        IngestSource, ListenerSet, PeerInfo, PersistPayload, SelectedHeader, SortDirection,
+        TorrentControlState, TorrentDisplayState, TorrentMetrics, TorrentPreviewPayload,
+        TorrentSortColumn, UiState, BITTORRENT_PROTOCOL_STR,
     };
     use crate::config::{
         clear_shared_config_state_for_tests, set_app_paths_override_for_tests, TorrentSettings,
@@ -6167,13 +6696,17 @@ mod tests {
     };
     use crate::persistence::event_journal::{EventCategory, EventJournalEntry};
     use crate::telemetry::ui_telemetry::UiTelemetry;
+    use crate::torrent_identity::info_hash_from_torrent_source;
     use crate::torrent_manager::{
         FileProbeBatchResult, FileProbeEntry, ManagerCommand, ManagerEvent, TorrentFileProbeStatus,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::env;
+    use std::io;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::PathBuf;
     use std::time::Duration;
+    use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio::sync::watch;
     use tokio::time;
@@ -6206,6 +6739,28 @@ mod tests {
         let data_dir = dir.path().join("data");
         set_app_paths_override_for_tests(Some((config_dir, data_dir)));
         dir
+    }
+
+    #[test]
+    fn format_filesystem_path_error_reports_directory_as_file_mismatch() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("folder");
+        std::fs::create_dir(&path).expect("create folder");
+
+        let error = io::Error::other("raw os text");
+        let message = format_filesystem_path_error("Failed to read torrent file", &path, &error);
+
+        assert!(message.contains("Failed to read torrent file"));
+        assert!(message.contains("expected a file here, but the path points to a directory"));
+    }
+
+    #[test]
+    fn format_filesystem_path_error_reports_missing_path_clearly() {
+        let path = PathBuf::from("/tmp/superseedr-missing-sample.torrent");
+        let error = io::Error::new(io::ErrorKind::NotFound, "No such file or directory");
+        let message = format_filesystem_path_error("Failed to read torrent file", &path, &error);
+
+        assert!(message.contains("file or directory was not found"));
     }
 
     #[test]
@@ -6296,6 +6851,56 @@ mod tests {
             },
             false
         ));
+    }
+
+    #[test]
+    fn build_persist_payload_keeps_deferred_startup_torrents_in_settings() {
+        let deferred_hash = vec![0x55; 20];
+        let loaded_hash = vec![0x66; 20];
+        let deferred_magnet =
+            "magnet:?xt=urn:btih:5555555555555555555555555555555555555555".to_string();
+        let loaded_magnet =
+            "magnet:?xt=urn:btih:6666666666666666666666666666666666666666".to_string();
+        let mut settings = crate::config::Settings {
+            torrents: vec![
+                TorrentSettings {
+                    torrent_or_magnet: deferred_magnet.clone(),
+                    name: "sample-deferred".to_string(),
+                    torrent_control_state: TorrentControlState::Running,
+                    ..Default::default()
+                },
+                TorrentSettings {
+                    torrent_or_magnet: loaded_magnet.clone(),
+                    name: "sample-loaded".to_string(),
+                    torrent_control_state: TorrentControlState::Running,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut app_state = AppState::default();
+        app_state.torrents.insert(
+            loaded_hash,
+            TorrentDisplayState {
+                latest_state: TorrentMetrics {
+                    info_hash: vec![0x66; 20],
+                    torrent_or_magnet: loaded_magnet,
+                    torrent_name: "sample-loaded".to_string(),
+                    torrent_control_state: TorrentControlState::Running,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let deferred_queue = VecDeque::from([deferred_hash]);
+        let payload = build_persist_payload(&mut settings, &mut app_state, &deferred_queue);
+
+        assert_eq!(payload.settings.torrents.len(), 2);
+        assert!(payload.settings.torrents.iter().any(|torrent| {
+            torrent.torrent_or_magnet == deferred_magnet
+                && torrent.torrent_control_state == TorrentControlState::Running
+        }));
     }
 
     #[test]
@@ -6613,6 +7218,159 @@ mod tests {
     }
 
     #[test]
+    fn incoming_handshake_validator_accepts_bittorrent_handshake_prefix() {
+        let mut handshake = vec![0u8; 68];
+        handshake[0] = BITTORRENT_PROTOCOL_STR.len() as u8;
+        handshake[1..(1 + BITTORRENT_PROTOCOL_STR.len())].copy_from_slice(BITTORRENT_PROTOCOL_STR);
+
+        assert!(is_valid_incoming_bittorrent_handshake(&handshake));
+    }
+
+    #[test]
+    fn incoming_handshake_validator_rejects_non_bittorrent_prefix() {
+        let mut handshake = vec![0u8; 68];
+        handshake[0] = BITTORRENT_PROTOCOL_STR.len() as u8;
+        handshake[1..(1 + BITTORRENT_PROTOCOL_STR.len())].copy_from_slice(b"NotTorrent protocol");
+
+        assert!(!is_valid_incoming_bittorrent_handshake(&handshake));
+    }
+
+    #[tokio::test]
+    async fn mark_port_open_command_tracks_ipv4_and_ipv6_independently() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("create app");
+
+        assert!(!app.app_state.externally_accessable_port_v4);
+        assert!(!app.app_state.externally_accessable_port_v6);
+
+        app.handle_app_command(AppCommand::MarkPortOpen(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            6681,
+        )))
+        .await;
+
+        assert!(app.app_state.externally_accessable_port_v4);
+        assert!(!app.app_state.externally_accessable_port_v6);
+
+        app.handle_app_command(AppCommand::MarkPortOpen(SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            6681,
+        )))
+        .await;
+
+        assert!(app.app_state.externally_accessable_port_v4);
+        assert!(app.app_state.externally_accessable_port_v6);
+    }
+
+    #[tokio::test]
+    async fn mark_port_open_command_treats_ipv4_mapped_ipv6_as_ipv4_reachability() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("create app");
+
+        assert!(!app.app_state.externally_accessable_port_v4);
+        assert!(!app.app_state.externally_accessable_port_v6);
+
+        let mapped_addr = SocketAddr::new(IpAddr::V6(Ipv4Addr::LOCALHOST.to_ipv6_mapped()), 6681);
+        app.handle_app_command(AppCommand::MarkPortOpen(mapped_addr))
+            .await;
+
+        assert!(app.app_state.externally_accessable_port_v4);
+        assert!(!app.app_state.externally_accessable_port_v6);
+    }
+
+    #[tokio::test]
+    async fn rebind_listener_with_ephemeral_port_notifies_managers_with_bound_port() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("create app");
+        let (manager_tx, mut manager_rx) = mpsc::channel(4);
+        app.torrent_manager_command_txs
+            .insert(b"port-update-test".to_vec(), manager_tx);
+
+        assert!(app.rebind_listener(0).await);
+
+        let bound_port = app.client_configs.client_port;
+        assert_ne!(bound_port, 0);
+
+        let command = manager_rx
+            .recv()
+            .await
+            .expect("manager should receive update");
+        assert!(matches!(
+            command,
+            ManagerCommand::UpdateListenPort(port) if port == bound_port
+        ));
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn apply_settings_update_restores_previous_port_when_rebind_fails() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("create app");
+        let original_port = app.client_configs.client_port;
+        let occupied_v4 = tokio::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .expect("bind occupied IPv4 port");
+        let occupied_port = occupied_v4
+            .local_addr()
+            .expect("occupied local addr")
+            .port();
+        let _occupied_v6 =
+            if TcpListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0))
+                .await
+                .is_ok()
+            {
+                match TcpListener::bind(SocketAddr::new(
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                    occupied_port,
+                ))
+                .await
+                {
+                    Ok(listener) => Some(listener),
+                    Err(error) if error.kind() == io::ErrorKind::AddrInUse => None,
+                    Err(error) => panic!("bind occupied IPv6 port: {error}"),
+                }
+            } else {
+                None
+            };
+
+        let mut next_settings = app.client_configs.clone();
+        next_settings.client_port = occupied_port;
+
+        app.apply_settings_update(next_settings, false).await;
+
+        let rebound_port = app
+            .listener
+            .as_ref()
+            .and_then(ListenerSet::local_port)
+            .expect("listener should remain bound");
+        assert_eq!(app.client_configs.client_port, original_port);
+        assert_eq!(rebound_port, original_port);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[test]
     fn should_load_persisted_torrent_skips_only_deleting_entries() {
         let running = TorrentSettings {
             torrent_control_state: TorrentControlState::Running,
@@ -6710,6 +7468,166 @@ mod tests {
             TorrentControlState::Running
         );
         assert!(app.app_state.ui.needs_redraw);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn load_next_startup_batch_loads_only_one_deferred_torrent() {
+        let mut settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        for index in 0..6 {
+            let hash_digit = char::from_digit((index + 1) as u32, 16).expect("hex digit");
+            settings.torrents.push(TorrentSettings {
+                torrent_or_magnet: format!(
+                    "magnet:?xt=urn:btih:{}",
+                    hash_digit.to_string().repeat(40)
+                ),
+                name: format!("sample-start-{}", index),
+                torrent_control_state: TorrentControlState::Running,
+                ..Default::default()
+            });
+        }
+
+        let mut app = App::new(
+            crate::config::Settings {
+                client_port: 0,
+                ..Default::default()
+            },
+            AppRuntimeMode::Normal,
+        )
+        .await
+        .expect("build app");
+        app.client_configs.torrents = settings.torrents.clone();
+        app.startup_deferred_load_queue = settings
+            .torrents
+            .iter()
+            .filter_map(|torrent| info_hash_from_torrent_source(&torrent.torrent_or_magnet))
+            .collect();
+
+        app.load_next_startup_batch().await;
+
+        assert_eq!(app.app_state.torrents.len(), 1);
+        assert_eq!(app.startup_deferred_load_queue.len(), 5);
+        assert!(app.next_startup_load_at.is_some());
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn load_next_startup_batch_keeps_failed_deferred_torrent_queued() {
+        let info_hash_hex = "1".repeat(40);
+        let missing_torrent_path = format!("/tmp/{}.torrent", info_hash_hex);
+        let torrent = TorrentSettings {
+            torrent_or_magnet: missing_torrent_path.clone(),
+            name: "missing-startup".to_string(),
+            torrent_control_state: TorrentControlState::Running,
+            ..Default::default()
+        };
+
+        let mut app = App::new(
+            crate::config::Settings {
+                client_port: 0,
+                ..Default::default()
+            },
+            AppRuntimeMode::Normal,
+        )
+        .await
+        .expect("build app");
+        app.client_configs.torrents = vec![torrent.clone()];
+        app.startup_deferred_load_queue =
+            VecDeque::from([info_hash_from_torrent_source(&torrent.torrent_or_magnet)
+                .expect("derive info hash from path")]);
+
+        app.load_next_startup_batch().await;
+
+        assert!(app.app_state.torrents.is_empty());
+        assert_eq!(app.startup_deferred_load_queue.len(), 1);
+        assert!(app.next_startup_load_at.is_some());
+
+        let payload = build_persist_payload(
+            &mut app.client_configs,
+            &mut app.app_state,
+            &app.startup_deferred_load_queue,
+        );
+        assert_eq!(payload.settings.torrents.len(), 1);
+        assert_eq!(
+            payload.settings.torrents[0].torrent_or_magnet,
+            missing_torrent_path
+        );
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn load_next_startup_batch_rotates_failed_deferred_torrent_behind_later_entries() {
+        let failed_info_hash_hex = "1".repeat(40);
+        let failed_torrent = TorrentSettings {
+            torrent_or_magnet: format!("/tmp/{}.torrent", failed_info_hash_hex),
+            name: "missing-startup".to_string(),
+            torrent_control_state: TorrentControlState::Running,
+            ..Default::default()
+        };
+        let deferred_running_torrent = TorrentSettings {
+            torrent_or_magnet: format!("magnet:?xt=urn:btih:{}", "2".repeat(40)),
+            name: "later-startup".to_string(),
+            torrent_control_state: TorrentControlState::Running,
+            ..Default::default()
+        };
+        let failed_info_hash = info_hash_from_torrent_source(&failed_torrent.torrent_or_magnet)
+            .expect("derive failed info hash");
+        let deferred_running_hash =
+            info_hash_from_torrent_source(&deferred_running_torrent.torrent_or_magnet)
+                .expect("derive deferred running hash");
+
+        let mut app = App::new(
+            crate::config::Settings {
+                client_port: 0,
+                ..Default::default()
+            },
+            AppRuntimeMode::Normal,
+        )
+        .await
+        .expect("build app");
+        app.client_configs.torrents = vec![failed_torrent.clone(), deferred_running_torrent];
+        app.startup_deferred_load_queue =
+            VecDeque::from([failed_info_hash.clone(), deferred_running_hash.clone()]);
+
+        app.load_next_startup_batch().await;
+        assert_eq!(
+            app.startup_deferred_load_queue,
+            VecDeque::from([deferred_running_hash.clone(), failed_info_hash.clone()])
+        );
+        assert!(app.app_state.torrents.is_empty());
+
+        app.load_next_startup_batch().await;
+
+        assert_eq!(app.app_state.torrents.len(), 1);
+        assert_eq!(
+            app.startup_deferred_load_queue,
+            VecDeque::from([failed_info_hash.clone()])
+        );
+
+        let payload = build_persist_payload(
+            &mut app.client_configs,
+            &mut app.app_state,
+            &app.startup_deferred_load_queue,
+        );
+        assert_eq!(payload.settings.torrents.len(), 2);
+        assert!(payload
+            .settings
+            .torrents
+            .iter()
+            .any(|torrent| torrent.torrent_or_magnet == failed_torrent.torrent_or_magnet));
+        assert!(payload.settings.torrents.iter().any(|torrent| {
+            torrent
+                .torrent_or_magnet
+                .starts_with("magnet:?xt=urn:btih:")
+                && info_hash_from_torrent_source(&torrent.torrent_or_magnet).as_deref()
+                    == Some(deferred_running_hash.as_slice())
+        }));
 
         let _ = app.shutdown_tx.send(());
     }
@@ -6974,6 +7892,129 @@ mod tests {
                 .and_then(|entry| entry.source_path.clone()),
             Some(final_path)
         );
+
+        let _ = app.shutdown_tx.send(());
+        if let Some(value) = original_shared_dir {
+            env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+        }
+        if let Some(value) = original_host_id {
+            env::set_var("SUPERSEEDR_SHARED_HOST_ID", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
+        }
+        clear_shared_config_state_for_tests();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn missing_verbatim_shared_inbox_magnet_is_ignored() {
+        let _guard = lock_shared_env();
+        let shared_root = tempfile::tempdir().expect("create shared root");
+        let effective_root = shared_root.path().join("superseedr-config");
+        let original_shared_dir = env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let original_host_id = env::var_os("SUPERSEEDR_SHARED_HOST_ID");
+
+        env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", shared_root.path());
+        env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
+        clear_shared_config_state_for_tests();
+
+        std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
+            .expect("create hosts dir");
+        std::fs::write(
+            effective_root
+                .join("hosts")
+                .join("node-a")
+                .join("config.toml"),
+            "client_port = 0\n",
+        )
+        .expect("write host config");
+        std::fs::create_dir_all(effective_root.join("inbox")).expect("create shared inbox");
+
+        let app = App::new(
+            crate::config::load_settings().expect("load shared settings"),
+            AppRuntimeMode::SharedLeader,
+        )
+        .await
+        .expect("build shared app");
+
+        let verbatim_missing_path = PathBuf::from(format!(
+            r"\\?\{}",
+            effective_root
+                .join("inbox")
+                .join("stale-event.magnet")
+                .display()
+        ));
+
+        assert!(watched_parent_matches(
+            &verbatim_missing_path,
+            &effective_root.join("inbox")
+        ));
+        assert!(matches!(
+            app.resolve_add_ingress_action(IngestSource::MagnetFile, &verbatim_missing_path),
+            super::AddIngressAction::IgnoreMissingSharedInboxItem { .. }
+        ));
+
+        let _ = app.shutdown_tx.send(());
+        if let Some(value) = original_shared_dir {
+            env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+        }
+        if let Some(value) = original_host_id {
+            env::set_var("SUPERSEEDR_SHARED_HOST_ID", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
+        }
+        clear_shared_config_state_for_tests();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_shared_inbox_magnet_is_not_ignored_as_missing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = lock_shared_env();
+        let shared_root = tempfile::tempdir().expect("create shared root");
+        let effective_root = shared_root.path().join("superseedr-config");
+        let shared_inbox = effective_root.join("inbox");
+        let original_shared_dir = env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let original_host_id = env::var_os("SUPERSEEDR_SHARED_HOST_ID");
+
+        env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", shared_root.path());
+        env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
+        clear_shared_config_state_for_tests();
+
+        std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
+            .expect("create hosts dir");
+        std::fs::write(
+            effective_root
+                .join("hosts")
+                .join("node-a")
+                .join("config.toml"),
+            "client_port = 0\n",
+        )
+        .expect("write host config");
+        std::fs::create_dir_all(&shared_inbox).expect("create shared inbox");
+
+        let app = App::new(
+            crate::config::load_settings().expect("load shared settings"),
+            AppRuntimeMode::SharedLeader,
+        )
+        .await
+        .expect("build shared app");
+
+        let unreadable_path = shared_inbox.join("permission-denied.magnet");
+        std::fs::set_permissions(&shared_inbox, std::fs::Permissions::from_mode(0o000))
+            .expect("make shared inbox unreadable");
+
+        let action = app.resolve_add_ingress_action(IngestSource::MagnetFile, &unreadable_path);
+
+        std::fs::set_permissions(&shared_inbox, std::fs::Permissions::from_mode(0o700))
+            .expect("restore shared inbox permissions");
+
+        assert!(matches!(action, super::AddIngressAction::Fail { .. }));
 
         let _ = app.shutdown_tx.send(());
         if let Some(value) = original_shared_dir {
@@ -7873,6 +8914,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_settings_update_refreshes_file_preview_tree_priorities() {
+        let magnet = "magnet:?xt=urn:btih:3333333333333333333333333333333333333333".to_string();
+        let settings = crate::config::Settings {
+            client_port: 0,
+            torrents: vec![crate::config::TorrentSettings {
+                torrent_or_magnet: magnet.clone(),
+                name: "Sample Foxtrot".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        let info_hash = info_hash_from_torrent_source(&magnet).expect("info hash");
+        let runtime = app
+            .app_state
+            .torrents
+            .get_mut(&info_hash)
+            .expect("torrent runtime should exist");
+        runtime.file_preview_tree = build_torrent_preview_tree(
+            vec![
+                (vec!["folder".to_string(), "alpha.bin".to_string()], 10),
+                (vec!["folder".to_string(), "beta.bin".to_string()], 20),
+            ],
+            &HashMap::new(),
+        );
+
+        let mut next_settings = app.client_configs.clone();
+        next_settings.torrents[0].file_priorities =
+            HashMap::from([(0, FilePriority::Skip), (1, FilePriority::High)]);
+        app.apply_settings_update(next_settings, false).await;
+
+        let runtime = app
+            .app_state
+            .torrents
+            .get(&info_hash)
+            .expect("torrent runtime should remain present");
+        let mut priorities = HashMap::new();
+        for node in &runtime.file_preview_tree {
+            node.collect_priorities(&mut priorities);
+        }
+        assert_eq!(
+            priorities,
+            HashMap::from([(0, FilePriority::Skip), (1, FilePriority::High)])
+        );
+        assert_eq!(
+            runtime.file_preview_tree[0].payload.priority,
+            FilePriority::Mixed
+        );
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn apply_settings_update_preserves_preview_file_indices_for_nonlexical_order() {
+        fn collect_preview_files(
+            node: &crate::tui::tree::RawNode<TorrentPreviewPayload>,
+            path: &mut Vec<String>,
+            files: &mut Vec<(Vec<String>, usize, FilePriority)>,
+        ) {
+            path.push(node.name.clone());
+            if node.is_dir {
+                for child in &node.children {
+                    collect_preview_files(child, path, files);
+                }
+            } else if let Some(file_index) = node.payload.file_index {
+                files.push((path.clone(), file_index, node.payload.priority));
+            }
+            path.pop();
+        }
+
+        let magnet = "magnet:?xt=urn:btih:4444444444444444444444444444444444444444".to_string();
+        let settings = crate::config::Settings {
+            client_port: 0,
+            torrents: vec![crate::config::TorrentSettings {
+                torrent_or_magnet: magnet.clone(),
+                name: "Sample Golf".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        let info_hash = info_hash_from_torrent_source(&magnet).expect("info hash");
+        let runtime = app
+            .app_state
+            .torrents
+            .get_mut(&info_hash)
+            .expect("torrent runtime should exist");
+        runtime.file_preview_tree = build_torrent_preview_tree(
+            vec![
+                (vec!["folder".to_string(), "beta.bin".to_string()], 20),
+                (vec!["folder".to_string(), "alpha.bin".to_string()], 10),
+            ],
+            &HashMap::new(),
+        );
+
+        let mut next_settings = app.client_configs.clone();
+        next_settings.torrents[0].file_priorities =
+            HashMap::from([(0, FilePriority::Skip), (1, FilePriority::High)]);
+        app.apply_settings_update(next_settings, false).await;
+
+        let runtime = app
+            .app_state
+            .torrents
+            .get(&info_hash)
+            .expect("torrent runtime should remain present");
+        let mut files = Vec::new();
+        let mut path = Vec::new();
+        for node in &runtime.file_preview_tree {
+            collect_preview_files(node, &mut path, &mut files);
+        }
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(
+            files,
+            vec![
+                (
+                    vec!["folder".to_string(), "alpha.bin".to_string()],
+                    1,
+                    FilePriority::High,
+                ),
+                (
+                    vec!["folder".to_string(), "beta.bin".to_string()],
+                    0,
+                    FilePriority::Skip,
+                ),
+            ]
+        );
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn shared_follower_promotion_starts_previously_suppressed_runtime() {
         let settings = crate::config::Settings {
             client_port: 0,
@@ -8541,7 +9718,7 @@ mod tests {
         app_state.torrents.insert(info_hash.clone(), display);
         app_state.torrent_list_order.push(info_hash);
 
-        let payload = build_persist_payload(&mut settings, &mut app_state);
+        let payload = build_persist_payload(&mut settings, &mut app_state, &VecDeque::new());
         assert_eq!(payload.settings.torrents.len(), 1);
         assert!(payload.settings.torrents[0].validation_status);
     }
@@ -8602,7 +9779,7 @@ mod tests {
             },
         );
 
-        let payload = build_persist_payload(&mut settings, &mut app_state);
+        let payload = build_persist_payload(&mut settings, &mut app_state, &VecDeque::new());
 
         assert!(payload.network_history.is_none());
         assert_eq!(app_state.network_history_state.updated_at_unix, 0);
@@ -8629,7 +9806,7 @@ mod tests {
             ..Default::default()
         };
 
-        let payload = build_persist_payload(&mut settings, &mut app_state);
+        let payload = build_persist_payload(&mut settings, &mut app_state, &VecDeque::new());
         let network_history = payload
             .network_history
             .expect("network history payload should be present");
@@ -8722,5 +9899,70 @@ mod tests {
 
         assert!(tx_opt.is_none());
         assert!(task_opt.is_none());
+    }
+
+    #[tokio::test]
+    async fn listener_set_bind_keeps_ipv6_listener_when_ipv4_port_is_already_in_use() {
+        let ipv6_supported =
+            TcpListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0))
+                .await
+                .is_ok();
+        let occupied = tokio::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .expect("bind occupied IPv4 port");
+        let port = occupied.local_addr().expect("occupied local addr").port();
+        let ipv6_can_bind_alongside_ipv4 = if ipv6_supported {
+            match TcpListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port)).await
+            {
+                Ok(listener) => {
+                    drop(listener);
+                    true
+                }
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => false,
+                Err(error) => panic!("probe IPv6 bind with occupied IPv4 port: {error}"),
+            }
+        } else {
+            false
+        };
+
+        match ListenerSet::bind(port).await {
+            Ok(listener_set) => {
+                assert!(
+                    ipv6_can_bind_alongside_ipv4,
+                    "expected full bind failure when IPv4 occupancy also blocks IPv6"
+                );
+                assert!(listener_set.ipv6.is_some());
+                assert!(listener_set.ipv4.is_none());
+                assert_eq!(listener_set.local_port(), Some(port));
+            }
+            Err(error) => {
+                assert!(
+                    !ipv6_can_bind_alongside_ipv4,
+                    "expected degraded IPv6-only bind, got {error}"
+                );
+                assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_set_bind_keeps_ipv4_listener_when_ipv6_port_is_already_in_use() {
+        let occupied =
+            match TcpListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)).await {
+                Ok(listener) => listener,
+                Err(_) => return,
+            };
+        let port = occupied.local_addr().expect("occupied local addr").port();
+
+        match ListenerSet::bind(port).await {
+            Ok(listener_set) => {
+                assert!(listener_set.ipv4.is_some());
+                assert!(listener_set.ipv6.is_none());
+                assert_eq!(listener_set.local_port(), Some(port));
+            }
+            Err(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+            }
+        }
     }
 }

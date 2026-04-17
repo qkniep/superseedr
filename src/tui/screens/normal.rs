@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::app::file_activity_wave_steps_per_second;
 use crate::app::sort_and_filter_torrent_list_state;
 use crate::app::torrent_completion_percent;
 use crate::app::AppCommand;
 use crate::app::BrowserPane;
 use crate::app::ChartPanelView;
 use crate::app::FileBrowserMode;
+use crate::app::FilePriority;
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
 use crate::app::{
@@ -26,26 +28,26 @@ use crate::tui::formatters::{
     generate_x_axis_labels, ip_to_color, parse_peer_id, sanitize_text, speed_to_style,
     truncate_with_ellipsis,
 };
-use crate::tui::layout::common::compute_smart_table_layout;
 use crate::tui::layout::common::compute_visible_peer_columns;
 use crate::tui::layout::common::compute_visible_torrent_columns;
 use crate::tui::layout::common::get_peer_columns;
 use crate::tui::layout::common::get_torrent_columns;
 use crate::tui::layout::common::ColumnId;
-use crate::tui::layout::common::{PeerColumnId, SmartCol};
+use crate::tui::layout::common::PeerColumnId;
 use crate::tui::layout::normal::calculate_layout;
 use crate::tui::layout::normal::LayoutContext;
 use crate::tui::layout::normal::LayoutPlan;
 use crate::tui::layout::normal::DEFAULT_SIDEBAR_PERCENT;
 use crate::tui::screen_context::ScreenContext;
-use crate::tui::tree::TreeViewState;
+use crate::tui::tree::{TreeFilter, TreeMathHelper, TreeViewState};
 use chrono::{DateTime, Utc};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{
     Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -56,7 +58,8 @@ use ratatui::prelude::{
     Stylize,
 };
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, Gauge, LineGauge, Padding, Paragraph, Row, Table, TableState, Wrap,
+    Block, Borders, Cell, Clear, Gauge, LineGauge, List, ListItem, Padding, Paragraph, Row, Table,
+    TableState, Wrap,
 };
 use strum::IntoEnumIterator;
 use tracing::{event as tracing_event, Level};
@@ -65,6 +68,10 @@ static APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SECONDS_HISTORY_MAX: usize = 3600;
 const MINUTES_HISTORY_MAX: usize = 48 * 60;
 const TUNING_LABEL_WIDTH: usize = 14;
+const FOOTER_STATUS_GUTTER: u16 = 2;
+const ASCII_TREE_DIR_ICON: &str = "> ";
+const ASCII_TREE_FILE_ICON: &str = "  ";
+const FILE_ACTIVITY_HIGHLIGHT_WINDOW: Duration = Duration::from_millis(1800);
 
 fn build_time_aligned_window(
     points: &[NetworkHistoryPoint],
@@ -229,6 +236,45 @@ fn torrent_period_traffic(
         .sum()
 }
 
+fn torrent_current_traffic(
+    app_state: &AppState,
+    info_hash: &[u8],
+    tier: HistoryTier,
+    step_secs: u64,
+    points_to_show: usize,
+    now_unix: u64,
+    alpha: f64,
+) -> u64 {
+    let key = hex::encode(info_hash);
+    let points = app_state
+        .activity_history_state
+        .torrents
+        .get(&key)
+        .map(|series| activity_points_for_tier(series, tier))
+        .unwrap_or(&[]);
+    let (dl_hist, ul_hist) =
+        build_time_aligned_pair_window(points, step_secs, points_to_show, now_unix);
+    let net_hist: Vec<u64> = dl_hist
+        .iter()
+        .zip(ul_hist.iter())
+        .map(|(dl, ul)| dl.saturating_add(*ul))
+        .collect();
+    smoothed_last_value(&net_hist, alpha)
+}
+
+fn smoothed_last_value(data: &[u64], alpha: f64) -> u64 {
+    if data.is_empty() {
+        return 0;
+    }
+
+    let mut last_ema = data[0] as f64;
+    for &value in data.iter().skip(1) {
+        last_ema = (value as f64 * alpha) + (last_ema * (1.0 - alpha));
+    }
+
+    last_ema as u64
+}
+
 fn chart_hidden_legend_constraints(view: ChartPanelView) -> (Constraint, Constraint) {
     if matches!(
         view,
@@ -337,6 +383,7 @@ pub enum UiAction {
     ClearSystemError,
     StartSearch,
     Navigate(KeyCode),
+    ToggleTorrentFiles,
     ToggleAnonymizeNames,
     EnterPowerSaving,
     RequestQuit,
@@ -401,6 +448,13 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
         }
         UiAction::Navigate(key_code) => {
             handle_navigation(app_state, key_code);
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+        UiAction::ToggleTorrentFiles => {
+            app_state.ui.show_torrent_files = !app_state.ui.show_torrent_files;
             ReduceResult {
                 redraw: true,
                 effects: Vec::new(),
@@ -547,7 +601,8 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
             let layout_plan = calculate_layout(app_state.screen_area, &layout_ctx);
             let (_, visible_torrent_columns) =
                 compute_visible_torrent_columns(app_state, layout_plan.list.width);
-            let (_, visible_peer_columns) = compute_visible_peer_columns(layout_plan.peers.width);
+            let (_, visible_peer_columns) =
+                compute_visible_peer_columns(app_state, layout_plan.peers.width);
 
             match app_state.ui.selected_header {
                 SelectedHeader::Torrent(i) => {
@@ -623,6 +678,7 @@ fn map_key_to_ui_action(key: KeyEvent) -> Option<UiAction> {
     match key.code {
         KeyCode::Esc => Some(UiAction::ClearSystemError),
         KeyCode::Char('/') => Some(UiAction::StartSearch),
+        KeyCode::Char('f') => Some(UiAction::ToggleTorrentFiles),
         KeyCode::Char('x') => Some(UiAction::ToggleAnonymizeNames),
         KeyCode::Char('z') => Some(UiAction::EnterPowerSaving),
         KeyCode::Char('Q') => Some(UiAction::RequestQuit),
@@ -662,7 +718,11 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
     draw_torrent_list(f, app_state, plan.list, ctx);
     draw_footer(f, app_state, settings, plan.footer, ctx);
     draw_details_panel(f, app_state, plan.details, ctx);
-    draw_peers_table(f, app_state, plan.peers, ctx);
+    if app_state.ui.show_torrent_files {
+        draw_torrent_files_panel(f, app_state, plan.peers, ctx);
+    } else {
+        draw_peers_table(f, app_state, plan.peers, ctx);
+    }
 
     if let Some(r) = plan.chart {
         draw_network_chart(f, app_state, r, ctx);
@@ -814,6 +874,25 @@ pub(crate) fn compute_footer_left_width(footer_width: u16, is_update: bool) -> u
     available_for_left.clamp(min_left, max_left)
 }
 
+pub(crate) fn compute_footer_side_widths(
+    footer_width: u16,
+    is_update: bool,
+    content_left: u16,
+    status_width: u16,
+) -> (u16, u16) {
+    let min_left = if is_update { 52u16 } else { 40u16 };
+    let min_commands = 18u16;
+    let desired_left = compute_footer_left_width(footer_width, is_update);
+    let left_target = desired_left.min(content_left.max(min_left));
+    let max_left = footer_width.saturating_sub(status_width.saturating_add(min_commands));
+    (left_target.min(max_left), status_width)
+}
+
+pub(crate) fn compute_footer_status_width(client_port: u16, overall_port_status: &str) -> u16 {
+    format!("Port {} | IPv4/IPv6 | {}", client_port, overall_port_status).len() as u16
+        + FOOTER_STATUS_GUTTER
+}
+
 fn estimate_footer_left_content_width(app_state: &AppState, ctx: &ThemeContext) -> u16 {
     let fx_enabled = ctx.theme.effects.enabled();
     let theme_label = if fx_enabled {
@@ -889,41 +968,27 @@ pub fn draw_footer(
     ctx: &ThemeContext,
 ) {
     let show_branding = footer_chunk.width >= 80;
-    let cluster_status_width = app_state
-        .cluster_role_label
-        .as_deref()
-        .map(|label| format!(" | Cluster: {}", label).len() as u16)
-        .unwrap_or(0)
-        .saturating_add(
-            app_state
-                .cluster_runtime_label
-                .as_deref()
-                .map(|label| format!(" | {}", label).len() as u16)
-                .unwrap_or(0),
-        );
-    let status_width = 21u16.saturating_add(cluster_status_width);
+    let any_port_open =
+        app_state.externally_accessable_port_v4 || app_state.externally_accessable_port_v6;
+    let overall_port_status = if any_port_open { "OPEN" } else { "CLOSED" };
+    let now = Instant::now();
+    let v4_highlight_active = app_state
+        .externally_accessable_port_v4_highlight_until
+        .is_some_and(|deadline| deadline > now);
+    let v6_highlight_active = app_state
+        .externally_accessable_port_v6_highlight_until
+        .is_some_and(|deadline| deadline > now);
+    let status_width = compute_footer_status_width(settings.client_port, overall_port_status);
 
     let is_update = app_state.update_available.is_some();
     let (left_constraint, right_constraint) = if show_branding {
-        let min_left = if is_update { 52u16 } else { 40u16 };
-        let min_commands = 18u16;
-        let desired_left = compute_footer_left_width(footer_chunk.width, is_update);
         let content_left = estimate_footer_left_content_width(app_state, ctx);
-        let left_target = desired_left.min(content_left.max(min_left));
-        let symmetric_left_cap = footer_chunk.width.saturating_sub(min_commands) / 2;
-
-        if symmetric_left_cap >= min_left {
-            let symmetric_left = left_target.min(symmetric_left_cap);
-            (
-                Constraint::Length(symmetric_left),
-                Constraint::Length(symmetric_left),
-            )
-        } else {
-            (
-                Constraint::Length(left_target),
-                Constraint::Length(status_width),
-            )
-        }
+        let (left_width, right_width) =
+            compute_footer_side_widths(footer_chunk.width, is_update, content_left, status_width);
+        (
+            Constraint::Length(left_width),
+            Constraint::Length(right_width),
+        )
     } else {
         (Constraint::Length(0), Constraint::Length(status_width))
     };
@@ -1148,6 +1213,11 @@ pub fn draw_footer(
         ctx.apply(Style::default().fg(ctx.state_success())),
     );
     push_if_fits(
+        "[f]",
+        "iles",
+        ctx.apply(Style::default().fg(ctx.accent_teal())),
+    );
+    push_if_fits(
         "[d]",
         "elete",
         ctx.apply(Style::default().fg(ctx.state_warning())),
@@ -1251,45 +1321,55 @@ pub fn draw_footer(
         .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
     f.render_widget(footer_paragraph, commands_chunk);
 
-    let port_style = if app_state.externally_accessable_port {
+    let port_style = if any_port_open {
         ctx.apply(Style::default().fg(ctx.state_success()))
     } else {
-        ctx.apply(Style::default().fg(ctx.state_error()))
+        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
     };
-    let port_text = if app_state.externally_accessable_port {
-        "Open"
+    let v4_port_style = if app_state.externally_accessable_port_v4 {
+        let style = Style::default().fg(ctx.state_success());
+        if v4_highlight_active {
+            ctx.apply(style.bold())
+        } else {
+            ctx.apply(style)
+        }
     } else {
-        "Closed"
+        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
+    };
+    let v6_port_style = if app_state.externally_accessable_port_v6 {
+        let style = Style::default().fg(ctx.state_success());
+        if v6_highlight_active {
+            ctx.apply(style.bold())
+        } else {
+            ctx.apply(style)
+        }
+    } else {
+        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
     };
 
-    let mut footer_status_spans = vec![
-        Span::raw("Port: "),
+    let footer_status_spans = vec![
+        Span::raw("Port "),
         Span::styled(settings.client_port.to_string(), port_style),
-        Span::raw(" ["),
-        Span::styled(port_text, port_style),
-        Span::raw("]"),
+        Span::raw(" | "),
+        Span::styled("IPv4", v4_port_style),
+        Span::raw("/"),
+        Span::styled("IPv6", v6_port_style),
+        Span::raw(" | "),
+        Span::styled(overall_port_status, port_style),
     ];
-    if let Some(cluster_role) = app_state.cluster_role_label.as_deref() {
-        let cluster_style = if cluster_role == "Leader" {
-            ctx.apply(Style::default().fg(ctx.state_success()).bold())
-        } else {
-            ctx.apply(Style::default().fg(ctx.state_warning()).bold())
-        };
-        footer_status_spans.push(Span::raw(" | Cluster: "));
-        footer_status_spans.push(Span::styled(cluster_role.to_string(), cluster_style));
-    }
-    if let Some(runtime_label) = app_state.cluster_runtime_label.as_deref() {
-        footer_status_spans.push(Span::raw(" | "));
-        footer_status_spans.push(Span::styled(
-            runtime_label.to_string(),
-            ctx.apply(Style::default().fg(ctx.accent_sapphire()).bold()),
-        ));
-    }
     let footer_status = Line::from(footer_status_spans).alignment(Alignment::Right);
 
     let status_paragraph = Paragraph::new(footer_status)
         .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
     f.render_widget(status_paragraph, status_chunk);
+}
+
+fn format_peer_address_for_table(address: &str) -> String {
+    match address.parse::<SocketAddr>() {
+        Ok(SocketAddr::V4(addr)) => addr.to_string(),
+        Ok(SocketAddr::V6(addr)) => format!("{}:{}", addr.ip(), addr.port()),
+        Err(_) => address.to_string(),
+    }
 }
 
 pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
@@ -2227,12 +2307,21 @@ pub fn draw_network_chart(
             ];
         }
         ChartPanelView::MultiTorrentOverlay => {
-            let mut ranked: Vec<(Vec<u8>, u64)> = app_state
+            let mut ranked: Vec<(Vec<u8>, u64, u64)> = app_state
                 .torrent_list_order
                 .iter()
                 .map(|info_hash| {
                     (
                         info_hash.clone(),
+                        torrent_current_traffic(
+                            app_state,
+                            info_hash,
+                            tier,
+                            step_secs,
+                            points_to_show,
+                            now_unix,
+                            alpha,
+                        ),
                         torrent_period_traffic(
                             app_state,
                             info_hash,
@@ -2243,26 +2332,48 @@ pub fn draw_network_chart(
                         ),
                     )
                 })
-                .filter(|(_, total)| *total > 0)
+                .filter(|(_, _, period_total)| *period_total > 0)
                 .collect();
-            ranked.sort_by(|a, b| b.1.cmp(&a.1));
+            ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
 
-            let mut chosen_hashes: Vec<Vec<u8>> =
-                ranked.into_iter().take(5).map(|(hash, _)| hash).collect();
+            let mut chosen_hashes: Vec<Vec<u8>> = ranked
+                .into_iter()
+                .take(5)
+                .map(|(hash, _, _)| hash)
+                .collect();
 
             let mut seen = HashSet::new();
             chosen_hashes.retain(|hash| seen.insert(hash.clone()));
             chosen_hashes.sort_by(|a, b| {
-                torrent_period_traffic(app_state, b, tier, step_secs, points_to_show, now_unix).cmp(
-                    &torrent_period_traffic(
-                        app_state,
-                        a,
-                        tier,
-                        step_secs,
-                        points_to_show,
-                        now_unix,
-                    ),
+                torrent_current_traffic(
+                    app_state,
+                    b,
+                    tier,
+                    step_secs,
+                    points_to_show,
+                    now_unix,
+                    alpha,
                 )
+                .cmp(&torrent_current_traffic(
+                    app_state,
+                    a,
+                    tier,
+                    step_secs,
+                    points_to_show,
+                    now_unix,
+                    alpha,
+                ))
+                .then_with(|| {
+                    torrent_period_traffic(app_state, b, tier, step_secs, points_to_show, now_unix)
+                        .cmp(&torrent_period_traffic(
+                            app_state,
+                            a,
+                            tier,
+                            step_secs,
+                            points_to_show,
+                            now_unix,
+                        ))
+                })
             });
 
             let palette = [
@@ -3862,17 +3973,8 @@ pub fn draw_peers_table(
                 });
 
                 let all_peer_cols = get_peer_columns();
-                let smart_cols: Vec<SmartCol> = all_peer_cols
-                    .iter()
-                    .map(|c| SmartCol {
-                        min_width: c.min_width,
-                        priority: c.priority,
-                        constraint: c.default_constraint,
-                    })
-                    .collect();
-
                 let (constraints, visible_indices) =
-                    compute_smart_table_layout(&smart_cols, peers_chunk.width, 1);
+                    compute_visible_peer_columns(app_state, peers_chunk.width);
 
                 let peer_border_style =
                     if matches!(app_state.ui.selected_header, SelectedHeader::Peer(_)) {
@@ -3977,11 +4079,11 @@ pub fn draw_peers_table(
                                     .into(),
                                     PeerColumnId::Address => {
                                         let display = if app_state.anonymize_torrent_names {
-                                            "xxx.xxx.xxx"
+                                            "xxx.xxx.xxx".to_string()
                                         } else {
-                                            &peer.address
+                                            format_peer_address_for_table(&peer.address)
                                         };
-                                        Cell::from(display.to_string())
+                                        Cell::from(display)
                                     }
                                     PeerColumnId::Client => {
                                         let raw_client = parse_peer_id(&peer.peer_id);
@@ -4071,6 +4173,782 @@ pub fn draw_peers_table(
         }
     } else {
         draw_swarm_heatmap(f, ctx, &[], 0, peers_chunk);
+    }
+}
+
+pub fn draw_torrent_files_panel(
+    f: &mut Frame,
+    app_state: &AppState,
+    area: Rect,
+    ctx: &ThemeContext,
+) {
+    const MIN_HEATMAP_HEIGHT: u16 = 4;
+
+    if area.height < 2 || area.width < 2 {
+        return;
+    }
+
+    let selected_torrent = app_state
+        .torrent_list_order
+        .get(app_state.ui.selected_torrent_index)
+        .and_then(|info_hash| app_state.torrents.get(info_hash));
+
+    let block = Block::default()
+        .title(Span::styled(
+            "Files",
+            ctx.apply(Style::default().fg(ctx.state_selected())),
+        ))
+        .borders(Borders::ALL)
+        .padding(Padding::new(1, 1, 0, 0))
+        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)));
+
+    let Some(torrent) = selected_torrent else {
+        let inner_area = block.inner(area);
+        f.render_widget(block, area);
+        let empty = Paragraph::new("No torrent selected")
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true });
+        f.render_widget(empty, inner_area);
+        return;
+    };
+
+    let list_items = build_torrent_file_list_items(
+        torrent,
+        area.width,
+        area.height.saturating_sub(2),
+        app_state.anonymize_torrent_names,
+        app_state.ui.file_activity_download_phase,
+        app_state.ui.file_activity_upload_phase,
+        ctx,
+    );
+    let file_block_height_needed = (list_items.len() as u16).saturating_add(2);
+    let remaining_height = area.height.saturating_sub(file_block_height_needed);
+
+    if remaining_height >= MIN_HEATMAP_HEIGHT {
+        let layout_chunks = Layout::vertical([
+            Constraint::Length(file_block_height_needed),
+            Constraint::Min(0),
+        ])
+        .split(area);
+        let inner_area = block.inner(layout_chunks[0]);
+        f.render_widget(block, layout_chunks[0]);
+        f.render_widget(List::new(list_items), inner_area);
+        draw_swarm_heatmap(
+            f,
+            ctx,
+            &torrent.latest_state.peers,
+            torrent.latest_state.number_of_pieces_total,
+            layout_chunks[1],
+        );
+    } else {
+        let inner_area = block.inner(area);
+        f.render_widget(block, area);
+        f.render_widget(List::new(list_items), inner_area);
+    }
+}
+
+fn build_torrent_file_list_items(
+    torrent: &TorrentDisplayState,
+    width: u16,
+    height: u16,
+    anonymize: bool,
+    download_phase: f64,
+    upload_phase: f64,
+    ctx: &ThemeContext,
+) -> Vec<ListItem<'static>> {
+    let mut list_items = Vec::new();
+    let root_style = ctx.apply(
+        Style::default()
+            .fg(ctx.theme.semantic.text)
+            .add_modifier(Modifier::BOLD),
+    );
+    let root_path = torrent_root_path_label(&torrent.latest_state, anonymize);
+    let root_path_char_len = root_path.chars().count();
+    let root_width = width.saturating_sub(6) as usize;
+    let root_rows = shape_root_path_for_viewport(&root_path, root_width.max(1), height as usize);
+    let root_row_offsets = shaped_row_start_offsets(&root_rows);
+    list_items.extend(root_rows.into_iter().zip(root_row_offsets).enumerate().map(
+        |(idx, (row, row_start_offset))| {
+            let indent = "  ".repeat(idx);
+            let mut spans = vec![
+                Span::styled(
+                    indent,
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+                ),
+                Span::styled(ASCII_TREE_DIR_ICON, root_style),
+            ];
+            spans.extend(render_file_tree_name_spans(
+                torrent,
+                "",
+                &row,
+                true,
+                FileTreeNameRenderContext {
+                    download_phase,
+                    upload_phase,
+                    row_start_offset,
+                    base_style: root_style,
+                    ctx,
+                },
+            ));
+            ListItem::new(Line::from(spans))
+        },
+    ));
+    let root_depth = list_items.len();
+
+    if torrent.file_preview_tree.is_empty() {
+        if !torrent.latest_state.torrent_name.is_empty() {
+            let child_name =
+                anonymize_tree_name(&torrent.latest_state.torrent_name, false, anonymize);
+            let child_indent = "  ".repeat(root_depth);
+            let mut spans = vec![
+                Span::styled(
+                    child_indent,
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+                ),
+                Span::styled(
+                    ASCII_TREE_FILE_ICON,
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+                ),
+            ];
+            spans.extend(render_file_tree_name_spans(
+                torrent,
+                &torrent.latest_state.torrent_name,
+                &child_name,
+                false,
+                FileTreeNameRenderContext {
+                    download_phase,
+                    upload_phase,
+                    row_start_offset: root_path_char_len
+                        + 1
+                        + path_parent_prefix_len(&torrent.latest_state.torrent_name),
+                    base_style: ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+                    ctx,
+                },
+            ));
+            if torrent.latest_state.total_size > 0 {
+                spans.push(Span::styled(
+                    format!(" ({})", format_bytes(torrent.latest_state.total_size)),
+                    ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+                ));
+            }
+            list_items.push(ListItem::new(Line::from(spans)));
+        }
+        return list_items;
+    }
+
+    let mut expanded_state = TreeViewState::default();
+    for node in &torrent.file_preview_tree {
+        node.expand_all(&mut expanded_state);
+    }
+    let visible_tree_height = (height as usize).saturating_sub(root_depth);
+
+    let visible_rows = TreeMathHelper::get_visible_slice(
+        &torrent.file_preview_tree,
+        &expanded_state,
+        TreeFilter::default(),
+        visible_tree_height,
+    );
+
+    list_items.extend(visible_rows.iter().map(|item| {
+        let indent = "  ".repeat(item.depth + root_depth);
+        let icon = if item.node.is_dir {
+            ASCII_TREE_DIR_ICON
+        } else {
+            ASCII_TREE_FILE_ICON
+        };
+        let relative_path = normalize_tree_relative_path(item.path.as_path());
+
+        let (name_style, suffix) = match item.node.payload.priority {
+            FilePriority::Skip => (
+                ctx.apply(
+                    Style::default()
+                        .fg(ctx.theme.semantic.surface1)
+                        .add_modifier(Modifier::CROSSED_OUT),
+                ),
+                Some(" [S]".to_string()),
+            ),
+            FilePriority::High => (
+                ctx.apply(
+                    Style::default()
+                        .fg(ctx.state_success())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Some(" [H]".to_string()),
+            ),
+            FilePriority::Mixed => (
+                ctx.apply(
+                    Style::default()
+                        .fg(ctx.state_warning())
+                        .add_modifier(Modifier::ITALIC),
+                ),
+                Some(" [*]".to_string()),
+            ),
+            FilePriority::Normal => (
+                ctx.apply(Style::default().fg(if item.node.is_dir {
+                    ctx.state_info()
+                } else {
+                    ctx.theme.semantic.text
+                })),
+                None,
+            ),
+        };
+        let mut spans = vec![
+            Span::styled(
+                indent,
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+            ),
+            Span::styled(
+                icon,
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+            ),
+        ];
+        let display_name = anonymize_tree_name(&item.node.name, item.node.is_dir, anonymize);
+        spans.extend(render_file_tree_name_spans(
+            torrent,
+            &relative_path,
+            &display_name,
+            item.node.is_dir,
+            FileTreeNameRenderContext {
+                download_phase,
+                upload_phase,
+                row_start_offset: root_path_char_len + 1 + path_parent_prefix_len(&relative_path),
+                base_style: name_style,
+                ctx,
+            },
+        ));
+
+        if !item.node.is_dir {
+            spans.push(Span::styled(
+                format!(" ({})", format_bytes(item.node.payload.size)),
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+            ));
+        }
+
+        if let Some(suffix) = suffix {
+            spans.push(Span::styled(
+                suffix,
+                ctx.apply(Style::default().fg(ctx.theme.semantic.surface1)),
+            ));
+        }
+
+        ListItem::new(Line::from(spans))
+    }));
+
+    list_items
+}
+
+fn normalize_tree_relative_path(path: &Path) -> String {
+    path.iter()
+        .map(|part| part.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn path_parent_prefix_len(relative_path: &str) -> usize {
+    relative_path
+        .rsplit_once('/')
+        .map(|(prefix, _)| prefix.chars().count() + 1)
+        .unwrap_or(0)
+}
+
+fn shaped_row_start_offsets(rows: &[String]) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(rows.len());
+    let mut current = 0usize;
+    for (idx, row) in rows.iter().enumerate() {
+        offsets.push(current);
+        current += row.chars().count();
+        if idx + 1 < rows.len() {
+            current += 1;
+        }
+    }
+    offsets
+}
+
+fn file_tree_activity_paths<'a>(
+    torrent: &'a TorrentDisplayState,
+    relative_path: &str,
+    is_dir: bool,
+    download_wave: FileActivityWaveProfile,
+    upload_wave: FileActivityWaveProfile,
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let mut download_paths = Vec::new();
+    let mut upload_paths = Vec::new();
+    let root_path_char_len = torrent_root_logical_len(torrent);
+
+    for (activity_path, activity) in &torrent.recent_file_activity {
+        let matches_row = if is_dir && relative_path.is_empty() {
+            true
+        } else if is_dir {
+            activity_path == relative_path
+                || activity_path.starts_with(&format!("{relative_path}/"))
+        } else {
+            activity_path == relative_path
+        };
+
+        if !matches_row {
+            continue;
+        }
+
+        let total_len = root_path_char_len
+            + if activity_path.is_empty() {
+                0
+            } else {
+                1 + activity_path.chars().count()
+            };
+
+        if activity
+            .download_at
+            .is_some_and(|seen_at| file_activity_is_visible(seen_at, total_len, download_wave))
+        {
+            download_paths.push(activity_path.as_str());
+        }
+        if activity
+            .upload_at
+            .is_some_and(|seen_at| file_activity_is_visible(seen_at, total_len, upload_wave))
+        {
+            upload_paths.push(activity_path.as_str());
+        }
+    }
+
+    (download_paths, upload_paths)
+}
+
+#[derive(Clone, Copy)]
+struct FileTreeNameRenderContext<'a> {
+    download_phase: f64,
+    upload_phase: f64,
+    row_start_offset: usize,
+    base_style: Style,
+    ctx: &'a ThemeContext,
+}
+
+fn render_file_tree_name_spans(
+    torrent: &TorrentDisplayState,
+    relative_path: &str,
+    display_name: &str,
+    is_dir: bool,
+    render_ctx: FileTreeNameRenderContext<'_>,
+) -> Vec<Span<'static>> {
+    let chars: Vec<char> = display_name.chars().collect();
+    let len = chars.len().max(1);
+    let download_wave = file_activity_wave_profile(torrent.smoothed_download_speed_bps, len);
+    let upload_wave = file_activity_wave_profile(torrent.smoothed_upload_speed_bps, len);
+    let (download_paths, upload_paths) =
+        file_tree_activity_paths(torrent, relative_path, is_dir, download_wave, upload_wave);
+    let row_active = !download_paths.is_empty() || !upload_paths.is_empty();
+    let active_base_style = render_ctx.ctx.apply(render_ctx.base_style);
+
+    if !row_active {
+        return vec![Span::styled(display_name.to_string(), active_base_style)];
+    }
+
+    let download_step = render_ctx.download_phase.floor() as usize;
+    let upload_step = render_ctx.upload_phase.floor() as usize;
+    let root_path_char_len = torrent_root_logical_len(torrent);
+
+    chars
+        .into_iter()
+        .enumerate()
+        .map(|(idx, ch)| {
+            let download_hit = download_paths.iter().any(|path| {
+                file_activity_wave_hits(
+                    path,
+                    render_ctx.row_start_offset + idx,
+                    root_path_char_len,
+                    download_wave,
+                    download_step,
+                    false,
+                )
+            });
+            let upload_hit = upload_paths.iter().any(|path| {
+                file_activity_wave_hits(
+                    path,
+                    render_ctx.row_start_offset + idx,
+                    root_path_char_len,
+                    upload_wave,
+                    upload_step,
+                    true,
+                )
+            });
+
+            let style = match (download_hit, upload_hit) {
+                (true, true) => render_ctx.ctx.apply(
+                    render_ctx
+                        .base_style
+                        .fg(render_ctx.ctx.state_selected())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                (true, false) => render_ctx.ctx.apply(
+                    render_ctx
+                        .base_style
+                        .fg(render_ctx.ctx.state_info())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                (false, true) => render_ctx.ctx.apply(
+                    render_ctx
+                        .base_style
+                        .fg(render_ctx.ctx.state_success())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                (false, false) => active_base_style,
+            };
+            Span::styled(ch.to_string(), style)
+        })
+        .collect()
+}
+
+fn torrent_root_logical_len(torrent: &TorrentDisplayState) -> usize {
+    torrent
+        .latest_state
+        .download_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().chars().count())
+        .unwrap_or_else(|| torrent.latest_state.torrent_name.chars().count())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FileActivityWaveProfile {
+    band_width: usize,
+    steps_per_second: f64,
+}
+
+fn file_activity_wave_cycle_duration(total_len: usize, wave: FileActivityWaveProfile) -> Duration {
+    Duration::from_secs_f64((total_len + wave.band_width) as f64 / wave.steps_per_second.max(1.0))
+}
+
+fn file_activity_is_visible(
+    seen_at: Instant,
+    total_len: usize,
+    wave: FileActivityWaveProfile,
+) -> bool {
+    seen_at.elapsed()
+        <= FILE_ACTIVITY_HIGHLIGHT_WINDOW + file_activity_wave_cycle_duration(total_len, wave)
+}
+
+fn file_activity_wave_profile(speed_bps: u64, text_len: usize) -> FileActivityWaveProfile {
+    let target_band_width = if speed_bps < 500_000 {
+        4 + usize::from(speed_bps >= 50_000)
+    } else if speed_bps < 20_000_000 {
+        5 + usize::from(speed_bps >= 2_000_000)
+    } else if speed_bps < 100_000_000 {
+        7 + usize::from(speed_bps >= 50_000_000)
+    } else {
+        9
+    };
+
+    FileActivityWaveProfile {
+        band_width: target_band_width.min(text_len.max(1)),
+        steps_per_second: file_activity_wave_steps_per_second(speed_bps),
+    }
+}
+
+fn file_activity_wave_hits(
+    relative_path: &str,
+    global_char_idx: usize,
+    root_path_char_len: usize,
+    wave: FileActivityWaveProfile,
+    step: usize,
+    left_to_right: bool,
+) -> bool {
+    let total_len = root_path_char_len
+        + if relative_path.is_empty() {
+            0
+        } else {
+            1 + relative_path.chars().count()
+        };
+    let cycle_len = total_len + wave.band_width;
+    let phase_offset = file_activity_wave_phase_offset(relative_path, left_to_right, cycle_len);
+    let head = (step + phase_offset) % cycle_len;
+    let logical_idx = if left_to_right {
+        global_char_idx
+    } else {
+        total_len.saturating_sub(1).saturating_sub(global_char_idx)
+    };
+
+    (head as isize - logical_idx as isize) >= 0
+        && (head as isize - logical_idx as isize) < wave.band_width as isize
+}
+
+fn file_activity_wave_phase_offset(
+    relative_path: &str,
+    left_to_right: bool,
+    cycle_len: usize,
+) -> usize {
+    if cycle_len == 0 {
+        return 0;
+    }
+
+    let mut hash = 1469598103934665603_u64;
+    for byte in relative_path.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash ^= u64::from(left_to_right);
+    hash = hash.wrapping_mul(1099511628211);
+    (hash % cycle_len as u64) as usize
+}
+
+fn torrent_root_path_label(metrics: &crate::app::TorrentMetrics, anonymize: bool) -> String {
+    let Some(download_path) = metrics.download_path.as_ref() else {
+        return if anonymize {
+            anonymize_preserving_shape(&metrics.torrent_name)
+        } else {
+            metrics.torrent_name.clone()
+        };
+    };
+
+    let display = download_path.to_string_lossy().to_string();
+    if anonymize {
+        anonymize_preserving_shape(&display)
+    } else {
+        display
+    }
+}
+
+fn split_path_components(path: &str) -> Vec<String> {
+    let separator = path_separator(path);
+    path.split(separator)
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
+        .collect()
+}
+
+fn path_separator(path: &str) -> char {
+    if path.contains('\\') || path.chars().nth(1).is_some_and(|ch| ch == ':') {
+        '\\'
+    } else {
+        '/'
+    }
+}
+
+fn path_root_prefix(path: &str, separator: char) -> Option<&'static str> {
+    (separator == '/' && path.starts_with('/')).then_some("/")
+}
+
+fn append_path_component(base: &str, component: &str, separator: char) -> String {
+    if base.is_empty() {
+        component.to_string()
+    } else if base == "/" {
+        format!("/{}", component)
+    } else {
+        format!("{}{}{}", base, separator, component)
+    }
+}
+
+fn render_path_slices(
+    prefix: Option<&str>,
+    left: &[String],
+    right: &[String],
+    separator: char,
+) -> String {
+    let separator_str = separator.to_string();
+    let left_joined = left.join(&separator_str);
+    let right_joined = right.join(&separator_str);
+
+    match prefix {
+        Some(prefix) if left_joined.is_empty() => {
+            format!("{}...{}{}", prefix, separator, right_joined)
+        }
+        Some(prefix) => format!(
+            "{}{}{}...{}{}",
+            prefix, left_joined, separator, separator, right_joined
+        ),
+        None => format!(
+            "{}{}...{}{}",
+            left_joined, separator, separator, right_joined
+        ),
+    }
+}
+
+fn truncate_path_component(component: &str, width: usize) -> String {
+    truncate_with_ellipsis(component, width.max(1))
+}
+
+fn middle_ellipsize_path(path: &str, width: usize) -> String {
+    if path.chars().count() <= width {
+        return path.to_string();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let components = split_path_components(path);
+    if components.len() <= 1 {
+        return truncate_with_ellipsis(path, width);
+    }
+
+    let separator = path_separator(path);
+    let prefix = path_root_prefix(path, separator);
+    let render =
+        |left: &[String], right: &[String]| render_path_slices(prefix, left, right, separator);
+
+    let mut left = vec![components[0].clone()];
+    let mut right = vec![components[components.len() - 1].clone()];
+    let mut left_idx = 1usize;
+    let mut right_idx = components.len() - 1;
+
+    let initial = render(&left, &right);
+    if initial.chars().count() > width {
+        return truncate_with_ellipsis(&initial, width);
+    }
+
+    let mut best = initial;
+    while left_idx < right_idx {
+        let try_left = {
+            let mut next_left = left.clone();
+            next_left.push(components[left_idx].clone());
+            render(&next_left, &right)
+        };
+        let try_right = {
+            let mut next_right = right.clone();
+            next_right.insert(0, components[right_idx - 1].clone());
+            render(&left, &next_right)
+        };
+
+        let left_fits = try_left.chars().count() <= width;
+        let right_fits = try_right.chars().count() <= width;
+
+        match (left_fits, right_fits) {
+            (false, false) => break,
+            (true, false) => {
+                left.push(components[left_idx].clone());
+                left_idx += 1;
+                best = try_left;
+            }
+            (false, true) => {
+                right_idx -= 1;
+                right.insert(0, components[right_idx].clone());
+                best = try_right;
+            }
+            (true, true) => {
+                if try_left.chars().count() >= try_right.chars().count() {
+                    left.push(components[left_idx].clone());
+                    left_idx += 1;
+                    best = try_left;
+                } else {
+                    right_idx -= 1;
+                    right.insert(0, components[right_idx].clone());
+                    best = try_right;
+                }
+            }
+        }
+    }
+
+    best
+}
+
+fn shape_root_path_for_viewport(path: &str, width: usize, height: usize) -> Vec<String> {
+    if path.is_empty() || width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    if path.chars().count() <= width {
+        return vec![path.to_string()];
+    }
+
+    let components = split_path_components(path);
+    if components.is_empty() {
+        return vec![truncate_with_ellipsis(path, width.max(1))];
+    }
+
+    if height == 1 {
+        return vec![middle_ellipsize_path(path, width)];
+    }
+
+    let mut rows: Vec<String> = Vec::new();
+    let separator = path_separator(path);
+    let prefix = path_root_prefix(path, separator).unwrap_or_default();
+    let mut current = prefix.to_string();
+
+    for component in components {
+        let candidate = append_path_component(&current, &component, separator);
+
+        if candidate.chars().count() <= width {
+            current = candidate;
+            continue;
+        }
+
+        if !current.is_empty() {
+            rows.push(std::mem::take(&mut current));
+            if rows.len() == height {
+                break;
+            }
+        }
+
+        let component_with_prefix = append_path_component(prefix, &component, separator);
+        if component_with_prefix.chars().count() <= width && !prefix.is_empty() && rows.is_empty() {
+            current = component_with_prefix;
+        } else if component.chars().count() <= width {
+            current = component;
+        } else {
+            rows.push(truncate_path_component(&component, width));
+            current = String::new();
+            if rows.len() == height {
+                break;
+            }
+        }
+    }
+
+    if rows.len() < height && !current.is_empty() {
+        rows.push(current);
+    }
+
+    if rows.len() > height {
+        rows.truncate(height);
+    }
+
+    if rows.is_empty() {
+        vec![truncate_with_ellipsis(path, width.max(1))]
+    } else {
+        rows
+    }
+}
+
+fn anonymize_tree_name(name: &str, is_dir: bool, anonymize: bool) -> String {
+    if !anonymize {
+        return name.to_string();
+    }
+
+    let _ = is_dir;
+    anonymize_preserving_shape(name)
+}
+
+fn anonymize_preserving_shape(input: &str) -> String {
+    let seed = stable_string_seed(input);
+    input
+        .chars()
+        .enumerate()
+        .map(|(idx, ch)| anonymized_shape_char(seed, idx, ch))
+        .collect()
+}
+
+fn stable_string_seed(input: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in input.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn anonymized_shape_char(seed: u64, idx: usize, ch: char) -> char {
+    let mut state = seed ^ ((idx as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15));
+    state ^= state >> 30;
+    state = state.wrapping_mul(0xbf58476d1ce4e5b9);
+    state ^= state >> 27;
+    state = state.wrapping_mul(0x94d049bb133111eb);
+    state ^= state >> 31;
+
+    if ch.is_ascii_lowercase() {
+        (b'a' + (state % 26) as u8) as char
+    } else if ch.is_ascii_uppercase() {
+        (b'A' + (state % 26) as u8) as char
+    } else if ch.is_ascii_digit() {
+        (b'0' + (state % 10) as u8) as char
+    } else if ch.is_alphabetic() {
+        (b'a' + (state % 26) as u8) as char
+    } else {
+        ch
     }
 }
 
@@ -4254,7 +5132,8 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     let layout_plan = calculate_layout(app_state.screen_area, &layout_ctx);
     let (_, visible_torrent_columns) =
         compute_visible_torrent_columns(app_state, layout_plan.list.width);
-    let (_, visible_peer_columns) = compute_visible_peer_columns(layout_plan.peers.width);
+    let (_, visible_peer_columns) =
+        compute_visible_peer_columns(app_state, layout_plan.peers.width);
     let torrent_col_count = visible_torrent_columns.len();
     let peer_col_count = visible_peer_columns.len();
 
@@ -4686,6 +5565,18 @@ mod tests {
     }
 
     #[test]
+    fn peer_address_formatter_omits_ipv6_brackets_in_table() {
+        assert_eq!(
+            format_peer_address_for_table("[2001:db8::1]:51413"),
+            "2001:db8::1:51413"
+        );
+        assert_eq!(
+            format_peer_address_for_table("127.0.0.1:6881"),
+            "127.0.0.1:6881"
+        );
+    }
+
+    #[test]
     fn reducer_start_search_sets_search_and_resets_selection() {
         let mut app_state = AppState::default();
         app_state.ui.is_searching = false;
@@ -4748,6 +5639,379 @@ mod tests {
 
         reduce_ui_action(&mut app_state, UiAction::ToggleAnonymizeNames);
         assert!(!app_state.anonymize_torrent_names);
+    }
+
+    #[test]
+    fn reducer_toggle_torrent_files_flips_flag() {
+        let mut app_state = AppState::default();
+        assert!(!app_state.ui.show_torrent_files);
+
+        reduce_ui_action(&mut app_state, UiAction::ToggleTorrentFiles);
+        assert!(app_state.ui.show_torrent_files);
+
+        reduce_ui_action(&mut app_state, UiAction::ToggleTorrentFiles);
+        assert!(!app_state.ui.show_torrent_files);
+    }
+
+    #[test]
+    fn split_path_components_handles_windows_paths() {
+        assert_eq!(
+            split_path_components(r"C:\Users\jagat\Documents\seedbox"),
+            vec!["C:", "Users", "jagat", "Documents", "seedbox"]
+        );
+    }
+
+    #[test]
+    fn split_path_components_handles_posix_paths() {
+        assert_eq!(
+            split_path_components("/data/downloads/show"),
+            vec!["data", "downloads", "show"]
+        );
+    }
+
+    #[test]
+    fn middle_ellipsize_path_preserves_path_ends() {
+        let shaped = middle_ellipsize_path(r"C:\Users\jagat\Documents\seedbox", 18);
+        assert!(shaped.chars().count() <= 18, "{shaped}");
+        assert!(shaped.starts_with("C:"), "{shaped}");
+        assert!(shaped.ends_with("seedbox"), "{shaped}");
+        assert!(shaped.contains("..."), "{shaped}");
+    }
+
+    #[test]
+    fn middle_ellipsize_path_preserves_posix_root_and_separator() {
+        let shaped = middle_ellipsize_path("/data/downloads/show", 14);
+        assert!(shaped.chars().count() <= 14, "{shaped}");
+        assert!(shaped.starts_with('/'), "{shaped}");
+        assert!(shaped.ends_with("show"), "{shaped}");
+        assert!(shaped.contains("/.../"), "{shaped}");
+    }
+
+    #[test]
+    fn torrent_root_path_label_uses_download_root_only() {
+        let metrics = TorrentMetrics {
+            download_path: Some(PathBuf::from(r"C:\Users\jagat\Documents\seedbox")),
+            container_name: Some("[team] sample release".to_string()),
+            is_multi_file: true,
+            torrent_name: "episode 01.mkv".to_string(),
+            info_hash: vec![1, 2, 3, 4],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            torrent_root_path_label(&metrics, false),
+            r"C:\Users\jagat\Documents\seedbox"
+        );
+    }
+
+    #[test]
+    fn anonymize_preserving_shape_keeps_length_and_structure() {
+        let original = r"C:\Users\jagat\Documents\seedbox\episode_01.mkv";
+        let anonymized = anonymize_preserving_shape(original);
+
+        assert_eq!(anonymized.chars().count(), original.chars().count());
+        assert_eq!(
+            anonymized.matches('\\').count(),
+            original.matches('\\').count()
+        );
+        assert_eq!(
+            anonymized.matches(':').count(),
+            original.matches(':').count()
+        );
+        assert_eq!(
+            anonymized.matches('.').count(),
+            original.matches('.').count()
+        );
+        assert_eq!(
+            anonymized.matches('_').count(),
+            original.matches('_').count()
+        );
+        assert_ne!(anonymized, original);
+    }
+
+    #[test]
+    fn torrent_root_path_label_anonymize_preserves_path_shape() {
+        let metrics = TorrentMetrics {
+            download_path: Some(PathBuf::from(r"C:\Users\jagat\Documents\seedbox")),
+            torrent_name: "episode 01.mkv".to_string(),
+            ..Default::default()
+        };
+
+        let original = torrent_root_path_label(&metrics, false);
+        let anonymized = torrent_root_path_label(&metrics, true);
+
+        assert_eq!(anonymized.chars().count(), original.chars().count());
+        assert_eq!(
+            anonymized.matches('\\').count(),
+            original.matches('\\').count()
+        );
+        assert_eq!(
+            anonymized.matches(':').count(),
+            original.matches(':').count()
+        );
+        assert_ne!(anonymized, original);
+    }
+
+    #[test]
+    fn shaped_row_start_offsets_account_for_hidden_path_separators() {
+        let rows = vec![
+            r"C:\Users".to_string(),
+            "jagat".to_string(),
+            "seedbox".to_string(),
+        ];
+
+        assert_eq!(shaped_row_start_offsets(&rows), vec![0, 9, 15]);
+    }
+
+    #[test]
+    fn file_activity_wave_hits_can_continue_across_adjacent_path_slices() {
+        let wave = FileActivityWaveProfile {
+            band_width: 3,
+            steps_per_second: 8.0,
+        };
+        let root_len = 9usize;
+        let relative_path = "demo/file.bin";
+        let total_len = root_len + 1 + relative_path.chars().count();
+        let logical_hit_idx = 10usize;
+        let mirrored_idx = total_len - 1 - logical_hit_idx;
+        let cycle_len = total_len + wave.band_width;
+        let phase_offset = file_activity_wave_phase_offset(relative_path, false, cycle_len);
+        let step = (mirrored_idx + 1 + cycle_len - phase_offset) % cycle_len;
+
+        assert!(file_activity_wave_hits(
+            relative_path,
+            logical_hit_idx,
+            root_len,
+            wave,
+            step,
+            false,
+        ));
+        assert!(file_activity_wave_hits(
+            relative_path,
+            logical_hit_idx + 1,
+            root_len,
+            wave,
+            step,
+            false,
+        ));
+    }
+
+    #[test]
+    fn file_activity_visibility_lingers_for_one_wave_cycle() {
+        let wave = FileActivityWaveProfile {
+            band_width: 4,
+            steps_per_second: 12.0,
+        };
+        let total_len = 24usize;
+        let linger = file_activity_wave_cycle_duration(total_len, wave);
+        let seen_at =
+            Instant::now() - FILE_ACTIVITY_HIGHLIGHT_WINDOW - linger + Duration::from_millis(50);
+
+        assert!(file_activity_is_visible(seen_at, total_len, wave));
+    }
+
+    #[test]
+    fn file_activity_visibility_expires_after_wave_cycle_finishes() {
+        let wave = FileActivityWaveProfile {
+            band_width: 4,
+            steps_per_second: 12.0,
+        };
+        let total_len = 24usize;
+        let linger = file_activity_wave_cycle_duration(total_len, wave);
+        let seen_at =
+            Instant::now() - FILE_ACTIVITY_HIGHLIGHT_WINDOW - linger - Duration::from_millis(50);
+
+        assert!(!file_activity_is_visible(seen_at, total_len, wave));
+    }
+
+    #[test]
+    fn shape_root_path_for_viewport_keeps_single_line_when_it_fits() {
+        let path = r"C:\Users\jagat\Documents";
+        assert_eq!(
+            shape_root_path_for_viewport(path, path.len(), 4),
+            vec![path.to_string()]
+        );
+    }
+
+    #[test]
+    fn shape_root_path_for_viewport_uses_middle_ellipsis_when_only_one_row_is_available() {
+        let rows = shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 18, 1);
+        assert_eq!(rows.len(), 1);
+        assert!(rows_fit_in_box(&rows, 18, 1), "{rows:?}");
+        assert!(rows[0].starts_with("C:"), "{rows:?}");
+        assert!(rows[0].ends_with("seedbox"), "{rows:?}");
+        assert!(rows[0].contains("..."), "{rows:?}");
+    }
+
+    #[test]
+    fn shape_root_path_for_viewport_splits_into_vertical_segments_when_narrow() {
+        assert_eq!(
+            shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 10, 5),
+            vec!["C:\\Users", "jagat", "Documents", "seedbox"]
+        );
+    }
+
+    #[test]
+    fn shape_root_path_for_viewport_preserves_posix_root_and_separator() {
+        assert_eq!(
+            shape_root_path_for_viewport("/data/downloads/show", 10, 5),
+            vec!["/data", "downloads", "show"]
+        );
+    }
+
+    #[test]
+    fn shape_root_path_for_viewport_regroups_segments_to_match_height_budget() {
+        assert_eq!(
+            shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 16, 3),
+            vec!["C:\\Users\\jagat", "Documents", "seedbox"]
+        );
+    }
+
+    #[test]
+    fn shape_root_path_for_viewport_truncates_overwide_group_when_needed() {
+        assert_eq!(
+            shape_root_path_for_viewport(
+                r"C:\Users\jagat\[251226][longlonglonglong] release",
+                12,
+                2
+            ),
+            vec!["C:\\Users", "jagat"]
+        );
+    }
+
+    fn rows_fit_in_box(rows: &[String], width: usize, height: usize) -> bool {
+        rows.len() <= height && rows.iter().all(|row| row.chars().count() <= width)
+    }
+
+    fn visible_signal(rows: &[String]) -> usize {
+        rows.iter()
+            .map(|row| row.replace("...", "").chars().count())
+            .sum()
+    }
+
+    #[test]
+    fn shaped_paths_fit_vertical_square_and_landscape_boxes() {
+        let cases = [
+            r"C:\Users\jagat\Documents\seedbox",
+            r"C:\Users\jagat\Documents\seedbox\[251226][long-release-name] Episode 01.mkv",
+            r"C:\seedbox\anime\season-01\episode-01.mkv",
+            r"D:\dl\onefile.mkv",
+            r"C:\very\deep\path\with\many\segments\and\a\long\final\component",
+        ];
+        let viewports = [
+            (10, 8), // vertical
+            (16, 4), // square-ish
+            (40, 2), // landscape
+            (12, 3),
+            (20, 5),
+        ];
+
+        for path in cases {
+            for (width, height) in viewports {
+                let rows = shape_root_path_for_viewport(path, width, height);
+                assert!(
+                    rows_fit_in_box(&rows, width, height),
+                    "rows should fit box for path={path:?} width={width} height={height}: {rows:?}"
+                );
+                assert!(
+                    !rows.is_empty(),
+                    "shape helper should produce at least one row for path={path:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wider_viewports_do_not_increase_row_count_or_truncation_for_same_height() {
+        let path = r"C:\Users\jagat\Documents\seedbox\[251226][long-release-name]\Episode 01.mkv";
+
+        let narrow = shape_root_path_for_viewport(path, 12, 3);
+        let medium = shape_root_path_for_viewport(path, 18, 3);
+        let wide = shape_root_path_for_viewport(path, 28, 3);
+
+        assert!(rows_fit_in_box(&narrow, 12, 3));
+        assert!(rows_fit_in_box(&medium, 18, 3));
+        assert!(rows_fit_in_box(&wide, 28, 3));
+        assert!(
+            visible_signal(&medium) >= visible_signal(&narrow),
+            "{medium:?} vs {narrow:?}"
+        );
+        assert!(
+            visible_signal(&wide) >= visible_signal(&medium),
+            "{wide:?} vs {medium:?}"
+        );
+    }
+
+    #[test]
+    fn taller_viewports_do_not_increase_truncation_for_same_width() {
+        let path =
+            r"C:\Users\jagat\Documents\seedbox\[251226][long-release-name]\subdir\Episode 01.mkv";
+
+        let short = shape_root_path_for_viewport(path, 14, 2);
+        let medium = shape_root_path_for_viewport(path, 14, 4);
+        let tall = shape_root_path_for_viewport(path, 14, 8);
+
+        assert!(
+            visible_signal(&medium) >= visible_signal(&short),
+            "{medium:?} vs {short:?}"
+        );
+        assert!(
+            visible_signal(&tall) >= visible_signal(&medium),
+            "{tall:?} vs {medium:?}"
+        );
+        assert!(rows_fit_in_box(&short, 14, 2));
+        assert!(rows_fit_in_box(&medium, 14, 4));
+        assert!(rows_fit_in_box(&tall, 14, 8));
+    }
+
+    #[test]
+    fn shallow_paths_prefer_horizontal_layouts_when_space_allows() {
+        let path = r"D:\dl\onefile.mkv";
+
+        assert_eq!(
+            shape_root_path_for_viewport(path, 40, 2),
+            vec![path.to_string()]
+        );
+        assert_eq!(
+            shape_root_path_for_viewport(path, 8, 3),
+            vec!["D:\\dl", "onefi..."]
+        );
+    }
+
+    #[test]
+    fn deep_paths_prefer_vertical_layouts_when_width_is_constrained() {
+        let path = r"C:\a\b\c\d\e\f\g\h\i";
+        let rows = shape_root_path_for_viewport(path, 4, 9);
+        assert!(rows_fit_in_box(&rows, 4, 9), "{rows:?}");
+        assert_eq!(rows.len(), 5);
+        assert!(
+            rows.first().is_some_and(|row| row.starts_with("C:")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.last().is_some_and(|row| row.ends_with('i')),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn root_path_shaping_peels_from_deepest_parent_first() {
+        assert_eq!(
+            shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 24, 4),
+            vec!["C:\\Users\\jagat\\Documents", "seedbox"]
+        );
+        assert_eq!(
+            shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 18, 4),
+            vec!["C:\\Users\\jagat", "Documents\\seedbox"]
+        );
+    }
+
+    #[test]
+    fn long_single_component_paths_are_truncated_to_fit() {
+        let path = r"C:\[251226][veryveryveryveryverylong-name]";
+        let rows = shape_root_path_for_viewport(path, 10, 2);
+        assert!(rows_fit_in_box(&rows, 10, 2));
+        assert!(rows.iter().any(|row| row.contains("...")), "{rows:?}");
     }
 
     #[test]
@@ -4880,6 +6144,85 @@ mod tests {
     }
 
     #[test]
+    fn torrent_current_traffic_uses_latest_point_only() {
+        let mut app_state = AppState::default();
+        let info_hash = vec![8; 20];
+        let key = hex::encode(&info_hash);
+        app_state.activity_history_state.torrents.insert(
+            key,
+            ActivityHistorySeries {
+                tiers: crate::persistence::activity_history::ActivityHistoryTiers {
+                    second_1s: vec![
+                        ActivityHistoryPoint {
+                            ts_unix: 8,
+                            primary: 100,
+                            secondary: 50,
+                        },
+                        ActivityHistoryPoint {
+                            ts_unix: 9,
+                            primary: 25,
+                            secondary: 5,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            torrent_current_traffic(
+                &app_state,
+                &info_hash,
+                HistoryTier::Second1s,
+                1,
+                4,
+                9,
+                2.0 / 6.0
+            ),
+            43
+        );
+    }
+
+    #[test]
+    fn torrent_current_traffic_preserves_recent_activity_when_latest_bucket_is_zero() {
+        let mut app_state = AppState::default();
+        let info_hash = vec![7; 20];
+        let key = hex::encode(&info_hash);
+        app_state.activity_history_state.torrents.insert(
+            key,
+            ActivityHistorySeries {
+                tiers: crate::persistence::activity_history::ActivityHistoryTiers {
+                    second_1s: vec![ActivityHistoryPoint {
+                        ts_unix: 8,
+                        primary: 100,
+                        secondary: 50,
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            torrent_current_traffic(
+                &app_state,
+                &info_hash,
+                HistoryTier::Second1s,
+                1,
+                4,
+                9,
+                2.0 / 6.0
+            ),
+            33
+        );
+        assert_eq!(
+            torrent_period_traffic(&app_state, &info_hash, HistoryTier::Second1s, 1, 4, 9),
+            150
+        );
+    }
+
+    #[test]
     fn details_eta_or_probe_text_uses_eta_for_incomplete_torrent() {
         let mut torrent = TorrentDisplayState::default();
         torrent.latest_state.number_of_pieces_total = 10;
@@ -4991,6 +6334,10 @@ mod tests {
         assert_eq!(
             map_key_to_ui_action(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)),
             None
+        );
+        assert_eq!(
+            map_key_to_ui_action(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
+            Some(UiAction::ToggleTorrentFiles)
         );
     }
 
@@ -5359,6 +6706,96 @@ mod tests {
         let data = [0_u64, 10, 0];
         let smoothed = peer_stream_smoothed_activity(&data, 1);
         assert!((smoothed - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn file_activity_wave_profile_grows_with_speed_tiers() {
+        let slow = file_activity_wave_profile(10_000, 24);
+        let mid = file_activity_wave_profile(5_000_000, 24);
+        let fast = file_activity_wave_profile(120_000_000, 24);
+
+        assert!(slow.band_width <= mid.band_width);
+        assert!(mid.band_width <= fast.band_width);
+        assert!(slow.steps_per_second < mid.steps_per_second);
+        assert!(mid.steps_per_second < fast.steps_per_second);
+    }
+
+    #[test]
+    fn file_activity_wave_profile_clamps_band_width_to_text_length() {
+        let profile = file_activity_wave_profile(120_000_000, 3);
+
+        assert_eq!(profile.band_width, 3);
+        assert_eq!(profile.steps_per_second, 23.0);
+    }
+
+    #[test]
+    fn file_activity_wave_phase_can_continue_across_speed_changes() {
+        let start_phase = 41.0;
+        let dt = 0.25;
+        let next_phase = start_phase + dt * file_activity_wave_steps_per_second(120_000_000);
+        let later_phase = next_phase + dt * file_activity_wave_steps_per_second(10_000);
+
+        assert!(next_phase > start_phase);
+        assert!(later_phase > next_phase);
+        assert!((later_phase - 49.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn file_activity_wave_phase_offset_is_stable_per_path() {
+        let cycle_len = 23;
+        let alpha = file_activity_wave_phase_offset("folder/alpha.bin", false, cycle_len);
+        let alpha_again = file_activity_wave_phase_offset("folder/alpha.bin", false, cycle_len);
+        let beta = file_activity_wave_phase_offset("folder/beta.bin", false, cycle_len);
+
+        assert_eq!(alpha, alpha_again);
+        assert!(alpha < cycle_len);
+        assert!(beta < cycle_len);
+        assert_ne!(alpha, beta);
+    }
+
+    #[test]
+    fn render_file_tree_name_spans_keeps_inactive_rows_at_base_style() {
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let base_style = Style::default()
+            .fg(ctx.theme.semantic.text)
+            .add_modifier(Modifier::BOLD);
+
+        let spans = render_file_tree_name_spans(
+            &torrent,
+            "folder/file.bin",
+            "file.bin",
+            false,
+            FileTreeNameRenderContext {
+                download_phase: 0.0,
+                upload_phase: 0.0,
+                row_start_offset: 0,
+                base_style,
+                ctx: &ctx,
+            },
+        );
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "file.bin");
+        assert_eq!(spans[0].style, ctx.apply(base_style));
+    }
+
+    #[test]
+    fn build_torrent_file_list_items_limits_tree_rows_to_viewport_height() {
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..20)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let items = build_torrent_file_list_items(&torrent, 40, 3, false, 0.0, 0.0, &ctx);
+
+        assert_eq!(items.len(), 3);
     }
 
     #[test]

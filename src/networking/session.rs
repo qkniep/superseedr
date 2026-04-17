@@ -19,7 +19,7 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 
 #[cfg(feature = "pex")]
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -695,24 +695,35 @@ impl PeerSession {
             .get(ClientExtendedId::UtPex.as_str())
             .copied()
         {
-            let added: Vec<u8> = peers_list
+            let peers: Vec<SocketAddr> = peers_list
                 .iter()
                 .filter(|&ip| *ip != self.peer_ip_port)
                 .filter_map(|ip| ip.parse::<std::net::SocketAddr>().ok())
-                .flat_map(|addr| match addr {
-                    std::net::SocketAddr::V4(v4) => {
-                        let mut b = v4.ip().octets().to_vec();
-                        b.extend_from_slice(&v4.port().to_be_bytes());
-                        Some(b)
-                    }
-                    _ => None,
-                })
-                .flatten()
                 .collect();
 
-            if !added.is_empty() {
+            let mut added = Vec::new();
+            let mut added6 = Vec::new();
+            for addr in peers {
+                match addr {
+                    SocketAddr::V4(v4) => {
+                        added.extend_from_slice(&v4.ip().octets());
+                        added.extend_from_slice(&v4.port().to_be_bytes());
+                    }
+                    SocketAddr::V6(v6) => {
+                        added6.extend_from_slice(&v6.ip().octets());
+                        added6.extend_from_slice(&v6.port().to_be_bytes());
+                    }
+                }
+            }
+
+            if !added.is_empty() || !added6.is_empty() {
+                let added_flags_len = added.len() / 6;
+                let added6_flags_len = added6.len() / 18;
                 let msg = PexMessage {
                     added,
+                    added_f: vec![0; added_flags_len],
+                    added6_f: vec![0; added6_flags_len],
+                    added6,
                     ..Default::default()
                 };
                 if let Ok(payload) = serde_bencode::to_bytes(&msg) {
@@ -761,7 +772,14 @@ impl PeerSession {
                     for chunk in pex_data.added.chunks_exact(6) {
                         let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
                         let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-                        new_peers.push((ip.to_string(), port));
+                        new_peers.push(SocketAddr::from((ip, port)));
+                    }
+                    for chunk in pex_data.added6.chunks_exact(18) {
+                        let mut addr = [0u8; 16];
+                        addr.copy_from_slice(&chunk[..16]);
+                        let ip = Ipv6Addr::from(addr);
+                        let port = u16::from_be_bytes([chunk[16], chunk[17]]);
+                        new_peers.push(SocketAddr::from((ip, port)));
                     }
                     if !new_peers.is_empty() {
                         let _ = self
@@ -1347,21 +1365,16 @@ mod tests {
                 timeout(Duration::from_secs(5), parse_message(&mut peer_read)).await
             {
                 match msg {
-                    Message::Interested => {
-                        if am_choking {
-                            let unchoke = generate_message(Message::Unchoke).unwrap();
-                            peer_write.write_all(&unchoke).await.unwrap();
-                            am_choking = false;
-                        }
+                    Message::Interested if am_choking => {
+                        let unchoke = generate_message(Message::Unchoke).unwrap();
+                        peer_write.write_all(&unchoke).await.unwrap();
+                        am_choking = false;
                     }
-                    Message::Request(index, begin, _len) => {
-                        if !am_choking {
-                            let data = vec![1u8; 16384];
-                            let piece =
-                                generate_message(Message::Piece(index, begin, data)).unwrap();
-                            if peer_write.write_all(&piece).await.is_err() {
-                                break;
-                            }
+                    Message::Request(index, begin, _len) if !am_choking => {
+                        let data = vec![1u8; 16384];
+                        let piece = generate_message(Message::Piece(index, begin, data)).unwrap();
+                        if peer_write.write_all(&piece).await.is_err() {
+                            break;
                         }
                     }
                     _ => {}
@@ -1577,23 +1590,19 @@ mod tests {
                 timeout(Duration::from_secs(30), parse_message(&mut peer_read)).await
             {
                 match msg {
-                    Message::Interested => {
-                        if am_choking {
-                            let unchoke = generate_message(Message::Unchoke).unwrap();
-                            if peer_write.write_all(&unchoke).await.is_err() {
-                                break;
-                            }
-                            am_choking = false;
+                    Message::Interested if am_choking => {
+                        let unchoke = generate_message(Message::Unchoke).unwrap();
+                        if peer_write.write_all(&unchoke).await.is_err() {
+                            break;
                         }
+                        am_choking = false;
                     }
-                    Message::Request(index, begin, _len) => {
-                        if !am_choking {
-                            let piece_msg =
-                                generate_message(Message::Piece(index, begin, dummy_data.clone()))
-                                    .unwrap();
-                            if peer_write.write_all(&piece_msg).await.is_err() {
-                                break;
-                            }
+                    Message::Request(index, begin, _len) if !am_choking => {
+                        let piece_msg =
+                            generate_message(Message::Piece(index, begin, dummy_data.clone()))
+                                .unwrap();
+                        if peer_write.write_all(&piece_msg).await.is_err() {
+                            break;
                         }
                     }
                     _ => {}
@@ -2010,25 +2019,21 @@ mod tests {
                 }
 
                 match msg {
-                    Message::Interested => {
-                        if am_choking {
-                            let unchoke = generate_message(Message::Unchoke).unwrap();
-                            let _ = peer_write.write_all(&unchoke).await;
-                            am_choking = false;
-                        }
+                    Message::Interested if am_choking => {
+                        let unchoke = generate_message(Message::Unchoke).unwrap();
+                        let _ = peer_write.write_all(&unchoke).await;
+                        am_choking = false;
                     }
-                    Message::Request(i, b, _) => {
-                        if !am_choking {
-                            if start_time.elapsed() < Duration::from_secs(2) {
-                                tokio::time::sleep(Duration::from_millis(10)).await;
-                            } else {
-                                tokio::time::sleep(Duration::from_millis(2)).await;
-                            }
-
-                            let piece =
-                                generate_message(Message::Piece(i, b, dummy_data.clone())).unwrap();
-                            let _ = peer_write.write_all(&piece).await;
+                    Message::Request(i, b, _) if !am_choking => {
+                        if start_time.elapsed() < Duration::from_secs(2) {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        } else {
+                            tokio::time::sleep(Duration::from_millis(2)).await;
                         }
+
+                        let piece =
+                            generate_message(Message::Piece(i, b, dummy_data.clone())).unwrap();
+                        let _ = peer_write.write_all(&piece).await;
                     }
                     _ => {}
                 }

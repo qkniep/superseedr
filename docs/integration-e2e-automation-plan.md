@@ -12,14 +12,14 @@ This document captures the current manual foundation and a concrete plan to auto
 
 ## Current Foundation (Completed)
 - Fixture generation script:
-  - `local_scripts/generate_integration_bins.py`
+  - `scripts/generate_integration_bins.py`
   - Generates deterministic test data in `integration_tests/test_data`.
 - Output validation script:
-  - `local_scripts/validate_integration_output.py`
+  - `scripts/validate_integration_output.py`
   - Compares `integration_tests/test_output/<mode>` to canonical `integration_tests/test_data` by size + SHA-256.
   - Supports mode-aware validation and v1-only expectation for `single_25k.bin`.
 - Output cleanup script:
-  - `local_scripts/clear_integration_output.py`
+  - `scripts/clear_integration_output.py`
   - Clears generated outputs while preserving the `v1`, `v2`, `hybrid` scaffold.
 - Torrent/settings setup:
   - `integration_tests/torrents/{v1,v2,hybrid}` populated.
@@ -41,7 +41,7 @@ This document captures the current manual foundation and a concrete plan to auto
 One command, e.g.:
 
 ```bash
-python3 local_scripts/run_integration_e2e.py --mode all --client qbittorrent
+python3 scripts/run_integration_e2e.py --mode all --client qbittorrent
 ```
 
 Behavior:
@@ -57,7 +57,7 @@ Behavior:
 ## Implementation Plan
 
 ### Phase 1: Standardize Data and Torrent Generation
-1. Add `local_scripts/generate_integration_torrents.py`.
+1. Add `scripts/generate_integration_torrents.py`.
 2. Input source: `integration_tests/test_data`.
 3. Output targets:
    - `integration_tests/torrents/v1`
@@ -73,7 +73,7 @@ Acceptance:
 - Non-aligned torrent metadata is reproducible and validated.
 
 ### Phase 2: Generate Settings from Source of Truth
-1. Add `local_scripts/generate_integration_settings.py`.
+1. Add `scripts/generate_integration_settings.py`.
 2. Build `integration_tests/settings.toml` from discovered torrents and mode rules.
 3. Avoid manual drift by deriving `download_path` conventionally:
    - `integration_tests/test_output/<mode>/...`
@@ -84,7 +84,7 @@ Acceptance:
 - Every `.torrent` has a corresponding `[[torrents]]` entry.
 
 ### Phase 3: qBittorrent Orchestration
-1. Add `local_scripts/run_qb_integration.py`.
+1. Add `scripts/run_qb_integration.py`.
 2. Modes:
    - `seed` mode for loading canonical data set.
    - `download` mode for writing into `integration_tests/test_output`.
@@ -99,7 +99,7 @@ Acceptance:
 - Failures identify torrent/hash/save-path mismatch quickly.
 
 ### Phase 4: End-to-End Runner and Exit Codes
-1. Add `local_scripts/run_integration_e2e.py` orchestrator.
+1. Add `scripts/run_integration_e2e.py` orchestrator.
 2. Sequence:
    - clear -> generate bins -> generate torrents -> generate settings -> qb run -> validate
 3. Strict exit policy:
@@ -175,7 +175,7 @@ Acceptance:
 2. Replace hardcoded validator mode exception (`v1`-only `single_25k.bin`) with settings/manifests-driven expected-file derivation.
 3. Document and/or formalize fixture seed compatibility mapping in `generate_integration_bins.py` (nested path alias behavior).
 4. Add smoke tests for:
-   - `local_scripts/generate_integration_bins.py`
-   - `local_scripts/validate_integration_output.py`
-   - `local_scripts/clear_integration_output.py`
+   - `scripts/generate_integration_bins.py`
+   - `scripts/validate_integration_output.py`
+   - `scripts/clear_integration_output.py`
 5. Improve cleanup script dry-run output so `WOULD_PRUNE` only reports directories that would actually be empty.

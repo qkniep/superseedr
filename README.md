@@ -73,13 +73,13 @@ superseedr
 - Enable port forwarding in your VPN settings
 - Check the swarm health in the TUI's analytics view
 
-**More help:** See the [FAQ](FAQ.md) or [open an issue](https://github.com/Jagalite/superseedr/issues)
+**More help:** See the [FAQ](docs/FAQ.md) or [open an issue](https://github.com/Jagalite/superseedr/issues)
 
 ## More Info
 - 🤝[Contributing](CONTRIBUTING.md): How you can contribute to the project (technical and non-technical).
-- ❓[FAQ](FAQ.md): Find answers to common questions about Superseedr.
-- 📜[Changelog](CHANGELOG.md): See what's new in recent versions of Superseedr.
-- 🗺️[Roadmap](ROADMAP.md): Discover upcoming features and future plans for Superseedr.
+- ❓[FAQ](docs/FAQ.md): Find answers to common questions about Superseedr.
+- 📜[Changelog](docs/CHANGELOG.md): See what's new in recent versions of Superseedr.
+- 🗺️[Roadmap](docs/ROADMAP.md): Discover upcoming features and future plans for Superseedr.
 - 🧑‍🤝‍🧑[Code of Conduct](CODE_OF_CONDUCT.md): Understand the community standards and expectations.
 
 ## 🐳 Running with Docker
@@ -443,7 +443,6 @@ Superseedr implements the following BitTorrent Enhancement Proposals (BEPs):
 * **BEP 52:** The BitTorrent Protocol v2
 
 </details>
-
 
 
 

@@ -254,7 +254,7 @@ async fn run_sync(
         }
     }
 
-    aggregated.sort_by(|a, b| b.sort_ts.cmp(&a.sort_ts));
+    aggregated.sort_by_key(|item| std::cmp::Reverse(item.sort_ts));
 
     let mut title_seen = HashSet::new();
     let mut preview_items = Vec::new();
@@ -585,8 +585,61 @@ async fn fetch_torrent_bytes(client: &Client, url: &str) -> Result<Vec<u8>, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    struct LocalWatchPathTestGuard {
+        _env_guard: std::sync::MutexGuard<'static, ()>,
+        _local_paths: tempfile::TempDir,
+        original_shared_dir: Option<std::ffi::OsString>,
+        original_shared_host_id: Option<std::ffi::OsString>,
+    }
+
+    impl LocalWatchPathTestGuard {
+        fn new() -> Self {
+            let env_guard = crate::config::shared_env_guard_for_tests()
+                .lock()
+                .expect("shared env guard lock poisoned");
+
+            let local_paths = tempfile::tempdir().expect("create local app paths");
+            let config_dir = local_paths.path().join("config");
+            let data_dir = local_paths.path().join("data");
+            crate::config::set_app_paths_override_for_tests(Some((config_dir, data_dir)));
+
+            let original_shared_dir = env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
+            let original_shared_host_id = env::var_os("SUPERSEEDR_SHARED_HOST_ID");
+            env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+            env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
+            crate::config::clear_shared_config_state_for_tests();
+
+            Self {
+                _env_guard: env_guard,
+                _local_paths: local_paths,
+                original_shared_dir,
+                original_shared_host_id,
+            }
+        }
+    }
+
+    impl Drop for LocalWatchPathTestGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original_shared_dir {
+                env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", value);
+            } else {
+                env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+            }
+
+            if let Some(value) = &self.original_shared_host_id {
+                env::set_var("SUPERSEEDR_SHARED_HOST_ID", value);
+            } else {
+                env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
+            }
+
+            crate::config::set_app_paths_override_for_tests(None);
+            crate::config::clear_shared_config_state_for_tests();
+        }
+    }
 
     #[test]
     fn dedupe_key_prefers_guid_then_link_then_title_source() {
@@ -692,8 +745,9 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn rss_sync_match_and_auto_ingest_magnet_end_to_end() {
+        let _guard = LocalWatchPathTestGuard::new();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
         let addr = listener.local_addr().expect("listener addr");
         let feed_url = format!("http://{}/rss.xml", addr);
@@ -857,8 +911,9 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn rss_max_preview_items_zero_skips_processing_and_auto_ingest() {
+        let _guard = LocalWatchPathTestGuard::new();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
         let addr = listener.local_addr().expect("listener addr");
         let feed_url = format!("http://{}/rss.xml", addr);

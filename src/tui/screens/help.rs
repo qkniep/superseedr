@@ -19,13 +19,16 @@ fn display_path_or_disabled(path: Option<std::path::PathBuf>) -> String {
         .unwrap_or_else(|| "Disabled".to_string())
 }
 
-fn build_help_footer_entries(settings: &Settings) -> Vec<(&'static str, String)> {
+fn build_help_footer_entries(
+    settings: &Settings,
+    app_state: &AppState,
+) -> Vec<(&'static str, String)> {
     let log_path_str = runtime_log_dir()
-        .map(|path| path.join("app.log"))
+        .map(|path| path.join("app*.log"))
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|| "Unknown location".to_string());
 
-    if is_shared_config_mode() {
+    let mut entries = if is_shared_config_mode() {
         vec![
             (
                 "Settings",
@@ -33,7 +36,7 @@ fn build_help_footer_entries(settings: &Settings) -> Vec<(&'static str, String)>
                     .map(|path| path.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Unknown location".to_string()),
             ),
-            ("Log File", log_path_str),
+            ("Log Files", log_path_str),
             (
                 "Host Watch",
                 display_path_or_disabled(resolve_host_watch_path(settings)),
@@ -54,10 +57,19 @@ fn build_help_footer_entries(settings: &Settings) -> Vec<(&'static str, String)>
             .unwrap_or_else(|| "Disabled".to_string());
         vec![
             ("Settings", settings_path_str),
-            ("Log File", log_path_str),
+            ("Log Files", log_path_str),
             ("Watch Dir", watch_path_str),
         ]
+    };
+
+    if let Some(cluster_role) = app_state.cluster_role_label.as_ref() {
+        entries.push(("Cluster", cluster_role.clone()));
     }
+    if let Some(runtime_label) = app_state.cluster_runtime_label.as_ref() {
+        entries.push(("Runtime", runtime_label.clone()));
+    }
+
+    entries
 }
 
 fn draw_help_footer(
@@ -153,7 +165,7 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
     let app_state = screen.ui;
     let settings = screen.settings;
     let ctx = screen.theme;
-    let footer_entries = build_help_footer_entries(settings);
+    let footer_entries = build_help_footer_entries(settings, app_state);
     let footer_height = footer_entries.len() as u16;
 
     let area = centered_rect(60, 100, f.area());
@@ -791,5 +803,31 @@ mod tests {
         );
 
         assert!(matches!(app_state.mode, AppMode::Normal));
+    }
+
+    #[test]
+    fn help_footer_includes_cluster_entries_when_present() {
+        let settings = Settings::default();
+        let app_state = AppState {
+            cluster_role_label: Some("Leader".to_string()),
+            cluster_runtime_label: Some("Reader".to_string()),
+            ..Default::default()
+        };
+
+        let entries = build_help_footer_entries(&settings, &app_state);
+
+        assert!(entries.contains(&("Cluster", "Leader".to_string())));
+        assert!(entries.contains(&("Runtime", "Reader".to_string())));
+    }
+
+    #[test]
+    fn help_footer_omits_cluster_entries_when_absent() {
+        let settings = Settings::default();
+        let app_state = AppState::default();
+
+        let entries = build_help_footer_entries(&settings, &app_state);
+
+        assert!(!entries.iter().any(|(label, _)| *label == "Cluster"));
+        assert!(!entries.iter().any(|(label, _)| *label == "Runtime"));
     }
 }

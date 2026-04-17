@@ -68,10 +68,16 @@ impl ClientExtendedId {
 pub struct PexMessage {
     #[serde(with = "serde_bytes", default)]
     pub added: Vec<u8>,
-    #[serde(default)]
+    #[serde(rename = "added.f", with = "serde_bytes", default)]
     pub added_f: Vec<u8>,
+    #[serde(rename = "added6", with = "serde_bytes", default)]
+    pub added6: Vec<u8>,
+    #[serde(rename = "added6.f", with = "serde_bytes", default)]
+    pub added6_f: Vec<u8>,
     #[serde(with = "serde_bytes", default)]
     pub dropped: Vec<u8>,
+    #[serde(rename = "dropped6", with = "serde_bytes", default)]
+    pub dropped6: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -890,5 +896,93 @@ mod tests {
         } else {
             panic!("ExtendedHandshake did not parse back as Message::Extended");
         }
+    }
+
+    #[cfg(feature = "pex")]
+    #[test]
+    fn test_pex_message_roundtrip_supports_ipv6_keys() {
+        let message = PexMessage {
+            added: vec![127, 0, 0, 1, 0x1A, 0xE1],
+            added_f: vec![0],
+            added6: {
+                let mut bytes = vec![0u8; 16];
+                bytes[15] = 1;
+                bytes.extend_from_slice(&6881u16.to_be_bytes());
+                bytes
+            },
+            added6_f: vec![0],
+            dropped: vec![127, 0, 0, 2, 0x1A, 0xE2],
+            dropped6: {
+                let mut bytes = vec![0u8; 16];
+                bytes[15] = 2;
+                bytes.extend_from_slice(&6882u16.to_be_bytes());
+                bytes
+            },
+        };
+
+        let encoded = serde_bencode::to_bytes(&message).expect("serialize pex");
+        assert!(
+            encoded.windows(b"added6".len()).any(|w| w == b"added6"),
+            "serialized payload should include added6 key"
+        );
+        assert!(
+            encoded.windows(b"added6.f".len()).any(|w| w == b"added6.f"),
+            "serialized payload should include added6.f key"
+        );
+        assert!(
+            encoded.windows(b"dropped6".len()).any(|w| w == b"dropped6"),
+            "serialized payload should include dropped6 key"
+        );
+
+        let decoded: PexMessage = serde_bencode::from_bytes(&encoded).expect("deserialize pex");
+        assert_eq!(decoded.added, message.added);
+        assert_eq!(decoded.added_f, message.added_f);
+        assert_eq!(decoded.added6, message.added6);
+        assert_eq!(decoded.added6_f, message.added6_f);
+        assert_eq!(decoded.dropped, message.dropped);
+        assert_eq!(decoded.dropped6, message.dropped6);
+    }
+
+    #[cfg(feature = "pex")]
+    #[test]
+    fn test_pex_message_serializes_dropped_as_compact_bytes() {
+        let message = PexMessage {
+            dropped: vec![127, 0, 0, 2, 0x1A, 0xE2],
+            ..Default::default()
+        };
+
+        let encoded = serde_bencode::to_bytes(&message).expect("serialize pex");
+
+        assert!(
+            encoded
+                .windows(b"7:dropped6:".len())
+                .any(|w| w == b"7:dropped6:"),
+            "dropped peers should serialize as a compact byte string"
+        );
+    }
+
+    #[cfg(feature = "pex")]
+    #[test]
+    fn test_pex_message_serializes_flag_vectors_as_compact_bytes() {
+        let message = PexMessage {
+            added_f: vec![0x01],
+            added6_f: vec![0x02],
+            ..Default::default()
+        };
+
+        let encoded = serde_bencode::to_bytes(&message).expect("serialize pex");
+
+        assert!(
+            encoded
+                .windows(b"7:added.f1:".len())
+                .any(|w| w == b"7:added.f1:"),
+            "added.f flags should serialize as a compact byte string"
+        );
+        assert!(
+            encoded
+                .windows(b"8:added6.f1:".len())
+                .any(|w| w == b"8:added6.f1:"),
+            "added6.f flags should serialize as a compact byte string"
+        );
     }
 }

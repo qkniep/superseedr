@@ -220,6 +220,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let _watcher = create_watcher(std::slice::from_ref(&dir), false, tx).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
 
         let file_path = dir.join("bridge.magnet");
         std::fs::write(
@@ -227,11 +228,19 @@ mod tests {
             "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=LocalWatchProbe",
         )
         .unwrap();
+        let canonical_file_path = std::fs::canonicalize(&file_path).ok();
 
         let event = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match rx.recv().await {
-                    Some(Ok(event)) if event.paths.iter().any(|path| path == &file_path) => {
+                    Some(Ok(event))
+                        if event.paths.iter().any(|path| {
+                            path == &file_path
+                                || std::fs::canonicalize(path).ok().as_ref()
+                                    == canonical_file_path.as_ref()
+                                || path.file_name() == file_path.file_name()
+                        }) =>
+                    {
                         break event;
                     }
                     Some(Ok(_)) => continue,

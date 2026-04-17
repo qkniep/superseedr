@@ -8,11 +8,20 @@ pub enum TrackerError {
     #[error("Request failed networking with tracker.")]
     Request(#[from] reqwest::Error),
 
+    #[error("Tracker I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error("Failed to parse bencoded tracker response")]
     Bencode(#[from] serde_bencode::Error),
 
     #[error("Tracker returned a failure reason: {0}")]
     Tracker(String),
+
+    #[error("Invalid tracker URL: {0}")]
+    InvalidUrl(String),
+
+    #[error("Tracker protocol error: {0}")]
+    Protocol(String),
 }
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]

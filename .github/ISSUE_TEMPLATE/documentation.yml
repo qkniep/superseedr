@@ -16,9 +16,9 @@ body:
       options:
         - README.md
         - CONTRIBUTING.md
-        - FAQ.md
-        - ROADMAP.md
-        - CHANGELOG.md
+        - docs/FAQ.md
+        - docs/ROADMAP.md
+        - docs/CHANGELOG.md
         - Code comments / rustdoc
         - Docker setup guides (.env examples)
         - GitHub wiki

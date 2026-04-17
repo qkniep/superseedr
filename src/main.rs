@@ -101,18 +101,28 @@ enum OutputMode {
 fn init_tracing(
     log_dirs: Vec<PathBuf>,
     filename_prefix: &str,
+    emit_stderr: bool,
 ) -> Vec<tracing_appender::non_blocking::WorkerGuard> {
     let quiet_filter = Targets::new()
         .with_default(DEFAULT_LOG_FILTER)
         .with_target("mainline::rpc::socket", LevelFilter::ERROR);
+    let stderr_fallback_filter = Targets::new()
+        .with_default(LevelFilter::WARN)
+        .with_target("mainline::rpc::socket", LevelFilter::ERROR);
+    let mut suppressed_failures = Vec::new();
 
     for log_dir in log_dirs {
         if let Err(error) = fs::create_dir_all(&log_dir) {
-            eprintln!(
-                "[Warn] Failed to create log directory at {}: {}",
+            let message = format!(
+                "Failed to create log directory at {}: {}",
                 log_dir.display(),
                 error
             );
+            if emit_stderr {
+                eprintln!("[Warn] {}", message);
+            } else {
+                suppressed_failures.push(message);
+            }
         } else {
             match RollingFileAppender::builder()
                 .rotation(Rotation::DAILY)
@@ -134,24 +144,67 @@ fn init_tracing(
                         .is_ok()
                     {
                         return vec![guard_general];
+                    } else {
+                        let message = format!(
+                            "Failed to initialize tracing subscriber for file logging at {}",
+                            log_dir.display()
+                        );
+                        if emit_stderr {
+                            eprintln!("[Warn] {}", message);
+                        } else {
+                            suppressed_failures.push(message);
+                        }
                     }
                 }
                 Err(error) => {
-                    eprintln!(
-                        "[Warn] Failed to initialize file logging at {}: {}",
+                    let message = format!(
+                        "Failed to initialize file logging at {}: {}",
                         log_dir.display(),
                         error
                     );
+                    if emit_stderr {
+                        eprintln!("[Warn] {}", message);
+                    } else {
+                        suppressed_failures.push(message);
+                    }
                 }
             }
         }
     }
 
+    if !emit_stderr && !suppressed_failures.is_empty() {
+        eprintln!(
+            "[Warn] File logging unavailable; falling back to stderr logging. {}",
+            suppressed_failures[0]
+        );
+        if suppressed_failures.len() > 1 {
+            eprintln!(
+                "[Warn] {} additional logging setup failure(s) were suppressed.",
+                suppressed_failures.len() - 1
+            );
+        }
+    }
+
+    let fallback_layer = if emit_stderr {
+        fmt::layer().with_filter(quiet_filter).boxed()
+    } else {
+        fmt::layer().with_filter(stderr_fallback_filter).boxed()
+    };
     let _ = tracing_subscriber::registry()
-        .with(fmt::layer().with_filter(quiet_filter))
+        .with(fallback_layer)
         .try_init();
 
     Vec::new()
+}
+
+fn already_running_message() -> &'static str {
+    "superseedr is already running."
+}
+
+fn private_client_leak_guard_message(config_path: &str) -> String {
+    format!(
+        "\n!!!ERROR: POTENTIAL LEAK!!!\n---------------------------------\nYou are running the normal build of superseedr (with DHT/PEX enabled),\nbut your configuration file indicates you last used a private build.\n\nThis safety check prevents accidental use of forbidden features on private trackers.\n\nChoose an option:\n  1. If you want to use the PRIVATE build (for private trackers):\n     Install and run it:\n       cargo install superseedr --no-default-features\n       superseedr\n\n  2. If you want to switch back to the NORMAL build (for public trackers):\n     Manually edit your configuration file:\n       {config_path}\n     Change the line `private_client = true` to `private_client = false`\n     Then, run this normal build again.\n\nExiting to prevent potential tracker issues."
+    )
 }
 
 #[tokio::main]
@@ -192,7 +245,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         dirs
     };
-    let _tracing_guards = init_tracing(log_dirs, if has_cli_request { "cli" } else { "app" });
+    let _tracing_guards = init_tracing(
+        log_dirs,
+        if has_cli_request { "cli" } else { "app" },
+        has_cli_request,
+    );
 
     tracing::info!("STARTING SUPERSEEDR");
 
@@ -262,7 +319,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if lock_file_handle.is_some() {
         AppRuntimeMode::Normal
     } else {
-        println!("superseedr is already running.");
+        let message = already_running_message();
+        println!("{message}");
+        tracing::info!("{message}");
         return Ok(());
     };
 
@@ -272,31 +331,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(all(feature = "dht", feature = "pex"))]
     {
         if client_configs.private_client {
-            eprintln!("\n!!!ERROR: POTENTIAL LEAK!!!");
-            eprintln!("---------------------------------");
-            eprintln!("You are running the normal build of superseedr (with DHT/PEX enabled),");
-            eprintln!("but your configuration file indicates you last used a private build.");
-            eprintln!("\nThis safety check prevents accidental use of forbidden features on private trackers.");
-
             let config_path_str = config::shared_settings_path()
                 .or_else(config::local_settings_path)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unable to determine config path.".to_string());
+            let message = private_client_leak_guard_message(&config_path_str);
 
-            eprintln!("\nChoose an option:");
-            eprintln!("  1. If you want to use the PRIVATE build (for private trackers):");
-            eprintln!("     Install and run it:");
-            eprintln!("       cargo install superseedr --no-default-features");
-            eprintln!("       superseedr");
-            eprintln!(
-                "\n  2. If you want to switch back to the NORMAL build (for public trackers):"
+            eprintln!("{message}");
+            tracing::error!(
+                config_path = %config_path_str,
+                "Potential leak guard triggered. You are running the normal build with DHT/PEX enabled, but your configuration indicates the private build was used previously. To continue safely, either install and run the private build with `cargo install superseedr --no-default-features`, or edit the configuration at {} and change `private_client = true` to `private_client = false`. Exiting to prevent potential tracker issues.",
+                config_path_str
             );
-            eprintln!("     Manually edit your configuration file:");
-            eprintln!("       {}", config_path_str);
-            eprintln!("     Change the line `private_client = true` to `private_client = false`");
-            eprintln!("     Then, run this normal build again.");
-
-            eprintln!("\nExiting to prevent potential tracker issues.");
             std::process::exit(1);
         }
     }
@@ -1513,6 +1559,21 @@ mod tests {
             settings.torrents[0].torrent_control_state,
             app::TorrentControlState::Paused
         );
+    }
+
+    #[test]
+    fn already_running_message_matches_terminal_text() {
+        assert_eq!(already_running_message(), "superseedr is already running.");
+    }
+
+    #[test]
+    fn private_client_leak_guard_message_includes_recovery_steps() {
+        let message = private_client_leak_guard_message("/tmp/config.toml");
+
+        assert!(message.contains("!!!ERROR: POTENTIAL LEAK!!!"));
+        assert!(message.contains("cargo install superseedr --no-default-features"));
+        assert!(message.contains("/tmp/config.toml"));
+        assert!(message.contains("private_client = true"));
     }
 
     #[test]

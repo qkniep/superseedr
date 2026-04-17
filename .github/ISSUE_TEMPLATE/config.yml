@@ -7,8 +7,8 @@ contact_links:
     url: https://github.com/Jagalite/superseedr#readme
     about: Read the project documentation and setup guides
   - name: ❓ FAQ
-    url: https://github.com/Jagalite/superseedr/blob/main/FAQ.md
+    url: https://github.com/Jagalite/superseedr/blob/main/docs/FAQ.md
     about: Check frequently asked questions
   - name: 🗺️ Roadmap
-    url: https://github.com/Jagalite/superseedr/blob/main/ROADMAP.md
+    url: https://github.com/Jagalite/superseedr/blob/main/docs/ROADMAP.md
     about: See planned features and project direction

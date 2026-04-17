@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::fmt;
+use std::net::SocketAddr;
 
 use crate::torrent_file::Torrent;
 
@@ -40,7 +41,7 @@ pub enum TorrentCommand {
     Disconnect(String),
 
     #[cfg(feature = "pex")]
-    AddPexPeers(String, Vec<(String, u16)>),
+    AddPexPeers(String, Vec<SocketAddr>),
 
     #[cfg(feature = "pex")]
     SendPexPeers(Vec<String>),
