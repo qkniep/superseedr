@@ -6110,12 +6110,15 @@ impl App {
                 self.startup_deferred_load_queue.pop_front();
                 loaded_count = loaded_count.saturating_add(1);
             } else {
+                if let Some(failed_info_hash) = self.startup_deferred_load_queue.pop_front() {
+                    self.startup_deferred_load_queue.push_back(failed_info_hash);
+                }
                 tracing_event!(
                     Level::WARN,
                     info_hash = %hex::encode(&info_hash),
-                    "Deferred startup torrent restore failed; keeping it queued"
+                    "Deferred startup torrent restore failed; moving it to the back of the queue"
                 );
-                break;
+                continue;
             }
         }
 
@@ -7528,6 +7531,77 @@ mod tests {
             payload.settings.torrents[0].torrent_or_magnet,
             missing_torrent_path
         );
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn load_next_startup_batch_rotates_failed_deferred_torrent_behind_later_entries() {
+        let failed_info_hash_hex = "1".repeat(40);
+        let failed_torrent = TorrentSettings {
+            torrent_or_magnet: format!("/tmp/{}.torrent", failed_info_hash_hex),
+            name: "missing-startup".to_string(),
+            torrent_control_state: TorrentControlState::Running,
+            ..Default::default()
+        };
+        let deferred_running_torrent = TorrentSettings {
+            torrent_or_magnet: format!("magnet:?xt=urn:btih:{}", "2".repeat(40)),
+            name: "later-startup".to_string(),
+            torrent_control_state: TorrentControlState::Running,
+            ..Default::default()
+        };
+        let failed_info_hash = info_hash_from_torrent_source(&failed_torrent.torrent_or_magnet)
+            .expect("derive failed info hash");
+        let deferred_running_hash =
+            info_hash_from_torrent_source(&deferred_running_torrent.torrent_or_magnet)
+                .expect("derive deferred running hash");
+
+        let mut app = App::new(
+            crate::config::Settings {
+                client_port: 0,
+                ..Default::default()
+            },
+            AppRuntimeMode::Normal,
+        )
+        .await
+        .expect("build app");
+        app.client_configs.torrents = vec![failed_torrent.clone(), deferred_running_torrent];
+        app.startup_deferred_load_queue =
+            VecDeque::from([failed_info_hash.clone(), deferred_running_hash.clone()]);
+
+        app.load_next_startup_batch().await;
+        assert_eq!(
+            app.startup_deferred_load_queue,
+            VecDeque::from([deferred_running_hash.clone(), failed_info_hash.clone()])
+        );
+        assert!(app.app_state.torrents.is_empty());
+
+        app.load_next_startup_batch().await;
+
+        assert_eq!(app.app_state.torrents.len(), 1);
+        assert_eq!(
+            app.startup_deferred_load_queue,
+            VecDeque::from([failed_info_hash.clone()])
+        );
+
+        let payload = build_persist_payload(
+            &mut app.client_configs,
+            &mut app.app_state,
+            &app.startup_deferred_load_queue,
+        );
+        assert_eq!(payload.settings.torrents.len(), 2);
+        assert!(payload
+            .settings
+            .torrents
+            .iter()
+            .any(|torrent| torrent.torrent_or_magnet == failed_torrent.torrent_or_magnet));
+        assert!(payload.settings.torrents.iter().any(|torrent| {
+            torrent
+                .torrent_or_magnet
+                .starts_with("magnet:?xt=urn:btih:")
+                && info_hash_from_torrent_source(&torrent.torrent_or_magnet).as_deref()
+                    == Some(deferred_running_hash.as_slice())
+        }));
 
         let _ = app.shutdown_tx.send(());
     }
