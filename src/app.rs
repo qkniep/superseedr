@@ -3200,14 +3200,17 @@ impl App {
         self.dispatch_integrity_probe_batches();
     }
 
-    async fn load_runtime_torrent_from_settings(&mut self, torrent_config: TorrentSettings) {
+    async fn load_runtime_torrent_from_settings(
+        &mut self,
+        torrent_config: TorrentSettings,
+    ) -> bool {
         if !should_load_persisted_torrent(&torrent_config) {
             tracing_event!(
                 Level::WARN,
                 torrent = %torrent_config.torrent_or_magnet,
                 "Skipping persisted torrent left in transient Deleting state during startup or convergence"
             );
-            return;
+            return false;
         }
 
         tracing_event!(
@@ -3227,10 +3230,10 @@ impl App {
 
         if self.should_suppress_follower_runtime_for_torrent(&torrent_config) {
             self.ensure_display_only_torrent_from_settings(&torrent_config);
-            return;
+            return true;
         }
 
-        if torrent_config.torrent_or_magnet.starts_with("magnet:") {
+        let ingest_result = if torrent_config.torrent_or_magnet.starts_with("magnet:") {
             self.add_magnet_torrent(
                 torrent_config.name.clone(),
                 torrent_config.torrent_or_magnet.clone(),
@@ -3240,7 +3243,7 @@ impl App {
                 torrent_config.file_priorities,
                 torrent_config.container_name,
             )
-            .await;
+            .await
         } else {
             self.add_torrent_from_file(
                 PathBuf::from(&torrent_config.torrent_or_magnet),
@@ -3250,8 +3253,13 @@ impl App {
                 torrent_config.file_priorities.clone(),
                 torrent_config.container_name,
             )
-            .await;
-        }
+            .await
+        };
+
+        matches!(
+            ingest_result,
+            CommandIngestResult::Added { .. } | CommandIngestResult::Duplicate { .. }
+        )
     }
 
     async fn sync_runtime_torrents_from_settings(
@@ -6066,11 +6074,12 @@ impl App {
         let mut loaded_count = 0usize;
 
         for _ in 0..STARTUP_ROLLING_LOADS_PER_INTERVAL {
-            let Some(info_hash) = self.startup_deferred_load_queue.pop_front() else {
+            let Some(info_hash) = self.startup_deferred_load_queue.front().cloned() else {
                 break;
             };
 
             if self.has_live_runtime_for_torrent(&info_hash) {
+                self.startup_deferred_load_queue.pop_front();
                 continue;
             }
 
@@ -6089,16 +6098,29 @@ impl App {
                     info_hash = %hex::encode(&info_hash),
                     "Skipping deferred startup torrent because it is no longer configured"
                 );
+                self.startup_deferred_load_queue.pop_front();
                 continue;
             };
 
             if !should_load_persisted_torrent(&torrent_config) {
+                self.startup_deferred_load_queue.pop_front();
                 continue;
             }
 
-            self.load_runtime_torrent_from_settings(torrent_config)
-                .await;
-            loaded_count = loaded_count.saturating_add(1);
+            if self
+                .load_runtime_torrent_from_settings(torrent_config)
+                .await
+            {
+                self.startup_deferred_load_queue.pop_front();
+                loaded_count = loaded_count.saturating_add(1);
+            } else {
+                tracing_event!(
+                    Level::WARN,
+                    info_hash = %hex::encode(&info_hash),
+                    "Deferred startup torrent restore failed; keeping it queued"
+                );
+                break;
+            }
         }
 
         self.reschedule_startup_load_deadline();
@@ -7463,6 +7485,51 @@ mod tests {
         assert_eq!(app.app_state.torrents.len(), 1);
         assert_eq!(app.startup_deferred_load_queue.len(), 5);
         assert!(app.next_startup_load_at.is_some());
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn load_next_startup_batch_keeps_failed_deferred_torrent_queued() {
+        let info_hash_hex = "1".repeat(40);
+        let missing_torrent_path = format!("/tmp/{}.torrent", info_hash_hex);
+        let torrent = TorrentSettings {
+            torrent_or_magnet: missing_torrent_path.clone(),
+            name: "missing-startup".to_string(),
+            torrent_control_state: TorrentControlState::Running,
+            ..Default::default()
+        };
+
+        let mut app = App::new(
+            crate::config::Settings {
+                client_port: 0,
+                ..Default::default()
+            },
+            AppRuntimeMode::Normal,
+        )
+        .await
+        .expect("build app");
+        app.client_configs.torrents = vec![torrent.clone()];
+        app.startup_deferred_load_queue =
+            VecDeque::from([info_hash_from_torrent_source(&torrent.torrent_or_magnet)
+                .expect("derive info hash from path")]);
+
+        app.load_next_startup_batch().await;
+
+        assert!(app.app_state.torrents.is_empty());
+        assert_eq!(app.startup_deferred_load_queue.len(), 1);
+        assert!(app.next_startup_load_at.is_some());
+
+        let payload = build_persist_payload(
+            &mut app.client_configs,
+            &mut app.app_state,
+            &app.startup_deferred_load_queue,
+        );
+        assert_eq!(payload.settings.torrents.len(), 1);
+        assert_eq!(
+            payload.settings.torrents[0].torrent_or_magnet,
+            missing_torrent_path
+        );
 
         let _ = app.shutdown_tx.send(());
     }
