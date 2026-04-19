@@ -705,6 +705,7 @@ fn map_key_to_ui_action(key: KeyEvent) -> Option<UiAction> {
         | KeyCode::Char('j')
         | KeyCode::Left
         | KeyCode::Char('h')
+        | KeyCode::Char('l')
         | KeyCode::Right => Some(UiAction::Navigate(key.code)),
         _ => None,
     }
@@ -6338,6 +6339,14 @@ mod tests {
         assert_eq!(
             map_key_to_ui_action(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
             Some(UiAction::ToggleTorrentFiles)
+        );
+    }
+
+    #[test]
+    fn keymap_includes_vim_right_navigation() {
+        assert_eq!(
+            map_key_to_ui_action(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+            Some(UiAction::Navigate(KeyCode::Char('l')))
         );
     }
 
