@@ -3111,6 +3111,7 @@ impl App {
             .iter()
             .filter(|(info_hash, display)| {
                 display.latest_state.torrent_control_state == TorrentControlState::Running
+                    && display.latest_state.number_of_pieces_total > 0
                     && self.torrent_manager_command_txs.contains_key(*info_hash)
             })
             .map(|(info_hash, _)| info_hash.clone())
@@ -3129,6 +3130,14 @@ impl App {
 
         let dht_handle = self.dht_service.handle();
         for info_hash in info_hashes {
+            let should_announce = self
+                .app_state
+                .torrents
+                .get(&info_hash)
+                .is_some_and(|display| display.latest_state.number_of_pieces_total > 0);
+            if !should_announce {
+                continue;
+            }
             let dht_handle = dht_handle.clone();
             tokio::spawn(async move {
                 let _ = dht_handle.announce_peer(info_hash, Some(port)).await;
@@ -7205,12 +7214,13 @@ mod tests {
     #[tokio::test]
     async fn mark_port_open_announces_running_torrents_once_per_family_transition() {
         let settings = crate::config::Settings {
-            client_port: 6681,
+            client_port: 0,
             ..Default::default()
         };
         let mut app = App::new(settings, AppRuntimeMode::Normal)
             .await
             .expect("create app");
+        app.client_configs.client_port = 6681;
         let recorder = TestDhtRecorder::default();
         app.dht_service = DhtService::from_test_recorder(recorder.clone());
         app.dht_status_rx = app.dht_service.subscribe_status();
@@ -7228,6 +7238,7 @@ mod tests {
         running_display.latest_state.info_hash = running_hash.clone();
         running_display.latest_state.torrent_name = "announce running torrent".to_string();
         running_display.latest_state.torrent_control_state = TorrentControlState::Running;
+        running_display.latest_state.number_of_pieces_total = 1;
         app.app_state
             .torrents
             .insert(running_hash.clone(), running_display);

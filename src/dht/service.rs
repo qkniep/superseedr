@@ -487,7 +487,6 @@ impl DhtHandle {
         match &self.inner {
             DhtHandleInner::Service { .. } => {
                 let handle = self.clone();
-                let mut status_rx = self.status_rx().clone();
                 Some(tokio::spawn(async move {
                     loop {
                         let mut peers_rx = match handle.start_lookup_receiver(info_hash).await {
@@ -508,11 +507,6 @@ impl DhtHandle {
 
                         tokio::select! {
                             _ = shutdown_rx.recv() => break,
-                            changed = status_rx.changed() => {
-                                if changed.is_err() {
-                                    break;
-                                }
-                            }
                             changed = dht_trigger_rx.changed() => {
                                 if changed.is_err() {
                                     break;
@@ -690,6 +684,7 @@ async fn run_service(
 
         let event = if let Some(active) = active_runtime.as_mut() {
             tokio::select! {
+                biased;
                 _ = shutdown_rx.recv() => LoopEvent::Shutdown,
                 maybe_command = command_rx.recv() => maybe_command.map_or(LoopEvent::CommandClosed, LoopEvent::Command),
                 _ = maintenance_interval.tick() => LoopEvent::MaintenanceTick,

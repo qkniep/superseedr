@@ -513,7 +513,7 @@ impl Runtime {
         self.cleanup_closed_lookups();
 
         let mut processed_lookup_results = 0usize;
-        while processed_lookup_results < 64 {
+        while processed_lookup_results < 4 {
             match self.lookup_result_rx.try_recv() {
                 Ok(result) => {
                     self.handle_lookup_result(result).await?;
