@@ -1668,12 +1668,7 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                     let state = &torrent.latest_state;
                     let is_selected = i == app_state.ui.selected_torrent_index;
                     let row_color = torrent_list_row_color(torrent, ctx);
-                    let awaiting_metadata = torrent_list_is_awaiting_metadata(torrent);
-                    let mut row_base_style = Style::default().fg(row_color);
-                    if awaiting_metadata {
-                        row_base_style = row_base_style.add_modifier(Modifier::DIM);
-                    }
-                    let mut row_style = ctx.apply(row_base_style);
+                    let mut row_style = ctx.apply(Style::default().fg(row_color));
                     row_style = ctx.apply(row_style);
 
                     if is_selected {
@@ -1691,7 +1686,7 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                                 ColumnId::Status => {
                                     let display_pct = torrent_completion_percent(state);
                                     Cell::from(format!("{:.1}%", display_pct))
-                                        .style(ctx.apply(row_base_style))
+                                        .style(ctx.apply(Style::default().fg(row_color)))
                                 }
                                 ColumnId::Name => {
                                     let name = if app_state.anonymize_torrent_names {
@@ -1701,13 +1696,7 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                                     };
                                     let mut c = Cell::from(name);
                                     if is_selected {
-                                        let mut selected_style =
-                                            Style::default().fg(ctx.state_warning());
-                                        if awaiting_metadata {
-                                            selected_style =
-                                                selected_style.add_modifier(Modifier::DIM);
-                                        }
-                                        let s = ctx.apply(selected_style);
+                                        let s = ctx.apply(Style::default().fg(ctx.state_warning()));
                                         c = c.style(s);
                                     }
                                     c
@@ -1716,7 +1705,7 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                                     let style = if state.data_available {
                                         speed_to_style(ctx, torrent.smoothed_download_speed_bps)
                                     } else {
-                                        row_base_style
+                                        Style::default().fg(row_color)
                                     };
                                     Cell::from(format_speed(torrent.smoothed_download_speed_bps))
                                         .style(ctx.apply(style))
@@ -1725,7 +1714,7 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                                     let style = if state.data_available {
                                         speed_to_style(ctx, torrent.smoothed_upload_speed_bps)
                                     } else {
-                                        row_base_style
+                                        Style::default().fg(row_color)
                                     };
                                     Cell::from(format_speed(torrent.smoothed_upload_speed_bps))
                                         .style(ctx.apply(style))
@@ -2124,15 +2113,9 @@ pub fn draw_details_panel(
     }
 }
 
-fn torrent_list_is_awaiting_metadata(torrent: &TorrentDisplayState) -> bool {
-    torrent.latest_state.number_of_pieces_total == 0 && !torrent.latest_state.is_complete
-}
-
 fn torrent_list_row_color(torrent: &TorrentDisplayState, ctx: &ThemeContext) -> Color {
     if !torrent.latest_state.data_available {
         ctx.state_error()
-    } else if torrent_list_is_awaiting_metadata(torrent) {
-        ctx.state_warning()
     } else {
         match torrent.latest_state.torrent_control_state {
             TorrentControlState::Running => ctx.theme.semantic.text,
@@ -6927,7 +6910,6 @@ mod tests {
         let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
         let mut torrent = create_mock_display_state(0);
 
-        torrent.latest_state.number_of_pieces_total = 10;
         assert_eq!(
             torrent_list_row_color(&torrent, &ctx),
             ctx.theme.semantic.text
@@ -6935,21 +6917,6 @@ mod tests {
 
         torrent.latest_state.data_available = false;
         assert_eq!(torrent_list_row_color(&torrent, &ctx), ctx.state_error());
-    }
-
-    #[test]
-    fn torrent_list_metadata_rows_use_warning_color_and_dim_style() {
-        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
-        let torrent = create_mock_display_state(0);
-
-        assert!(torrent_list_is_awaiting_metadata(&torrent));
-        assert_eq!(torrent_list_row_color(&torrent, &ctx), ctx.state_warning());
-
-        let mut style = Style::default().fg(torrent_list_row_color(&torrent, &ctx));
-        if torrent_list_is_awaiting_metadata(&torrent) {
-            style = style.add_modifier(Modifier::DIM);
-        }
-        assert!(style.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
