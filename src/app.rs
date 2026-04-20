@@ -1409,18 +1409,28 @@ struct DhtWaveTargets {
     bootstrap_ratio: f64,
 }
 
+fn dht_wave_query_yield_ratio(telemetry: &DhtWaveTelemetry) -> f64 {
+    let total_queries = (telemetry.inflight_ipv4_queries + telemetry.inflight_ipv6_queries) as f64;
+    let unique_peers_found_last_10s = telemetry.unique_peers_found_last_10s as f64;
+
+    if total_queries <= 0.0 {
+        0.0
+    } else if unique_peers_found_last_10s <= 0.0 {
+        (total_queries / 16.0).clamp(0.0, 1.0)
+    } else {
+        (total_queries / unique_peers_found_last_10s).clamp(0.0, 1.0)
+    }
+}
+
 fn dht_wave_targets(status: &DhtStatus, telemetry: &DhtWaveTelemetry) -> DhtWaveTargets {
     let health = &status.health;
     let routes = (health.cached_ipv4_routes + health.cached_ipv6_routes) as f64;
-    let lookups = telemetry.active_lookups as f64;
-    let queries = (telemetry.inflight_ipv4_queries + telemetry.inflight_ipv6_queries) as f64;
     let bootstrap_total = (health.ipv4_bootstrap_nodes + health.ipv6_bootstrap_nodes) as f64;
     let responsive_total =
         (health.responsive_ipv4_bootstrap_nodes + health.responsive_ipv6_bootstrap_nodes) as f64;
 
     let route_energy = (routes / 2_048.0).clamp(0.0, 1.0);
-    let lookup_energy = (lookups / 8.0).clamp(0.0, 1.0);
-    let query_energy = (queries / 32.0).clamp(0.0, 1.0);
+    let ratio_signal = (dht_wave_query_yield_ratio(telemetry) / 0.02).clamp(0.0, 1.0);
     let bootstrap_ratio = if bootstrap_total > 0.0 {
         (responsive_total / bootstrap_total).clamp(0.0, 1.0)
     } else if health.enabled {
@@ -1435,9 +1445,7 @@ fn dht_wave_targets(status: &DhtStatus, telemetry: &DhtWaveTelemetry) -> DhtWave
         None => 0.88,
     };
     let warning_boost = f64::from(status.warning.is_some() || health.recovery_pending);
-    let activity_energy = lookup_energy
-        .max(query_energy)
-        .max((warning_boost * 0.7).clamp(0.0, 1.0));
+    let activity_energy = ratio_signal.max((warning_boost * 0.55).clamp(0.0, 1.0));
 
     let amplitude = ((0.01 + activity_energy * (0.16 + route_energy * 0.20))
         * firewalled_factor
@@ -1446,18 +1454,17 @@ fn dht_wave_targets(status: &DhtStatus, telemetry: &DhtWaveTelemetry) -> DhtWave
     let harmonic_amplitude = ((0.004
         + activity_energy
             * (0.03
-                + query_energy * 0.10
+                + ratio_signal * 0.10
                 + (1.0 - bootstrap_ratio) * 0.04
                 + warning_boost * 0.04))
         * enabled_factor)
         .clamp(0.0, 0.20);
     let frequency = (0.08
         + activity_energy
-            * (0.08 + query_energy * 0.12 + (1.0 - bootstrap_ratio) * 0.04 + warning_boost * 0.03))
+            * (0.08 + ratio_signal * 0.12 + (1.0 - bootstrap_ratio) * 0.04 + warning_boost * 0.03))
         .clamp(0.06, 0.38);
     let phase_speed = ((0.03
-        + activity_energy
-            * (0.45 + query_energy * 1.0 + lookup_energy * 0.7 + warning_boost * 0.35))
+        + activity_energy * (0.45 + ratio_signal * 1.4 + warning_boost * 0.35))
         * enabled_factor)
         .clamp(0.0, 2.0);
     let crest_bias = match health.firewalled {

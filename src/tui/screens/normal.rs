@@ -758,18 +758,15 @@ struct DhtWaveProfile {
 }
 
 impl DhtWaveProfile {
-    fn from_status(status: &DhtStatus) -> Self {
+    fn from_inputs(status: &DhtStatus, telemetry: &DhtWaveTelemetry) -> Self {
         let health = &status.health;
         let routes = (health.cached_ipv4_routes + health.cached_ipv6_routes) as f64;
-        let lookups = health.inflight_lookups as f64;
-        let queries = (health.inflight_ipv4_queries + health.inflight_ipv6_queries) as f64;
         let bootstrap_total = (health.ipv4_bootstrap_nodes + health.ipv6_bootstrap_nodes) as f64;
         let responsive_total = (health.responsive_ipv4_bootstrap_nodes
             + health.responsive_ipv6_bootstrap_nodes) as f64;
 
         let route_energy = (routes / 2_048.0).clamp(0.0, 1.0);
-        let lookup_energy = (lookups / 8.0).clamp(0.0, 1.0);
-        let query_energy = (queries / 32.0).clamp(0.0, 1.0);
+        let ratio_signal = dht_wave_query_yield_signal(telemetry);
         let bootstrap_ratio = if bootstrap_total > 0.0 {
             (responsive_total / bootstrap_total).clamp(0.0, 1.0)
         } else if health.enabled {
@@ -784,9 +781,7 @@ impl DhtWaveProfile {
             None => 0.88,
         };
         let warning_boost = f64::from(status.warning.is_some() || health.recovery_pending);
-        let activity_energy = lookup_energy
-            .max(query_energy)
-            .max((warning_boost * 0.7).clamp(0.0, 1.0));
+        let activity_energy = ratio_signal.max((warning_boost * 0.55).clamp(0.0, 1.0));
 
         let amplitude = ((0.01 + activity_energy * (0.16 + route_energy * 0.20))
             * firewalled_factor
@@ -795,7 +790,7 @@ impl DhtWaveProfile {
         let harmonic_amplitude = ((0.004
             + activity_energy
                 * (0.03
-                    + query_energy * 0.10
+                    + ratio_signal * 0.10
                     + (1.0 - bootstrap_ratio) * 0.04
                     + warning_boost * 0.04))
             * enabled_factor)
@@ -803,13 +798,12 @@ impl DhtWaveProfile {
         let frequency = (0.08
             + activity_energy
                 * (0.08
-                    + query_energy * 0.12
+                    + ratio_signal * 0.12
                     + (1.0 - bootstrap_ratio) * 0.04
                     + warning_boost * 0.03))
             .clamp(0.06, 0.38);
         let phase_speed = ((0.03
-            + activity_energy
-                * (0.45 + query_energy * 1.0 + lookup_energy * 0.7 + warning_boost * 0.35))
+            + activity_energy * (0.45 + ratio_signal * 1.4 + warning_boost * 0.35))
             * enabled_factor)
             .clamp(0.0, 2.0);
         let crest_bias = match health.firewalled {
@@ -827,6 +821,21 @@ impl DhtWaveProfile {
             bootstrap_ratio,
         }
     }
+}
+
+fn dht_wave_query_yield_signal(telemetry: &DhtWaveTelemetry) -> f64 {
+    let total_queries = (telemetry.inflight_ipv4_queries + telemetry.inflight_ipv6_queries) as f64;
+    let unique_peers_found_last_10s = telemetry.unique_peers_found_last_10s as f64;
+
+    let ratio = if total_queries <= 0.0 {
+        0.0
+    } else if unique_peers_found_last_10s <= 0.0 {
+        (total_queries / 16.0).clamp(0.0, 1.0)
+    } else {
+        (total_queries / unique_peers_found_last_10s).clamp(0.0, 1.0)
+    };
+
+    (ratio / 0.02).clamp(0.0, 1.0)
 }
 
 fn dht_backend_label(backend: DhtBackendKind) -> &'static str {
@@ -864,7 +873,7 @@ fn draw_dht_wave_panel(
             bootstrap_ratio: app_state.ui.dht_wave.bootstrap_ratio,
         }
     } else {
-        DhtWaveProfile::from_status(&dht_status)
+        DhtWaveProfile::from_inputs(&dht_status, dht_wave_telemetry)
     };
     let total_routes = health.cached_ipv4_routes + health.cached_ipv6_routes;
     let total_bootstrap = health.ipv4_bootstrap_nodes + health.ipv6_bootstrap_nodes;
@@ -872,7 +881,12 @@ fn draw_dht_wave_panel(
         health.responsive_ipv4_bootstrap_nodes + health.responsive_ipv6_bootstrap_nodes;
     let total_queries =
         dht_wave_telemetry.inflight_ipv4_queries + dht_wave_telemetry.inflight_ipv6_queries;
-    let unique_peers_found_last_30s = dht_wave_telemetry.unique_peers_found_last_30s;
+    let unique_peers_found_last_10s = dht_wave_telemetry.unique_peers_found_last_10s;
+    let ratio = if total_queries == 0 {
+        0.0
+    } else {
+        total_queries as f64 / unique_peers_found_last_10s.max(1) as f64
+    };
     let x_bound = area.width.saturating_sub(3).max(1) as usize;
     let phase = if app_state.ui.dht_wave.initialized {
         app_state.ui.dht_wave.phase
@@ -911,16 +925,17 @@ fn draw_dht_wave_panel(
         should_use_compact_dht_wave_legend(area.width.saturating_sub(2) as usize, total_routes);
     let legend_text = if compact_legend {
         format!(
-            "q:{} u:{} d:{}",
-            total_queries, unique_peers_found_last_30s, discovered_count
+            "q:{} u10:{} r:{:.3}",
+            total_queries, unique_peers_found_last_10s, ratio
         )
     } else {
         format!(
-            "{} routes:{} q:{} u30:{} boot:{}/{} d:{}{}",
+            "{} routes:{} q:{} u10:{} r:{:.3} boot:{}/{} d:{}{}",
             dht_backend_label(health.backend),
             total_routes,
             total_queries,
-            unique_peers_found_last_30s,
+            unique_peers_found_last_10s,
+            ratio,
             responsive_bootstrap,
             total_bootstrap,
             discovered_count,
@@ -6963,23 +6978,31 @@ mod tests {
     }
 
     #[test]
-    fn dht_wave_profile_responds_to_routes_and_query_pressure() {
+    fn dht_wave_profile_responds_to_query_to_yield_ratio() {
         let mut quiet = DhtStatus::default();
         quiet.health.enabled = true;
         quiet.health.backend = DhtBackendKind::InternalPrototype;
         quiet.health.ipv4_bootstrap_nodes = 3;
         quiet.health.responsive_ipv4_bootstrap_nodes = 1;
+        let quiet_telemetry = DhtWaveTelemetry {
+            inflight_ipv4_queries: 4,
+            unique_peers_found_last_10s: 2_000,
+            ..Default::default()
+        };
 
         let mut busy = quiet.clone();
         busy.health.cached_ipv4_routes = 1_200;
         busy.health.cached_ipv6_routes = 220;
-        busy.health.inflight_lookups = 5;
-        busy.health.inflight_ipv4_queries = 14;
-        busy.health.inflight_ipv6_queries = 6;
         busy.health.responsive_ipv4_bootstrap_nodes = 3;
+        let busy_telemetry = DhtWaveTelemetry {
+            inflight_ipv4_queries: 14,
+            inflight_ipv6_queries: 6,
+            unique_peers_found_last_10s: 120,
+            ..Default::default()
+        };
 
-        let quiet_profile = DhtWaveProfile::from_status(&quiet);
-        let busy_profile = DhtWaveProfile::from_status(&busy);
+        let quiet_profile = DhtWaveProfile::from_inputs(&quiet, &quiet_telemetry);
+        let busy_profile = DhtWaveProfile::from_inputs(&busy, &busy_telemetry);
 
         assert!(busy_profile.amplitude > quiet_profile.amplitude);
         assert!(busy_profile.phase_speed > quiet_profile.phase_speed);
@@ -6992,19 +7015,23 @@ mod tests {
         healthy.health.enabled = true;
         healthy.health.backend = DhtBackendKind::InternalPrototype;
         healthy.health.cached_ipv4_routes = 900;
-        healthy.health.inflight_lookups = 4;
-        healthy.health.inflight_ipv4_queries = 12;
         healthy.health.ipv4_bootstrap_nodes = 3;
         healthy.health.responsive_ipv4_bootstrap_nodes = 3;
         healthy.health.firewalled = Some(false);
+        let healthy_telemetry = DhtWaveTelemetry {
+            inflight_ipv4_queries: 12,
+            unique_peers_found_last_10s: 180,
+            ..Default::default()
+        };
 
         let mut constrained = healthy.clone();
         constrained.health.enabled = false;
         constrained.health.backend = DhtBackendKind::Disabled;
         constrained.health.firewalled = Some(true);
+        let constrained_telemetry = healthy_telemetry.clone();
 
-        let healthy_profile = DhtWaveProfile::from_status(&healthy);
-        let constrained_profile = DhtWaveProfile::from_status(&constrained);
+        let healthy_profile = DhtWaveProfile::from_inputs(&healthy, &healthy_telemetry);
+        let constrained_profile = DhtWaveProfile::from_inputs(&constrained, &constrained_telemetry);
 
         assert!(healthy_profile.amplitude > constrained_profile.amplitude);
         assert!(healthy_profile.crest_bias > constrained_profile.crest_bias);
@@ -7019,14 +7046,18 @@ mod tests {
         route_warm.health.cached_ipv6_routes = 260;
         route_warm.health.ipv4_bootstrap_nodes = 3;
         route_warm.health.responsive_ipv4_bootstrap_nodes = 3;
+        let route_warm_telemetry = DhtWaveTelemetry::default();
 
-        let mut active = route_warm.clone();
-        active.health.inflight_lookups = 4;
-        active.health.inflight_ipv4_queries = 10;
-        active.health.inflight_ipv6_queries = 4;
+        let active = route_warm.clone();
+        let active_telemetry = DhtWaveTelemetry {
+            inflight_ipv4_queries: 10,
+            inflight_ipv6_queries: 4,
+            unique_peers_found_last_10s: 120,
+            ..Default::default()
+        };
 
-        let route_warm_profile = DhtWaveProfile::from_status(&route_warm);
-        let active_profile = DhtWaveProfile::from_status(&active);
+        let route_warm_profile = DhtWaveProfile::from_inputs(&route_warm, &route_warm_telemetry);
+        let active_profile = DhtWaveProfile::from_inputs(&active, &active_telemetry);
 
         assert!(route_warm_profile.amplitude < 0.03);
         assert!(route_warm_profile.phase_speed < 0.08);

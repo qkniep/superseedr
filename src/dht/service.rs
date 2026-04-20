@@ -35,7 +35,7 @@ const DHT_PERSISTENCE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const DHT_STARTUP_BOOTSTRAP_DELAY: Duration = Duration::from_secs(5);
 const DHT_IPV6_HEDGE_DELAY: Duration = Duration::from_millis(750);
 const DHT_LOOKUP_BOOTSTRAP_WAIT: Duration = Duration::from_secs(2);
-const DHT_UNIQUE_PEERS_FOUND_WINDOW: Duration = Duration::from_secs(30);
+const DHT_UNIQUE_PEERS_FOUND_WINDOW: Duration = Duration::from_secs(10);
 const DHT_PARKED_CRAWL_MAX_AGE: Duration = Duration::from_secs(5 * 60);
 const DHT_AWAITING_METADATA_SLICE_WALL_TIME: Duration = Duration::from_secs(6);
 const DHT_AWAITING_METADATA_SLICE_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -143,7 +143,7 @@ pub struct DhtWaveTelemetry {
     pub active_user_lookups: usize,
     pub inflight_ipv4_queries: usize,
     pub inflight_ipv6_queries: usize,
-    pub unique_peers_found_last_30s: usize,
+    pub unique_peers_found_last_10s: usize,
 }
 
 #[derive(Debug)]
@@ -254,8 +254,22 @@ impl DemandCrawlState {
         now.saturating_duration_since(self.updated_at) >= DHT_PARKED_CRAWL_MAX_AGE
     }
 
+    fn reset_reason_for(
+        &self,
+        class: DemandSliceClass,
+        now: Instant,
+    ) -> Option<DemandCrawlResetReason> {
+        if self.class != class {
+            Some(DemandCrawlResetReason::ClassChanged)
+        } else if self.is_stale(now) {
+            Some(DemandCrawlResetReason::Stale)
+        } else {
+            None
+        }
+    }
+
     fn should_reset_for(&self, class: DemandSliceClass, now: Instant) -> bool {
-        self.class != class || self.is_stale(now)
+        self.reset_reason_for(class, now).is_some()
     }
 
     fn reset_for(&mut self, class: DemandSliceClass, now: Instant) {
@@ -283,6 +297,164 @@ impl DemandSliceClass {
         } else {
             Self::RoutineRefresh
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DemandSliceStopReason {
+    NaturalFinish,
+    WallTime,
+    IdleTimeout,
+    FirstBatch,
+    UniquePeerCap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DemandCrawlResetReason {
+    Stale,
+    ClassChanged,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DemandSliceClassMetrics {
+    fresh_starts: u64,
+    resumed_starts: u64,
+    natural_finishes: u64,
+    wall_time_stops: u64,
+    idle_timeout_stops: u64,
+    first_batch_stops: u64,
+    unique_peer_cap_stops: u64,
+    peers_yielded: u64,
+    unique_peers_yielded: u64,
+    stale_resets: u64,
+    class_change_resets: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DemandSliceMetrics {
+    awaiting_metadata: DemandSliceClassMetrics,
+    no_connected_peers: DemandSliceClassMetrics,
+    routine_refresh: DemandSliceClassMetrics,
+}
+
+impl DemandSliceMetrics {
+    fn class_mut(&mut self, class: DemandSliceClass) -> &mut DemandSliceClassMetrics {
+        match class {
+            DemandSliceClass::AwaitingMetadata => &mut self.awaiting_metadata,
+            DemandSliceClass::NoConnectedPeers => &mut self.no_connected_peers,
+            DemandSliceClass::RoutineRefresh => &mut self.routine_refresh,
+        }
+    }
+
+    fn class_ref(&self, class: DemandSliceClass) -> &DemandSliceClassMetrics {
+        match class {
+            DemandSliceClass::AwaitingMetadata => &self.awaiting_metadata,
+            DemandSliceClass::NoConnectedPeers => &self.no_connected_peers,
+            DemandSliceClass::RoutineRefresh => &self.routine_refresh,
+        }
+    }
+
+    fn record_start(&mut self, class: DemandSliceClass, resumed: bool) {
+        let metrics = self.class_mut(class);
+        if resumed {
+            metrics.resumed_starts = metrics.resumed_starts.saturating_add(1);
+        } else {
+            metrics.fresh_starts = metrics.fresh_starts.saturating_add(1);
+        }
+    }
+
+    fn record_stop(
+        &mut self,
+        class: DemandSliceClass,
+        reason: DemandSliceStopReason,
+        total_peers: usize,
+        unique_peers: usize,
+    ) {
+        let metrics = self.class_mut(class);
+        match reason {
+            DemandSliceStopReason::NaturalFinish => {
+                metrics.natural_finishes = metrics.natural_finishes.saturating_add(1)
+            }
+            DemandSliceStopReason::WallTime => {
+                metrics.wall_time_stops = metrics.wall_time_stops.saturating_add(1)
+            }
+            DemandSliceStopReason::IdleTimeout => {
+                metrics.idle_timeout_stops = metrics.idle_timeout_stops.saturating_add(1)
+            }
+            DemandSliceStopReason::FirstBatch => {
+                metrics.first_batch_stops = metrics.first_batch_stops.saturating_add(1)
+            }
+            DemandSliceStopReason::UniquePeerCap => {
+                metrics.unique_peer_cap_stops = metrics.unique_peer_cap_stops.saturating_add(1)
+            }
+        }
+        metrics.peers_yielded = metrics.peers_yielded.saturating_add(total_peers as u64);
+        metrics.unique_peers_yielded = metrics
+            .unique_peers_yielded
+            .saturating_add(unique_peers as u64);
+    }
+
+    fn record_reset(&mut self, class: DemandSliceClass, reason: DemandCrawlResetReason) {
+        let metrics = self.class_mut(class);
+        match reason {
+            DemandCrawlResetReason::Stale => {
+                metrics.stale_resets = metrics.stale_resets.saturating_add(1)
+            }
+            DemandCrawlResetReason::ClassChanged => {
+                metrics.class_change_resets = metrics.class_change_resets.saturating_add(1)
+            }
+        }
+    }
+
+    fn has_activity(&self) -> bool {
+        for class in [
+            DemandSliceClass::AwaitingMetadata,
+            DemandSliceClass::NoConnectedPeers,
+            DemandSliceClass::RoutineRefresh,
+        ] {
+            let metrics = self.class_ref(class);
+            if metrics.fresh_starts > 0
+                || metrics.resumed_starts > 0
+                || metrics.natural_finishes > 0
+                || metrics.wall_time_stops > 0
+                || metrics.idle_timeout_stops > 0
+                || metrics.first_batch_stops > 0
+                || metrics.unique_peer_cap_stops > 0
+                || metrics.peers_yielded > 0
+                || metrics.unique_peers_yielded > 0
+                || metrics.stale_resets > 0
+                || metrics.class_change_resets > 0
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn summary(&self) -> String {
+        fn fmt(label: &str, metrics: &DemandSliceClassMetrics) -> String {
+            format!(
+                "{label}(fresh={} resumed={} natural={} wall={} idle={} first={} cap={} peers={} unique={} reset_stale={} reset_class={})",
+                metrics.fresh_starts,
+                metrics.resumed_starts,
+                metrics.natural_finishes,
+                metrics.wall_time_stops,
+                metrics.idle_timeout_stops,
+                metrics.first_batch_stops,
+                metrics.unique_peer_cap_stops,
+                metrics.peers_yielded,
+                metrics.unique_peers_yielded,
+                metrics.stale_resets,
+                metrics.class_change_resets,
+            )
+        }
+
+        [
+            fmt("awaiting", &self.awaiting_metadata),
+            fmt("no_peers", &self.no_connected_peers),
+            fmt("routine", &self.routine_refresh),
+        ]
+        .join(" ")
     }
 }
 
@@ -465,6 +637,9 @@ enum DhtCommand {
     },
     DemandLookupFinished {
         info_hash: InfoHash,
+        slice_class: DemandSliceClass,
+        total_peers: usize,
+        unique_peers: usize,
     },
     StartGetPeers {
         info_hash: InfoHash,
@@ -474,6 +649,7 @@ enum DhtCommand {
         info_hash: InfoHash,
         family: AddressFamily,
         slice_class: DemandSliceClass,
+        record_metrics: bool,
         merged_tx: mpsc::UnboundedSender<Vec<SocketAddr>>,
         lookup_ids: Arc<StdMutex<Vec<LookupId>>>,
         first_batch_seen: Arc<AtomicBool>,
@@ -484,6 +660,9 @@ enum DhtCommand {
     ParkDemandLookups {
         info_hash: InfoHash,
         slice_class: DemandSliceClass,
+        stop_reason: DemandSliceStopReason,
+        total_peers: usize,
+        unique_peers: usize,
         lookup_ids: Arc<StdMutex<Vec<LookupId>>>,
     },
     AnnouncePeer {
@@ -980,6 +1159,7 @@ async fn run_service(
     mut command_rx: mpsc::UnboundedReceiver<DhtCommand>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
+    let slice_metrics_log_enabled = env::var_os("SUPERSEEDR_DHT_SLICE_LOG").is_some();
     let mut demand_tick = tokio::time::interval(DHT_DEMAND_SCHEDULER_INTERVAL);
     demand_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut maintenance_interval = tokio::time::interval(DHT_MAINTENANCE_INTERVAL);
@@ -997,6 +1177,7 @@ async fn run_service(
     > = HashMap::new();
     let mut demand_lookup_ids: HashMap<InfoHash, Arc<StdMutex<Vec<LookupId>>>> = HashMap::new();
     let mut parked_crawls: HashMap<InfoHash, DemandCrawlState> = HashMap::new();
+    let mut slice_metrics = DemandSliceMetrics::default();
     let mut recent_unique_peers = RecentUniquePeers::new(DHT_UNIQUE_PEERS_FOUND_WINDOW);
     let mut next_subscriber_id = 1u64;
 
@@ -1074,6 +1255,7 @@ async fn run_service(
                     &mut demand_scheduler,
                     &mut demand_lookup_ids,
                     &mut parked_crawls,
+                    &mut slice_metrics,
                 )
                 .await;
             }
@@ -1097,6 +1279,7 @@ async fn run_service(
                     &mut demand_scheduler,
                     &mut demand_lookup_ids,
                     &mut parked_crawls,
+                    &mut slice_metrics,
                 )
                 .await;
             }
@@ -1108,6 +1291,7 @@ async fn run_service(
                     &mut demand_scheduler,
                     &mut demand_lookup_ids,
                     &mut parked_crawls,
+                    &mut slice_metrics,
                 )
                 .await;
             }
@@ -1173,8 +1357,19 @@ async fn run_service(
                     }
                 }
             }
-            LoopEvent::Command(DhtCommand::DemandLookupFinished { info_hash }) => {
+            LoopEvent::Command(DhtCommand::DemandLookupFinished {
+                info_hash,
+                slice_class,
+                total_peers,
+                unique_peers,
+            }) => {
                 demand_lookup_ids.remove(&info_hash);
+                slice_metrics.record_stop(
+                    slice_class,
+                    DemandSliceStopReason::NaturalFinish,
+                    total_peers,
+                    unique_peers,
+                );
                 demand_scheduler.finish(info_hash, Instant::now());
                 start_due_demands(
                     active_runtime.as_mut(),
@@ -1182,6 +1377,7 @@ async fn run_service(
                     &mut demand_scheduler,
                     &mut demand_lookup_ids,
                     &mut parked_crawls,
+                    &mut slice_metrics,
                 )
                 .await;
             }
@@ -1193,8 +1389,10 @@ async fn run_service(
                     active_runtime.as_mut(),
                     &command_tx,
                     &mut parked_crawls,
+                    None,
                     info_hash,
                     DemandSliceClass::RoutineRefresh,
+                    false,
                 )
                 .await;
                 let _ = response_tx.send(result);
@@ -1203,6 +1401,7 @@ async fn run_service(
                 info_hash,
                 family,
                 slice_class,
+                record_metrics,
                 merged_tx,
                 lookup_ids,
                 first_batch_seen,
@@ -1210,6 +1409,11 @@ async fn run_service(
                 let _ = attach_lookup_family(
                     active_runtime.as_mut(),
                     &mut parked_crawls,
+                    if record_metrics {
+                        Some(&mut slice_metrics)
+                    } else {
+                        None
+                    },
                     info_hash,
                     family,
                     slice_class,
@@ -1229,9 +1433,13 @@ async fn run_service(
             LoopEvent::Command(DhtCommand::ParkDemandLookups {
                 info_hash,
                 slice_class,
+                stop_reason,
+                total_peers,
+                unique_peers,
                 lookup_ids,
             }) => {
                 demand_lookup_ids.remove(&info_hash);
+                slice_metrics.record_stop(slice_class, stop_reason, total_peers, unique_peers);
                 park_lookup_ids(
                     active_runtime.as_mut(),
                     &mut parked_crawls,
@@ -1246,6 +1454,7 @@ async fn run_service(
                     &mut demand_scheduler,
                     &mut demand_lookup_ids,
                     &mut parked_crawls,
+                    &mut slice_metrics,
                 )
                 .await;
             }
@@ -1264,6 +1473,7 @@ async fn run_service(
                     &mut demand_scheduler,
                     &mut demand_lookup_ids,
                     &mut parked_crawls,
+                    &mut slice_metrics,
                 )
                 .await;
             }
@@ -1294,6 +1504,13 @@ async fn run_service(
                 if let Some(active) = active_runtime.as_ref() {
                     let _ = active.runtime.save_state().await;
                 }
+                if slice_metrics_log_enabled && slice_metrics.has_activity() {
+                    tracing::info!(
+                        target: "superseedr::dht_slice",
+                        summary = %slice_metrics.summary(),
+                        "DHT slice metrics"
+                    );
+                }
             }
             LoopEvent::RuntimeStep(Ok(_)) => {}
             LoopEvent::RuntimeStep(Err(error)) => {
@@ -1320,8 +1537,10 @@ async fn start_get_peers_lookup(
     active_runtime: Option<&mut ActiveRuntime>,
     command_tx: &mpsc::UnboundedSender<DhtCommand>,
     parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
+    slice_metrics: Option<&mut DemandSliceMetrics>,
     info_hash: InfoHash,
     slice_class: DemandSliceClass,
+    record_metrics: bool,
 ) -> Result<StartedLookup, String> {
     let Some(active_runtime) = active_runtime else {
         return Ok(StartedLookup {
@@ -1348,6 +1567,7 @@ async fn start_get_peers_lookup(
         attach_lookup_family(
             Some(active_runtime),
             parked_crawls,
+            slice_metrics,
             info_hash,
             family,
             slice_class,
@@ -1374,6 +1594,7 @@ async fn start_get_peers_lookup(
                 info_hash,
                 family: AddressFamily::Ipv6,
                 slice_class,
+                record_metrics,
                 merged_tx,
                 lookup_ids,
                 first_batch_seen,
@@ -1402,14 +1623,19 @@ async fn start_get_peers_lookup(
 
 fn take_parked_family_state(
     parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
+    slice_metrics: Option<&mut DemandSliceMetrics>,
     info_hash: InfoHash,
     family: AddressFamily,
     slice_class: DemandSliceClass,
 ) -> Option<LookupState> {
     let now = Instant::now();
+    let mut slice_metrics = slice_metrics;
     let mut remove_entry = false;
     let state = parked_crawls.get_mut(&info_hash).and_then(|crawl| {
-        if crawl.should_reset_for(slice_class, now) {
+        if let Some(reason) = crawl.reset_reason_for(slice_class, now) {
+            if let Some(metrics) = slice_metrics.as_mut() {
+                metrics.record_reset(crawl.class, reason);
+            }
             crawl.reset_for(slice_class, now);
             remove_entry = true;
             None
@@ -1489,6 +1715,7 @@ async fn start_due_demands(
     demand_scheduler: &mut DemandScheduler,
     demand_lookup_ids: &mut HashMap<InfoHash, Arc<StdMutex<Vec<LookupId>>>>,
     parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
+    slice_metrics: &mut DemandSliceMetrics,
 ) {
     let Some(active_runtime) = active_runtime else {
         return;
@@ -1504,8 +1731,10 @@ async fn start_due_demands(
             Some(active_runtime),
             command_tx,
             parked_crawls,
+            Some(slice_metrics),
             info_hash,
             plan.class,
+            true,
         )
         .await
         {
@@ -1519,22 +1748,24 @@ async fn start_due_demands(
                     let overall_sleep = tokio::time::sleep(plan.max_wall_time);
                     tokio::pin!(overall_sleep);
                     let mut unique_peers = HashSet::new();
-                    let mut should_park = false;
+                    let mut total_peers = 0usize;
+                    let mut stop_reason = None;
 
                     loop {
                         tokio::select! {
                             _ = &mut overall_sleep => {
-                                should_park = true;
+                                stop_reason = Some(DemandSliceStopReason::WallTime);
                                 break;
                             }
                             _ = &mut idle_sleep => {
-                                should_park = true;
+                                stop_reason = Some(DemandSliceStopReason::IdleTimeout);
                                 break;
                             }
                             maybe_peers = receiver.recv() => {
                                 let Some(peers) = maybe_peers else {
                                     break;
                                 };
+                                total_peers = total_peers.saturating_add(peers.len());
                                 let _ = command_tx.send(DhtCommand::DemandPeers {
                                     info_hash,
                                     peers: peers.clone(),
@@ -1542,10 +1773,12 @@ async fn start_due_demands(
                                 for peer in peers {
                                     unique_peers.insert(peer);
                                 }
-                                if plan.stop_after_first_batch
-                                    || unique_peers.len() >= plan.unique_peer_cap
-                                {
-                                    should_park = true;
+                                if plan.stop_after_first_batch {
+                                    stop_reason = Some(DemandSliceStopReason::FirstBatch);
+                                    break;
+                                }
+                                if unique_peers.len() >= plan.unique_peer_cap {
+                                    stop_reason = Some(DemandSliceStopReason::UniquePeerCap);
                                     break;
                                 }
                                 idle_sleep
@@ -1555,14 +1788,22 @@ async fn start_due_demands(
                         }
                     }
 
-                    if should_park {
+                    if let Some(reason) = stop_reason {
                         let _ = command_tx.send(DhtCommand::ParkDemandLookups {
                             info_hash,
                             slice_class: plan.class,
+                            stop_reason: reason,
+                            total_peers,
+                            unique_peers: unique_peers.len(),
                             lookup_ids,
                         });
                     } else {
-                        let _ = command_tx.send(DhtCommand::DemandLookupFinished { info_hash });
+                        let _ = command_tx.send(DhtCommand::DemandLookupFinished {
+                            info_hash,
+                            slice_class: plan.class,
+                            total_peers,
+                            unique_peers: unique_peers.len(),
+                        });
                     }
                 });
             }
@@ -1605,6 +1846,7 @@ async fn ensure_lookup_routes(
 async fn attach_lookup_family(
     active_runtime: Option<&mut ActiveRuntime>,
     parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
+    slice_metrics: Option<&mut DemandSliceMetrics>,
     info_hash: InfoHash,
     family: AddressFamily,
     slice_class: DemandSliceClass,
@@ -1619,7 +1861,15 @@ async fn attach_lookup_family(
         return Ok(());
     }
 
-    let resumed_state = take_parked_family_state(parked_crawls, info_hash, family, slice_class);
+    let mut slice_metrics = slice_metrics;
+    let resumed_state = take_parked_family_state(
+        parked_crawls,
+        slice_metrics.as_mut().map(|metrics| &mut **metrics),
+        info_hash,
+        family,
+        slice_class,
+    );
+    let resumed = resumed_state.is_some();
     let (lookup_id, mut family_rx) = match resumed_state {
         Some(state) => active_runtime
             .runtime
@@ -1632,6 +1882,9 @@ async fn attach_lookup_family(
             .await
             .map_err(|error| error.to_string())?,
     };
+    if let Some(metrics) = slice_metrics {
+        metrics.record_start(slice_class, resumed);
+    }
     lookup_ids
         .lock()
         .expect("managed dht lookup ids lock")
@@ -1817,11 +2070,11 @@ fn publish_status(
 
 fn build_wave_telemetry(
     active_runtime: Option<&ActiveRuntime>,
-    unique_peers_found_last_30s: usize,
+    unique_peers_found_last_10s: usize,
 ) -> DhtWaveTelemetry {
     let Some(active_runtime) = active_runtime else {
         return DhtWaveTelemetry {
-            unique_peers_found_last_30s,
+            unique_peers_found_last_10s,
             ..DhtWaveTelemetry::default()
         };
     };
@@ -1834,7 +2087,7 @@ fn build_wave_telemetry(
         active_user_lookups: active_runtime.runtime.active_user_lookup_count(),
         inflight_ipv4_queries,
         inflight_ipv6_queries,
-        unique_peers_found_last_30s,
+        unique_peers_found_last_10s,
     }
 }
 
@@ -2102,18 +2355,27 @@ mod tests {
         let now = Instant::now();
         let mut crawl = DemandCrawlState::new(now, DemandSliceClass::RoutineRefresh);
 
-        assert!(!crawl.should_reset_for(
-            DemandSliceClass::RoutineRefresh,
-            now + Duration::from_secs(1)
-        ));
-        assert!(crawl.should_reset_for(
-            DemandSliceClass::NoConnectedPeers,
-            now + Duration::from_secs(1)
-        ));
-        assert!(crawl.should_reset_for(
-            DemandSliceClass::RoutineRefresh,
-            now + DHT_PARKED_CRAWL_MAX_AGE
-        ));
+        assert_eq!(
+            crawl.reset_reason_for(
+                DemandSliceClass::RoutineRefresh,
+                now + Duration::from_secs(1)
+            ),
+            None
+        );
+        assert_eq!(
+            crawl.reset_reason_for(
+                DemandSliceClass::NoConnectedPeers,
+                now + Duration::from_secs(1)
+            ),
+            Some(DemandCrawlResetReason::ClassChanged)
+        );
+        assert_eq!(
+            crawl.reset_reason_for(
+                DemandSliceClass::RoutineRefresh,
+                now + DHT_PARKED_CRAWL_MAX_AGE
+            ),
+            Some(DemandCrawlResetReason::Stale)
+        );
 
         crawl.reset_for(
             DemandSliceClass::AwaitingMetadata,
@@ -2122,5 +2384,44 @@ mod tests {
         assert_eq!(crawl.class, DemandSliceClass::AwaitingMetadata);
         assert_eq!(crawl.reset_count, 1);
         assert!(crawl.is_empty());
+    }
+
+    #[test]
+    fn demand_slice_metrics_record_starts_stops_and_resets() {
+        let mut metrics = DemandSliceMetrics::default();
+
+        metrics.record_start(DemandSliceClass::AwaitingMetadata, false);
+        metrics.record_start(DemandSliceClass::AwaitingMetadata, true);
+        metrics.record_stop(
+            DemandSliceClass::AwaitingMetadata,
+            DemandSliceStopReason::WallTime,
+            12,
+            7,
+        );
+        metrics.record_stop(
+            DemandSliceClass::NoConnectedPeers,
+            DemandSliceStopReason::NaturalFinish,
+            4,
+            3,
+        );
+        metrics.record_reset(
+            DemandSliceClass::RoutineRefresh,
+            DemandCrawlResetReason::ClassChanged,
+        );
+        metrics.record_reset(
+            DemandSliceClass::RoutineRefresh,
+            DemandCrawlResetReason::Stale,
+        );
+
+        assert!(metrics.has_activity());
+        assert_eq!(metrics.awaiting_metadata.fresh_starts, 1);
+        assert_eq!(metrics.awaiting_metadata.resumed_starts, 1);
+        assert_eq!(metrics.awaiting_metadata.wall_time_stops, 1);
+        assert_eq!(metrics.awaiting_metadata.peers_yielded, 12);
+        assert_eq!(metrics.awaiting_metadata.unique_peers_yielded, 7);
+        assert_eq!(metrics.no_connected_peers.natural_finishes, 1);
+        assert_eq!(metrics.routine_refresh.class_change_resets, 1);
+        assert_eq!(metrics.routine_refresh.stale_resets, 1);
+        assert!(metrics.summary().contains("awaiting("));
     }
 }
