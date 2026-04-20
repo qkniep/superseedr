@@ -425,6 +425,36 @@ impl Runtime {
         Ok((lookup_id, peer_rx))
     }
 
+    pub async fn start_lookup_with_state(
+        &mut self,
+        mut state: LookupState,
+    ) -> io::Result<(LookupId, mpsc::UnboundedReceiver<Vec<SocketAddr>>)> {
+        self.cleanup_closed_lookups();
+
+        let family = state.family();
+        if self.transport_for(family).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "transport not bound for requested family",
+            ));
+        }
+
+        let lookup_id = LookupId(self.next_lookup_id);
+        self.next_lookup_id = self.next_lookup_id.saturating_add(1);
+        state.resume(lookup_id, Instant::now());
+        let (peer_tx, peer_rx) = mpsc::unbounded_channel();
+        self.active_lookups.insert(
+            lookup_id,
+            ActiveLookup {
+                family,
+                state,
+                peer_tx,
+            },
+        );
+        self.pump_lookup(lookup_id).await?;
+        Ok((lookup_id, peer_rx))
+    }
+
     pub async fn start_get_peers(
         &mut self,
         family: AddressFamily,
@@ -436,6 +466,24 @@ impl Runtime {
             LookupTarget::InfoHash(info_hash),
         )
         .await
+    }
+
+    pub async fn start_get_peers_with_state(
+        &mut self,
+        state: LookupState,
+    ) -> io::Result<(LookupId, mpsc::UnboundedReceiver<Vec<SocketAddr>>)> {
+        let request = state.request();
+        match request {
+            LookupRequest {
+                kind: LookupKind::GetPeers,
+                target: LookupTarget::InfoHash(_),
+                ..
+            } => self.start_lookup_with_state(state).await,
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "lookup state is not a get_peers traversal",
+            )),
+        }
     }
 
     pub async fn start_find_node(
@@ -1051,8 +1099,12 @@ impl Runtime {
     }
 
     pub fn cancel_lookup(&mut self, lookup_id: LookupId) -> bool {
+        self.cancel_lookup_and_take_state(lookup_id).is_some()
+    }
+
+    pub fn cancel_lookup_and_take_state(&mut self, lookup_id: LookupId) -> Option<LookupState> {
         let Some(active) = self.active_lookups.remove(&lookup_id) else {
-            return false;
+            return None;
         };
         self.maintenance_lookup_receivers.remove(&lookup_id);
         self.cache_lookup_responders(active.family, &active.state);
@@ -1063,7 +1115,9 @@ impl Runtime {
             }
         }
 
-        true
+        let mut state = active.state;
+        state.park();
+        Some(state)
     }
 
     pub fn cancel_maintenance_lookups(&mut self) {

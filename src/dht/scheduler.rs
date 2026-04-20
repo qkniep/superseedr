@@ -148,6 +148,10 @@ impl DemandScheduler {
         Self::apply_demand_update(entry, demand, now);
     }
 
+    pub(super) fn demand_state(&self, info_hash: InfoHash) -> Option<DhtDemandState> {
+        self.entries.get(&info_hash).map(|entry| entry.demand)
+    }
+
     pub(super) fn take_due(&mut self, now: Instant, limit: usize) -> Vec<InfoHash> {
         let mut due = self
             .entries

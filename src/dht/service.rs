@@ -5,7 +5,7 @@ use super::persist::{PersistenceConfig, PersistenceManager};
 use super::scheduler::DemandScheduler;
 pub use super::scheduler::DhtDemandState;
 use super::types::{AddressFamily, InfoHash, LookupId, NodeId};
-use super::{Runtime, RuntimeConfig};
+use super::{LookupState, Runtime, RuntimeConfig};
 use crate::config::{self, Settings};
 use rand::random;
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,16 @@ const DHT_STARTUP_BOOTSTRAP_DELAY: Duration = Duration::from_secs(5);
 const DHT_IPV6_HEDGE_DELAY: Duration = Duration::from_millis(750);
 const DHT_LOOKUP_BOOTSTRAP_WAIT: Duration = Duration::from_secs(2);
 const DHT_UNIQUE_PEERS_FOUND_WINDOW: Duration = Duration::from_secs(30);
+const DHT_PARKED_CRAWL_MAX_AGE: Duration = Duration::from_secs(5 * 60);
+const DHT_AWAITING_METADATA_SLICE_WALL_TIME: Duration = Duration::from_secs(6);
+const DHT_AWAITING_METADATA_SLICE_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+const DHT_NO_CONNECTED_PEERS_SLICE_WALL_TIME: Duration = Duration::from_secs(4);
+const DHT_NO_CONNECTED_PEERS_SLICE_IDLE_TIMEOUT: Duration = Duration::from_millis(1500);
+const DHT_ROUTINE_SLICE_WALL_TIME: Duration = Duration::from_secs(2);
+const DHT_ROUTINE_SLICE_IDLE_TIMEOUT: Duration = Duration::from_millis(750);
+const DHT_AWAITING_METADATA_SLICE_UNIQUE_PEER_CAP: usize = 128;
+const DHT_NO_CONNECTED_PEERS_SLICE_UNIQUE_PEER_CAP: usize = 48;
+const DHT_ROUTINE_SLICE_UNIQUE_PEER_CAP: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DhtBackendKind {
@@ -196,6 +206,123 @@ struct StartedLookup {
     receiver: mpsc::UnboundedReceiver<Vec<SocketAddr>>,
 }
 
+#[derive(Debug)]
+struct DemandCrawlState {
+    ipv4: Option<LookupState>,
+    ipv6: Option<LookupState>,
+    class: DemandSliceClass,
+    updated_at: Instant,
+    reset_count: u32,
+}
+
+impl DemandCrawlState {
+    fn new(now: Instant, class: DemandSliceClass) -> Self {
+        Self {
+            ipv4: None,
+            ipv6: None,
+            class,
+            updated_at: now,
+            reset_count: 0,
+        }
+    }
+
+    fn take_family_state(&mut self, family: AddressFamily) -> Option<LookupState> {
+        let state = match family {
+            AddressFamily::Ipv4 => self.ipv4.take(),
+            AddressFamily::Ipv6 => self.ipv6.take(),
+        };
+        if state.is_some() {
+            self.updated_at = Instant::now();
+        }
+        state
+    }
+
+    fn store_family_state(&mut self, class: DemandSliceClass, state: LookupState) {
+        match state.family() {
+            AddressFamily::Ipv4 => self.ipv4 = Some(state),
+            AddressFamily::Ipv6 => self.ipv6 = Some(state),
+        }
+        self.class = class;
+        self.updated_at = Instant::now();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ipv4.is_none() && self.ipv6.is_none()
+    }
+
+    fn is_stale(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.updated_at) >= DHT_PARKED_CRAWL_MAX_AGE
+    }
+
+    fn should_reset_for(&self, class: DemandSliceClass, now: Instant) -> bool {
+        self.class != class || self.is_stale(now)
+    }
+
+    fn reset_for(&mut self, class: DemandSliceClass, now: Instant) {
+        self.ipv4 = None;
+        self.ipv6 = None;
+        self.class = class;
+        self.updated_at = now;
+        self.reset_count = self.reset_count.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DemandSliceClass {
+    RoutineRefresh,
+    NoConnectedPeers,
+    AwaitingMetadata,
+}
+
+impl DemandSliceClass {
+    fn from_demand(demand: DhtDemandState) -> Self {
+        if demand.awaiting_metadata {
+            Self::AwaitingMetadata
+        } else if demand.connected_peers == 0 {
+            Self::NoConnectedPeers
+        } else {
+            Self::RoutineRefresh
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DemandLookupPlan {
+    class: DemandSliceClass,
+    idle_timeout: Duration,
+    max_wall_time: Duration,
+    stop_after_first_batch: bool,
+    unique_peer_cap: usize,
+}
+
+impl DemandLookupPlan {
+    fn for_demand(demand: DhtDemandState) -> Self {
+        match DemandSliceClass::from_demand(demand) {
+            DemandSliceClass::AwaitingMetadata => Self {
+                class: DemandSliceClass::AwaitingMetadata,
+                idle_timeout: DHT_AWAITING_METADATA_SLICE_IDLE_TIMEOUT,
+                max_wall_time: DHT_AWAITING_METADATA_SLICE_WALL_TIME,
+                stop_after_first_batch: false,
+                unique_peer_cap: DHT_AWAITING_METADATA_SLICE_UNIQUE_PEER_CAP,
+            },
+            DemandSliceClass::NoConnectedPeers => Self {
+                class: DemandSliceClass::NoConnectedPeers,
+                idle_timeout: DHT_NO_CONNECTED_PEERS_SLICE_IDLE_TIMEOUT,
+                max_wall_time: DHT_NO_CONNECTED_PEERS_SLICE_WALL_TIME,
+                stop_after_first_batch: false,
+                unique_peer_cap: DHT_NO_CONNECTED_PEERS_SLICE_UNIQUE_PEER_CAP,
+            },
+            DemandSliceClass::RoutineRefresh => Self {
+                class: DemandSliceClass::RoutineRefresh,
+                idle_timeout: DHT_ROUTINE_SLICE_IDLE_TIMEOUT,
+                max_wall_time: DHT_ROUTINE_SLICE_WALL_TIME,
+                stop_after_first_batch: true,
+                unique_peer_cap: DHT_ROUTINE_SLICE_UNIQUE_PEER_CAP,
+            },
+        }
+    }
+}
+
 struct LookupCancelGuard {
     command_tx: mpsc::UnboundedSender<DhtCommand>,
     lookup_ids: Arc<StdMutex<Vec<LookupId>>>,
@@ -346,12 +473,18 @@ enum DhtCommand {
     StartGetPeersFamily {
         info_hash: InfoHash,
         family: AddressFamily,
+        slice_class: DemandSliceClass,
         merged_tx: mpsc::UnboundedSender<Vec<SocketAddr>>,
         lookup_ids: Arc<StdMutex<Vec<LookupId>>>,
         first_batch_seen: Arc<AtomicBool>,
     },
     CancelLookups {
         lookup_ids: Vec<LookupId>,
+    },
+    ParkDemandLookups {
+        info_hash: InfoHash,
+        slice_class: DemandSliceClass,
+        lookup_ids: Arc<StdMutex<Vec<LookupId>>>,
     },
     AnnouncePeer {
         info_hash: InfoHash,
@@ -863,6 +996,7 @@ async fn run_service(
         HashMap<u64, mpsc::UnboundedSender<Vec<SocketAddr>>>,
     > = HashMap::new();
     let mut demand_lookup_ids: HashMap<InfoHash, Arc<StdMutex<Vec<LookupId>>>> = HashMap::new();
+    let mut parked_crawls: HashMap<InfoHash, DemandCrawlState> = HashMap::new();
     let mut recent_unique_peers = RecentUniquePeers::new(DHT_UNIQUE_PEERS_FOUND_WINDOW);
     let mut next_subscriber_id = 1u64;
 
@@ -926,6 +1060,7 @@ async fn run_service(
                 }
                 demand_scheduler.reset_active(Instant::now());
                 demand_lookup_ids.clear();
+                parked_crawls.clear();
                 publish_status(
                     &status_tx,
                     active_runtime.as_ref(),
@@ -938,6 +1073,7 @@ async fn run_service(
                     &command_tx,
                     &mut demand_scheduler,
                     &mut demand_lookup_ids,
+                    &mut parked_crawls,
                 )
                 .await;
             }
@@ -960,6 +1096,7 @@ async fn run_service(
                     &command_tx,
                     &mut demand_scheduler,
                     &mut demand_lookup_ids,
+                    &mut parked_crawls,
                 )
                 .await;
             }
@@ -970,6 +1107,7 @@ async fn run_service(
                     &command_tx,
                     &mut demand_scheduler,
                     &mut demand_lookup_ids,
+                    &mut parked_crawls,
                 )
                 .await;
             }
@@ -977,6 +1115,10 @@ async fn run_service(
                 info_hash,
                 subscriber_id,
             }) => {
+                let slice_class = demand_scheduler
+                    .demand_state(info_hash)
+                    .map(DemandSliceClass::from_demand)
+                    .unwrap_or(DemandSliceClass::RoutineRefresh);
                 let mut removed = false;
                 if let Some(subscribers) = demand_subscribers.get_mut(&info_hash) {
                     removed = subscribers.remove(&subscriber_id).is_some();
@@ -986,7 +1128,13 @@ async fn run_service(
                 }
                 if removed && demand_scheduler.unregister(info_hash) {
                     if let Some(lookup_ids) = demand_lookup_ids.remove(&info_hash) {
-                        cancel_lookup_ids(&command_tx, lookup_ids);
+                        park_lookup_ids(
+                            active_runtime.as_mut(),
+                            &mut parked_crawls,
+                            info_hash,
+                            slice_class,
+                            lookup_ids,
+                        );
                     }
                 }
             }
@@ -1000,6 +1148,10 @@ async fn run_service(
                 subscribers.retain(|_, subscriber_tx| subscriber_tx.send(peers.clone()).is_ok());
                 let removed = subscriber_count_before.saturating_sub(subscribers.len());
                 let mut drained = false;
+                let slice_class = demand_scheduler
+                    .demand_state(info_hash)
+                    .map(DemandSliceClass::from_demand)
+                    .unwrap_or(DemandSliceClass::RoutineRefresh);
                 for _ in 0..removed {
                     if demand_scheduler.unregister(info_hash) {
                         drained = true;
@@ -1010,7 +1162,13 @@ async fn run_service(
                     demand_subscribers.remove(&info_hash);
                     if drained {
                         if let Some(lookup_ids) = demand_lookup_ids.remove(&info_hash) {
-                            cancel_lookup_ids(&command_tx, lookup_ids);
+                            park_lookup_ids(
+                                active_runtime.as_mut(),
+                                &mut parked_crawls,
+                                info_hash,
+                                slice_class,
+                                lookup_ids,
+                            );
                         }
                     }
                 }
@@ -1023,6 +1181,7 @@ async fn run_service(
                     &command_tx,
                     &mut demand_scheduler,
                     &mut demand_lookup_ids,
+                    &mut parked_crawls,
                 )
                 .await;
             }
@@ -1030,21 +1189,30 @@ async fn run_service(
                 info_hash,
                 response_tx,
             }) => {
-                let result =
-                    start_get_peers_lookup(active_runtime.as_mut(), &command_tx, info_hash).await;
+                let result = start_get_peers_lookup(
+                    active_runtime.as_mut(),
+                    &command_tx,
+                    &mut parked_crawls,
+                    info_hash,
+                    DemandSliceClass::RoutineRefresh,
+                )
+                .await;
                 let _ = response_tx.send(result);
             }
             LoopEvent::Command(DhtCommand::StartGetPeersFamily {
                 info_hash,
                 family,
+                slice_class,
                 merged_tx,
                 lookup_ids,
                 first_batch_seen,
             }) => {
                 let _ = attach_lookup_family(
                     active_runtime.as_mut(),
+                    &mut parked_crawls,
                     info_hash,
                     family,
+                    slice_class,
                     merged_tx,
                     lookup_ids,
                     first_batch_seen,
@@ -1057,6 +1225,29 @@ async fn run_service(
                         active_runtime.runtime.cancel_lookup(lookup_id);
                     }
                 }
+            }
+            LoopEvent::Command(DhtCommand::ParkDemandLookups {
+                info_hash,
+                slice_class,
+                lookup_ids,
+            }) => {
+                demand_lookup_ids.remove(&info_hash);
+                park_lookup_ids(
+                    active_runtime.as_mut(),
+                    &mut parked_crawls,
+                    info_hash,
+                    slice_class,
+                    lookup_ids,
+                );
+                demand_scheduler.finish(info_hash, Instant::now());
+                start_due_demands(
+                    active_runtime.as_mut(),
+                    &command_tx,
+                    &mut demand_scheduler,
+                    &mut demand_lookup_ids,
+                    &mut parked_crawls,
+                )
+                .await;
             }
             LoopEvent::Command(DhtCommand::AnnouncePeer {
                 info_hash,
@@ -1072,6 +1263,7 @@ async fn run_service(
                     &command_tx,
                     &mut demand_scheduler,
                     &mut demand_lookup_ids,
+                    &mut parked_crawls,
                 )
                 .await;
             }
@@ -1127,7 +1319,9 @@ async fn run_service(
 async fn start_get_peers_lookup(
     active_runtime: Option<&mut ActiveRuntime>,
     command_tx: &mpsc::UnboundedSender<DhtCommand>,
+    parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
     info_hash: InfoHash,
+    slice_class: DemandSliceClass,
 ) -> Result<StartedLookup, String> {
     let Some(active_runtime) = active_runtime else {
         return Ok(StartedLookup {
@@ -1153,8 +1347,10 @@ async fn start_get_peers_lookup(
         active_runtime.runtime.cancel_maintenance_lookups();
         attach_lookup_family(
             Some(active_runtime),
+            parked_crawls,
             info_hash,
             family,
+            slice_class,
             merged_tx.clone(),
             lookup_ids.clone(),
             first_batch_seen.clone(),
@@ -1177,6 +1373,7 @@ async fn start_get_peers_lookup(
             let _ = command_tx.send(DhtCommand::StartGetPeersFamily {
                 info_hash,
                 family: AddressFamily::Ipv6,
+                slice_class,
                 merged_tx,
                 lookup_ids,
                 first_batch_seen,
@@ -1203,17 +1400,87 @@ async fn start_get_peers_lookup(
     })
 }
 
-fn cancel_lookup_ids(
-    command_tx: &mpsc::UnboundedSender<DhtCommand>,
-    lookup_ids: Arc<StdMutex<Vec<LookupId>>>,
+fn take_parked_family_state(
+    parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
+    info_hash: InfoHash,
+    family: AddressFamily,
+    slice_class: DemandSliceClass,
+) -> Option<LookupState> {
+    let now = Instant::now();
+    let mut remove_entry = false;
+    let state = parked_crawls.get_mut(&info_hash).and_then(|crawl| {
+        if crawl.should_reset_for(slice_class, now) {
+            crawl.reset_for(slice_class, now);
+            remove_entry = true;
+            None
+        } else {
+            let state = crawl.take_family_state(family);
+            remove_entry = crawl.is_empty();
+            state
+        }
+    });
+    if remove_entry {
+        parked_crawls.remove(&info_hash);
+    }
+    state
+}
+
+fn store_parked_lookup_states(
+    parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
+    info_hash: InfoHash,
+    slice_class: DemandSliceClass,
+    states: Vec<LookupState>,
 ) {
-    let mut lookup_ids = lookup_ids.lock().expect("managed dht lookup ids lock");
-    if lookup_ids.is_empty() {
+    if states.is_empty() {
         return;
     }
-    let _ = command_tx.send(DhtCommand::CancelLookups {
-        lookup_ids: std::mem::take(&mut *lookup_ids),
-    });
+
+    let now = Instant::now();
+    let crawl = parked_crawls
+        .entry(info_hash)
+        .or_insert_with(|| DemandCrawlState::new(now, slice_class));
+    for state in states {
+        crawl.store_family_state(slice_class, state);
+    }
+}
+
+fn park_lookup_ids(
+    active_runtime: Option<&mut ActiveRuntime>,
+    parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
+    info_hash: InfoHash,
+    slice_class: DemandSliceClass,
+    lookup_ids: Arc<StdMutex<Vec<LookupId>>>,
+) {
+    let lookup_ids = {
+        let mut lookup_ids = lookup_ids.lock().expect("managed dht lookup ids lock");
+        if lookup_ids.is_empty() {
+            return;
+        }
+        std::mem::take(&mut *lookup_ids)
+    };
+
+    let Some(active_runtime) = active_runtime else {
+        return;
+    };
+
+    let mut parked_states = Vec::new();
+    for lookup_id in lookup_ids {
+        if let Some(state) = active_runtime
+            .runtime
+            .cancel_lookup_and_take_state(lookup_id)
+        {
+            parked_states.push(state);
+        }
+    }
+
+    store_parked_lookup_states(parked_crawls, info_hash, slice_class, parked_states);
+}
+
+fn evict_stale_parked_crawls(
+    parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
+    now: Instant,
+) {
+    parked_crawls.retain(|_, crawl| !crawl.is_stale(now) && !crawl.is_empty());
 }
 
 async fn start_due_demands(
@@ -1221,23 +1488,82 @@ async fn start_due_demands(
     command_tx: &mpsc::UnboundedSender<DhtCommand>,
     demand_scheduler: &mut DemandScheduler,
     demand_lookup_ids: &mut HashMap<InfoHash, Arc<StdMutex<Vec<LookupId>>>>,
+    parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
 ) {
     let Some(active_runtime) = active_runtime else {
         return;
     };
 
+    evict_stale_parked_crawls(parked_crawls, Instant::now());
     let due = demand_scheduler.take_due(Instant::now(), DHT_DEMAND_LOOKUPS_PER_TICK);
     for info_hash in due {
-        match start_get_peers_lookup(Some(active_runtime), command_tx, info_hash).await {
+        let plan = DemandLookupPlan::for_demand(
+            demand_scheduler.demand_state(info_hash).unwrap_or_default(),
+        );
+        match start_get_peers_lookup(
+            Some(active_runtime),
+            command_tx,
+            parked_crawls,
+            info_hash,
+            plan.class,
+        )
+        .await
+        {
             Ok(started) => {
                 demand_lookup_ids.insert(info_hash, started.lookup_ids.clone());
                 let mut receiver = started.receiver;
                 let command_tx = command_tx.clone();
+                let lookup_ids = started.lookup_ids.clone();
                 tokio::spawn(async move {
-                    while let Some(peers) = receiver.recv().await {
-                        let _ = command_tx.send(DhtCommand::DemandPeers { info_hash, peers });
+                    let mut idle_sleep = Box::pin(tokio::time::sleep(plan.idle_timeout));
+                    let overall_sleep = tokio::time::sleep(plan.max_wall_time);
+                    tokio::pin!(overall_sleep);
+                    let mut unique_peers = HashSet::new();
+                    let mut should_park = false;
+
+                    loop {
+                        tokio::select! {
+                            _ = &mut overall_sleep => {
+                                should_park = true;
+                                break;
+                            }
+                            _ = &mut idle_sleep => {
+                                should_park = true;
+                                break;
+                            }
+                            maybe_peers = receiver.recv() => {
+                                let Some(peers) = maybe_peers else {
+                                    break;
+                                };
+                                let _ = command_tx.send(DhtCommand::DemandPeers {
+                                    info_hash,
+                                    peers: peers.clone(),
+                                });
+                                for peer in peers {
+                                    unique_peers.insert(peer);
+                                }
+                                if plan.stop_after_first_batch
+                                    || unique_peers.len() >= plan.unique_peer_cap
+                                {
+                                    should_park = true;
+                                    break;
+                                }
+                                idle_sleep
+                                    .as_mut()
+                                    .reset(tokio::time::Instant::now() + plan.idle_timeout);
+                            }
+                        }
                     }
-                    let _ = command_tx.send(DhtCommand::DemandLookupFinished { info_hash });
+
+                    if should_park {
+                        let _ = command_tx.send(DhtCommand::ParkDemandLookups {
+                            info_hash,
+                            slice_class: plan.class,
+                            lookup_ids,
+                        });
+                    } else {
+                        let _ = command_tx.send(DhtCommand::DemandLookupFinished { info_hash });
+                    }
                 });
             }
             Err(_) => {
@@ -1278,8 +1604,10 @@ async fn ensure_lookup_routes(
 
 async fn attach_lookup_family(
     active_runtime: Option<&mut ActiveRuntime>,
+    parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
     info_hash: InfoHash,
     family: AddressFamily,
+    slice_class: DemandSliceClass,
     merged_tx: mpsc::UnboundedSender<Vec<SocketAddr>>,
     lookup_ids: Arc<StdMutex<Vec<LookupId>>>,
     first_batch_seen: Arc<AtomicBool>,
@@ -1291,11 +1619,19 @@ async fn attach_lookup_family(
         return Ok(());
     }
 
-    let (lookup_id, mut family_rx) = active_runtime
-        .runtime
-        .start_get_peers(family, info_hash)
-        .await
-        .map_err(|error| error.to_string())?;
+    let resumed_state = take_parked_family_state(parked_crawls, info_hash, family, slice_class);
+    let (lookup_id, mut family_rx) = match resumed_state {
+        Some(state) => active_runtime
+            .runtime
+            .start_get_peers_with_state(state)
+            .await
+            .map_err(|error| error.to_string())?,
+        None => active_runtime
+            .runtime
+            .start_get_peers(family, info_hash)
+            .await
+            .map_err(|error| error.to_string())?,
+    };
     lookup_ids
         .lock()
         .expect("managed dht lookup ids lock")
@@ -1728,5 +2064,63 @@ mod tests {
 
         assert_eq!(recent.unique_count(start + Duration::from_secs(31)), 1);
         assert_eq!(recent.unique_count(start + Duration::from_secs(41)), 0);
+    }
+
+    #[test]
+    fn demand_lookup_plan_varies_by_demand_class() {
+        let metadata = DemandLookupPlan::for_demand(DhtDemandState {
+            awaiting_metadata: true,
+            connected_peers: 0,
+        });
+        let no_peers = DemandLookupPlan::for_demand(DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        });
+        let routine = DemandLookupPlan::for_demand(DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 3,
+        });
+
+        assert_eq!(
+            metadata.max_wall_time,
+            DHT_AWAITING_METADATA_SLICE_WALL_TIME
+        );
+        assert_eq!(
+            no_peers.max_wall_time,
+            DHT_NO_CONNECTED_PEERS_SLICE_WALL_TIME
+        );
+        assert_eq!(routine.max_wall_time, DHT_ROUTINE_SLICE_WALL_TIME);
+        assert!(!metadata.stop_after_first_batch);
+        assert!(!no_peers.stop_after_first_batch);
+        assert!(routine.stop_after_first_batch);
+        assert!(metadata.unique_peer_cap > no_peers.unique_peer_cap);
+        assert!(no_peers.unique_peer_cap > routine.unique_peer_cap);
+    }
+
+    #[test]
+    fn demand_crawl_state_resets_on_class_change_or_staleness() {
+        let now = Instant::now();
+        let mut crawl = DemandCrawlState::new(now, DemandSliceClass::RoutineRefresh);
+
+        assert!(!crawl.should_reset_for(
+            DemandSliceClass::RoutineRefresh,
+            now + Duration::from_secs(1)
+        ));
+        assert!(crawl.should_reset_for(
+            DemandSliceClass::NoConnectedPeers,
+            now + Duration::from_secs(1)
+        ));
+        assert!(crawl.should_reset_for(
+            DemandSliceClass::RoutineRefresh,
+            now + DHT_PARKED_CRAWL_MAX_AGE
+        ));
+
+        crawl.reset_for(
+            DemandSliceClass::AwaitingMetadata,
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(crawl.class, DemandSliceClass::AwaitingMetadata);
+        assert_eq!(crawl.reset_count, 1);
+        assert!(crawl.is_empty());
     }
 }

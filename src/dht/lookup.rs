@@ -193,6 +193,10 @@ impl LookupState {
         self.request
     }
 
+    pub fn family(&self) -> AddressFamily {
+        self.family
+    }
+
     pub fn target_id(&self) -> NodeId {
         self.request.target.as_node_id()
     }
@@ -203,6 +207,23 @@ impl LookupState {
 
     pub fn inflight_transaction_ids(&self) -> Vec<TransactionId> {
         self.inflight.keys().copied().collect()
+    }
+
+    pub fn park(&mut self) {
+        let inflight_queries = self
+            .inflight
+            .drain()
+            .map(|(_, query)| query)
+            .collect::<Vec<_>>();
+        for query in inflight_queries {
+            self.visited.remove(&query.candidate.addr);
+            self.insert_candidate(query.candidate);
+        }
+    }
+
+    pub fn resume(&mut self, lookup_id: LookupId, now: Instant) {
+        self.request.lookup_id = lookup_id;
+        self.started_at = now;
     }
 
     pub fn next_candidates(&self) -> Vec<LookupCandidate> {
@@ -998,6 +1019,48 @@ mod tests {
         assert_eq!(update.discovered_nodes.len(), 1);
         assert_eq!(state.frontier.len(), 1);
         assert_eq!(state.frontier[0].addr, repeated.addr);
+    }
+
+    #[test]
+    fn park_requeues_inflight_candidates_for_resume() {
+        let info_hash = seeded_info_hash(0x23);
+        let bootstrap = socket(127, 0, 10, 10, 31001);
+
+        let manager = LookupManager::new(LookupConfig::default());
+        let now = Instant::now();
+        let mut state = manager.start(
+            LookupRequest {
+                lookup_id: LookupId(3),
+                kind: LookupKind::GetPeers,
+                target: LookupTarget::InfoHash(info_hash),
+            },
+            AddressFamily::Ipv4,
+            &empty_routing_snapshot(AddressFamily::Ipv4),
+            &[bootstrap],
+            &[],
+            now,
+        );
+
+        let candidate = state
+            .next_candidates()
+            .into_iter()
+            .next()
+            .expect("seeded bootstrap candidate");
+        let transaction_id = TransactionId::from(9u32.to_be_bytes());
+        assert!(state
+            .mark_inflight(transaction_id, candidate.addr, now)
+            .is_some());
+        assert!(state.visited.contains(&candidate.addr));
+        assert!(state.inflight_transaction_ids().contains(&transaction_id));
+
+        state.park();
+
+        assert!(state.inflight_transaction_ids().is_empty());
+        assert!(!state.visited.contains(&candidate.addr));
+        assert!(state
+            .frontier
+            .iter()
+            .any(|entry| entry.addr == candidate.addr));
     }
 
     fn empty_routing_snapshot(family: AddressFamily) -> RoutingSnapshot {
