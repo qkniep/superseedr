@@ -253,6 +253,20 @@ impl Runtime {
             .saturating_sub(self.maintenance_lookup_receivers.len())
     }
 
+    pub fn inflight_query_counts(&self) -> (usize, usize) {
+        let ipv4 = self
+            .ipv4_transport
+            .as_ref()
+            .map(TransportActor::inflight_query_count)
+            .unwrap_or_default();
+        let ipv6 = self
+            .ipv6_transport
+            .as_ref()
+            .map(TransportActor::inflight_query_count)
+            .unwrap_or_default();
+        (ipv4, ipv6)
+    }
+
     pub fn active_route_count(&self, family: AddressFamily) -> usize {
         let now = Instant::now();
         match family {

@@ -28,7 +28,7 @@ use crate::control_service::{
     control_event_details, online_control_success_message, plan_control_request,
     ControlExecutionPlan,
 };
-use crate::dht_service::{DhtService, DhtServiceConfig, DhtStatus};
+use crate::dht_service::{DhtService, DhtServiceConfig, DhtStatus, DhtWaveTelemetry};
 use crate::persistence::activity_history::{
     load_activity_history_state, save_activity_history_state, ActivityHistoryPersistedState,
     ActivityHistoryRollupState,
@@ -959,6 +959,19 @@ pub struct RecentFileActivity {
     pub upload_at: Option<Instant>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DhtWaveUiState {
+    pub phase: f64,
+    pub amplitude: f64,
+    pub harmonic_amplitude: f64,
+    pub frequency: f64,
+    pub phase_speed: f64,
+    pub crest_bias: f64,
+    pub bootstrap_ratio: f64,
+    pub discovery_boost: f64,
+    pub initialized: bool,
+}
+
 #[derive(Default)]
 pub struct UiState {
     pub needs_redraw: bool,
@@ -967,6 +980,7 @@ pub struct UiState {
     pub effects_speed_multiplier: f64,
     pub file_activity_download_phase: f64,
     pub file_activity_upload_phase: f64,
+    pub dht_wave: DhtWaveUiState,
     pub selected_header: SelectedHeader,
     pub selected_torrent_index: usize,
     pub selected_peer_index: usize,
@@ -1383,6 +1397,139 @@ fn initial_cluster_role_for_runtime_mode(runtime_mode: AppRuntimeMode) -> Option
         AppRuntimeMode::SharedLeader => Some(AppClusterRole::Leader),
         AppRuntimeMode::SharedFollower => Some(AppClusterRole::Follower),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DhtWaveTargets {
+    amplitude: f64,
+    harmonic_amplitude: f64,
+    frequency: f64,
+    phase_speed: f64,
+    crest_bias: f64,
+    bootstrap_ratio: f64,
+}
+
+fn dht_wave_targets(status: &DhtStatus, telemetry: &DhtWaveTelemetry) -> DhtWaveTargets {
+    let health = &status.health;
+    let routes = (health.cached_ipv4_routes + health.cached_ipv6_routes) as f64;
+    let lookups = telemetry.active_lookups as f64;
+    let queries = (telemetry.inflight_ipv4_queries + telemetry.inflight_ipv6_queries) as f64;
+    let bootstrap_total = (health.ipv4_bootstrap_nodes + health.ipv6_bootstrap_nodes) as f64;
+    let responsive_total =
+        (health.responsive_ipv4_bootstrap_nodes + health.responsive_ipv6_bootstrap_nodes) as f64;
+
+    let route_energy = (routes / 2_048.0).clamp(0.0, 1.0);
+    let lookup_energy = (lookups / 8.0).clamp(0.0, 1.0);
+    let query_energy = (queries / 32.0).clamp(0.0, 1.0);
+    let bootstrap_ratio = if bootstrap_total > 0.0 {
+        (responsive_total / bootstrap_total).clamp(0.0, 1.0)
+    } else if health.enabled {
+        0.0
+    } else {
+        1.0
+    };
+    let enabled_factor = if health.enabled { 1.0 } else { 0.0 };
+    let firewalled_factor = match health.firewalled {
+        Some(true) => 0.72,
+        Some(false) => 1.0,
+        None => 0.88,
+    };
+    let warning_boost = f64::from(status.warning.is_some() || health.recovery_pending);
+    let activity_energy = lookup_energy
+        .max(query_energy)
+        .max((warning_boost * 0.7).clamp(0.0, 1.0));
+
+    let amplitude = ((0.01 + activity_energy * (0.16 + route_energy * 0.20))
+        * firewalled_factor
+        * enabled_factor)
+        .clamp(0.0, 0.52);
+    let harmonic_amplitude = ((0.004
+        + activity_energy
+            * (0.03
+                + query_energy * 0.10
+                + (1.0 - bootstrap_ratio) * 0.04
+                + warning_boost * 0.04))
+        * enabled_factor)
+        .clamp(0.0, 0.20);
+    let frequency = (0.08
+        + activity_energy
+            * (0.08 + query_energy * 0.12 + (1.0 - bootstrap_ratio) * 0.04 + warning_boost * 0.03))
+        .clamp(0.06, 0.38);
+    let phase_speed = ((0.03
+        + activity_energy
+            * (0.45 + query_energy * 1.0 + lookup_energy * 0.7 + warning_boost * 0.35))
+        * enabled_factor)
+        .clamp(0.0, 2.0);
+    let crest_bias = match health.firewalled {
+        Some(true) => -0.10,
+        Some(false) => 0.06,
+        None => 0.0,
+    } + ((route_energy - 0.5) * 0.12 * activity_energy);
+
+    DhtWaveTargets {
+        amplitude,
+        harmonic_amplitude,
+        frequency,
+        phase_speed,
+        crest_bias: crest_bias.clamp(-0.22, 0.22),
+        bootstrap_ratio,
+    }
+}
+
+fn dht_wave_smoothing_factor(frame_dt: f64, rate: f64) -> f64 {
+    1.0 - (-frame_dt * rate).exp()
+}
+
+fn smooth_dht_wave_component(current: &mut f64, target: f64, factor: f64) {
+    *current += (target - *current) * factor;
+}
+
+const DHT_WAVE_PHASE_WRAP_PERIOD: f64 = std::f64::consts::TAU * 25.0;
+
+fn advance_dht_wave_state(
+    wave: &mut DhtWaveUiState,
+    target_wave: DhtWaveTargets,
+    target_discovery_boost: f64,
+    frame_dt: f64,
+) {
+    if !wave.initialized {
+        wave.amplitude = target_wave.amplitude;
+        wave.harmonic_amplitude = target_wave.harmonic_amplitude;
+        wave.frequency = target_wave.frequency;
+        wave.phase_speed = target_wave.phase_speed;
+        wave.crest_bias = target_wave.crest_bias;
+        wave.bootstrap_ratio = target_wave.bootstrap_ratio;
+        wave.discovery_boost = target_discovery_boost;
+        wave.initialized = true;
+    } else {
+        let profile_blend = dht_wave_smoothing_factor(frame_dt, 9.0);
+        let phase_speed_blend = dht_wave_smoothing_factor(frame_dt, 14.0);
+        let discovery_blend = dht_wave_smoothing_factor(frame_dt, 12.0);
+        smooth_dht_wave_component(&mut wave.amplitude, target_wave.amplitude, profile_blend);
+        smooth_dht_wave_component(
+            &mut wave.harmonic_amplitude,
+            target_wave.harmonic_amplitude,
+            profile_blend,
+        );
+        smooth_dht_wave_component(&mut wave.frequency, target_wave.frequency, profile_blend);
+        smooth_dht_wave_component(
+            &mut wave.phase_speed,
+            target_wave.phase_speed,
+            phase_speed_blend,
+        );
+        smooth_dht_wave_component(&mut wave.crest_bias, target_wave.crest_bias, profile_blend);
+        smooth_dht_wave_component(
+            &mut wave.bootstrap_ratio,
+            target_wave.bootstrap_ratio,
+            profile_blend,
+        );
+        smooth_dht_wave_component(
+            &mut wave.discovery_boost,
+            target_discovery_boost,
+            discovery_blend,
+        );
+    }
+    wave.phase = (wave.phase + frame_dt * wave.phase_speed).rem_euclid(DHT_WAVE_PHASE_WRAP_PERIOD);
 }
 
 fn spawn_persistence_writer(
@@ -2797,8 +2944,16 @@ impl App {
                     self.drain_latest_torrent_metrics();
                     if Self::should_draw_this_frame(&self.app_state.mode, self.app_state.ui.needs_redraw) {
                         self.tick_ui_effects_clock();
+                        let dht_status = self.dht_service.current_status();
+                        let dht_wave_telemetry = self.dht_service.current_wave_telemetry();
                         terminal.draw(|f| {
-                            draw(f, &self.app_state, &self.client_configs);
+                            draw(
+                                f,
+                                &self.app_state,
+                                &dht_status,
+                                &dht_wave_telemetry,
+                                &self.client_configs,
+                            );
                         })?;
                         self.app_state.ui.needs_redraw = false;
                     }
@@ -2885,11 +3040,22 @@ impl App {
         self.app_state.ui.effects_last_wall_time = frame_wall_time;
         self.app_state.ui.effects_speed_multiplier = activity_speed_multiplier;
         self.app_state.ui.effects_phase_time += frame_dt * activity_speed_multiplier;
+
         let selected_torrent = self
             .app_state
             .torrent_list_order
             .get(self.app_state.ui.selected_torrent_index)
             .and_then(|info_hash| self.app_state.torrents.get(info_hash));
+        let dht_status = self.dht_service.current_status();
+        let dht_wave_telemetry = self.dht_service.current_wave_telemetry();
+        let target_wave = dht_wave_targets(&dht_status, &dht_wave_telemetry);
+        let target_discovery_boost = selected_torrent
+            .map(|torrent| {
+                (torrent.peers_discovered_this_tick as f64 / 10.0).clamp(0.0, 1.0) * 0.18
+            })
+            .unwrap_or_default();
+        let wave = &mut self.app_state.ui.dht_wave;
+        advance_dht_wave_state(wave, target_wave, target_discovery_boost, frame_dt);
         let download_steps_per_second = selected_torrent
             .map(|torrent| file_activity_wave_steps_per_second(torrent.smoothed_download_speed_bps))
             .unwrap_or_else(|| file_activity_wave_steps_per_second(0));
@@ -3001,8 +3167,16 @@ impl App {
             self.app_state.shutdown_progress =
                 managers_shut_down as f64 / total_managers_to_shut_down as f64;
             self.tick_ui_effects_clock();
+            let dht_status = self.dht_service.current_status();
+            let dht_wave_telemetry = self.dht_service.current_wave_telemetry();
             let _ = terminal.draw(|f| {
-                draw(f, &self.app_state, &self.client_configs);
+                draw(
+                    f,
+                    &self.app_state,
+                    &dht_status,
+                    &dht_wave_telemetry,
+                    &self.client_configs,
+                );
             });
 
             tokio::select! {
@@ -6563,18 +6737,19 @@ mod tests {
     #![allow(clippy::await_holding_lock)]
 
     use super::{
-        apply_network_history_persist_result, build_persist_payload, build_torrent_preview_tree,
-        clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
-        flush_persistence_writer_parts, format_filesystem_path_error,
+        advance_dht_wave_state, apply_network_history_persist_result, build_persist_payload,
+        build_torrent_preview_tree, clamp_selected_indices_in_state, compose_system_warning,
+        extract_magnet_display_name, flush_persistence_writer_parts, format_filesystem_path_error,
         is_valid_incoming_bittorrent_handshake, move_file_with_fallback_impl, parse_hybrid_hashes,
         persisted_validation_status_from_metrics, prune_rss_feed_errors, queue_persistence_payload,
         resolve_magnet_torrent_name, rss_settings_changed, should_load_persisted_torrent,
         should_persist_network_history_on_interval, sort_and_filter_torrent_list_state,
         torrent_completion_percent, torrent_is_effectively_incomplete, watched_parent_matches, App,
         AppClusterRole, AppCommand, AppMode, AppRuntimeMode, AppState, CommandIngestResult,
-        FilePriority, IngestSource, ListenerSet, PeerInfo, PersistPayload, SelectedHeader,
-        SortDirection, TorrentControlState, TorrentDisplayState, TorrentMetrics,
-        TorrentPreviewPayload, TorrentSortColumn, UiState, BITTORRENT_PROTOCOL_STR,
+        DhtWaveTargets, DhtWaveUiState, FilePriority, IngestSource, ListenerSet, PeerInfo,
+        PersistPayload, SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState,
+        TorrentMetrics, TorrentPreviewPayload, TorrentSortColumn, UiState, BITTORRENT_PROTOCOL_STR,
+        DHT_WAVE_PHASE_WRAP_PERIOD,
     };
     use crate::config::{
         clear_shared_config_state_for_tests, set_app_paths_override_for_tests, TorrentSettings,
@@ -6812,6 +6987,117 @@ mod tests {
     fn should_only_draw_dirty_in_power_saving_mode() {
         assert!(!App::should_draw_this_frame(&AppMode::PowerSaving, false));
         assert!(App::should_draw_this_frame(&AppMode::PowerSaving, true));
+    }
+
+    fn test_dht_wave_targets(
+        amplitude: f64,
+        harmonic_amplitude: f64,
+        frequency: f64,
+        phase_speed: f64,
+        crest_bias: f64,
+        bootstrap_ratio: f64,
+    ) -> DhtWaveTargets {
+        DhtWaveTargets {
+            amplitude,
+            harmonic_amplitude,
+            frequency,
+            phase_speed,
+            crest_bias,
+            bootstrap_ratio,
+        }
+    }
+
+    fn test_dht_wave_signal_at(wave: &DhtWaveUiState, x: f64) -> f64 {
+        let theta = x * wave.frequency;
+        let envelope = 0.84 + 0.16 * (theta * 0.33 + wave.phase * 0.28).sin();
+        let dht_amplitude = (wave.amplitude + wave.discovery_boost).clamp(0.05, 0.78);
+        let carrier = wave.crest_bias * 0.35
+            + envelope * dht_amplitude * (theta + wave.phase).sin()
+            + wave.harmonic_amplitude * ((theta * 2.35) - wave.phase * 0.72).sin();
+        carrier.clamp(-1.1, 1.1)
+    }
+
+    #[test]
+    fn dht_wave_state_smooths_60fps_target_transition() {
+        let frame_dt = 1.0 / 60.0;
+        let idle = test_dht_wave_targets(0.01, 0.004, 0.08, 0.03, 0.0, 1.0);
+        let busy = test_dht_wave_targets(0.36, 0.12, 0.24, 1.2, 0.10, 1.0);
+        let mut wave = DhtWaveUiState::default();
+
+        advance_dht_wave_state(&mut wave, idle, 0.0, frame_dt);
+
+        let mut previous = wave.clone();
+        let mut max_amplitude_delta: f64 = 0.0;
+        let mut max_frequency_delta: f64 = 0.0;
+        let mut max_discovery_delta: f64 = 0.0;
+        let mut max_sample_delta: f64 = 0.0;
+
+        for frame in 0..120 {
+            let (target, discovery_boost) = if frame < 60 {
+                (idle, 0.0)
+            } else {
+                (busy, 0.18)
+            };
+            advance_dht_wave_state(&mut wave, target, discovery_boost, frame_dt);
+
+            max_amplitude_delta =
+                max_amplitude_delta.max((wave.amplitude - previous.amplitude).abs());
+            max_frequency_delta =
+                max_frequency_delta.max((wave.frequency - previous.frequency).abs());
+            max_discovery_delta =
+                max_discovery_delta.max((wave.discovery_boost - previous.discovery_boost).abs());
+
+            let previous_sample = test_dht_wave_signal_at(&previous, 18.0);
+            let sample = test_dht_wave_signal_at(&wave, 18.0);
+            max_sample_delta = max_sample_delta.max((sample - previous_sample).abs());
+
+            previous = wave.clone();
+        }
+
+        assert!(
+            max_amplitude_delta < 0.06,
+            "amplitude delta too large at 60fps: {max_amplitude_delta}"
+        );
+        assert!(
+            max_frequency_delta < 0.03,
+            "frequency delta too large at 60fps: {max_frequency_delta}"
+        );
+        assert!(
+            max_discovery_delta < 0.04,
+            "discovery delta too large at 60fps: {max_discovery_delta}"
+        );
+        assert!(
+            max_sample_delta < 0.12,
+            "signal delta too large at 60fps: {max_sample_delta}"
+        );
+    }
+
+    #[test]
+    fn dht_wave_state_stays_continuous_across_phase_wrap() {
+        let frame_dt = 1.0 / 60.0;
+        let target = test_dht_wave_targets(0.34, 0.11, 0.22, 2.0, 0.08, 1.0);
+        let phase_step = frame_dt * target.phase_speed;
+        let mut wave = DhtWaveUiState {
+            phase: DHT_WAVE_PHASE_WRAP_PERIOD - (phase_step * 0.5),
+            amplitude: target.amplitude,
+            harmonic_amplitude: target.harmonic_amplitude,
+            frequency: target.frequency,
+            phase_speed: target.phase_speed,
+            crest_bias: target.crest_bias,
+            bootstrap_ratio: target.bootstrap_ratio,
+            discovery_boost: 0.0,
+            initialized: true,
+        };
+
+        let before = test_dht_wave_signal_at(&wave, 18.0);
+        advance_dht_wave_state(&mut wave, target, 0.0, frame_dt);
+        let after = test_dht_wave_signal_at(&wave, 18.0);
+
+        assert!(
+            (after - before).abs() < 0.08,
+            "wave jumped too much across wrap: {}",
+            (after - before).abs()
+        );
     }
 
     #[test]

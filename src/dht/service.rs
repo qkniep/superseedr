@@ -9,7 +9,7 @@ use super::{Runtime, RuntimeConfig};
 use crate::config::{self, Settings};
 use rand::random;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
@@ -35,6 +35,7 @@ const DHT_PERSISTENCE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const DHT_STARTUP_BOOTSTRAP_DELAY: Duration = Duration::from_secs(5);
 const DHT_IPV6_HEDGE_DELAY: Duration = Duration::from_millis(750);
 const DHT_LOOKUP_BOOTSTRAP_WAIT: Duration = Duration::from_secs(2);
+const DHT_UNIQUE_PEERS_FOUND_WINDOW: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DhtBackendKind {
@@ -124,6 +125,57 @@ pub struct DhtStatus {
     pub generation: u64,
     pub warning: Option<String>,
     pub health: DhtHealthSnapshot,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DhtWaveTelemetry {
+    pub active_lookups: usize,
+    pub active_user_lookups: usize,
+    pub inflight_ipv4_queries: usize,
+    pub inflight_ipv6_queries: usize,
+    pub unique_peers_found_last_30s: usize,
+}
+
+#[derive(Debug)]
+struct RecentUniquePeers {
+    window: Duration,
+    events: VecDeque<(Instant, SocketAddr)>,
+    last_seen: HashMap<SocketAddr, Instant>,
+}
+
+impl RecentUniquePeers {
+    fn new(window: Duration) -> Self {
+        Self {
+            window,
+            events: VecDeque::new(),
+            last_seen: HashMap::new(),
+        }
+    }
+
+    fn record_batch(&mut self, now: Instant, peers: &[SocketAddr]) {
+        self.evict_expired(now);
+        for &peer in peers {
+            self.events.push_back((now, peer));
+            self.last_seen.insert(peer, now);
+        }
+    }
+
+    fn evict_expired(&mut self, now: Instant) {
+        while let Some((seen_at, peer)) = self.events.front().copied() {
+            if now.saturating_duration_since(seen_at) < self.window {
+                break;
+            }
+            self.events.pop_front();
+            if self.last_seen.get(&peer).copied() == Some(seen_at) {
+                self.last_seen.remove(&peer);
+            }
+        }
+    }
+
+    fn unique_count(&mut self, now: Instant) -> usize {
+        self.evict_expired(now);
+        self.last_seen.len()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -346,6 +398,7 @@ struct BuiltRuntime {
 pub struct DhtService {
     handle: DhtHandle,
     status_rx: watch::Receiver<DhtStatus>,
+    wave_telemetry_rx: watch::Receiver<DhtWaveTelemetry>,
     command_tx: mpsc::UnboundedSender<DhtCommand>,
     #[allow(dead_code)]
     task: Option<JoinHandle<()>>,
@@ -366,8 +419,10 @@ impl DhtService {
             0,
             initial.bootstrap,
         );
+        let initial_wave_telemetry = build_wave_telemetry(initial.active_runtime.as_ref(), 0);
 
         let (status_tx, status_rx) = watch::channel(initial_status);
+        let (wave_telemetry_tx, wave_telemetry_rx) = watch::channel(initial_wave_telemetry);
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let handle = DhtHandle {
             inner: DhtHandleInner::Service {
@@ -381,6 +436,7 @@ impl DhtService {
             initial.active_runtime,
             initial.warning,
             status_tx,
+            wave_telemetry_tx,
             command_tx.clone(),
             command_rx,
             shutdown_rx,
@@ -389,6 +445,7 @@ impl DhtService {
         Ok(Self {
             handle,
             status_rx,
+            wave_telemetry_rx,
             command_tx,
             task,
         })
@@ -404,6 +461,10 @@ impl DhtService {
 
     pub fn current_status(&self) -> DhtStatus {
         self.status_rx.borrow().clone()
+    }
+
+    pub fn current_wave_telemetry(&self) -> DhtWaveTelemetry {
+        self.wave_telemetry_rx.borrow().clone()
     }
 
     pub fn current_warning(&self) -> Option<String> {
@@ -439,10 +500,12 @@ impl DhtService {
     pub(crate) fn from_test_recorder(recorder: TestDhtRecorder) -> Self {
         let handle = DhtHandle::from_test_recorder(recorder);
         let status_rx = handle.status_rx().clone();
+        let (_wave_telemetry_tx, wave_telemetry_rx) = watch::channel(DhtWaveTelemetry::default());
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         Self {
             handle,
             status_rx,
+            wave_telemetry_rx,
             command_tx,
             task: None,
         }
@@ -779,6 +842,7 @@ async fn run_service(
     mut active_runtime: Option<ActiveRuntime>,
     mut warning: Option<String>,
     status_tx: watch::Sender<DhtStatus>,
+    wave_telemetry_tx: watch::Sender<DhtWaveTelemetry>,
     command_tx: mpsc::UnboundedSender<DhtCommand>,
     mut command_rx: mpsc::UnboundedReceiver<DhtCommand>,
     mut shutdown_rx: broadcast::Receiver<()>,
@@ -799,6 +863,7 @@ async fn run_service(
         HashMap<u64, mpsc::UnboundedSender<Vec<SocketAddr>>>,
     > = HashMap::new();
     let mut demand_lookup_ids: HashMap<InfoHash, Arc<StdMutex<Vec<LookupId>>>> = HashMap::new();
+    let mut recent_unique_peers = RecentUniquePeers::new(DHT_UNIQUE_PEERS_FOUND_WINDOW);
     let mut next_subscriber_id = 1u64;
 
     loop {
@@ -926,6 +991,7 @@ async fn run_service(
                 }
             }
             LoopEvent::Command(DhtCommand::DemandPeers { info_hash, peers }) => {
+                recent_unique_peers.record_batch(Instant::now(), &peers);
                 let Some(subscribers) = demand_subscribers.get_mut(&info_hash) else {
                     continue;
                 };
@@ -1011,18 +1077,17 @@ async fn run_service(
             }
             LoopEvent::MaintenanceTick => {
                 if let Some(active) = active_runtime.as_mut() {
-                    if active.runtime.active_user_lookup_count() > 0 {
-                        continue;
-                    }
-                    if let Err(error) = active.runtime.run_maintenance().await {
-                        warning = Some(format!("DHT maintenance failed: {error}"));
-                        publish_status(
-                            &status_tx,
-                            active_runtime.as_ref(),
-                            warning.clone(),
-                            generation,
-                            config.preferred_backend,
-                        );
+                    if active.runtime.active_user_lookup_count() == 0 {
+                        if let Err(error) = active.runtime.run_maintenance().await {
+                            warning = Some(format!("DHT maintenance failed: {error}"));
+                            publish_status(
+                                &status_tx,
+                                active_runtime.as_ref(),
+                                warning.clone(),
+                                generation,
+                                config.preferred_backend,
+                            );
+                        }
                     }
                 }
             }
@@ -1050,6 +1115,12 @@ async fn run_service(
                 );
             }
         }
+
+        publish_wave_telemetry(
+            &wave_telemetry_tx,
+            active_runtime.as_ref(),
+            &mut recent_unique_peers,
+        );
     }
 }
 
@@ -1408,6 +1479,43 @@ fn publish_status(
     ));
 }
 
+fn build_wave_telemetry(
+    active_runtime: Option<&ActiveRuntime>,
+    unique_peers_found_last_30s: usize,
+) -> DhtWaveTelemetry {
+    let Some(active_runtime) = active_runtime else {
+        return DhtWaveTelemetry {
+            unique_peers_found_last_30s,
+            ..DhtWaveTelemetry::default()
+        };
+    };
+
+    let (inflight_ipv4_queries, inflight_ipv6_queries) =
+        active_runtime.runtime.inflight_query_counts();
+
+    DhtWaveTelemetry {
+        active_lookups: active_runtime.runtime.active_lookup_count(),
+        active_user_lookups: active_runtime.runtime.active_user_lookup_count(),
+        inflight_ipv4_queries,
+        inflight_ipv6_queries,
+        unique_peers_found_last_30s,
+    }
+}
+
+fn publish_wave_telemetry(
+    wave_telemetry_tx: &watch::Sender<DhtWaveTelemetry>,
+    active_runtime: Option<&ActiveRuntime>,
+    recent_unique_peers: &mut RecentUniquePeers,
+) {
+    let telemetry = build_wave_telemetry(
+        active_runtime,
+        recent_unique_peers.unique_count(Instant::now()),
+    );
+    if *wave_telemetry_tx.borrow() != telemetry {
+        let _ = wave_telemetry_tx.send(telemetry);
+    }
+}
+
 fn persistence_config() -> Option<PersistenceConfig> {
     if std::env::var_os("SUPERSEEDR_DHT_DISABLE_PERSISTENCE").is_some()
         || std::env::var_os("SUPERSEEDR_DHT_FRESH_BOOTSTRAP").is_some()
@@ -1594,4 +1702,31 @@ fn forced_internal_backend_error(config: &DhtServiceConfig) -> Option<String> {
 
     let _ = config;
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peer(addr: &str) -> SocketAddr {
+        addr.parse().expect("valid socket address")
+    }
+
+    #[test]
+    fn recent_unique_peers_dedupes_and_expires_entries() {
+        let start = Instant::now();
+        let mut recent = RecentUniquePeers::new(Duration::from_secs(30));
+        let peer_a = peer("127.0.0.1:1000");
+        let peer_b = peer("127.0.0.2:1000");
+
+        recent.record_batch(start, &[peer_a, peer_a, peer_b]);
+        assert_eq!(recent.unique_count(start), 2);
+
+        let refresh = start + Duration::from_secs(10);
+        recent.record_batch(refresh, &[peer_a]);
+        assert_eq!(recent.unique_count(refresh), 2);
+
+        assert_eq!(recent.unique_count(start + Duration::from_secs(31)), 1);
+        assert_eq!(recent.unique_count(start + Duration::from_secs(41)), 0);
+    }
 }
