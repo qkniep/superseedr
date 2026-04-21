@@ -914,11 +914,11 @@ fn draw_dht_wave_panel(
         } else {
             0.0
         };
-        let dht_amplitude = (profile.amplitude + discovery_boost).clamp(0.05, 0.78);
+        let dht_amplitude = (profile.amplitude + discovery_boost).clamp(0.05, 0.82);
         let carrier = profile.crest_bias * 0.35
             + envelope * dht_amplitude * (theta + phase).sin()
             + profile.harmonic_amplitude * ((theta * 2.35) - phase * 0.72).sin();
-        dht_points.push((x, carrier.clamp(-1.1, 1.1)));
+        dht_points.push((x, carrier.clamp(-1.04, 1.04)));
     }
 
     let compact_legend =
@@ -990,7 +990,7 @@ fn draw_dht_wave_panel(
                 .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
         )
         .x_axis(ratatui::widgets::Axis::default().bounds([0.0, x_bound as f64]))
-        .y_axis(ratatui::widgets::Axis::default().bounds([-1.2, 1.2]));
+        .y_axis(ratatui::widgets::Axis::default().bounds([-1.08, 1.08]));
 
     f.render_widget(chart, area);
 }
