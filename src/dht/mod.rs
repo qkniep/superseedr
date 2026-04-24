@@ -49,7 +49,7 @@ pub use types::{
 use crate::dht::bootstrap::{BootstrapConfig, BootstrapCoordinator};
 use crate::dht::health::DhtHealthSnapshot as InternalHealthSnapshot;
 use crate::dht::inbound::{InboundAction, InboundActor, InboundConfig, InboundRequestContext};
-use crate::dht::lookup::{LookupManager, LookupState, LookupUpdate};
+use crate::dht::lookup::{LookupManager, LookupQualitySnapshot, LookupState, LookupUpdate};
 use crate::dht::peer_store::{PeerStore, PeerStoreConfig};
 use crate::dht::persist::PersistenceManager;
 use crate::dht::routing::{InsertOutcome, RoutingActor, RoutingConfig};
@@ -73,6 +73,23 @@ struct ActiveLookup {
     family: AddressFamily,
     state: LookupState,
     peer_tx: mpsc::UnboundedSender<Vec<SocketAddr>>,
+    mode: LookupRunMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LookupRunMode {
+    Active,
+    Draining,
+}
+
+impl LookupRunMode {
+    fn is_active(self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    fn is_draining(self) -> bool {
+        matches!(self, Self::Draining)
+    }
 }
 
 #[derive(Debug)]
@@ -89,6 +106,7 @@ struct LookupTaskResult {
     transaction_id: TransactionId,
     outcome: LookupTaskOutcome,
 }
+
 
 #[derive(Debug)]
 pub struct Runtime {
@@ -244,13 +262,27 @@ impl Runtime {
     }
 
     pub fn active_lookup_count(&self) -> usize {
-        self.active_lookups.len()
+        self.active_lookups
+            .values()
+            .filter(|active| active.mode.is_active())
+            .count()
     }
 
     pub fn active_user_lookup_count(&self) -> usize {
         self.active_lookups
-            .len()
-            .saturating_sub(self.maintenance_lookup_receivers.len())
+            .iter()
+            .filter(|(lookup_id, active)| {
+                active.mode.is_active()
+                    && !self.maintenance_lookup_receivers.contains_key(lookup_id)
+            })
+            .count()
+    }
+
+    pub fn draining_lookup_count(&self) -> usize {
+        self.active_lookups
+            .values()
+            .filter(|active| active.mode.is_draining())
+            .count()
     }
 
     pub fn inflight_query_counts(&self) -> (usize, usize) {
@@ -265,6 +297,13 @@ impl Runtime {
             .map(TransportActor::inflight_query_count)
             .unwrap_or_default();
         (ipv4, ipv6)
+    }
+
+
+    pub fn lookup_quality_snapshot(&self, lookup_id: LookupId) -> Option<LookupQualitySnapshot> {
+        self.active_lookups
+            .get(&lookup_id)
+            .map(|active| active.state.quality_snapshot())
     }
 
     pub fn active_route_count(&self, family: AddressFamily) -> usize {
@@ -419,6 +458,7 @@ impl Runtime {
                 family,
                 state,
                 peer_tx,
+                mode: LookupRunMode::Active,
             },
         );
         self.pump_lookup(lookup_id).await?;
@@ -449,6 +489,7 @@ impl Runtime {
                 family,
                 state,
                 peer_tx,
+                mode: LookupRunMode::Active,
             },
         );
         self.pump_lookup(lookup_id).await?;
@@ -724,8 +765,10 @@ impl Runtime {
         let mut finished = false;
         let mut peer_tx = None;
         let mut receiver_closed = false;
+        let mut draining = false;
 
         if let Some(active) = self.active_lookups.get_mut(&result.lookup_id) {
+            draining = active.mode.is_draining();
             receiver_closed = active.peer_tx.is_closed();
             peer_tx = Some(active.peer_tx.clone());
             let target_node_id = active.state.target_id();
@@ -869,8 +912,14 @@ impl Runtime {
                     ),
                 );
             }
-            self.cancel_lookup(result.lookup_id);
-        } else if self.active_lookups.contains_key(&result.lookup_id) {
+            if !draining {
+                self.cancel_lookup(result.lookup_id);
+            }
+        } else if self
+            .active_lookups
+            .get(&result.lookup_id)
+            .is_some_and(|active| active.mode.is_active())
+        {
             self.pump_lookup(result.lookup_id).await?;
         }
 
@@ -879,6 +928,7 @@ impl Runtime {
 
     async fn pump_lookup(&mut self, lookup_id: LookupId) -> io::Result<()> {
         let (family, request, candidates) = match self.active_lookups.get(&lookup_id) {
+            Some(active) if active.mode.is_draining() => return Ok(()),
             Some(active) if active.peer_tx.is_closed() => {
                 self.cancel_lookup(lookup_id);
                 return Ok(());
@@ -1090,7 +1140,9 @@ impl Runtime {
         let closed = self
             .active_lookups
             .iter()
-            .filter_map(|(lookup_id, active)| active.peer_tx.is_closed().then_some(*lookup_id))
+            .filter_map(|(lookup_id, active)| {
+                (active.mode.is_active() && active.peer_tx.is_closed()).then_some(*lookup_id)
+            })
             .collect::<Vec<_>>();
 
         for lookup_id in closed {
@@ -1100,6 +1152,41 @@ impl Runtime {
 
     pub fn cancel_lookup(&mut self, lookup_id: LookupId) -> bool {
         self.cancel_lookup_and_take_state(lookup_id).is_some()
+    }
+
+    pub fn pause_lookup_for_drain(&mut self, lookup_id: LookupId) -> Option<LookupQualitySnapshot> {
+        let active = self.active_lookups.get_mut(&lookup_id)?;
+        active.mode = LookupRunMode::Draining;
+        Some(active.state.quality_snapshot())
+    }
+
+    pub fn drained_lookups_ready(&self, lookup_ids: &[LookupId]) -> bool {
+        lookup_ids.iter().all(|lookup_id| {
+            self.active_lookups.get(lookup_id).is_none_or(|active| {
+                active.mode.is_draining() && active.state.quality_snapshot().inflight_len == 0
+            })
+        })
+    }
+
+    pub fn finish_drained_lookup(&mut self, lookup_id: LookupId) -> Option<LookupState> {
+        let active = self.active_lookups.get(&lookup_id)?;
+        if !active.mode.is_draining() {
+            return None;
+        }
+
+        let active = self.active_lookups.remove(&lookup_id)?;
+        self.maintenance_lookup_receivers.remove(&lookup_id);
+        self.cache_lookup_responders(active.family, &active.state);
+
+        if let Some(transport) = self.transport_for(active.family).cloned() {
+            for transaction_id in active.state.inflight_transaction_ids() {
+                transport.cancel_inflight_query(transaction_id);
+            }
+        }
+
+        let mut state = active.state;
+        state.park();
+        Some(state)
     }
 
     pub fn cancel_lookup_and_take_state(&mut self, lookup_id: LookupId) -> Option<LookupState> {
@@ -1316,7 +1403,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::net::UdpSocket;
     use tokio::task::JoinHandle;
-    use tokio::time::timeout;
+    use tokio::time::{sleep, timeout};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum ReplayBehavior {
@@ -1410,6 +1497,95 @@ mod tests {
                 }
             }
         })
+    }
+
+    async fn spawn_delayed_get_peers_responder(
+        socket: UdpSocket,
+        node_id: NodeId,
+        response_body: KrpcResponseBody,
+        delay: Duration,
+        query_log: Arc<Mutex<Vec<QueryLogEntry>>>,
+    ) -> JoinHandle<()> {
+        let responder_addr = socket.local_addr().expect("delayed responder local addr");
+        tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            loop {
+                let (len, source) = match socket.recv_from(&mut buffer).await {
+                    Ok(result) => result,
+                    Err(_) => break,
+                };
+
+                let Ok(message) = decode_message(&buffer[..len]) else {
+                    continue;
+                };
+                let KrpcInboundMessage::Query(query) = message else {
+                    continue;
+                };
+
+                query_log
+                    .lock()
+                    .expect("delayed query log lock")
+                    .push(QueryLogEntry {
+                        responder: responder_addr,
+                        source,
+                        kind: query.kind(),
+                    });
+
+                let transaction_id = match query {
+                    KrpcIncomingQuery::GetPeers { transaction_id, .. } => transaction_id,
+                    KrpcIncomingQuery::Ping { transaction_id, .. } => {
+                        let response = KrpcResponseEnvelope::new(
+                            transaction_id.as_ref(),
+                            KrpcResponseBody::pong(node_id),
+                        );
+                        if let Ok(payload) = serde_bencode::to_bytes(&response) {
+                            let _ = socket.send_to(&payload, source).await;
+                        }
+                        continue;
+                    }
+                    KrpcIncomingQuery::FindNode { transaction_id, .. }
+                    | KrpcIncomingQuery::AnnouncePeer { transaction_id, .. } => {
+                        let response = KrpcResponseEnvelope::new(
+                            transaction_id.as_ref(),
+                            KrpcResponseBody::pong(node_id),
+                        );
+                        if let Ok(payload) = serde_bencode::to_bytes(&response) {
+                            let _ = socket.send_to(&payload, source).await;
+                        }
+                        continue;
+                    }
+                };
+
+                sleep(delay).await;
+                let response =
+                    KrpcResponseEnvelope::new(transaction_id.as_ref(), response_body.clone());
+                if let Ok(payload) = serde_bencode::to_bytes(&response) {
+                    let _ = socket.send_to(&payload, source).await;
+                }
+            }
+        })
+    }
+
+    async fn wait_for_query(
+        query_log: Arc<Mutex<Vec<QueryLogEntry>>>,
+        responder: SocketAddr,
+        kind: KrpcQueryKind,
+    ) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if query_log
+                    .lock()
+                    .expect("query log lock")
+                    .iter()
+                    .any(|entry| entry.responder == responder && entry.kind == kind)
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for query");
     }
 
     #[tokio::test]
@@ -1574,6 +1750,128 @@ mod tests {
                     && entry.kind == KrpcQueryKind::GetPeers),
             "runtime never reached terminal peer responder"
         );
+
+        for handle in handles {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn draining_lookup_accepts_late_peers_without_pumping_more_queries() {
+        let query_log = Arc::new(Mutex::new(Vec::new()));
+
+        let bootstrap_socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .expect("bind bootstrap");
+        let bootstrap_addr = bootstrap_socket.local_addr().expect("bootstrap addr");
+
+        let branch_socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .expect("bind branch");
+        let branch_addr = branch_socket.local_addr().expect("branch addr");
+
+        let terminal_peers = [
+            CompactPeer {
+                addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42000),
+            },
+            CompactPeer {
+                addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42001),
+            },
+        ];
+        let branch_referral = [CompactNode {
+            id: seeded_node_id(0x40),
+            addr: branch_addr,
+        }];
+        let mut response_body = KrpcResponseBody::with_closest_nodes(
+            seeded_node_id(0x10),
+            &branch_referral,
+            AddressFamily::Ipv4,
+            b"rt",
+        );
+        response_body.values = terminal_peers
+            .iter()
+            .copied()
+            .map(encode_compact_peer)
+            .collect();
+
+        let handles = vec![
+            spawn_delayed_get_peers_responder(
+                bootstrap_socket,
+                seeded_node_id(0x10),
+                response_body,
+                Duration::from_millis(100),
+                query_log.clone(),
+            )
+            .await,
+            spawn_replay_responder(
+                branch_socket,
+                seeded_node_id(0x40),
+                ReplayBehavior::Peers(Vec::new()),
+                query_log.clone(),
+            )
+            .await,
+        ];
+
+        let mut runtime = Runtime::bind(RuntimeConfig {
+            local_node_id: seeded_node_id(0x01),
+            bootstrap_nodes: vec![bootstrap_addr],
+            ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+            ipv6_bind_addr: None,
+            persistence: None,
+        })
+        .await
+        .expect("bind runtime");
+
+        let info_hash = seeded_info_hash(0x45);
+        let (lookup_id, mut peer_rx) = runtime
+            .start_get_peers(AddressFamily::Ipv4, info_hash)
+            .await
+            .expect("start get_peers lookup");
+
+        wait_for_query(query_log.clone(), bootstrap_addr, KrpcQueryKind::GetPeers).await;
+        assert!(runtime.pause_lookup_for_drain(lookup_id).is_some());
+        assert_eq!(runtime.active_lookup_count(), 0);
+        assert_eq!(runtime.draining_lookup_count(), 1);
+        assert!(!runtime.drained_lookups_ready(&[lookup_id]));
+
+        let peers = timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::select! {
+                    maybe_batch = peer_rx.recv() => {
+                        return maybe_batch.expect("peer receiver closed before drained reply");
+                    }
+                    step_result = runtime.step() => {
+                        let active = step_result.expect("runtime step");
+                        assert!(active, "runtime step loop terminated before drained reply");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for drained peer reply");
+
+        let expected_peers = terminal_peers
+            .iter()
+            .map(|peer| peer.addr)
+            .collect::<Vec<_>>();
+        assert_eq!(peers, expected_peers);
+        assert!(runtime.drained_lookups_ready(&[lookup_id]));
+        assert!(
+            query_log
+                .lock()
+                .expect("query log lock")
+                .iter()
+                .all(|entry| entry.responder != branch_addr),
+            "draining lookup should not pump discovered branch candidates"
+        );
+
+        let drained_state = runtime
+            .finish_drained_lookup(lookup_id)
+            .expect("finished drained lookup state");
+        assert_eq!(drained_state.quality_snapshot().received_peer_count, 2);
+        assert_eq!(runtime.active_lookup_count(), 0);
+        assert_eq!(runtime.draining_lookup_count(), 0);
 
         for handle in handles {
             handle.abort();
