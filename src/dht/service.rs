@@ -43,6 +43,7 @@ const DHT_NO_CONNECTED_PEERS_LAUNCHES_PER_MINUTE: u64 = 30;
 const DHT_NO_CONNECTED_PEERS_LAUNCH_BURST: u64 = 10;
 const DHT_ROUTINE_REFRESH_LAUNCHES_PER_MINUTE: u64 = 5;
 const DHT_ROUTINE_REFRESH_LAUNCH_BURST: u64 = 5;
+const DHT_DEMAND_FAIRNESS_AGE: Duration = Duration::from_secs(10 * 60);
 const DHT_DEMAND_SPARE_RESEARCH_MAX_ACTIVE: usize = 1;
 const DHT_DEMAND_SPARE_RESEARCH_LAUNCH_LIMIT: usize = 1;
 const DHT_DEMAND_SPARE_RESEARCH_MIN_INTERVAL: Duration = Duration::from_secs(20);
@@ -3317,6 +3318,14 @@ fn candidate_last_unique_peers(
         .unwrap_or(0)
 }
 
+fn candidate_due_age(candidate: DueDemandCandidate, now: Instant) -> Duration {
+    now.saturating_duration_since(candidate.next_eligible_at)
+}
+
+fn candidate_has_fairness_age(candidate: DueDemandCandidate, now: Instant) -> bool {
+    candidate_due_age(candidate, now) >= DHT_DEMAND_FAIRNESS_AGE
+}
+
 fn candidate_has_useful_yield_history(
     planner_state: &HashMap<InfoHash, DemandPlannerState>,
     info_hash: InfoHash,
@@ -3503,9 +3512,12 @@ fn select_due_demand_launches_with_stats(
         let right_useful_age = candidate_last_useful_yield_age(planner_state, right.info_hash, now);
         let left_last_unique = candidate_last_unique_peers(planner_state, left.info_hash);
         let right_last_unique = candidate_last_unique_peers(planner_state, right.info_hash);
+        let left_fairness = candidate_has_fairness_age(*left, now);
+        let right_fairness = candidate_has_fairness_age(*right, now);
 
         demand_slice_class_priority(right_class)
             .cmp(&demand_slice_class_priority(left_class))
+            .then_with(|| right_fairness.cmp(&left_fairness))
             .then_with(|| match (left_useful_age, right_useful_age) {
                 (Some(left_age), Some(right_age)) => left_age.cmp(&right_age),
                 (Some(_), None) => std::cmp::Ordering::Less,
@@ -5042,6 +5054,57 @@ mod tests {
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].info_hash, hash(2));
+    }
+
+    #[test]
+    fn select_due_demand_launches_fairness_age_overtakes_yield_history() {
+        let hash = |byte: u8| InfoHash::from([byte; InfoHash::LEN]);
+        let now = Instant::now();
+        let due = vec![
+            DueDemandCandidate {
+                info_hash: hash(1),
+                demand: DhtDemandState {
+                    awaiting_metadata: false,
+                    connected_peers: 0,
+                },
+                next_eligible_at: now - DHT_DEMAND_FAIRNESS_AGE - Duration::from_secs(1),
+                subscriber_count: 1,
+            },
+            DueDemandCandidate {
+                info_hash: hash(2),
+                demand: DhtDemandState {
+                    awaiting_metadata: false,
+                    connected_peers: 0,
+                },
+                next_eligible_at: now - Duration::from_secs(10),
+                subscriber_count: 1,
+            },
+        ];
+
+        let mut planner_state = HashMap::new();
+        planner_state.insert(
+            hash(2),
+            DemandPlannerState {
+                last_started_at: Some(now - Duration::from_secs(20)),
+                last_finished_at: Some(now - Duration::from_secs(5)),
+                last_useful_yield_at: Some(now - Duration::from_secs(5)),
+                last_unique_peers: 8,
+            },
+        );
+
+        let mut planner_budget = DemandPlannerBudget::new(now);
+        let selected = select_due_demand_launches(
+            &due,
+            DemandSlotCounts::default(),
+            &HashMap::new(),
+            &planner_state,
+            &mut planner_budget,
+            now,
+            1,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].info_hash, hash(1));
     }
 
     #[test]
