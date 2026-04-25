@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::app::align_unpinned_sort_with_visible_activity;
 use crate::app::file_activity_wave_steps_per_second;
 use crate::app::sort_and_filter_torrent_list_state;
 use crate::app::torrent_completion_percent;
+use crate::app::torrent_is_effectively_incomplete;
 use crate::app::AppCommand;
 use crate::app::BrowserPane;
 use crate::app::ChartPanelView;
@@ -15,8 +17,7 @@ use crate::app::{
     App, AppMode, AppState, ConfigItem, RssScreen, SelectedHeader, TorrentControlState,
     TorrentDisplayState,
 };
-use crate::config::Settings;
-use crate::config::SortDirection;
+use crate::config::{PeerSortColumn, Settings, SortDirection, TorrentSortColumn};
 use crate::dht_service::{DhtBackendKind, DhtStatus, DhtWaveTelemetry};
 use crate::integrations::control::ControlRequest;
 use crate::persistence::activity_history::{ActivityHistoryPoint, ActivityHistorySeries};
@@ -403,6 +404,7 @@ pub enum UiAction {
     ThemeNext,
     TogglePauseSelected,
     SortBySelectedColumn,
+    ClearManualSorting,
     OpenHelp,
     PasteText(String),
 }
@@ -642,7 +644,8 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                                 app_state.torrent_sort.0 = column;
                                 app_state.torrent_sort.1 = column.default_direction();
                             }
-                            app_state.torrent_sort_pinned = true;
+                            app_state.torrent_sort_pinned =
+                                !torrent_sort_column_uses_autosort(column);
                             sort_and_filter_torrent_list_state(app_state);
                         }
                     }
@@ -674,11 +677,22 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                                 app_state.peer_sort.0 = column;
                                 app_state.peer_sort.1 = column.default_direction();
                             }
-                            app_state.peer_sort_pinned = true;
+                            app_state.peer_sort_pinned = !peer_sort_column_uses_autosort(column);
                         }
                     }
                 }
             };
+
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+        UiAction::ClearManualSorting => {
+            app_state.torrent_sort_pinned = false;
+            app_state.peer_sort_pinned = false;
+            align_unpinned_sort_with_visible_activity(app_state);
+            sort_and_filter_torrent_list_state(app_state);
 
             ReduceResult {
                 redraw: true,
@@ -729,6 +743,7 @@ fn map_key_to_ui_action(key: KeyEvent) -> Option<UiAction> {
         KeyCode::Char('>') => Some(UiAction::ThemeNext),
         KeyCode::Char('p') => Some(UiAction::TogglePauseSelected),
         KeyCode::Char('s') => Some(UiAction::SortBySelectedColumn),
+        KeyCode::Char('S') => Some(UiAction::ClearManualSorting),
         KeyCode::Up
         | KeyCode::Char('k')
         | KeyCode::Down
@@ -739,6 +754,14 @@ fn map_key_to_ui_action(key: KeyEvent) -> Option<UiAction> {
         | KeyCode::Right => Some(UiAction::Navigate(key.code)),
         _ => None,
     }
+}
+
+fn torrent_sort_column_uses_autosort(column: TorrentSortColumn) -> bool {
+    matches!(column, TorrentSortColumn::Down | TorrentSortColumn::Up)
+}
+
+fn peer_sort_column_uses_autosort(column: PeerSortColumn) -> bool {
+    matches!(column, PeerSortColumn::DL | PeerSortColumn::UL)
 }
 
 pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
@@ -1814,9 +1837,8 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                             let def = &all_cols[real_idx];
                             match def.id {
                                 ColumnId::Status => {
-                                    let display_pct = torrent_completion_percent(state);
-                                    Cell::from(format!("{:.1}%", display_pct))
-                                        .style(ctx.apply(Style::default().fg(row_color)))
+                                    let status = torrent_status_cell(torrent, ctx);
+                                    Cell::from(status.text).style(status.style)
                                 }
                                 ColumnId::Name => {
                                     let name = if app_state.anonymize_torrent_names {
@@ -2252,6 +2274,39 @@ fn torrent_list_row_color(torrent: &TorrentDisplayState, ctx: &ThemeContext) -> 
             TorrentControlState::Paused => ctx.theme.semantic.surface1,
             TorrentControlState::Deleting => ctx.state_error(),
         }
+    }
+}
+
+struct TorrentStatusCell {
+    text: String,
+    style: Style,
+}
+
+fn torrent_status_cell(torrent: &TorrentDisplayState, ctx: &ThemeContext) -> TorrentStatusCell {
+    let state = &torrent.latest_state;
+    let metadata_pending = matches!(
+        torrent.latest_file_probe_status,
+        Some(TorrentFileProbeStatus::PendingMetadata)
+    ) || (state.number_of_pieces_total == 0
+        && torrent_is_effectively_incomplete(state));
+
+    if metadata_pending {
+        return TorrentStatusCell {
+            text: "Meta".to_string(),
+            style: ctx.apply(Style::default().fg(ctx.state_warning())),
+        };
+    }
+
+    if !state.data_available {
+        return TorrentStatusCell {
+            text: "Files".to_string(),
+            style: ctx.apply(Style::default().fg(ctx.state_error())),
+        };
+    }
+
+    TorrentStatusCell {
+        text: format!("{:.1}%", torrent_completion_percent(state)),
+        style: ctx.apply(Style::default().fg(torrent_list_row_color(torrent, ctx))),
     }
 }
 
@@ -5940,6 +5995,10 @@ mod tests {
 
     fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
         let mut metrics = TorrentMetrics::default();
+        metrics.data_available = true;
+        metrics.is_complete = true;
+        metrics.number_of_pieces_total = 1;
+        metrics.number_of_pieces_completed = 1;
         let mut peers = Vec::new();
         for i in 0..peer_count {
             peers.push(PeerInfo {
@@ -6754,6 +6813,10 @@ mod tests {
             map_key_to_ui_action(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
             Some(UiAction::ToggleTorrentFiles)
         );
+        assert_eq!(
+            map_key_to_ui_action(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE)),
+            Some(UiAction::ClearManualSorting)
+        );
     }
 
     #[test]
@@ -7047,6 +7110,10 @@ mod tests {
             app_state.torrent_sort,
             (TorrentSortColumn::Down, SortDirection::Descending)
         );
+        assert!(
+            !app_state.torrent_sort_pinned,
+            "DL/UL torrent sorting is autosort-managed, not a manual pin"
+        );
         assert_eq!(
             app_state.torrent_list_order,
             vec!["hash_b".as_bytes().to_vec(), "hash_a".as_bytes().to_vec()]
@@ -7091,7 +7158,25 @@ mod tests {
             app_state.peer_sort,
             (PeerSortColumn::DL, SortDirection::Descending)
         );
-        assert!(app_state.peer_sort_pinned);
+        assert!(
+            !app_state.peer_sort_pinned,
+            "DL/UL peer sorting is autosort-managed, not a manual pin"
+        );
+    }
+
+    #[test]
+    fn reducer_clear_manual_sorting_resumes_autosort() {
+        let mut app_state = create_test_app_state();
+        app_state.torrent_sort = (TorrentSortColumn::Name, SortDirection::Ascending);
+        app_state.torrent_sort_pinned = true;
+        app_state.peer_sort = (PeerSortColumn::Address, SortDirection::Ascending);
+        app_state.peer_sort_pinned = true;
+
+        let result = reduce_ui_action(&mut app_state, UiAction::ClearManualSorting);
+
+        assert!(result.redraw);
+        assert!(!app_state.torrent_sort_pinned);
+        assert!(!app_state.peer_sort_pinned);
     }
 
     #[test]
@@ -7173,6 +7258,27 @@ mod tests {
 
         torrent.latest_state.data_available = false;
         assert_eq!(torrent_list_row_color(&torrent, &ctx), ctx.state_error());
+    }
+
+    #[test]
+    fn torrent_status_cell_shows_metadata_pending() {
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.is_complete = false;
+        torrent.latest_state.number_of_pieces_total = 0;
+        torrent.latest_state.number_of_pieces_completed = 0;
+
+        assert_eq!(torrent_status_cell(&torrent, &ctx).text, "Meta");
+    }
+
+    #[test]
+    fn torrent_status_cell_shows_file_probe_issue() {
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.data_available = false;
+        torrent.latest_file_probe_status = Some(TorrentFileProbeStatus::Files(Vec::new()));
+
+        assert_eq!(torrent_status_cell(&torrent, &ctx).text, "Files");
     }
 
     #[test]

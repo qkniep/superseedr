@@ -308,6 +308,13 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                     )),
                     Cell::from("Change sort order for the selected column"),
                 ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "S (shift+s)",
+                        ctx.apply(Style::default().fg(ctx.state_success())),
+                    )),
+                    Cell::from("Clear manual sorting and resume automatic sorting"),
+                ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 // --- Torrent Management ---
                 Row::new(vec![Cell::from(Span::styled(
