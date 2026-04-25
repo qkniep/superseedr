@@ -107,7 +107,6 @@ struct LookupTaskResult {
     outcome: LookupTaskOutcome,
 }
 
-
 #[derive(Debug)]
 pub struct Runtime {
     config: RuntimeConfig,
@@ -298,7 +297,6 @@ impl Runtime {
             .unwrap_or_default();
         (ipv4, ipv6)
     }
-
 
     pub fn lookup_quality_snapshot(&self, lookup_id: LookupId) -> Option<LookupQualitySnapshot> {
         self.active_lookups
