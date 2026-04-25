@@ -1425,6 +1425,7 @@ enum DhtCommand {
 enum LoopEvent {
     Shutdown,
     Command(DhtCommand),
+    DrainTick,
     DemandTick,
     MaintenanceTick,
     HealthTick,
@@ -1912,6 +1913,8 @@ async fn run_service(
     let demand_log_enabled = env::var_os("SUPERSEEDR_DHT_DEMAND_LOG").is_some();
     let mut demand_tick = tokio::time::interval(DHT_DEMAND_SCHEDULER_INTERVAL);
     demand_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut drain_interval = tokio::time::interval(DHT_DEMAND_DRAIN_POLL_INTERVAL);
+    drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut maintenance_interval = tokio::time::interval(DHT_MAINTENANCE_INTERVAL);
     let mut health_interval = tokio::time::interval(DHT_HEALTH_REFRESH_INTERVAL);
     let mut generation = status_tx.borrow().generation;
@@ -1955,6 +1958,7 @@ async fn run_service(
             tokio::select! {
                 biased;
                 _ = shutdown_rx.recv() => LoopEvent::Shutdown,
+                _ = drain_interval.tick(), if !draining_demands.is_empty() => LoopEvent::DrainTick,
                 maybe_command = command_rx.recv() => maybe_command.map_or(LoopEvent::CommandClosed, LoopEvent::Command),
                 _ = demand_tick.tick() => LoopEvent::DemandTick,
                 _ = maintenance_interval.tick() => LoopEvent::MaintenanceTick,
@@ -1964,6 +1968,7 @@ async fn run_service(
         } else {
             tokio::select! {
                 _ = shutdown_rx.recv() => LoopEvent::Shutdown,
+                _ = drain_interval.tick(), if !draining_demands.is_empty() => LoopEvent::DrainTick,
                 maybe_command = command_rx.recv() => maybe_command.map_or(LoopEvent::CommandClosed, LoopEvent::Command),
                 _ = demand_tick.tick() => LoopEvent::DemandTick,
                 _ = maintenance_interval.tick() => LoopEvent::MaintenanceTick,
@@ -2086,6 +2091,25 @@ async fn run_service(
                         &demand_lookup_ids,
                         &parked_crawls,
                         now,
+                    );
+                }
+                if draining_demands
+                    .get(&info_hash)
+                    .is_some_and(|drain| drain.slice_class != DemandSliceClass::from_demand(demand))
+                {
+                    finish_drained_demand_lookup(
+                        active_runtime.as_mut(),
+                        &mut parked_crawls,
+                        &mut draining_demands,
+                        &command_tx,
+                        &mut demand_scheduler,
+                        &demand_lookup_ids,
+                        &mut planner_state,
+                        &mut slice_metrics,
+                        &mut soak_metrics,
+                        info_hash,
+                        true,
+                        demand_log_enabled,
                     );
                 }
                 start_due_demands(
@@ -2435,6 +2459,27 @@ async fn run_service(
                         Instant::now(),
                     );
                 }
+                if draining_demands.contains_key(&info_hash)
+                    && demand_scheduler
+                        .demand_state(info_hash)
+                        .map(DemandSliceClass::from_demand)
+                        .is_some_and(|current_class| current_class != slice_class)
+                {
+                    finish_drained_demand_lookup(
+                        active_runtime.as_mut(),
+                        &mut parked_crawls,
+                        &mut draining_demands,
+                        &command_tx,
+                        &mut demand_scheduler,
+                        &demand_lookup_ids,
+                        &mut planner_state,
+                        &mut slice_metrics,
+                        &mut soak_metrics,
+                        info_hash,
+                        true,
+                        demand_log_enabled,
+                    );
+                }
                 start_due_demands(
                     active_runtime.as_mut(),
                     &command_tx,
@@ -2451,78 +2496,20 @@ async fn run_service(
                 .await;
             }
             LoopEvent::Command(DhtCommand::FinalizeDrainedDemandLookups { info_hash }) => {
-                let previous = if demand_log_enabled {
-                    demand_scheduler.entry_snapshot(info_hash)
-                } else {
-                    None
-                };
-                let drained_outcome = finalize_drained_demand_lookup(
+                finish_drained_demand_lookup(
                     active_runtime.as_mut(),
                     &mut parked_crawls,
                     &mut draining_demands,
                     &command_tx,
+                    &mut demand_scheduler,
+                    &demand_lookup_ids,
+                    &mut planner_state,
+                    &mut slice_metrics,
+                    &mut soak_metrics,
                     info_hash,
+                    false,
+                    demand_log_enabled,
                 );
-                if let Some(outcome) = drained_outcome {
-                    planner_state
-                        .entry(info_hash)
-                        .or_default()
-                        .note_finish(Instant::now(), outcome.unique_peers);
-                    slice_metrics.record_stop(
-                        outcome.slice_class,
-                        outcome.stop_reason,
-                        outcome.total_peers,
-                        outcome.unique_peers,
-                    );
-                    soak_metrics.record_drain_finalize(
-                        outcome,
-                        outcome.drain_duration_ms,
-                        outcome.finalized_after_deadline,
-                    );
-                    let now = Instant::now();
-                    let finish_mode = if outcome.slice_class == DemandSliceClass::NoConnectedPeers
-                        && outcome.parked_outcome
-                            == Some(DemandParkedSliceOutcome::HealthyZeroYield)
-                    {
-                        DemandFinishMode::AcceleratedNoConnectedPeersBackoff
-                    } else {
-                        DemandFinishMode::Standard
-                    };
-                    demand_scheduler.finish_with_mode(info_hash, now, finish_mode);
-                    if demand_log_enabled {
-                        tracing::info!(
-                            target: "superseedr::dht_demand",
-                            info_hash = %short_info_hash_hex(info_hash),
-                            class = demand_slice_class_label(outcome.slice_class),
-                            stop_reason = demand_stop_reason_label(outcome.stop_reason),
-                            parked_outcome = outcome
-                                .parked_outcome
-                                .map(demand_parked_slice_outcome_label)
-                                .unwrap_or("none"),
-                            accelerated_no_peers_backoff = matches!(
-                                finish_mode,
-                                DemandFinishMode::AcceleratedNoConnectedPeersBackoff
-                            ),
-                            total_peers = outcome.total_peers,
-                            unique_peers = outcome.unique_peers,
-                            drain_duration_ms = outcome.drain_duration_ms,
-                            finalized_after_deadline = outcome.finalized_after_deadline,
-                            finalized_early_no_yield = outcome.finalized_early_no_yield,
-                            parked = parked_crawls.contains_key(&info_hash),
-                            "dht demand drain finalized"
-                        );
-                        log_demand_state_event(
-                            "drain_finish",
-                            info_hash,
-                            None,
-                            previous,
-                            demand_scheduler.entry_snapshot(info_hash),
-                            &demand_lookup_ids,
-                            &parked_crawls,
-                            now,
-                        );
-                    }
-                }
                 start_due_demands(
                     active_runtime.as_mut(),
                     &command_tx,
@@ -2537,6 +2524,46 @@ async fn run_service(
                     demand_log_enabled,
                 )
                 .await;
+            }
+            LoopEvent::DrainTick => {
+                let due_drains = due_drained_demand_lookups(
+                    active_runtime.as_ref(),
+                    &draining_demands,
+                    Instant::now(),
+                );
+                let mut finalized_any = false;
+                for info_hash in due_drains {
+                    finalized_any |= finish_drained_demand_lookup(
+                        active_runtime.as_mut(),
+                        &mut parked_crawls,
+                        &mut draining_demands,
+                        &command_tx,
+                        &mut demand_scheduler,
+                        &demand_lookup_ids,
+                        &mut planner_state,
+                        &mut slice_metrics,
+                        &mut soak_metrics,
+                        info_hash,
+                        false,
+                        demand_log_enabled,
+                    );
+                }
+                if finalized_any {
+                    start_due_demands(
+                        active_runtime.as_mut(),
+                        &command_tx,
+                        &mut demand_scheduler,
+                        &mut demand_lookup_ids,
+                        &mut parked_crawls,
+                        &draining_demands,
+                        &mut planner_state,
+                        &mut planner_budget,
+                        &mut slice_metrics,
+                        &mut soak_metrics,
+                        demand_log_enabled,
+                    )
+                    .await;
+                }
             }
             LoopEvent::Command(DhtCommand::AnnouncePeer {
                 info_hash,
@@ -3165,21 +3192,58 @@ fn drain_lookup_ids(
     parked_outcome
 }
 
+fn drained_demand_lookup_runtime_ready(
+    active_runtime: Option<&ActiveRuntime>,
+    drain: &DrainingDemandLookup,
+) -> bool {
+    active_runtime.is_none_or(|active| active.runtime.drained_lookups_ready(&drain.lookup_ids))
+}
+
+fn drained_demand_lookup_ready_for_finalize(
+    runtime_ready: bool,
+    drain: &DrainingDemandLookup,
+    now: Instant,
+) -> (bool, bool) {
+    let early_no_yield = !runtime_ready
+        && now >= drain.no_late_yield_deadline
+        && drain.late_unique_peer_count() == 0;
+    let ready_to_finalize = runtime_ready || early_no_yield || now >= drain.deadline;
+    (ready_to_finalize, early_no_yield)
+}
+
+fn due_drained_demand_lookups(
+    active_runtime: Option<&ActiveRuntime>,
+    draining_demands: &HashMap<InfoHash, DrainingDemandLookup>,
+    now: Instant,
+) -> Vec<InfoHash> {
+    draining_demands
+        .iter()
+        .filter_map(|(&info_hash, drain)| {
+            let runtime_ready = drained_demand_lookup_runtime_ready(active_runtime, drain);
+            let (ready_to_finalize, _) =
+                drained_demand_lookup_ready_for_finalize(runtime_ready, drain, now);
+            ready_to_finalize.then_some(info_hash)
+        })
+        .collect()
+}
+
 fn finalize_drained_demand_lookup(
     active_runtime: Option<&mut ActiveRuntime>,
     parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
     draining_demands: &mut HashMap<InfoHash, DrainingDemandLookup>,
     command_tx: &mpsc::UnboundedSender<DhtCommand>,
     info_hash: InfoHash,
+    force: bool,
 ) -> Option<DrainedDemandOutcome> {
     let drain = draining_demands.get(&info_hash).cloned()?;
     let now = Instant::now();
-    let ready = active_runtime
-        .as_ref()
-        .is_none_or(|active| active.runtime.drained_lookups_ready(&drain.lookup_ids));
-    let early_no_yield =
-        !ready && now >= drain.no_late_yield_deadline && drain.late_unique_peer_count() == 0;
-    if !ready && !early_no_yield && now < drain.deadline {
+    let runtime_ready = drained_demand_lookup_runtime_ready(
+        active_runtime.as_ref().map(|active| &**active),
+        &drain,
+    );
+    let (ready_to_finalize, early_no_yield) =
+        drained_demand_lookup_ready_for_finalize(runtime_ready, &drain, now);
+    if !force && !ready_to_finalize {
         schedule_drained_demand_finalize(command_tx, info_hash, DHT_DEMAND_DRAIN_POLL_INTERVAL);
         return None;
     }
@@ -3216,6 +3280,97 @@ fn finalize_drained_demand_lookup(
         finalized_after_deadline,
         finalized_early_no_yield: early_no_yield && !finalized_after_deadline,
     })
+}
+
+fn finish_drained_demand_lookup(
+    active_runtime: Option<&mut ActiveRuntime>,
+    parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
+    draining_demands: &mut HashMap<InfoHash, DrainingDemandLookup>,
+    command_tx: &mpsc::UnboundedSender<DhtCommand>,
+    demand_scheduler: &mut DemandScheduler,
+    demand_lookup_ids: &HashMap<InfoHash, ActiveDemandLookup>,
+    planner_state: &mut HashMap<InfoHash, DemandPlannerState>,
+    slice_metrics: &mut DemandSliceMetrics,
+    soak_metrics: &mut DhtSoakMetrics,
+    info_hash: InfoHash,
+    force: bool,
+    demand_log_enabled: bool,
+) -> bool {
+    let previous = if demand_log_enabled {
+        demand_scheduler.entry_snapshot(info_hash)
+    } else {
+        None
+    };
+    let Some(outcome) = finalize_drained_demand_lookup(
+        active_runtime,
+        parked_crawls,
+        draining_demands,
+        command_tx,
+        info_hash,
+        force,
+    ) else {
+        return false;
+    };
+
+    let now = Instant::now();
+    planner_state
+        .entry(info_hash)
+        .or_default()
+        .note_finish(now, outcome.unique_peers);
+    slice_metrics.record_stop(
+        outcome.slice_class,
+        outcome.stop_reason,
+        outcome.total_peers,
+        outcome.unique_peers,
+    );
+    soak_metrics.record_drain_finalize(
+        outcome,
+        outcome.drain_duration_ms,
+        outcome.finalized_after_deadline,
+    );
+    let finish_mode = if outcome.slice_class == DemandSliceClass::NoConnectedPeers
+        && outcome.parked_outcome == Some(DemandParkedSliceOutcome::HealthyZeroYield)
+    {
+        DemandFinishMode::AcceleratedNoConnectedPeersBackoff
+    } else {
+        DemandFinishMode::Standard
+    };
+    demand_scheduler.finish_with_mode(info_hash, now, finish_mode);
+    if demand_log_enabled {
+        tracing::info!(
+            target: "superseedr::dht_demand",
+            info_hash = %short_info_hash_hex(info_hash),
+            class = demand_slice_class_label(outcome.slice_class),
+            stop_reason = demand_stop_reason_label(outcome.stop_reason),
+            parked_outcome = outcome
+                .parked_outcome
+                .map(demand_parked_slice_outcome_label)
+                .unwrap_or("none"),
+            accelerated_no_peers_backoff = matches!(
+                finish_mode,
+                DemandFinishMode::AcceleratedNoConnectedPeersBackoff
+            ),
+            total_peers = outcome.total_peers,
+            unique_peers = outcome.unique_peers,
+            drain_duration_ms = outcome.drain_duration_ms,
+            finalized_after_deadline = outcome.finalized_after_deadline,
+            finalized_early_no_yield = outcome.finalized_early_no_yield,
+            parked = parked_crawls.contains_key(&info_hash),
+            "dht demand drain finalized"
+        );
+        log_demand_state_event(
+            "drain_finish",
+            info_hash,
+            None,
+            previous,
+            demand_scheduler.entry_snapshot(info_hash),
+            demand_lookup_ids,
+            parked_crawls,
+            now,
+        );
+    }
+
+    true
 }
 
 fn evict_stale_parked_crawls(
@@ -4641,6 +4796,59 @@ mod tests {
                 AggregateLookupQualitySnapshot::default(),
             ),
             Some(DemandParkedSliceOutcome::HealthyLowYield)
+        );
+    }
+
+    #[test]
+    fn drain_finalize_readiness_bounds_waiting_drains() {
+        let start = Instant::now();
+        let initial_peer = peer("127.0.0.1:4000");
+        let late_peer = peer("127.0.0.2:4000");
+        let mut unique_peers = HashSet::new();
+        unique_peers.insert(initial_peer);
+        let mut drain = DrainingDemandLookup {
+            lookup_ids: vec![LookupId(1)],
+            slice_class: DemandSliceClass::NoConnectedPeers,
+            stop_reason: DemandSliceStopReason::WallTime,
+            started_at: start,
+            total_peers: 1,
+            initial_unique_peers: 1,
+            unique_peers,
+            deadline: start + Duration::from_secs(2),
+            no_late_yield_deadline: start + Duration::from_secs(1),
+            initial_inflight_queries: 8,
+            score: 100,
+        };
+
+        assert_eq!(
+            drained_demand_lookup_ready_for_finalize(
+                false,
+                &drain,
+                start + Duration::from_millis(999),
+            ),
+            (false, false)
+        );
+        assert_eq!(
+            drained_demand_lookup_ready_for_finalize(false, &drain, start + Duration::from_secs(1)),
+            (true, true)
+        );
+
+        drain.record_peers(&[late_peer]);
+        assert_eq!(
+            drained_demand_lookup_ready_for_finalize(
+                false,
+                &drain,
+                start + Duration::from_millis(1500),
+            ),
+            (false, false)
+        );
+        assert_eq!(
+            drained_demand_lookup_ready_for_finalize(false, &drain, start + Duration::from_secs(2)),
+            (true, false)
+        );
+        assert_eq!(
+            drained_demand_lookup_ready_for_finalize(true, &drain, start),
+            (true, false)
         );
     }
 
