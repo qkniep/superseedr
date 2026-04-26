@@ -38,9 +38,32 @@ pub(in crate::dht::service) async fn apply_dht_service_effects(
     active_runtime: &mut Option<ActiveRuntime>,
     status_tx: &watch::Sender<DhtStatus>,
     command_tx: &DhtCommandSender,
+    local_node_id: NodeId,
 ) {
-    for effect in effects {
+    let mut pending_effects = VecDeque::from(effects);
+
+    while let Some(effect) = pending_effects.pop_front() {
         match effect {
+            DhtServiceEffect::BuildRuntime { config } => {
+                let reduction = match build_runtime(&config, local_node_id).await {
+                    Ok(built) => {
+                        if let Some(previous) = active_runtime.as_ref() {
+                            let _ = previous.runtime.save_state().await;
+                        }
+                        *active_runtime = built.active_runtime;
+                        service_state
+                            .service
+                            .update(DhtServiceAction::ReconfigureSucceeded {
+                                config,
+                                warning: built.warning,
+                            })
+                    }
+                    Err(error) => service_state
+                        .service
+                        .update(DhtServiceAction::ReconfigureFailed { warning: error }),
+                };
+                pending_effects.extend(reduction.effects);
+            }
             DhtServiceEffect::ResetDemandPlanner => {
                 service_state
                     .demand_planner
@@ -107,6 +130,7 @@ pub(in crate::dht::service) async fn apply_dht_lifecycle_effects(
     active_runtime: &mut Option<ActiveRuntime>,
     status_tx: &watch::Sender<DhtStatus>,
     command_tx: &DhtCommandSender,
+    local_node_id: NodeId,
 ) {
     let mut pending_effects = VecDeque::from(effects);
 
@@ -163,6 +187,7 @@ pub(in crate::dht::service) async fn apply_dht_lifecycle_effects(
                         active_runtime,
                         status_tx,
                         command_tx,
+                        local_node_id,
                     )
                     .await;
                 }
@@ -529,7 +554,7 @@ pub(in crate::dht::service) async fn start_due_demands(
         let plan = start.plan;
         slice_metrics.record_selection(plan.class, start.selection_reason);
         match start_get_peers_lookup(
-            active_runtime.as_mut().map(|active| &mut **active),
+            active_runtime.as_deref_mut(),
             command_tx,
             demand_planner,
             Some(slice_metrics),

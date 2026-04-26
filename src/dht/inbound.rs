@@ -71,6 +71,7 @@ impl InboundActor {
         &self.config
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn handle_query(
         &mut self,
         ctx: InboundRequestContext,

@@ -593,7 +593,7 @@ fn decode_query(
 
 pub fn decode_compact_peers(bytes: &[u8], family: AddressFamily) -> Vec<CompactPeer> {
     match family {
-        AddressFamily::Ipv4 if !bytes.is_empty() && bytes.len() % 6 == 0 => bytes
+        AddressFamily::Ipv4 if !bytes.is_empty() && bytes.len().is_multiple_of(6) => bytes
             .chunks_exact(6)
             .map(|chunk| CompactPeer {
                 addr: SocketAddr::new(
@@ -602,7 +602,7 @@ pub fn decode_compact_peers(bytes: &[u8], family: AddressFamily) -> Vec<CompactP
                 ),
             })
             .collect(),
-        AddressFamily::Ipv6 if !bytes.is_empty() && bytes.len() % 18 == 0 => bytes
+        AddressFamily::Ipv6 if !bytes.is_empty() && bytes.len().is_multiple_of(18) => bytes
             .chunks_exact(18)
             .map(|chunk| {
                 let mut ip = [0u8; 16];
@@ -638,7 +638,7 @@ pub fn encode_compact_peer(peer: CompactPeer) -> ByteBuf {
 
 pub fn decode_compact_nodes(bytes: &[u8], family: AddressFamily) -> Vec<CompactNode> {
     match family {
-        AddressFamily::Ipv4 if bytes.len() % 26 == 0 => bytes
+        AddressFamily::Ipv4 if bytes.len().is_multiple_of(26) => bytes
             .chunks_exact(26)
             .filter_map(|chunk| {
                 let id = NodeId::try_from(&chunk[..20]).ok()?;
@@ -651,7 +651,7 @@ pub fn decode_compact_nodes(bytes: &[u8], family: AddressFamily) -> Vec<CompactN
                 })
             })
             .collect(),
-        AddressFamily::Ipv6 if bytes.len() % 38 == 0 => bytes
+        AddressFamily::Ipv6 if bytes.len().is_multiple_of(38) => bytes
             .chunks_exact(38)
             .filter_map(|chunk| {
                 let id = NodeId::try_from(&chunk[..20]).ok()?;

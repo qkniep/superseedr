@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::path::PathBuf;
+
 use super::*;
 
 #[derive(Debug)]
@@ -218,6 +220,7 @@ pub(in crate::dht::service) async fn ensure_lookup_routes(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::dht::service) async fn attach_lookup_family(
     active_runtime: Option<&mut ActiveRuntime>,
     demand_planner: &mut DemandPlannerModel,
@@ -242,7 +245,7 @@ pub(in crate::dht::service) async fn attach_lookup_family(
 
     let mut slice_metrics = slice_metrics;
     let resumed_state = demand_planner.take_parked_family_state(
-        slice_metrics.as_mut().map(|metrics| &mut **metrics),
+        slice_metrics.as_deref_mut(),
         info_hash,
         family,
         slice_class,
@@ -294,13 +297,12 @@ pub(in crate::dht::service) async fn announce_peer(
         if !active_runtime.runtime.family_bound(family) {
             continue;
         }
-        match active_runtime
+        if let Ok(success) = active_runtime
             .runtime
             .announce_peer(family, info_hash, port)
             .await
         {
-            Ok(success) => announced |= success,
-            Err(_) => {}
+            announced |= success;
         }
     }
 
@@ -369,6 +371,21 @@ pub(in crate::dht::service) async fn build_runtime(
         backend: DhtBackendKind::InternalPrototype,
         warning,
         bootstrap,
+    })
+}
+
+pub(in crate::dht::service) fn persistence_config() -> Option<PersistenceConfig> {
+    if std::env::var_os("SUPERSEEDR_DHT_DISABLE_PERSISTENCE").is_some()
+        || std::env::var_os("SUPERSEEDR_DHT_FRESH_BOOTSTRAP").is_some()
+    {
+        return None;
+    }
+    let path = crate::config::runtime_persistence_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("dht_state.json");
+    Some(PersistenceConfig {
+        path,
+        max_age: DHT_PERSISTENCE_MAX_AGE,
     })
 }
 

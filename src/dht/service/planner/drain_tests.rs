@@ -811,7 +811,7 @@ fn demand_planner_lookup_park_rejection_finishes_scheduler_entry() {
         panic!("expected parked effect");
     };
     assert!(parked.drain_admission.is_none());
-    assert!(parked.current.expect("current snapshot").in_progress == false);
+    assert!(!parked.current.expect("current snapshot").in_progress);
 }
 #[test]
 fn demand_planner_lookup_park_admission_keeps_scheduler_entry_in_progress() {
@@ -871,7 +871,7 @@ fn demand_planner_lookup_park_admission_keeps_scheduler_entry_in_progress() {
             .expect("demand entry")
             .in_progress
     );
-    assert!(planner.state.get(&info_hash).is_none());
+    assert!(!planner.state.contains_key(&info_hash));
     let DemandPlannerEffect::LookupParked(parked) =
         resolved.effects.into_iter().next().expect("parked effect")
     else {

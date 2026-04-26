@@ -143,9 +143,9 @@ impl DemandScheduler {
         let previous_class = DemandClass::from_demand(entry.demand);
         let next_class = DemandClass::from_demand(demand);
         entry.demand = demand;
-        if next_class != DemandClass::NoConnectedPeers {
-            entry.no_connected_peers_backoff_step = 0;
-        } else if previous_class != DemandClass::NoConnectedPeers {
+        if next_class != DemandClass::NoConnectedPeers
+            || previous_class != DemandClass::NoConnectedPeers
+        {
             entry.no_connected_peers_backoff_step = 0;
         }
 

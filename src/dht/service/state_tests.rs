@@ -34,6 +34,30 @@ fn dht_service_model_reconfigure_success_updates_state_and_emits_followups() {
         ]
     );
 }
+
+#[test]
+fn dht_service_model_reconfigure_request_emits_runtime_build_effect() {
+    let initial = disabled_service_config();
+    let next = DhtServiceConfig {
+        port: 6882,
+        bootstrap_nodes: vec!["203.0.113.21:6881".to_string()],
+        preferred_backend: DhtBackendKind::InternalPrototype,
+        force_internal_failure: false,
+    };
+    let mut model = DhtServiceModel::new(initial.clone(), 5, None);
+
+    let reduction = model.update(DhtServiceAction::ReconfigureRequested {
+        config: next.clone(),
+    });
+
+    assert_eq!(model.config(), &initial);
+    assert_eq!(model.generation(), 5);
+    assert_eq!(
+        reduction.effects,
+        vec![DhtServiceEffect::BuildRuntime { config: next }]
+    );
+}
+
 #[test]
 fn dht_service_model_reconfigure_failure_preserves_config_and_generation() {
     let initial = DhtServiceConfig {

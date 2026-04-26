@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    AddressFamily, DemandSliceClass, DemandSliceStopReason, DhtCommand, InfoHash, LookupId,
-    StartedLookup,
+    observe_action_effect_reduction, AddressFamily, DemandSliceClass, DemandSliceStopReason,
+    DhtCommand, InfoHash, LookupId, StartedLookup,
 };
 
 pub(super) struct DhtRuntimeLookupFamilyRequest {
@@ -86,6 +86,37 @@ pub(super) struct DhtRuntimeCommandReduction {
 
 pub(super) struct DhtRuntimeCommandModel;
 
+impl DhtRuntimeCommandAction {
+    fn kind(&self) -> &'static str {
+        match self {
+            DhtRuntimeCommandAction::StartGetPeers { .. } => "start_get_peers",
+            DhtRuntimeCommandAction::StartGetPeersFamily(_) => "start_get_peers_family",
+            DhtRuntimeCommandAction::CancelLookups { .. } => "cancel_lookups",
+            DhtRuntimeCommandAction::ParkDemandLookups { .. } => "park_demand_lookups",
+            DhtRuntimeCommandAction::FinalizeDrainedDemandLookups { .. } => {
+                "finalize_drained_demand_lookups"
+            }
+            DhtRuntimeCommandAction::AnnouncePeer { .. } => "announce_peer",
+        }
+    }
+}
+
+impl DhtRuntimeCommandEffect {
+    fn kind(&self) -> &'static str {
+        match self {
+            DhtRuntimeCommandEffect::StartGetPeers { .. } => "start_get_peers",
+            DhtRuntimeCommandEffect::AttachLookupFamily(_) => "attach_lookup_family",
+            DhtRuntimeCommandEffect::CancelLookups { .. } => "cancel_lookups",
+            DhtRuntimeCommandEffect::ParkDemandLookups { .. } => "park_demand_lookups",
+            DhtRuntimeCommandEffect::FinalizeDrainedDemandLookups { .. } => {
+                "finalize_drained_demand_lookups"
+            }
+            DhtRuntimeCommandEffect::AnnouncePeer { .. } => "announce_peer",
+            DhtRuntimeCommandEffect::StartDueDemands => "start_due_demands",
+        }
+    }
+}
+
 impl DhtRuntimeCommandModel {
     pub(super) fn update_command(command: DhtCommand) -> Option<DhtRuntimeCommandReduction> {
         let action = match command {
@@ -156,6 +187,7 @@ impl DhtRuntimeCommandModel {
     }
 
     pub(super) fn update(action: DhtRuntimeCommandAction) -> DhtRuntimeCommandReduction {
+        let action_kind = action.kind();
         let effects = match action {
             DhtRuntimeCommandAction::StartGetPeers {
                 info_hash,
@@ -210,6 +242,11 @@ impl DhtRuntimeCommandModel {
                 }]
             }
         };
+        observe_action_effect_reduction(
+            "runtime_command",
+            action_kind,
+            effects.iter().map(DhtRuntimeCommandEffect::kind).collect(),
+        );
         DhtRuntimeCommandReduction { effects }
     }
 }

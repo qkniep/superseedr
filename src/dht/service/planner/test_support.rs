@@ -279,6 +279,7 @@ pub(super) fn insert_synthetic_drain(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn insert_synthetic_drain_with_stop_reason(
     draining_demands: &mut HashMap<InfoHash, DrainingDemandLookup>,
     info_hash: InfoHash,

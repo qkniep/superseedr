@@ -5,15 +5,18 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use super::{
-    DemandPlannerAction, DemandPlannerEffect, DemandPlannerModel, DemandSliceClass,
-    DemandSliceMetrics, DemandSubscriberAction, DemandSubscriberEffect, DemandSubscriberRegistry,
-    DhtCommand, DhtDemandState, DhtServiceConfig, InfoHash, RecentUniquePeers,
-    DHT_UNIQUE_PEERS_FOUND_WINDOW,
+    observe_action_effect_reduction, DemandPlannerAction, DemandPlannerEffect, DemandPlannerModel,
+    DemandSliceClass, DemandSliceMetrics, DemandSubscriberAction, DemandSubscriberEffect,
+    DemandSubscriberRegistry, DhtCommand, DhtDemandState, DhtServiceConfig, InfoHash,
+    RecentUniquePeers, DHT_UNIQUE_PEERS_FOUND_WINDOW,
 };
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug)]
 pub(super) enum DhtServiceAction {
+    ReconfigureRequested {
+        config: DhtServiceConfig,
+    },
     ReconfigureSucceeded {
         config: DhtServiceConfig,
         warning: Option<String>,
@@ -26,8 +29,9 @@ pub(super) enum DhtServiceAction {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DhtServiceEffect {
+    BuildRuntime { config: DhtServiceConfig },
     ResetDemandPlanner,
     PublishStatus,
     StartDueDemands,
@@ -111,7 +115,11 @@ impl DhtServiceModel {
     }
 
     pub(super) fn update(&mut self, action: DhtServiceAction) -> DhtServiceReduction {
-        match action {
+        let action_kind = action.kind();
+        let reduction = match action {
+            DhtServiceAction::ReconfigureRequested { config } => DhtServiceReduction {
+                effects: vec![DhtServiceEffect::BuildRuntime { config }],
+            },
             DhtServiceAction::ReconfigureSucceeded { config, warning } => {
                 self.config = config;
                 self.generation = self.generation.saturating_add(1);
@@ -140,7 +148,17 @@ impl DhtServiceModel {
                     effects: vec![DhtServiceEffect::PublishStatus],
                 }
             }
-        }
+        };
+        observe_action_effect_reduction(
+            "service",
+            action_kind,
+            reduction
+                .effects
+                .iter()
+                .map(DhtServiceEffect::kind)
+                .collect(),
+        );
+        reduction
     }
 }
 
@@ -234,7 +252,8 @@ impl DhtServiceState {
         &mut self,
         action: DhtDemandCommandAction,
     ) -> DhtDemandCommandReduction {
-        match action {
+        let action_kind = action.kind();
+        let reduction = match action {
             DhtDemandCommandAction::Register {
                 info_hash,
                 demand,
@@ -337,6 +356,61 @@ impl DhtServiceState {
                     ],
                 }
             }
+        };
+        observe_action_effect_reduction(
+            "demand_command",
+            action_kind,
+            reduction
+                .effects
+                .iter()
+                .map(DhtDemandCommandEffect::kind)
+                .collect(),
+        );
+        reduction
+    }
+}
+
+impl DhtServiceAction {
+    fn kind(&self) -> &'static str {
+        match self {
+            DhtServiceAction::ReconfigureRequested { .. } => "reconfigure_requested",
+            DhtServiceAction::ReconfigureSucceeded { .. } => "reconfigure_succeeded",
+            DhtServiceAction::ReconfigureFailed { .. } => "reconfigure_failed",
+            DhtServiceAction::RuntimeWarning { .. } => "runtime_warning",
+        }
+    }
+}
+
+impl DhtServiceEffect {
+    fn kind(&self) -> &'static str {
+        match self {
+            DhtServiceEffect::BuildRuntime { .. } => "build_runtime",
+            DhtServiceEffect::ResetDemandPlanner => "reset_demand_planner",
+            DhtServiceEffect::PublishStatus => "publish_status",
+            DhtServiceEffect::StartDueDemands => "start_due_demands",
+        }
+    }
+}
+
+impl DhtDemandCommandAction {
+    fn kind(&self) -> &'static str {
+        match self {
+            DhtDemandCommandAction::Register { .. } => "register",
+            DhtDemandCommandAction::Update { .. } => "update",
+            DhtDemandCommandAction::Unregister { .. } => "unregister",
+            DhtDemandCommandAction::PeersReceived { .. } => "peers_received",
+            DhtDemandCommandAction::LookupFinished { .. } => "lookup_finished",
+        }
+    }
+}
+
+impl DhtDemandCommandEffect {
+    fn kind(&self) -> &'static str {
+        match self {
+            DhtDemandCommandEffect::SendRegisterResponse { .. } => "send_register_response",
+            DhtDemandCommandEffect::ApplySubscriberEffects(_) => "apply_subscriber_effects",
+            DhtDemandCommandEffect::ApplyPlannerEffects(_) => "apply_planner_effects",
+            DhtDemandCommandEffect::StartDueDemands => "start_due_demands",
         }
     }
 }

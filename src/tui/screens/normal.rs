@@ -853,7 +853,7 @@ fn draw_dht_wave_panel(
             crest_bias: app_state.ui.dht_wave.crest_bias,
         }
     } else {
-        DhtWaveProfile::from_inputs(&dht_status, dht_wave_telemetry)
+        DhtWaveProfile::from_inputs(dht_status, dht_wave_telemetry)
     };
     let total_queries =
         dht_wave_telemetry.inflight_ipv4_queries + dht_wave_telemetry.inflight_ipv6_queries;
@@ -1654,8 +1654,7 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
     let (sort_col, sort_dir) = app_state.torrent_sort;
     let header_cells: Vec<Cell> = visible_indices
         .iter()
-        .enumerate()
-        .map(|(_visual_idx, &real_idx)| {
+        .map(|&real_idx| {
             let def = &all_cols[real_idx];
             let is_selected = app_state.ui.selected_header == SelectedHeader::Torrent(def.id);
             let is_sorting = def.sort_enum == Some(sort_col);
@@ -4317,8 +4316,7 @@ pub fn draw_peers_table(
                 } else {
                     let header_cells: Vec<Cell> = visible_indices
                         .iter()
-                        .enumerate()
-                        .map(|(_visual_idx, &real_idx)| {
+                        .map(|&real_idx| {
                             let def = &all_peer_cols[real_idx];
 
                             let is_selected =
@@ -5886,11 +5884,6 @@ mod tests {
     use tempfile::tempdir;
 
     fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
-        let mut metrics = TorrentMetrics::default();
-        metrics.data_available = true;
-        metrics.is_complete = true;
-        metrics.number_of_pieces_total = 1;
-        metrics.number_of_pieces_completed = 1;
         let mut peers = Vec::new();
         for i in 0..peer_count {
             peers.push(PeerInfo {
@@ -5898,8 +5891,14 @@ mod tests {
                 ..Default::default()
             });
         }
-        metrics.peers = peers;
-        metrics
+        TorrentMetrics {
+            data_available: true,
+            is_complete: true,
+            number_of_pieces_total: 1,
+            number_of_pieces_completed: 1,
+            peers,
+            ..Default::default()
+        }
     }
 
     fn create_mock_display_state(peer_count: usize) -> TorrentDisplayState {

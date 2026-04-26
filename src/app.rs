@@ -3636,7 +3636,6 @@ impl App {
             }
             AppCommand::MarkPortOpen(peer_addr) => {
                 let highlight_until = Some(Instant::now() + PORT_FAMILY_HIGHLIGHT_DURATION);
-                let just_opened;
                 let open_flag = match peer_addr {
                     SocketAddr::V4(_) => {
                         self.app_state.externally_accessable_port_v4_highlight_until =
@@ -3654,7 +3653,7 @@ impl App {
                         &mut self.app_state.externally_accessable_port_v6
                     }
                 };
-                just_opened = !*open_flag;
+                let just_opened = !*open_flag;
                 if just_opened {
                     *open_flag = true;
                     let info_hashes = self.active_running_torrents_for_dht_announce();
@@ -6692,9 +6691,7 @@ pub(crate) fn align_unpinned_sort_with_visible_activity(app_state: &mut AppState
 
         let target = if has_download_activity && (!app_state.is_seeding || !has_upload_activity) {
             PeerSortColumn::DL
-        } else if has_upload_activity {
-            PeerSortColumn::UL
-        } else if app_state.is_seeding {
+        } else if has_upload_activity || app_state.is_seeding {
             PeerSortColumn::UL
         } else {
             PeerSortColumn::DL

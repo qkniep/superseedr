@@ -2623,7 +2623,7 @@ impl TorrentManager {
                             for peer in peers {
                                 event!(Level::DEBUG, "PEER FROM DHT {}", peer);
                                 if self.should_accept_new_peers() {
-                                    self.connect_to_peer(peer.into());
+                                    self.connect_to_peer(peer);
                                 }
                             }
                         } else {

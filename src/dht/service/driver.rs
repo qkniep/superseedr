@@ -1,7 +1,19 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use super::*;
+use std::time::Instant;
+
+use tokio::sync::{broadcast, watch};
+
+use super::{
+    apply_demand_planner_effects_for_state, apply_dht_demand_command_effects,
+    apply_dht_lifecycle_effects, apply_dht_runtime_command_effects, apply_dht_service_effects,
+    publish_wave_telemetry, start_due_demands_for_state, ActiveRuntime, DemandPlannerAction,
+    DhtCommand, DhtCommandReceiver, DhtCommandSender, DhtLifecycleAction, DhtLifecycleModel,
+    DhtRuntimeCommandModel, DhtServiceAction, DhtServiceConfig, DhtServiceState, DhtStatus,
+    DhtWaveTelemetry, NodeId, DHT_DEMAND_DRAIN_POLL_INTERVAL, DHT_DEMAND_SCHEDULER_INTERVAL,
+    DHT_HEALTH_REFRESH_INTERVAL, DHT_MAINTENANCE_INTERVAL,
+};
 
 #[derive(Debug)]
 pub(in crate::dht::service) enum LoopEvent {
@@ -22,6 +34,7 @@ pub(in crate::dht::service) fn command_event(maybe_command: Option<DhtCommand>) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::dht::service) async fn run_service(
     config: DhtServiceConfig,
     local_node_id: NodeId,
@@ -56,6 +69,7 @@ pub(in crate::dht::service) async fn run_service(
                     &mut active_runtime,
                     &status_tx,
                     &command_tx,
+                    local_node_id,
                 )
                 .await;
             }
@@ -92,34 +106,22 @@ pub(in crate::dht::service) async fn run_service(
                     &mut active_runtime,
                     &status_tx,
                     &command_tx,
+                    local_node_id,
                 )
                 .await;
                 break;
             }
             LoopEvent::Command(DhtCommand::Reconfigure(new_config)) => {
-                let reduction = match build_runtime(&new_config, local_node_id).await {
-                    Ok(built) => {
-                        if let Some(previous) = active_runtime.as_ref() {
-                            let _ = previous.runtime.save_state().await;
-                        }
-                        active_runtime = built.active_runtime;
-                        service_state
-                            .service
-                            .update(DhtServiceAction::ReconfigureSucceeded {
-                                config: new_config,
-                                warning: built.warning,
-                            })
-                    }
-                    Err(error) => service_state
-                        .service
-                        .update(DhtServiceAction::ReconfigureFailed { warning: error }),
-                };
+                let reduction = service_state
+                    .service
+                    .update(DhtServiceAction::ReconfigureRequested { config: new_config });
                 apply_dht_service_effects(
                     reduction.effects,
                     &mut service_state,
                     &mut active_runtime,
                     &status_tx,
                     &command_tx,
+                    local_node_id,
                 )
                 .await;
             }
@@ -201,6 +203,7 @@ pub(in crate::dht::service) async fn run_service(
                     &mut active_runtime,
                     &status_tx,
                     &command_tx,
+                    local_node_id,
                 )
                 .await;
             }
@@ -212,6 +215,7 @@ pub(in crate::dht::service) async fn run_service(
                     &mut active_runtime,
                     &status_tx,
                     &command_tx,
+                    local_node_id,
                 )
                 .await;
             }
@@ -226,6 +230,7 @@ pub(in crate::dht::service) async fn run_service(
                     &mut active_runtime,
                     &status_tx,
                     &command_tx,
+                    local_node_id,
                 )
                 .await;
             }

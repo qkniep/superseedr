@@ -1,7 +1,111 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use super::*;
+use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
+
+use super::{ActiveRuntime, BootstrapSummary, DhtBackendKind};
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DhtHealthSnapshot {
+    pub backend: DhtBackendKind,
+    pub preferred_backend: Option<DhtBackendKind>,
+    pub recovery_pending: bool,
+    pub enabled: bool,
+    pub local_addr: Option<SocketAddr>,
+    pub ipv4_local_addr: Option<SocketAddr>,
+    pub ipv6_local_addr: Option<SocketAddr>,
+    pub bound_family_count: usize,
+    pub cached_ipv4_routes: usize,
+    pub cached_ipv6_routes: usize,
+    pub active_ipv4_routes: usize,
+    pub active_ipv6_routes: usize,
+    pub cached_ipv4_announce_tokens: usize,
+    pub cached_ipv6_announce_tokens: usize,
+    pub cached_lookup_results: usize,
+    pub inflight_lookups: usize,
+    pub inflight_ipv4_queries: usize,
+    pub inflight_ipv6_queries: usize,
+    pub public_addr: Option<SocketAddr>,
+    pub firewalled: Option<bool>,
+    pub server_mode: Option<bool>,
+    pub exported_bootstrap_nodes: usize,
+    pub dht_size_estimate: Option<DhtSizeEstimate>,
+    pub ipv4_bootstrap_nodes: usize,
+    pub ipv6_bootstrap_nodes: usize,
+    pub responsive_ipv4_bootstrap_nodes: usize,
+    pub responsive_ipv6_bootstrap_nodes: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DhtSizeEstimate {
+    pub node_count: usize,
+    pub std_dev: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DhtStatus {
+    pub generation: u64,
+    pub warning: Option<String>,
+    pub health: DhtHealthSnapshot,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DhtWaveTelemetry {
+    pub active_lookups: usize,
+    pub active_user_lookups: usize,
+    pub inflight_ipv4_queries: usize,
+    pub inflight_ipv6_queries: usize,
+    pub unique_peers_found_last_10s: usize,
+}
+
+#[derive(Debug)]
+pub(in crate::dht::service) struct RecentUniquePeers {
+    window: Duration,
+    events: VecDeque<(Instant, SocketAddr)>,
+    last_seen: HashMap<SocketAddr, Instant>,
+}
+
+impl RecentUniquePeers {
+    pub(in crate::dht::service) fn new(window: Duration) -> Self {
+        Self {
+            window,
+            events: VecDeque::new(),
+            last_seen: HashMap::new(),
+        }
+    }
+
+    pub(in crate::dht::service) fn record_batch(&mut self, now: Instant, peers: &[SocketAddr]) {
+        self.evict_expired(now);
+        for &peer in peers {
+            self.events.push_back((now, peer));
+            self.last_seen.insert(peer, now);
+        }
+    }
+
+    fn evict_expired(&mut self, now: Instant) {
+        while let Some((seen_at, peer)) = self.events.front().copied() {
+            if now.saturating_duration_since(seen_at) < self.window {
+                break;
+            }
+            self.events.pop_front();
+            if self.last_seen.get(&peer).copied() == Some(seen_at) {
+                self.last_seen.remove(&peer);
+            }
+        }
+    }
+
+    pub(in crate::dht::service) fn unique_count(&mut self, now: Instant) -> usize {
+        self.evict_expired(now);
+        self.last_seen.len()
+    }
+}
 
 pub(super) fn build_status(
     active_runtime: Option<&ActiveRuntime>,

@@ -100,9 +100,7 @@ pub(in crate::dht::service) fn park_lookup_ids(
         std::mem::take(&mut *lookup_ids)
     };
 
-    let Some(active_runtime) = active_runtime else {
-        return None;
-    };
+    let active_runtime = active_runtime?;
 
     let mut parked_states = Vec::new();
     for lookup_id in lookup_ids {
@@ -290,6 +288,7 @@ pub(in crate::dht::service) fn cancel_lookup_ids_to_parked(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::dht::service) fn drain_lookup_ids(
     active_runtime: Option<&mut ActiveRuntime>,
     parked_crawls: &mut HashMap<InfoHash, DemandCrawlState>,
@@ -310,9 +309,7 @@ pub(in crate::dht::service) fn drain_lookup_ids(
         std::mem::take(&mut *lookup_ids)
     };
 
-    let Some(active_runtime) = active_runtime else {
-        return None;
-    };
+    let active_runtime = active_runtime?;
 
     if let Some(previous) = draining_demands.remove(&info_hash) {
         for lookup_id in previous.lookup_ids {
@@ -488,6 +485,7 @@ impl DemandPlannerModel {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::dht::service) fn drain_lookup_ids(
         &mut self,
         active_runtime: Option<&mut ActiveRuntime>,
@@ -562,10 +560,7 @@ pub(in crate::dht::service) fn finalize_drained_demand_lookup(
 ) -> Option<DrainedDemandOutcome> {
     let drain = draining_demands.get(&info_hash).cloned()?;
     let now = Instant::now();
-    let runtime_ready = drained_demand_lookup_runtime_ready(
-        active_runtime.as_ref().map(|active| &**active),
-        &drain,
-    );
+    let runtime_ready = drained_demand_lookup_runtime_ready(active_runtime.as_deref(), &drain);
     let (ready_to_finalize, early_no_yield) =
         drained_demand_lookup_ready_for_finalize(runtime_ready, &drain, now);
     if !force && !ready_to_finalize {

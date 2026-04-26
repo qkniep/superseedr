@@ -92,6 +92,7 @@ impl LookupRunMode {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum LookupTaskOutcome {
     Reply(TransportReply),
@@ -738,12 +739,7 @@ impl Runtime {
                 }
             }
             TransportEvent::UnexpectedReply { source, .. } => {
-                if self
-                    .config
-                    .bootstrap_nodes
-                    .iter()
-                    .any(|addr| *addr == source)
-                {
+                if self.config.bootstrap_nodes.contains(&source) {
                     self.bootstrap_responsive_count =
                         self.bootstrap_responsive_count.saturating_add(1);
                 }
@@ -792,7 +788,7 @@ impl Runtime {
                                     .unwrap_or_else(|| "<unknown>".to_string()),
                                 response_body
                                     .node_id()
-                                    .map(|node_id| node_id_hex(node_id))
+                                    .map(node_id_hex)
                                     .unwrap_or_else(|| "<none>".to_string()),
                                 update.discovered_nodes.len(),
                                 update.emitted_peers.len(),
@@ -856,12 +852,7 @@ impl Runtime {
                     record.note_query_response(Some(node_id), now);
                     let _ = routing.insert(record, now);
                 }
-                if self
-                    .config
-                    .bootstrap_nodes
-                    .iter()
-                    .any(|bootstrap| *bootstrap == addr)
-                {
+                if self.config.bootstrap_nodes.contains(&addr) {
                     self.bootstrap_responsive_count =
                         self.bootstrap_responsive_count.saturating_add(1);
                 }
@@ -888,10 +879,9 @@ impl Runtime {
         self.enqueue_probe_targets(result.family, &probe_targets);
 
         if let Some(peer_tx) = peer_tx {
-            if !emitted_peers.is_empty() {
-                if peer_tx.send(emitted_peers).is_err() {
-                    receiver_closed = true;
-                }
+            let send_failed = !emitted_peers.is_empty() && peer_tx.send(emitted_peers).is_err();
+            if send_failed {
+                receiver_closed = true;
             }
         }
 
@@ -1188,9 +1178,7 @@ impl Runtime {
     }
 
     pub fn cancel_lookup_and_take_state(&mut self, lookup_id: LookupId) -> Option<LookupState> {
-        let Some(active) = self.active_lookups.remove(&lookup_id) else {
-            return None;
-        };
+        let active = self.active_lookups.remove(&lookup_id)?;
         self.maintenance_lookup_receivers.remove(&lookup_id);
         self.cache_lookup_responders(active.family, &active.state);
 
@@ -1280,12 +1268,7 @@ impl Runtime {
                         record.note_query_response(node_id, now);
                         let _ = routing.insert(record, now);
                     }
-                    if self
-                        .config
-                        .bootstrap_nodes
-                        .iter()
-                        .any(|bootstrap| *bootstrap == addr)
-                    {
+                    if self.config.bootstrap_nodes.contains(&addr) {
                         self.bootstrap_responsive_count =
                             self.bootstrap_responsive_count.saturating_add(1);
                     }

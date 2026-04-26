@@ -77,9 +77,12 @@ impl Drop for DhtDemandSubscription {
 }
 
 #[cfg(test)]
+type RecordedAnnounces = Arc<StdMutex<Vec<(Vec<u8>, Option<u16>)>>>;
+
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TestDhtRecorder {
-    announce_requests: Arc<StdMutex<Vec<(Vec<u8>, Option<u16>)>>>,
+    announce_requests: RecordedAnnounces,
 }
 
 #[cfg(test)]

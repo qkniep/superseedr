@@ -3,6 +3,8 @@
 
 use std::time::Instant;
 
+use super::observe_action_effect_reduction;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DhtLifecycleAction {
     StartupBootstrapDue {
@@ -50,8 +52,39 @@ pub(super) struct DhtLifecycleReduction {
 
 pub(super) struct DhtLifecycleModel;
 
+impl DhtLifecycleAction {
+    fn kind(&self) -> &'static str {
+        match self {
+            DhtLifecycleAction::StartupBootstrapDue { .. } => "startup_bootstrap_due",
+            DhtLifecycleAction::StartupBootstrapSucceeded => "startup_bootstrap_succeeded",
+            DhtLifecycleAction::StartupBootstrapFailed { .. } => "startup_bootstrap_failed",
+            DhtLifecycleAction::MaintenanceTick { .. } => "maintenance_tick",
+            DhtLifecycleAction::MaintenanceFailed { .. } => "maintenance_failed",
+            DhtLifecycleAction::HealthTick => "health_tick",
+            DhtLifecycleAction::RuntimeStepFailed { .. } => "runtime_step_failed",
+            DhtLifecycleAction::Shutdown => "shutdown",
+        }
+    }
+}
+
+impl DhtLifecycleEffect {
+    fn kind(&self) -> &'static str {
+        match self {
+            DhtLifecycleEffect::RunStartupBootstrap => "run_startup_bootstrap",
+            DhtLifecycleEffect::ClearStartupBootstrapDue => "clear_startup_bootstrap_due",
+            DhtLifecycleEffect::SetStartupBootstrapDue(_) => "set_startup_bootstrap_due",
+            DhtLifecycleEffect::RunMaintenance => "run_maintenance",
+            DhtLifecycleEffect::RecordRuntimeWarning { .. } => "record_runtime_warning",
+            DhtLifecycleEffect::PublishStatus => "publish_status",
+            DhtLifecycleEffect::ExpireRecentUniquePeers => "expire_recent_unique_peers",
+            DhtLifecycleEffect::SaveRuntimeState => "save_runtime_state",
+        }
+    }
+}
+
 impl DhtLifecycleModel {
     pub(super) fn update(action: DhtLifecycleAction) -> DhtLifecycleReduction {
+        let action_kind = action.kind();
         let effects = match action {
             DhtLifecycleAction::StartupBootstrapDue {
                 now,
@@ -94,6 +127,11 @@ impl DhtLifecycleModel {
             ],
             DhtLifecycleAction::Shutdown => vec![DhtLifecycleEffect::SaveRuntimeState],
         };
+        observe_action_effect_reduction(
+            "lifecycle",
+            action_kind,
+            effects.iter().map(DhtLifecycleEffect::kind).collect(),
+        );
         DhtLifecycleReduction { effects }
     }
 }
