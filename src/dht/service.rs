@@ -1804,6 +1804,250 @@ fn command_event(maybe_command: Option<DhtCommand>) -> LoopEvent {
     }
 }
 
+#[derive(Debug)]
+enum DhtServiceAction {
+    ReconfigureSucceeded {
+        config: DhtServiceConfig,
+        warning: Option<String>,
+    },
+    ReconfigureFailed {
+        warning: String,
+    },
+    RuntimeWarning {
+        warning: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DhtServiceEffect {
+    ResetDemandPlanner,
+    PublishStatus,
+    StartDueDemands,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DhtServiceReduction {
+    effects: Vec<DhtServiceEffect>,
+}
+
+#[derive(Debug)]
+struct DhtServiceModel {
+    config: DhtServiceConfig,
+    generation: u64,
+    warning: Option<String>,
+}
+
+impl DhtServiceModel {
+    fn new(config: DhtServiceConfig, generation: u64, warning: Option<String>) -> Self {
+        Self {
+            config,
+            generation,
+            warning,
+        }
+    }
+
+    fn config(&self) -> &DhtServiceConfig {
+        &self.config
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn warning_owned(&self) -> Option<String> {
+        self.warning.clone()
+    }
+
+    fn update(&mut self, action: DhtServiceAction) -> DhtServiceReduction {
+        match action {
+            DhtServiceAction::ReconfigureSucceeded { config, warning } => {
+                self.config = config;
+                self.generation = self.generation.saturating_add(1);
+                self.warning = warning;
+                DhtServiceReduction {
+                    effects: vec![
+                        DhtServiceEffect::ResetDemandPlanner,
+                        DhtServiceEffect::PublishStatus,
+                        DhtServiceEffect::StartDueDemands,
+                    ],
+                }
+            }
+            DhtServiceAction::ReconfigureFailed { warning } => {
+                self.warning = Some(warning);
+                DhtServiceReduction {
+                    effects: vec![
+                        DhtServiceEffect::ResetDemandPlanner,
+                        DhtServiceEffect::PublishStatus,
+                        DhtServiceEffect::StartDueDemands,
+                    ],
+                }
+            }
+            DhtServiceAction::RuntimeWarning { warning } => {
+                self.warning = Some(warning);
+                DhtServiceReduction {
+                    effects: vec![DhtServiceEffect::PublishStatus],
+                }
+            }
+        }
+    }
+}
+
+struct DemandSubscriberDelivery {
+    subscriber_id: u64,
+    subscriber_tx: mpsc::UnboundedSender<Vec<SocketAddr>>,
+}
+
+enum DemandSubscriberAction {
+    Register {
+        info_hash: InfoHash,
+        demand: DhtDemandState,
+        subscriber_tx: mpsc::UnboundedSender<Vec<SocketAddr>>,
+    },
+    Unregister {
+        info_hash: InfoHash,
+        subscriber_id: u64,
+    },
+    DeliverPeers {
+        info_hash: InfoHash,
+        peers: Vec<SocketAddr>,
+    },
+    PruneDeadSubscribers {
+        info_hash: InfoHash,
+        subscriber_ids: Vec<u64>,
+    },
+}
+
+enum DemandSubscriberEffect {
+    Registered {
+        info_hash: InfoHash,
+        demand: DhtDemandState,
+        subscriber_id: u64,
+    },
+    SubscriberRemoved {
+        info_hash: InfoHash,
+    },
+    DeliverPeers {
+        info_hash: InfoHash,
+        peers: Vec<SocketAddr>,
+        deliveries: Vec<DemandSubscriberDelivery>,
+    },
+}
+
+#[derive(Default)]
+struct DemandSubscriberReduction {
+    subscriber_id: Option<u64>,
+    effects: Vec<DemandSubscriberEffect>,
+}
+
+struct DemandSubscriberRegistry {
+    subscribers: HashMap<InfoHash, HashMap<u64, mpsc::UnboundedSender<Vec<SocketAddr>>>>,
+    next_subscriber_id: u64,
+}
+
+impl DemandSubscriberRegistry {
+    fn new() -> Self {
+        Self {
+            subscribers: HashMap::new(),
+            next_subscriber_id: 1,
+        }
+    }
+
+    fn update(&mut self, action: DemandSubscriberAction) -> DemandSubscriberReduction {
+        match action {
+            DemandSubscriberAction::Register {
+                info_hash,
+                demand,
+                subscriber_tx,
+            } => {
+                let subscriber_id = self.next_subscriber_id;
+                self.next_subscriber_id = self.next_subscriber_id.saturating_add(1);
+                self.subscribers
+                    .entry(info_hash)
+                    .or_default()
+                    .insert(subscriber_id, subscriber_tx);
+                DemandSubscriberReduction {
+                    subscriber_id: Some(subscriber_id),
+                    effects: vec![DemandSubscriberEffect::Registered {
+                        info_hash,
+                        demand,
+                        subscriber_id,
+                    }],
+                }
+            }
+            DemandSubscriberAction::Unregister {
+                info_hash,
+                subscriber_id,
+            } => {
+                let removed = self.remove_subscriber(info_hash, subscriber_id);
+                DemandSubscriberReduction {
+                    subscriber_id: None,
+                    effects: removed
+                        .then_some(DemandSubscriberEffect::SubscriberRemoved { info_hash })
+                        .into_iter()
+                        .collect(),
+                }
+            }
+            DemandSubscriberAction::DeliverPeers { info_hash, peers } => {
+                let deliveries = self
+                    .subscribers
+                    .get(&info_hash)
+                    .map(|subscribers| {
+                        subscribers
+                            .iter()
+                            .map(|(&subscriber_id, subscriber_tx)| DemandSubscriberDelivery {
+                                subscriber_id,
+                                subscriber_tx: subscriber_tx.clone(),
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                DemandSubscriberReduction {
+                    subscriber_id: None,
+                    effects: (!deliveries.is_empty())
+                        .then_some(DemandSubscriberEffect::DeliverPeers {
+                            info_hash,
+                            peers,
+                            deliveries,
+                        })
+                        .into_iter()
+                        .collect(),
+                }
+            }
+            DemandSubscriberAction::PruneDeadSubscribers {
+                info_hash,
+                subscriber_ids,
+            } => {
+                let removed = subscriber_ids
+                    .into_iter()
+                    .filter(|&subscriber_id| self.remove_subscriber(info_hash, subscriber_id))
+                    .count();
+                DemandSubscriberReduction {
+                    subscriber_id: None,
+                    effects: (0..removed)
+                        .map(|_| DemandSubscriberEffect::SubscriberRemoved { info_hash })
+                        .collect(),
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn subscriber_count(&self, info_hash: InfoHash) -> usize {
+        self.subscribers.get(&info_hash).map_or(0, HashMap::len)
+    }
+
+    fn remove_subscriber(&mut self, info_hash: InfoHash, subscriber_id: u64) -> bool {
+        let Some(subscribers) = self.subscribers.get_mut(&info_hash) else {
+            return false;
+        };
+        let removed = subscribers.remove(&subscriber_id).is_some();
+        if subscribers.is_empty() {
+            self.subscribers.remove(&info_hash);
+        }
+        removed
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct BootstrapSummary {
     total: usize,
@@ -2272,10 +2516,10 @@ impl DhtHandle {
 }
 
 async fn run_service(
-    mut config: DhtServiceConfig,
+    config: DhtServiceConfig,
     local_node_id: NodeId,
     mut active_runtime: Option<ActiveRuntime>,
-    mut warning: Option<String>,
+    warning: Option<String>,
     status_tx: watch::Sender<DhtStatus>,
     wave_telemetry_tx: watch::Sender<DhtWaveTelemetry>,
     command_tx: DhtCommandSender,
@@ -2288,15 +2532,11 @@ async fn run_service(
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut maintenance_interval = tokio::time::interval(DHT_MAINTENANCE_INTERVAL);
     let mut health_interval = tokio::time::interval(DHT_HEALTH_REFRESH_INTERVAL);
-    let mut generation = status_tx.borrow().generation;
+    let mut service_model = DhtServiceModel::new(config, status_tx.borrow().generation, warning);
     let mut demand_planner = DemandPlannerModel::new(Instant::now());
-    let mut demand_subscribers: HashMap<
-        InfoHash,
-        HashMap<u64, mpsc::UnboundedSender<Vec<SocketAddr>>>,
-    > = HashMap::new();
+    let mut demand_subscribers = DemandSubscriberRegistry::new();
     let mut slice_metrics = DemandSliceMetrics::default();
     let mut recent_unique_peers = RecentUniquePeers::new(DHT_UNIQUE_PEERS_FOUND_WINDOW);
-    let mut next_subscriber_id = 1u64;
 
     loop {
         if let Some(active) = active_runtime.as_mut() {
@@ -2305,7 +2545,9 @@ async fn run_service(
                     match active.runtime.bootstrap_startup().await {
                         Ok(()) => active.startup_bootstrap_due = None,
                         Err(error) => {
-                            warning = Some(format!("DHT startup bootstrap failed: {error}"));
+                            let _ = service_model.update(DhtServiceAction::RuntimeWarning {
+                                warning: format!("DHT startup bootstrap failed: {error}"),
+                            });
                             active.startup_bootstrap_due =
                                 Some(Instant::now() + DHT_STARTUP_BOOTSTRAP_DELAY);
                         }
@@ -2344,32 +2586,26 @@ async fn run_service(
                 break;
             }
             LoopEvent::Command(DhtCommand::Reconfigure(new_config)) => {
-                match build_runtime(&new_config, local_node_id).await {
+                let reduction = match build_runtime(&new_config, local_node_id).await {
                     Ok(built) => {
                         if let Some(previous) = active_runtime.as_ref() {
                             let _ = previous.runtime.save_state().await;
                         }
-                        config = new_config;
-                        generation = generation.saturating_add(1);
-                        warning = built.warning;
                         active_runtime = built.active_runtime;
+                        service_model.update(DhtServiceAction::ReconfigureSucceeded {
+                            config: new_config,
+                            warning: built.warning,
+                        })
                     }
                     Err(error) => {
-                        warning = Some(error);
+                        service_model.update(DhtServiceAction::ReconfigureFailed { warning: error })
                     }
-                }
-                demand_planner.update(DemandPlannerAction::RuntimeReset {
-                    now: Instant::now(),
-                });
-                publish_status(
+                };
+                apply_dht_service_effects(
+                    reduction.effects,
+                    &service_model,
+                    &mut active_runtime,
                     &status_tx,
-                    active_runtime.as_ref(),
-                    warning.clone(),
-                    generation,
-                    config.preferred_backend,
-                );
-                start_due_demands(
-                    active_runtime.as_mut(),
                     &command_tx,
                     &mut demand_planner,
                     &mut slice_metrics,
@@ -2382,19 +2618,20 @@ async fn run_service(
                 subscriber_tx,
                 response_tx,
             }) => {
-                let subscriber_id = next_subscriber_id;
-                next_subscriber_id = next_subscriber_id.saturating_add(1);
-                demand_subscribers
-                    .entry(info_hash)
-                    .or_default()
-                    .insert(subscriber_id, subscriber_tx);
-                let now = Instant::now();
-                demand_planner.update(DemandPlannerAction::DemandRegistered {
+                let reduction = demand_subscribers.update(DemandSubscriberAction::Register {
                     info_hash,
                     demand,
-                    now,
+                    subscriber_tx,
                 });
-                let _ = response_tx.send(Some(subscriber_id));
+                let _ = response_tx.send(reduction.subscriber_id);
+                apply_demand_subscriber_effects(
+                    &mut demand_subscribers,
+                    active_runtime.as_mut(),
+                    &mut demand_planner,
+                    &command_tx,
+                    &mut slice_metrics,
+                    reduction.effects,
+                );
                 start_due_demands(
                     active_runtime.as_mut(),
                     &command_tx,
@@ -2429,24 +2666,18 @@ async fn run_service(
                 info_hash,
                 subscriber_id,
             }) => {
-                let mut removed = false;
-                if let Some(subscribers) = demand_subscribers.get_mut(&info_hash) {
-                    removed = subscribers.remove(&subscriber_id).is_some();
-                    if subscribers.is_empty() {
-                        demand_subscribers.remove(&info_hash);
-                    }
-                }
-                if removed {
-                    let reduction = demand_planner
-                        .update(DemandPlannerAction::DemandSubscriberRemoved { info_hash });
-                    apply_demand_planner_effects(
-                        active_runtime.as_mut(),
-                        &mut demand_planner,
-                        &command_tx,
-                        &mut slice_metrics,
-                        reduction.effects,
-                    );
-                }
+                let reduction = demand_subscribers.update(DemandSubscriberAction::Unregister {
+                    info_hash,
+                    subscriber_id,
+                });
+                apply_demand_subscriber_effects(
+                    &mut demand_subscribers,
+                    active_runtime.as_mut(),
+                    &mut demand_planner,
+                    &command_tx,
+                    &mut slice_metrics,
+                    reduction.effects,
+                );
             }
             LoopEvent::Command(DhtCommand::DemandPeers { info_hash, peers }) => {
                 recent_unique_peers.record_batch(Instant::now(), &peers);
@@ -2461,28 +2692,15 @@ async fn run_service(
                     &mut slice_metrics,
                     reduction.effects,
                 );
-                let Some(subscribers) = demand_subscribers.get_mut(&info_hash) else {
-                    continue;
-                };
-
-                let subscriber_count_before = subscribers.len();
-                subscribers.retain(|_, subscriber_tx| subscriber_tx.send(peers.clone()).is_ok());
-                let removed = subscriber_count_before.saturating_sub(subscribers.len());
-                let mut cleanup_effects = Vec::new();
-                for _ in 0..removed {
-                    let reduction = demand_planner
-                        .update(DemandPlannerAction::DemandSubscriberRemoved { info_hash });
-                    cleanup_effects.extend(reduction.effects);
-                }
-                if subscribers.is_empty() {
-                    demand_subscribers.remove(&info_hash);
-                }
-                apply_demand_planner_effects(
+                let reduction = demand_subscribers
+                    .update(DemandSubscriberAction::DeliverPeers { info_hash, peers });
+                apply_demand_subscriber_effects(
+                    &mut demand_subscribers,
                     active_runtime.as_mut(),
                     &mut demand_planner,
                     &command_tx,
                     &mut slice_metrics,
-                    cleanup_effects,
+                    reduction.effects,
                 );
             }
             LoopEvent::Command(DhtCommand::DemandLookupFinished {
@@ -2657,14 +2875,20 @@ async fn run_service(
                 if let Some(active) = active_runtime.as_mut() {
                     if active.runtime.active_user_lookup_count() == 0 {
                         if let Err(error) = active.runtime.run_maintenance().await {
-                            warning = Some(format!("DHT maintenance failed: {error}"));
-                            publish_status(
+                            let reduction =
+                                service_model.update(DhtServiceAction::RuntimeWarning {
+                                    warning: format!("DHT maintenance failed: {error}"),
+                                });
+                            apply_dht_service_effects(
+                                reduction.effects,
+                                &service_model,
+                                &mut active_runtime,
                                 &status_tx,
-                                active_runtime.as_ref(),
-                                warning.clone(),
-                                generation,
-                                config.preferred_backend,
-                            );
+                                &command_tx,
+                                &mut demand_planner,
+                                &mut slice_metrics,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -2681,9 +2905,9 @@ async fn run_service(
                 let status = build_status(
                     active_runtime.as_ref(),
                     backend,
-                    config.preferred_backend,
-                    warning.clone(),
-                    generation,
+                    service_model.config().preferred_backend,
+                    service_model.warning_owned(),
+                    service_model.generation(),
                     bootstrap,
                 );
                 let _ = status_tx.send(status.clone());
@@ -2695,14 +2919,19 @@ async fn run_service(
             }
             LoopEvent::RuntimeStep(Ok(_)) => {}
             LoopEvent::RuntimeStep(Err(error)) => {
-                warning = Some(format!("DHT runtime step failed: {error}"));
-                publish_status(
+                let reduction = service_model.update(DhtServiceAction::RuntimeWarning {
+                    warning: format!("DHT runtime step failed: {error}"),
+                });
+                apply_dht_service_effects(
+                    reduction.effects,
+                    &service_model,
+                    &mut active_runtime,
                     &status_tx,
-                    active_runtime.as_ref(),
-                    warning.clone(),
-                    generation,
-                    config.preferred_backend,
-                );
+                    &command_tx,
+                    &mut demand_planner,
+                    &mut slice_metrics,
+                )
+                .await;
             }
         }
 
@@ -2711,6 +2940,114 @@ async fn run_service(
             active_runtime.as_ref(),
             &mut recent_unique_peers,
         );
+    }
+}
+
+async fn apply_dht_service_effects(
+    effects: Vec<DhtServiceEffect>,
+    service_model: &DhtServiceModel,
+    active_runtime: &mut Option<ActiveRuntime>,
+    status_tx: &watch::Sender<DhtStatus>,
+    command_tx: &DhtCommandSender,
+    demand_planner: &mut DemandPlannerModel,
+    slice_metrics: &mut DemandSliceMetrics,
+) {
+    for effect in effects {
+        match effect {
+            DhtServiceEffect::ResetDemandPlanner => {
+                demand_planner.update(DemandPlannerAction::RuntimeReset {
+                    now: Instant::now(),
+                });
+            }
+            DhtServiceEffect::PublishStatus => {
+                publish_status(
+                    status_tx,
+                    active_runtime.as_ref(),
+                    service_model.warning_owned(),
+                    service_model.generation(),
+                    service_model.config().preferred_backend,
+                );
+            }
+            DhtServiceEffect::StartDueDemands => {
+                start_due_demands(
+                    active_runtime.as_mut(),
+                    command_tx,
+                    demand_planner,
+                    slice_metrics,
+                )
+                .await;
+            }
+        }
+    }
+}
+
+fn apply_demand_subscriber_effects(
+    demand_subscribers: &mut DemandSubscriberRegistry,
+    mut active_runtime: Option<&mut ActiveRuntime>,
+    demand_planner: &mut DemandPlannerModel,
+    command_tx: &DhtCommandSender,
+    slice_metrics: &mut DemandSliceMetrics,
+    effects: Vec<DemandSubscriberEffect>,
+) {
+    let mut pending_effects = VecDeque::from(effects);
+
+    while let Some(effect) = pending_effects.pop_front() {
+        match effect {
+            DemandSubscriberEffect::Registered {
+                info_hash,
+                demand,
+                subscriber_id,
+            } => {
+                let _ = subscriber_id;
+                let reduction = demand_planner.update(DemandPlannerAction::DemandRegistered {
+                    info_hash,
+                    demand,
+                    now: Instant::now(),
+                });
+                apply_demand_planner_effects(
+                    active_runtime.as_deref_mut(),
+                    demand_planner,
+                    command_tx,
+                    slice_metrics,
+                    reduction.effects,
+                );
+            }
+            DemandSubscriberEffect::SubscriberRemoved { info_hash } => {
+                let reduction = demand_planner
+                    .update(DemandPlannerAction::DemandSubscriberRemoved { info_hash });
+                apply_demand_planner_effects(
+                    active_runtime.as_deref_mut(),
+                    demand_planner,
+                    command_tx,
+                    slice_metrics,
+                    reduction.effects,
+                );
+            }
+            DemandSubscriberEffect::DeliverPeers {
+                info_hash,
+                peers,
+                deliveries,
+            } => {
+                let dead_subscribers = deliveries
+                    .into_iter()
+                    .filter_map(|delivery| {
+                        delivery
+                            .subscriber_tx
+                            .send(peers.clone())
+                            .is_err()
+                            .then_some(delivery.subscriber_id)
+                    })
+                    .collect::<Vec<_>>();
+                if !dead_subscribers.is_empty() {
+                    let reduction =
+                        demand_subscribers.update(DemandSubscriberAction::PruneDeadSubscribers {
+                            info_hash,
+                            subscriber_ids: dead_subscribers,
+                        });
+                    pending_effects.extend(reduction.effects);
+                }
+            }
+        }
     }
 }
 
@@ -5212,6 +5549,226 @@ mod tests {
             0,
             literal_bootstrap_summary(&config.bootstrap_nodes),
         )
+    }
+
+    #[test]
+    fn dht_service_model_reconfigure_success_updates_state_and_emits_followups() {
+        let initial = DhtServiceConfig {
+            port: 6881,
+            bootstrap_nodes: vec!["198.51.100.10:6881".to_string()],
+            preferred_backend: DhtBackendKind::InternalPrototype,
+            force_internal_failure: false,
+        };
+        let next = DhtServiceConfig {
+            port: 6882,
+            bootstrap_nodes: vec!["203.0.113.20:6881".to_string()],
+            preferred_backend: DhtBackendKind::Disabled,
+            force_internal_failure: false,
+        };
+        let mut model = DhtServiceModel::new(initial, 7, Some("old warning".to_string()));
+
+        let reduction = model.update(DhtServiceAction::ReconfigureSucceeded {
+            config: next.clone(),
+            warning: None,
+        });
+
+        assert_eq!(model.config(), &next);
+        assert_eq!(model.generation(), 8);
+        assert_eq!(model.warning_owned(), None);
+        assert_eq!(
+            reduction.effects,
+            vec![
+                DhtServiceEffect::ResetDemandPlanner,
+                DhtServiceEffect::PublishStatus,
+                DhtServiceEffect::StartDueDemands,
+            ]
+        );
+    }
+
+    #[test]
+    fn dht_service_model_reconfigure_failure_preserves_config_and_generation() {
+        let initial = DhtServiceConfig {
+            port: 6881,
+            bootstrap_nodes: vec!["198.51.100.10:6881".to_string()],
+            preferred_backend: DhtBackendKind::InternalPrototype,
+            force_internal_failure: false,
+        };
+        let mut model = DhtServiceModel::new(initial.clone(), 3, None);
+
+        let reduction = model.update(DhtServiceAction::ReconfigureFailed {
+            warning: "runtime unavailable".to_string(),
+        });
+
+        assert_eq!(model.config(), &initial);
+        assert_eq!(model.generation(), 3);
+        assert_eq!(
+            model.warning_owned().as_deref(),
+            Some("runtime unavailable")
+        );
+        assert_eq!(
+            reduction.effects,
+            vec![
+                DhtServiceEffect::ResetDemandPlanner,
+                DhtServiceEffect::PublishStatus,
+                DhtServiceEffect::StartDueDemands,
+            ]
+        );
+    }
+
+    #[test]
+    fn dht_service_model_runtime_warning_only_publishes_status() {
+        let config = disabled_service_config();
+        let mut model = DhtServiceModel::new(config.clone(), 11, None);
+
+        let reduction = model.update(DhtServiceAction::RuntimeWarning {
+            warning: "maintenance failed".to_string(),
+        });
+
+        assert_eq!(model.config(), &config);
+        assert_eq!(model.generation(), 11);
+        assert_eq!(model.warning_owned().as_deref(), Some("maintenance failed"));
+        assert_eq!(reduction.effects, vec![DhtServiceEffect::PublishStatus]);
+    }
+
+    #[test]
+    fn demand_subscriber_registry_registers_and_unregisters_once() {
+        let mut registry = DemandSubscriberRegistry::new();
+        let info_hash = hash_index(42);
+        let demand = DhtDemandState {
+            awaiting_metadata: true,
+            connected_peers: 0,
+        };
+        let (subscriber_tx, _subscriber_rx) = mpsc::unbounded_channel();
+
+        let registered = registry.update(DemandSubscriberAction::Register {
+            info_hash,
+            demand,
+            subscriber_tx,
+        });
+
+        assert_eq!(registered.subscriber_id, Some(1));
+        assert_eq!(registry.subscriber_count(info_hash), 1);
+        assert_eq!(registered.effects.len(), 1);
+        match &registered.effects[0] {
+            DemandSubscriberEffect::Registered {
+                info_hash: registered_hash,
+                demand: registered_demand,
+                subscriber_id,
+            } => {
+                assert_eq!(*registered_hash, info_hash);
+                assert_eq!(*registered_demand, demand);
+                assert_eq!(*subscriber_id, 1);
+            }
+            _ => panic!("expected registered effect"),
+        }
+
+        let removed = registry.update(DemandSubscriberAction::Unregister {
+            info_hash,
+            subscriber_id: 1,
+        });
+
+        assert_eq!(registry.subscriber_count(info_hash), 0);
+        assert_eq!(removed.effects.len(), 1);
+        match &removed.effects[0] {
+            DemandSubscriberEffect::SubscriberRemoved {
+                info_hash: removed_hash,
+            } => assert_eq!(*removed_hash, info_hash),
+            _ => panic!("expected subscriber removed effect"),
+        }
+
+        let duplicate = registry.update(DemandSubscriberAction::Unregister {
+            info_hash,
+            subscriber_id: 1,
+        });
+        assert!(duplicate.effects.is_empty());
+    }
+
+    #[test]
+    fn demand_subscriber_registry_delivery_prunes_closed_subscribers() {
+        let mut registry = DemandSubscriberRegistry::new();
+        let info_hash = hash_index(43);
+        let demand = DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        };
+        let (live_tx, mut live_rx) = mpsc::unbounded_channel();
+        let (dead_tx, dead_rx) = mpsc::unbounded_channel();
+        drop(dead_rx);
+
+        let live_id = registry
+            .update(DemandSubscriberAction::Register {
+                info_hash,
+                demand,
+                subscriber_tx: live_tx,
+            })
+            .subscriber_id
+            .expect("live subscriber id");
+        let _dead_id = registry
+            .update(DemandSubscriberAction::Register {
+                info_hash,
+                demand,
+                subscriber_tx: dead_tx,
+            })
+            .subscriber_id
+            .expect("dead subscriber id");
+        assert_eq!(registry.subscriber_count(info_hash), 2);
+
+        let peers = vec![peer("127.0.0.1:6881"), peer("127.0.0.1:6882")];
+        let delivery = registry.update(DemandSubscriberAction::DeliverPeers {
+            info_hash,
+            peers: peers.clone(),
+        });
+        assert_eq!(delivery.effects.len(), 1);
+        let DemandSubscriberEffect::DeliverPeers {
+            info_hash: delivered_hash,
+            peers: delivered_peers,
+            deliveries,
+        } = delivery
+            .effects
+            .into_iter()
+            .next()
+            .expect("delivery effect")
+        else {
+            panic!("expected peer delivery effect");
+        };
+        assert_eq!(delivered_hash, info_hash);
+        assert_eq!(delivered_peers, peers);
+        assert_eq!(deliveries.len(), 2);
+
+        let dead_subscribers = deliveries
+            .into_iter()
+            .filter_map(|delivery| {
+                delivery
+                    .subscriber_tx
+                    .send(delivered_peers.clone())
+                    .is_err()
+                    .then_some(delivery.subscriber_id)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(live_rx.try_recv().expect("live peers delivered"), peers);
+        assert_eq!(dead_subscribers.len(), 1);
+
+        let pruned = registry.update(DemandSubscriberAction::PruneDeadSubscribers {
+            info_hash,
+            subscriber_ids: dead_subscribers,
+        });
+        assert_eq!(registry.subscriber_count(info_hash), 1);
+        assert_eq!(pruned.effects.len(), 1);
+        assert!(matches!(
+            pruned.effects.as_slice(),
+            [DemandSubscriberEffect::SubscriberRemoved {
+                info_hash: removed_hash
+            }] if *removed_hash == info_hash
+        ));
+
+        let remaining = registry.update(DemandSubscriberAction::DeliverPeers { info_hash, peers });
+        let Some(DemandSubscriberEffect::DeliverPeers { deliveries, .. }) =
+            remaining.effects.into_iter().next()
+        else {
+            panic!("expected remaining delivery effect");
+        };
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].subscriber_id, live_id);
     }
 
     async fn local_ipv4_active_runtime() -> ActiveRuntime {
