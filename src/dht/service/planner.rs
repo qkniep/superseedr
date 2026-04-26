@@ -12,6 +12,9 @@ pub(super) use selection::*;
 mod drain;
 pub(super) use drain::*;
 
+mod invariants;
+pub(super) use invariants::*;
+
 #[cfg(test)]
 #[path = "planner/test_support.rs"]
 mod test_support;
@@ -27,6 +30,10 @@ mod drain_tests;
 #[cfg(test)]
 #[path = "planner/reducer_tests.rs"]
 mod reducer_tests;
+
+#[cfg(test)]
+#[path = "planner/invariant_tests.rs"]
+mod invariant_tests;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct DemandPlannerActionView {
@@ -266,9 +273,36 @@ impl DemandPlannerEffectView {
     }
 }
 
+pub(super) fn trace_env_enabled(env_names: &[&str]) -> bool {
+    trace_env_names_enabled(env_names, |name| env::var_os(name).is_some())
+}
+
+pub(super) fn trace_env_names_enabled(
+    env_names: &[&str],
+    mut is_set: impl FnMut(&str) -> bool,
+) -> bool {
+    env_names.iter().any(|name| is_set(name))
+}
+
+pub(super) fn dht_actor_monitor_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        trace_env_enabled(&[
+            DHT_TRACE_ENV,
+            DHT_ACTOR_MONITOR_ENV,
+            DHT_PLANNER_MONITOR_ENV,
+        ])
+    })
+}
+
 pub(super) fn demand_planner_monitor_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env::var_os(DHT_PLANNER_MONITOR_ENV).is_some())
+    *ENABLED.get_or_init(|| trace_env_enabled(&[DHT_TRACE_ENV, DHT_PLANNER_MONITOR_ENV]))
+}
+
+pub(super) fn dht_invariant_checks_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| trace_env_enabled(&[DHT_INVARIANT_CHECK_ENV]))
 }
 
 pub(super) fn short_info_hash(info_hash: InfoHash) -> String {
@@ -771,6 +805,7 @@ impl DemandPlannerModel {
                 }
             }
         };
+        observe_demand_planner_invariants(action_view.kind, self);
         trace_demand_planner_reduction(action_view, &reduction, self);
         reduction
     }

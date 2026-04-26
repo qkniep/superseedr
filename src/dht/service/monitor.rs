@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use super::demand_planner_monitor_enabled;
+use super::dht_actor_monitor_enabled;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::dht::service) struct DhtActionEffectSnapshot {
@@ -24,16 +24,18 @@ pub(in crate::dht::service) fn action_effect_snapshot(
     }
 }
 
-pub(in crate::dht::service) fn observe_action_effect_reduction(
+pub(in crate::dht::service) fn observe_action_effect_reduction<I>(
     domain: &'static str,
     action: &'static str,
-    effects: Vec<&'static str>,
-) {
-    let snapshot = action_effect_snapshot(domain, action, effects);
-    if !demand_planner_monitor_enabled() {
+    effects: I,
+) where
+    I: IntoIterator<Item = &'static str>,
+{
+    if !dht_actor_monitor_enabled() {
         return;
     }
 
+    let snapshot = action_effect_snapshot(domain, action, effects.into_iter().collect());
     tracing::info!(
         target: "superseedr::dht_actor",
         event = "reduce",

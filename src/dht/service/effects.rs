@@ -8,13 +8,7 @@ pub(in crate::dht::service) async fn start_due_demands_for_state(
     command_tx: &DhtCommandSender,
     service_state: &mut DhtServiceState,
 ) {
-    start_due_demands(
-        active_runtime.as_mut(),
-        command_tx,
-        &mut service_state.demand_planner,
-        &mut service_state.slice_metrics,
-    )
-    .await;
+    start_due_demands(active_runtime.as_mut(), command_tx, service_state).await;
 }
 
 pub(in crate::dht::service) fn apply_demand_planner_effects_for_state(
@@ -45,31 +39,37 @@ pub(in crate::dht::service) async fn apply_dht_service_effects(
     while let Some(effect) = pending_effects.pop_front() {
         match effect {
             DhtServiceEffect::BuildRuntime { config } => {
-                let reduction = match build_runtime(&config, local_node_id).await {
-                    Ok(built) => {
-                        if let Some(previous) = active_runtime.as_ref() {
-                            let _ = previous.runtime.save_state().await;
+                let reduction =
+                    match build_runtime(&config, local_node_id).await {
+                        Ok(built) => {
+                            if let Some(previous) = active_runtime.as_ref() {
+                                let _ = previous.runtime.save_state().await;
+                            }
+                            *active_runtime = built.active_runtime;
+                            service_state.update_service_action(
+                                DhtServiceAction::ReconfigureSucceeded {
+                                    config,
+                                    warning: built.warning,
+                                },
+                            )
                         }
-                        *active_runtime = built.active_runtime;
-                        service_state
-                            .service
-                            .update(DhtServiceAction::ReconfigureSucceeded {
-                                config,
-                                warning: built.warning,
-                            })
-                    }
-                    Err(error) => service_state
-                        .service
-                        .update(DhtServiceAction::ReconfigureFailed { warning: error }),
-                };
+                        Err(error) => service_state.update_service_action(
+                            DhtServiceAction::ReconfigureFailed { warning: error },
+                        ),
+                    };
                 pending_effects.extend(reduction.effects);
             }
             DhtServiceEffect::ResetDemandPlanner => {
-                service_state
-                    .demand_planner
-                    .update(DemandPlannerAction::RuntimeReset {
+                let reduction =
+                    service_state.update_demand_planner_action(DemandPlannerAction::RuntimeReset {
                         now: Instant::now(),
                     });
+                apply_demand_planner_effects_for_state(
+                    active_runtime.as_mut(),
+                    command_tx,
+                    service_state,
+                    reduction.effects,
+                );
             }
             DhtServiceEffect::PublishStatus => {
                 publish_status(
@@ -178,8 +178,7 @@ pub(in crate::dht::service) async fn apply_dht_lifecycle_effects(
                 publish_status,
             } => {
                 let reduction = service_state
-                    .service
-                    .update(DhtServiceAction::RuntimeWarning { warning });
+                    .update_service_action(DhtServiceAction::RuntimeWarning { warning });
                 if publish_status {
                     apply_dht_service_effects(
                         reduction.effects,
@@ -219,45 +218,16 @@ pub(in crate::dht::service) fn apply_demand_subscriber_effects(
     command_tx: &DhtCommandSender,
     effects: Vec<DemandSubscriberEffect>,
 ) {
-    let DhtServiceState {
-        demand_planner,
-        demand_subscribers,
-        slice_metrics,
-        ..
-    } = service_state;
     let mut pending_effects = VecDeque::from(effects);
 
     while let Some(effect) = pending_effects.pop_front() {
         match effect {
-            DemandSubscriberEffect::Registered {
-                info_hash,
-                demand,
-                subscriber_id,
-            } => {
+            DemandSubscriberEffect::Registered { subscriber_id, .. } => {
                 let _ = subscriber_id;
-                let reduction = demand_planner.update(DemandPlannerAction::DemandRegistered {
-                    info_hash,
-                    demand,
-                    now: Instant::now(),
-                });
-                apply_demand_planner_effects(
-                    active_runtime.as_deref_mut(),
-                    demand_planner,
-                    command_tx,
-                    slice_metrics,
-                    reduction.effects,
-                );
             }
-            DemandSubscriberEffect::SubscriberRemoved { info_hash } => {
-                let reduction = demand_planner
-                    .update(DemandPlannerAction::DemandSubscriberRemoved { info_hash });
-                apply_demand_planner_effects(
-                    active_runtime.as_deref_mut(),
-                    demand_planner,
-                    command_tx,
-                    slice_metrics,
-                    reduction.effects,
-                );
+            DemandSubscriberEffect::SubscriberRemoved { .. } => {
+                // Subscriber-removal planner effects are reduced by command
+                // reducers or explicit prune handling before this no-op runs.
             }
             DemandSubscriberEffect::DeliverPeers {
                 info_hash,
@@ -275,12 +245,40 @@ pub(in crate::dht::service) fn apply_demand_subscriber_effects(
                     })
                     .collect::<Vec<_>>();
                 if !dead_subscribers.is_empty() {
-                    let reduction =
-                        demand_subscribers.update(DemandSubscriberAction::PruneDeadSubscribers {
+                    let reduction = service_state.update_demand_command(
+                        DhtDemandCommandAction::PruneDeadSubscribers {
                             info_hash,
                             subscriber_ids: dead_subscribers,
-                        });
-                    pending_effects.extend(reduction.effects);
+                            now: Instant::now(),
+                        },
+                    );
+                    for effect in reduction.effects {
+                        match effect {
+                            DhtDemandCommandEffect::SendRegisterResponse {
+                                response_tx,
+                                subscriber_id,
+                            } => {
+                                let _ = response_tx.send(subscriber_id);
+                            }
+                            DhtDemandCommandEffect::ApplySubscriberEffects(effects) => {
+                                pending_effects.extend(effects);
+                            }
+                            DhtDemandCommandEffect::ApplyPlannerEffects(effects) => {
+                                apply_demand_planner_effects_for_state(
+                                    active_runtime.as_deref_mut(),
+                                    command_tx,
+                                    service_state,
+                                    effects,
+                                );
+                            }
+                            DhtDemandCommandEffect::StartDueDemands => {
+                                debug_assert!(
+                                    false,
+                                    "dead subscriber pruning must not emit async demand starts"
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -345,17 +343,16 @@ pub(in crate::dht::service) async fn apply_dht_runtime_command_effects(
                 unique_peers,
                 lookup_ids,
             } => {
-                let requested =
-                    service_state
-                        .demand_planner
-                        .update(DemandPlannerAction::LookupParkRequested {
-                            info_hash,
-                            slice_class,
-                            stop_reason,
-                            total_peers,
-                            unique_peers,
-                            lookup_ids,
-                        });
+                let requested = service_state.update_demand_planner_action(
+                    DemandPlannerAction::LookupParkRequested {
+                        info_hash,
+                        slice_class,
+                        stop_reason,
+                        total_peers,
+                        unique_peers,
+                        lookup_ids,
+                    },
+                );
                 apply_demand_planner_effects_for_state(
                     active_runtime.as_mut(),
                     command_tx,
@@ -535,12 +532,11 @@ pub(in crate::dht::service) fn finish_drained_demand_lookup(
 pub(in crate::dht::service) async fn start_due_demands(
     mut active_runtime: Option<&mut ActiveRuntime>,
     command_tx: &DhtCommandSender,
-    demand_planner: &mut DemandPlannerModel,
-    slice_metrics: &mut DemandSliceMetrics,
+    service_state: &mut DhtServiceState,
 ) {
     let now = Instant::now();
     let runtime_available = active_runtime.is_some();
-    let reduction = demand_planner.update(DemandPlannerAction::PlanDue {
+    let reduction = service_state.update_demand_planner_action(DemandPlannerAction::PlanDue {
         now,
         runtime_available,
     });
@@ -552,12 +548,14 @@ pub(in crate::dht::service) async fn start_due_demands(
         let candidate = start.candidate;
         let info_hash = candidate.info_hash;
         let plan = start.plan;
-        slice_metrics.record_selection(plan.class, start.selection_reason);
+        service_state
+            .slice_metrics
+            .record_selection(plan.class, start.selection_reason);
         match start_get_peers_lookup(
             active_runtime.as_deref_mut(),
             command_tx,
-            demand_planner,
-            Some(slice_metrics),
+            &mut service_state.demand_planner,
+            Some(&mut service_state.slice_metrics),
             info_hash,
             plan.class,
             true,
@@ -565,7 +563,7 @@ pub(in crate::dht::service) async fn start_due_demands(
         .await
         {
             Ok(started) => {
-                demand_planner.update(DemandPlannerAction::LookupStarted {
+                service_state.update_demand_planner_action(DemandPlannerAction::LookupStarted {
                     info_hash,
                     slice_class: plan.class,
                     lookup_ids: started.lookup_ids.clone(),
@@ -665,11 +663,13 @@ pub(in crate::dht::service) async fn start_due_demands(
                 });
             }
             Err(_) => {
-                demand_planner.update(DemandPlannerAction::LookupStartFailed {
-                    info_hash,
-                    slice_class: plan.class,
-                    now: Instant::now(),
-                });
+                service_state.update_demand_planner_action(
+                    DemandPlannerAction::LookupStartFailed {
+                        info_hash,
+                        slice_class: plan.class,
+                        now: Instant::now(),
+                    },
+                );
             }
         }
     }

@@ -6,9 +6,9 @@ use std::time::Instant;
 
 use super::{
     observe_action_effect_reduction, DemandPlannerAction, DemandPlannerEffect, DemandPlannerModel,
-    DemandSliceClass, DemandSliceMetrics, DemandSubscriberAction, DemandSubscriberEffect,
-    DemandSubscriberRegistry, DhtCommand, DhtDemandState, DhtServiceConfig, InfoHash,
-    RecentUniquePeers, DHT_UNIQUE_PEERS_FOUND_WINDOW,
+    DemandPlannerReduction, DemandSliceClass, DemandSliceMetrics, DemandSubscriberAction,
+    DemandSubscriberEffect, DemandSubscriberRegistry, DhtCommand, DhtDemandState, DhtServiceConfig,
+    InfoHash, RecentUniquePeers, DHT_UNIQUE_PEERS_FOUND_WINDOW,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -48,6 +48,7 @@ pub(in crate::dht::service) enum DhtDemandCommandAction {
         demand: DhtDemandState,
         subscriber_tx: mpsc::UnboundedSender<Vec<SocketAddr>>,
         response_tx: oneshot::Sender<Option<u64>>,
+        now: Instant,
     },
     Update {
         info_hash: InfoHash,
@@ -57,6 +58,12 @@ pub(in crate::dht::service) enum DhtDemandCommandAction {
     Unregister {
         info_hash: InfoHash,
         subscriber_id: u64,
+        now: Instant,
+    },
+    PruneDeadSubscribers {
+        info_hash: InfoHash,
+        subscriber_ids: Vec<u64>,
+        now: Instant,
     },
     PeersReceived {
         info_hash: InfoHash,
@@ -152,11 +159,7 @@ impl DhtServiceModel {
         observe_action_effect_reduction(
             "service",
             action_kind,
-            reduction
-                .effects
-                .iter()
-                .map(DhtServiceEffect::kind)
-                .collect(),
+            reduction.effects.iter().map(DhtServiceEffect::kind),
         );
         reduction
     }
@@ -193,6 +196,20 @@ impl DhtServiceState {
         let _ = self.recent_unique_peers.unique_count(Instant::now());
     }
 
+    pub(super) fn update_service_action(
+        &mut self,
+        action: DhtServiceAction,
+    ) -> DhtServiceReduction {
+        self.service.update(action)
+    }
+
+    pub(in crate::dht::service) fn update_demand_planner_action(
+        &mut self,
+        action: DemandPlannerAction<'_>,
+    ) -> DemandPlannerReduction {
+        self.demand_planner.update(action)
+    }
+
     pub(in crate::dht::service) fn update_demand_command_from_command(
         &mut self,
         command: DhtCommand,
@@ -209,6 +226,7 @@ impl DhtServiceState {
                 demand,
                 subscriber_tx,
                 response_tx,
+                now,
             },
             DhtCommand::UpdateDemand { info_hash, demand } => DhtDemandCommandAction::Update {
                 info_hash,
@@ -221,6 +239,7 @@ impl DhtServiceState {
             } => DhtDemandCommandAction::Unregister {
                 info_hash,
                 subscriber_id,
+                now,
             },
             DhtCommand::DemandPeers { info_hash, peers } => {
                 DhtDemandCommandAction::PeersReceived { info_hash, peers }
@@ -259,6 +278,7 @@ impl DhtServiceState {
                 demand,
                 subscriber_tx,
                 response_tx,
+                now,
             } => {
                 let reduction = self
                     .demand_subscribers
@@ -267,6 +287,8 @@ impl DhtServiceState {
                         demand,
                         subscriber_tx,
                     });
+                let planner_effects =
+                    self.reduce_subscriber_planner_followups(&reduction.effects, now);
                 DhtDemandCommandReduction {
                     effects: vec![
                         DhtDemandCommandEffect::SendRegisterResponse {
@@ -274,6 +296,7 @@ impl DhtServiceState {
                             subscriber_id: reduction.subscriber_id,
                         },
                         DhtDemandCommandEffect::ApplySubscriberEffects(reduction.effects),
+                        DhtDemandCommandEffect::ApplyPlannerEffects(planner_effects),
                         DhtDemandCommandEffect::StartDueDemands,
                     ],
                 }
@@ -300,6 +323,7 @@ impl DhtServiceState {
             DhtDemandCommandAction::Unregister {
                 info_hash,
                 subscriber_id,
+                now,
             } => {
                 let reduction =
                     self.demand_subscribers
@@ -307,10 +331,33 @@ impl DhtServiceState {
                             info_hash,
                             subscriber_id,
                         });
+                let planner_effects =
+                    self.reduce_subscriber_planner_followups(&reduction.effects, now);
                 DhtDemandCommandReduction {
-                    effects: vec![DhtDemandCommandEffect::ApplySubscriberEffects(
-                        reduction.effects,
-                    )],
+                    effects: vec![
+                        DhtDemandCommandEffect::ApplySubscriberEffects(reduction.effects),
+                        DhtDemandCommandEffect::ApplyPlannerEffects(planner_effects),
+                    ],
+                }
+            }
+            DhtDemandCommandAction::PruneDeadSubscribers {
+                info_hash,
+                subscriber_ids,
+                now,
+            } => {
+                let reduction =
+                    self.demand_subscribers
+                        .update(DemandSubscriberAction::PruneDeadSubscribers {
+                            info_hash,
+                            subscriber_ids,
+                        });
+                let planner_effects =
+                    self.reduce_subscriber_planner_followups(&reduction.effects, now);
+                DhtDemandCommandReduction {
+                    effects: vec![
+                        DhtDemandCommandEffect::ApplySubscriberEffects(reduction.effects),
+                        DhtDemandCommandEffect::ApplyPlannerEffects(planner_effects),
+                    ],
                 }
             }
             DhtDemandCommandAction::PeersReceived { info_hash, peers } => {
@@ -360,13 +407,38 @@ impl DhtServiceState {
         observe_action_effect_reduction(
             "demand_command",
             action_kind,
-            reduction
-                .effects
-                .iter()
-                .map(DhtDemandCommandEffect::kind)
-                .collect(),
+            reduction.effects.iter().map(DhtDemandCommandEffect::kind),
         );
         reduction
+    }
+
+    fn reduce_subscriber_planner_followups(
+        &mut self,
+        effects: &[DemandSubscriberEffect],
+        now: Instant,
+    ) -> Vec<DemandPlannerEffect> {
+        let mut planner_effects = Vec::new();
+        for effect in effects {
+            let reduction = match effect {
+                DemandSubscriberEffect::Registered {
+                    info_hash, demand, ..
+                } => self
+                    .demand_planner
+                    .update(DemandPlannerAction::DemandRegistered {
+                        info_hash: *info_hash,
+                        demand: *demand,
+                        now,
+                    }),
+                DemandSubscriberEffect::SubscriberRemoved { info_hash } => self
+                    .demand_planner
+                    .update(DemandPlannerAction::DemandSubscriberRemoved {
+                        info_hash: *info_hash,
+                    }),
+                DemandSubscriberEffect::DeliverPeers { .. } => continue,
+            };
+            planner_effects.extend(reduction.effects);
+        }
+        planner_effects
     }
 }
 
@@ -398,6 +470,7 @@ impl DhtDemandCommandAction {
             DhtDemandCommandAction::Register { .. } => "register",
             DhtDemandCommandAction::Update { .. } => "update",
             DhtDemandCommandAction::Unregister { .. } => "unregister",
+            DhtDemandCommandAction::PruneDeadSubscribers { .. } => "prune_dead_subscribers",
             DhtDemandCommandAction::PeersReceived { .. } => "peers_received",
             DhtDemandCommandAction::LookupFinished { .. } => "lookup_finished",
         }

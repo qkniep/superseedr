@@ -186,6 +186,7 @@ fn dht_demand_command_register_and_unregister_emit_subscriber_effects() {
         demand,
         subscriber_tx,
         response_tx,
+        now: Instant::now(),
     });
 
     assert_eq!(state.demand_subscribers.subscriber_count(info_hash), 1);
@@ -216,6 +217,10 @@ fn dht_demand_command_register_and_unregister_emit_subscriber_effects() {
     ));
     assert!(matches!(
         effects.next(),
+        Some(DhtDemandCommandEffect::ApplyPlannerEffects(_))
+    ));
+    assert!(matches!(
+        effects.next(),
         Some(DhtDemandCommandEffect::StartDueDemands)
     ));
     assert!(effects.next().is_none());
@@ -223,6 +228,7 @@ fn dht_demand_command_register_and_unregister_emit_subscriber_effects() {
     let reduction = state.update_demand_command(DhtDemandCommandAction::Unregister {
         info_hash,
         subscriber_id: 1,
+        now: Instant::now(),
     });
 
     assert_eq!(state.demand_subscribers.subscriber_count(info_hash), 0);
@@ -236,7 +242,16 @@ fn dht_demand_command_register_and_unregister_emit_subscriber_effects() {
         [DemandSubscriberEffect::SubscriberRemoved { info_hash: removed_hash }]
             if *removed_hash == info_hash
     ));
+    assert!(matches!(
+        effects.next(),
+        Some(DhtDemandCommandEffect::ApplyPlannerEffects(_))
+    ));
     assert!(effects.next().is_none());
+    assert!(state
+        .demand_planner
+        .scheduler
+        .entry_snapshot(info_hash)
+        .is_none());
 }
 
 #[test]
@@ -255,6 +270,7 @@ fn dht_demand_command_peer_and_finish_actions_emit_planner_followups() {
         },
         subscriber_tx,
         response_tx,
+        now: Instant::now(),
     });
 
     let peers = vec![peer("127.0.0.91:6881")];
@@ -303,4 +319,103 @@ fn dht_demand_command_peer_and_finish_actions_emit_planner_followups() {
         Some(DhtDemandCommandEffect::StartDueDemands)
     ));
     assert!(effects.next().is_none());
+}
+
+#[test]
+fn dht_demand_command_prune_dead_subscribers_updates_planner_state() {
+    let config = disabled_service_config();
+    let mut state = DhtServiceState::new(config, 0, None);
+    let info_hash = hash_index(93);
+    let (subscriber_tx, _subscriber_rx) = mpsc::unbounded_channel();
+    let (response_tx, _response_rx) = oneshot::channel();
+
+    let _ = state.update_demand_command(DhtDemandCommandAction::Register {
+        info_hash,
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        subscriber_tx,
+        response_tx,
+        now: Instant::now(),
+    });
+    assert_eq!(state.demand_subscribers.subscriber_count(info_hash), 1);
+    assert!(state
+        .demand_planner
+        .scheduler
+        .entry_snapshot(info_hash)
+        .is_some());
+
+    let reduction = state.update_demand_command(DhtDemandCommandAction::PruneDeadSubscribers {
+        info_hash,
+        subscriber_ids: vec![1],
+        now: Instant::now(),
+    });
+
+    assert_eq!(state.demand_subscribers.subscriber_count(info_hash), 0);
+    assert!(state
+        .demand_planner
+        .scheduler
+        .entry_snapshot(info_hash)
+        .is_none());
+    let mut effects = reduction.effects.into_iter();
+    let Some(DhtDemandCommandEffect::ApplySubscriberEffects(subscriber_effects)) = effects.next()
+    else {
+        panic!("expected subscriber effects");
+    };
+    assert!(matches!(
+        subscriber_effects.as_slice(),
+        [DemandSubscriberEffect::SubscriberRemoved { info_hash: removed_hash }]
+            if *removed_hash == info_hash
+    ));
+    assert!(matches!(
+        effects.next(),
+        Some(DhtDemandCommandEffect::ApplyPlannerEffects(_))
+    ));
+    assert!(effects.next().is_none());
+}
+
+#[test]
+fn dht_demand_subscriber_effect_delivery_failure_prunes_through_reducer() {
+    let config = disabled_service_config();
+    let mut state = DhtServiceState::new(config, 0, None);
+    let info_hash = hash_index(94);
+    let (dead_tx, dead_rx) = mpsc::unbounded_channel();
+    drop(dead_rx);
+    let (response_tx, _response_rx) = oneshot::channel();
+
+    let _ = state.update_demand_command(DhtDemandCommandAction::Register {
+        info_hash,
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        subscriber_tx: dead_tx,
+        response_tx,
+        now: Instant::now(),
+    });
+    assert_eq!(state.demand_subscribers.subscriber_count(info_hash), 1);
+
+    let reduction = state.update_demand_command(DhtDemandCommandAction::PeersReceived {
+        info_hash,
+        peers: vec![peer("127.0.0.94:6881")],
+    });
+    let subscriber_effects = reduction
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            DhtDemandCommandEffect::ApplySubscriberEffects(effects) => Some(effects),
+            _ => None,
+        })
+        .expect("subscriber delivery effects");
+    let (command_tx, _command_rx) = mpsc::unbounded_channel();
+
+    apply_demand_subscriber_effects(&mut state, None, &command_tx, subscriber_effects);
+
+    assert_eq!(state.demand_subscribers.subscriber_count(info_hash), 0);
+    assert!(state
+        .demand_planner
+        .scheduler
+        .entry_snapshot(info_hash)
+        .is_none());
 }

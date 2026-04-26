@@ -112,9 +112,10 @@ pub(in crate::dht::service) async fn run_service(
                 break;
             }
             LoopEvent::Command(DhtCommand::Reconfigure(new_config)) => {
-                let reduction = service_state
-                    .service
-                    .update(DhtServiceAction::ReconfigureRequested { config: new_config });
+                let reduction =
+                    service_state.update_service_action(DhtServiceAction::ReconfigureRequested {
+                        config: new_config,
+                    });
                 apply_dht_service_effects(
                     reduction.effects,
                     &mut service_state,
@@ -166,12 +167,10 @@ pub(in crate::dht::service) async fn run_service(
                     .demand_planner
                     .drain_runtime_readiness(active_runtime.as_ref());
                 let reduction =
-                    service_state
-                        .demand_planner
-                        .update(DemandPlannerAction::DrainTick {
-                            now: Instant::now(),
-                            runtime_ready,
-                        });
+                    service_state.update_demand_planner_action(DemandPlannerAction::DrainTick {
+                        now: Instant::now(),
+                        runtime_ready,
+                    });
                 let finalized_any = apply_demand_planner_effects_for_state(
                     active_runtime.as_mut(),
                     &command_tx,

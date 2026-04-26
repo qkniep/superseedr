@@ -130,7 +130,7 @@ impl DhtLifecycleModel {
         observe_action_effect_reduction(
             "lifecycle",
             action_kind,
-            effects.iter().map(DhtLifecycleEffect::kind).collect(),
+            effects.iter().map(DhtLifecycleEffect::kind),
         );
         DhtLifecycleReduction { effects }
     }

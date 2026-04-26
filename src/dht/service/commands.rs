@@ -245,7 +245,7 @@ impl DhtRuntimeCommandModel {
         observe_action_effect_reduction(
             "runtime_command",
             action_kind,
-            effects.iter().map(DhtRuntimeCommandEffect::kind).collect(),
+            effects.iter().map(DhtRuntimeCommandEffect::kind),
         );
         DhtRuntimeCommandReduction { effects }
     }
