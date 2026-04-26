@@ -172,26 +172,38 @@ impl Runtime {
             }
         }
 
-        let (ipv4_transport, ipv4_events) = if let Some(bind_addr) = config.ipv4_bind_addr {
-            let (transport, events) = TransportActor::bind(TransportConfig {
-                family: AddressFamily::Ipv4,
-                bind_addr,
-                ..TransportConfig::default()
-            })
-            .await?;
-            (Some(transport), Some(events))
-        } else {
-            (None, None)
-        };
+        let bind_addr = config.ipv4_bind_addr.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "DHT runtime requires an IPv4 bind address",
+            )
+        })?;
+        let (ipv4_transport, ipv4_events) = TransportActor::bind(TransportConfig {
+            family: AddressFamily::Ipv4,
+            bind_addr,
+            ..TransportConfig::default()
+        })
+        .await
+        .map(|(transport, events)| (Some(transport), Some(events)))?;
 
         let (ipv6_transport, ipv6_events) = if let Some(bind_addr) = config.ipv6_bind_addr {
-            let (transport, events) = TransportActor::bind(TransportConfig {
+            match TransportActor::bind(TransportConfig {
                 family: AddressFamily::Ipv6,
                 bind_addr,
                 ..TransportConfig::default()
             })
-            .await?;
-            (Some(transport), Some(events))
+            .await
+            {
+                Ok((transport, events)) => (Some(transport), Some(events)),
+                Err(error) => {
+                    tracing::warn!(
+                        bind_addr = %bind_addr,
+                        error = %error,
+                        "DHT IPv6 bind failed; continuing with IPv4 only"
+                    );
+                    (None, None)
+                }
+            }
         } else {
             (None, None)
         };
@@ -1381,7 +1393,7 @@ mod tests {
     use crate::dht::krpc::{decode_message, KrpcInboundMessage, KrpcIncomingQuery};
     use crate::dht::routing::RoutingSnapshot;
     use crate::dht::test_support::{seeded_info_hash, seeded_node_id};
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
     use tokio::net::UdpSocket;
     use tokio::task::JoinHandle;
@@ -1568,6 +1580,56 @@ mod tests {
         })
         .await
         .expect("timed out waiting for query");
+    }
+
+    #[tokio::test]
+    async fn runtime_bind_requires_ipv4_transport() {
+        let error = Runtime::bind(RuntimeConfig {
+            local_node_id: seeded_node_id(0x01),
+            bootstrap_nodes: Vec::new(),
+            ipv4_bind_addr: None,
+            ipv6_bind_addr: None,
+            persistence: None,
+        })
+        .await
+        .expect_err("runtime bind without IPv4 should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn runtime_bind_continues_without_ipv6_when_ipv6_port_is_unavailable() {
+        let occupied_ipv6 =
+            match UdpSocket::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).await {
+                Ok(socket) => socket,
+                Err(error) if ipv6_test_bind_unavailable(&error) => return,
+                Err(error) => panic!("bind occupied IPv6 test socket: {error}"),
+            };
+        let occupied_addr = occupied_ipv6
+            .local_addr()
+            .expect("occupied IPv6 local addr");
+
+        let runtime = Runtime::bind(RuntimeConfig {
+            local_node_id: seeded_node_id(0x02),
+            bootstrap_nodes: Vec::new(),
+            ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+            ipv6_bind_addr: Some(occupied_addr),
+            persistence: None,
+        })
+        .await
+        .expect("runtime should start with IPv4 when IPv6 bind fails");
+
+        assert!(runtime.family_bound(AddressFamily::Ipv4));
+        assert!(!runtime.family_bound(AddressFamily::Ipv6));
+    }
+
+    fn ipv6_test_bind_unavailable(error: &io::Error) -> bool {
+        matches!(
+            error.kind(),
+            io::ErrorKind::AddrNotAvailable
+                | io::ErrorKind::Unsupported
+                | io::ErrorKind::PermissionDenied
+        )
     }
 
     #[tokio::test]

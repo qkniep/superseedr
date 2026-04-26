@@ -7,9 +7,10 @@ use super::krpc::{
 };
 use super::types::{AddressFamily, InfoHash, NodeId, TransactionId};
 use serde::Serialize;
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket as StdUdpSocket};
 use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -159,7 +160,7 @@ impl TransportActor {
         mut config: TransportConfig,
     ) -> io::Result<(Self, mpsc::UnboundedReceiver<TransportEvent>)> {
         config.bind_addr = normalize_bind_addr(config.bind_addr, config.family);
-        let socket = Arc::new(UdpSocket::bind(config.bind_addr).await?);
+        let socket = Arc::new(bind_udp_socket(config.bind_addr, config.family)?);
         let inflight_queries = Arc::new(StdMutex::new(HashMap::new()));
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -727,6 +728,21 @@ fn normalize_bind_addr(bind_addr: SocketAddr, family: AddressFamily) -> SocketAd
     }
 }
 
+fn bind_udp_socket(bind_addr: SocketAddr, family: AddressFamily) -> io::Result<UdpSocket> {
+    let domain = match family {
+        AddressFamily::Ipv4 => Domain::IPV4,
+        AddressFamily::Ipv6 => Domain::IPV6,
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    if matches!(family, AddressFamily::Ipv6) {
+        socket.set_only_v6(true)?;
+    }
+    socket.bind(&SockAddr::from(bind_addr))?;
+    socket.set_nonblocking(true)?;
+    let std_socket: StdUdpSocket = socket.into();
+    UdpSocket::from_std(std_socket)
+}
+
 fn is_transient_udp_recv_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -736,4 +752,49 @@ fn is_transient_udp_recv_error(error: &io::Error) -> bool {
             | io::ErrorKind::Interrupted
             | io::ErrorKind::TimedOut
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    #[tokio::test]
+    async fn ipv6_transport_bind_is_v6_only_for_shared_dht_port() {
+        let (ipv4_transport, _ipv4_events) = TransportActor::bind(TransportConfig {
+            family: AddressFamily::Ipv4,
+            bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            ..TransportConfig::default()
+        })
+        .await
+        .expect("bind IPv4 wildcard transport");
+        let port = ipv4_transport.local_addr().expect("IPv4 local addr").port();
+
+        let ipv6_result = TransportActor::bind(TransportConfig {
+            family: AddressFamily::Ipv6,
+            bind_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port),
+            ..TransportConfig::default()
+        })
+        .await;
+
+        match ipv6_result {
+            Ok((ipv6_transport, _ipv6_events)) => {
+                assert_eq!(
+                    ipv6_transport.local_addr().expect("IPv6 local addr").port(),
+                    port
+                );
+            }
+            Err(error) if ipv6_bind_unavailable(&error) => {}
+            Err(error) => panic!("IPv6 wildcard bind should coexist with IPv4: {error}"),
+        }
+    }
+
+    fn ipv6_bind_unavailable(error: &io::Error) -> bool {
+        matches!(
+            error.kind(),
+            io::ErrorKind::AddrNotAvailable
+                | io::ErrorKind::Unsupported
+                | io::ErrorKind::PermissionDenied
+        )
+    }
 }

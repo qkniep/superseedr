@@ -317,9 +317,6 @@ pub(in crate::dht::service) async fn build_runtime(
         return Err(error);
     }
 
-    let disable_ipv4 = std::env::var_os("SUPERSEEDR_DHT_DISABLE_IPV4").is_some();
-    let disable_ipv6 = std::env::var_os("SUPERSEEDR_DHT_DISABLE_IPV6").is_some();
-
     if matches!(config.preferred_backend, DhtBackendKind::Disabled) {
         let bootstrap = literal_bootstrap_summary(&config.bootstrap_nodes);
         return Ok(BuiltRuntime {
@@ -345,11 +342,11 @@ pub(in crate::dht::service) async fn build_runtime(
     let runtime = Runtime::bind(RuntimeConfig {
         local_node_id,
         bootstrap_nodes,
-        ipv4_bind_addr: (!disable_ipv4).then_some(SocketAddr::new(
+        ipv4_bind_addr: Some(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             config.port,
         )),
-        ipv6_bind_addr: (!disable_ipv6).then_some(SocketAddr::new(
+        ipv6_bind_addr: Some(SocketAddr::new(
             IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             config.port,
         )),
