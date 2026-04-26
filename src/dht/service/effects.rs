@@ -39,11 +39,21 @@ pub(in crate::dht::service) async fn apply_dht_service_effects(
     while let Some(effect) = pending_effects.pop_front() {
         match effect {
             DhtServiceEffect::BuildRuntime { config } => {
+                let old_port = service_state.service.config().port;
+                let drop_before_bind = active_runtime.is_some() && old_port == config.port;
+                if drop_before_bind {
+                    if let Some(previous) = active_runtime.take() {
+                        let _ = previous.runtime.save_state().await;
+                    }
+                }
+
                 let reduction =
                     match build_runtime(&config, local_node_id).await {
                         Ok(built) => {
-                            if let Some(previous) = active_runtime.as_ref() {
-                                let _ = previous.runtime.save_state().await;
+                            if !drop_before_bind {
+                                if let Some(previous) = active_runtime.as_ref() {
+                                    let _ = previous.runtime.save_state().await;
+                                }
                             }
                             *active_runtime = built.active_runtime;
                             service_state.update_service_action(
@@ -375,8 +385,13 @@ pub(in crate::dht::service) async fn apply_dht_runtime_command_effects(
                 port,
                 response_tx,
             } => {
-                let success = announce_peer(active_runtime.as_mut(), info_hash, port).await;
-                let _ = response_tx.send(success);
+                let Some(job) = announce_peer_job(active_runtime.as_ref(), info_hash, port) else {
+                    let _ = response_tx.send(false);
+                    continue;
+                };
+                tokio::spawn(async move {
+                    let _ = response_tx.send(job.run().await);
+                });
             }
             DhtRuntimeCommandEffect::StartDueDemands => {
                 start_due_demands_for_state(active_runtime, command_tx, service_state).await;

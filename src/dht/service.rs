@@ -8,7 +8,7 @@ use super::scheduler::{
     DemandEntrySnapshot, DemandFinishMode, DemandScheduler, DueDemandCandidate,
 };
 use super::types::{AddressFamily, InfoHash, LookupId, NodeId};
-use super::{LookupState, Runtime, RuntimeConfig};
+use super::{AnnouncePeerJob, LookupState, Runtime, RuntimeConfig};
 use crate::config::Settings;
 use rand::random;
 use std::collections::{HashMap, HashSet, VecDeque};

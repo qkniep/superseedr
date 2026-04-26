@@ -5904,6 +5904,13 @@ impl App {
                 self.dht_service
                     .reconfigure(DhtServiceConfig::from_settings(&self.client_configs));
 
+                if self.app_state.externally_accessable_port_v4
+                    || self.app_state.externally_accessable_port_v6
+                {
+                    let info_hashes = self.active_running_torrents_for_dht_announce();
+                    self.announce_torrents_to_dht(info_hashes);
+                }
+
                 true
             }
             Err(e) => {
@@ -8156,6 +8163,46 @@ mod tests {
             command,
             ManagerCommand::UpdateListenPort(port) if port == bound_port
         ));
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn rebind_listener_reannounces_running_torrents_on_new_port_when_already_reachable() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("create app");
+        let recorder = TestDhtRecorder::default();
+        app.dht_service = DhtService::from_test_recorder(recorder.clone());
+        app.dht_status_rx = app.dht_service.subscribe_status();
+        app.app_state.externally_accessable_port_v4 = true;
+
+        let running_hash = vec![3; 20];
+        let (running_tx, _running_rx) = mpsc::channel(1);
+        app.torrent_manager_command_txs
+            .insert(running_hash.clone(), running_tx);
+        let mut running_display = TorrentDisplayState::default();
+        running_display.latest_state.info_hash = running_hash.clone();
+        running_display.latest_state.torrent_name = "port reannounce sample".to_string();
+        running_display.latest_state.torrent_control_state = TorrentControlState::Running;
+        running_display.latest_state.number_of_pieces_total = 1;
+        app.app_state
+            .torrents
+            .insert(running_hash.clone(), running_display);
+
+        assert!(app.rebind_listener(0).await);
+        tokio::task::yield_now().await;
+
+        let bound_port = app.client_configs.client_port;
+        assert_ne!(bound_port, 0);
+        assert_eq!(
+            recorder.recorded_announces(),
+            vec![(running_hash, Some(bound_port))]
+        );
 
         let _ = app.shutdown_tx.send(());
     }

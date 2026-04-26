@@ -30,6 +30,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::net::lookup_host;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 pub use health::{DhtAnomalySummary, DhtHealthSnapshot};
@@ -108,6 +109,46 @@ struct LookupTaskResult {
     family: AddressFamily,
     transaction_id: TransactionId,
     outcome: LookupTaskOutcome,
+}
+
+pub(crate) struct AnnouncePeerJob {
+    local_node_id: NodeId,
+    info_hash: InfoHash,
+    port: Option<u16>,
+    targets: Vec<AnnouncePeerTarget>,
+}
+
+struct AnnouncePeerTarget {
+    transport: TransportActor,
+    addr: SocketAddr,
+}
+
+impl AnnouncePeerJob {
+    pub(crate) async fn run(self) -> bool {
+        let mut tasks = JoinSet::new();
+        for target in self.targets {
+            let local_node_id = self.local_node_id;
+            let info_hash = self.info_hash;
+            let port = self.port;
+            tasks.spawn(async move {
+                announce_peer_to_target(
+                    target.transport,
+                    target.addr,
+                    local_node_id,
+                    info_hash,
+                    port,
+                )
+                .await
+                .unwrap_or(false)
+            });
+        }
+
+        let mut announced = false;
+        while let Some(result) = tasks.join_next().await {
+            announced |= result.unwrap_or(false);
+        }
+        announced
+    }
 }
 
 #[derive(Debug)]
@@ -642,6 +683,51 @@ impl Runtime {
         }
 
         Ok(announced)
+    }
+
+    pub(crate) fn announce_peer_job(
+        &self,
+        info_hash: InfoHash,
+        port: Option<u16>,
+    ) -> Option<AnnouncePeerJob> {
+        let target = NodeId::from(info_hash);
+        let mut targets = Vec::new();
+
+        for family in [AddressFamily::Ipv4, AddressFamily::Ipv6] {
+            let Some(transport) = self.transport_for(family).cloned() else {
+                continue;
+            };
+            let mut candidates = match family {
+                AddressFamily::Ipv4 => self.ipv4_routing.table().closest_nodes(target, 8),
+                AddressFamily::Ipv6 => self.ipv6_routing.table().closest_nodes(target, 8),
+            }
+            .into_iter()
+            .map(|record| record.addr)
+            .collect::<Vec<_>>();
+
+            if candidates.is_empty() {
+                candidates.extend(
+                    self.config
+                        .bootstrap_nodes
+                        .iter()
+                        .copied()
+                        .filter(|addr| AddressFamily::for_addr(*addr) == family)
+                        .take(8),
+                );
+            }
+
+            targets.extend(candidates.into_iter().map(|addr| AnnouncePeerTarget {
+                transport: transport.clone(),
+                addr,
+            }));
+        }
+
+        (!targets.is_empty()).then_some(AnnouncePeerJob {
+            local_node_id: self.config.local_node_id,
+            info_hash,
+            port,
+            targets,
+        })
     }
 
     pub async fn step(&mut self) -> io::Result<bool> {
@@ -1423,6 +1509,38 @@ async fn resolve_bootstrap_sources(bootstrap_sources: &[String]) -> Vec<SocketAd
     }
 
     resolved
+}
+
+async fn announce_peer_to_target(
+    transport: TransportActor,
+    addr: SocketAddr,
+    local_node_id: NodeId,
+    info_hash: InfoHash,
+    port: Option<u16>,
+) -> io::Result<bool> {
+    let Some(TransportReply::Response(response)) =
+        transport.get_peers(addr, local_node_id, info_hash).await?
+    else {
+        return Ok(false);
+    };
+
+    let response_body = response.r.unwrap_or_default();
+    if response_body.token.is_empty() {
+        return Ok(false);
+    }
+
+    Ok(matches!(
+        transport
+            .announce_peer(
+                addr,
+                local_node_id,
+                info_hash,
+                response_body.token.as_ref(),
+                port,
+            )
+            .await?,
+        Some(TransportReply::Response(_))
+    ))
 }
 
 #[cfg(test)]

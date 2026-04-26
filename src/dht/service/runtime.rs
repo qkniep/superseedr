@@ -283,30 +283,12 @@ pub(in crate::dht::service) async fn attach_lookup_family(
     Ok(())
 }
 
-pub(in crate::dht::service) async fn announce_peer(
-    active_runtime: Option<&mut ActiveRuntime>,
+pub(in crate::dht::service) fn announce_peer_job(
+    active_runtime: Option<&ActiveRuntime>,
     info_hash: InfoHash,
     port: Option<u16>,
-) -> bool {
-    let Some(active_runtime) = active_runtime else {
-        return false;
-    };
-
-    let mut announced = false;
-    for family in [AddressFamily::Ipv4, AddressFamily::Ipv6] {
-        if !active_runtime.runtime.family_bound(family) {
-            continue;
-        }
-        if let Ok(success) = active_runtime
-            .runtime
-            .announce_peer(family, info_hash, port)
-            .await
-        {
-            announced |= success;
-        }
-    }
-
-    announced
+) -> Option<AnnouncePeerJob> {
+    active_runtime?.runtime.announce_peer_job(info_hash, port)
 }
 
 pub(in crate::dht::service) async fn build_runtime(
