@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    AddressFamily, DemandSliceClass, DemandSliceStopReason, InfoHash, LookupId, StartedLookup,
+    AddressFamily, DemandSliceClass, DemandSliceStopReason, DhtCommand, InfoHash, LookupId,
+    StartedLookup,
 };
 
 pub(super) struct DhtRuntimeLookupFamilyRequest {
@@ -86,6 +87,74 @@ pub(super) struct DhtRuntimeCommandReduction {
 pub(super) struct DhtRuntimeCommandModel;
 
 impl DhtRuntimeCommandModel {
+    pub(super) fn update_command(command: DhtCommand) -> Option<DhtRuntimeCommandReduction> {
+        let action = match command {
+            DhtCommand::StartGetPeers {
+                info_hash,
+                response_tx,
+            } => DhtRuntimeCommandAction::StartGetPeers {
+                info_hash,
+                response_tx,
+            },
+            DhtCommand::StartGetPeersFamily {
+                info_hash,
+                family,
+                slice_class,
+                record_metrics,
+                merged_tx,
+                lookup_ids,
+                first_batch_seen,
+                accepting_families,
+            } => DhtRuntimeCommandAction::StartGetPeersFamily(DhtRuntimeLookupFamilyRequest {
+                info_hash,
+                family,
+                slice_class,
+                record_metrics,
+                merged_tx,
+                lookup_ids,
+                first_batch_seen,
+                accepting_families,
+            }),
+            DhtCommand::CancelLookups { lookup_ids } => {
+                DhtRuntimeCommandAction::CancelLookups { lookup_ids }
+            }
+            DhtCommand::ParkDemandLookups {
+                info_hash,
+                slice_class,
+                stop_reason,
+                total_peers,
+                unique_peers,
+                lookup_ids,
+            } => DhtRuntimeCommandAction::ParkDemandLookups {
+                info_hash,
+                slice_class,
+                stop_reason,
+                total_peers,
+                unique_peers,
+                lookup_ids,
+            },
+            DhtCommand::FinalizeDrainedDemandLookups { info_hash } => {
+                DhtRuntimeCommandAction::FinalizeDrainedDemandLookups { info_hash }
+            }
+            DhtCommand::AnnouncePeer {
+                info_hash,
+                port,
+                response_tx,
+            } => DhtRuntimeCommandAction::AnnouncePeer {
+                info_hash,
+                port,
+                response_tx,
+            },
+            DhtCommand::Reconfigure(_)
+            | DhtCommand::RegisterDemand { .. }
+            | DhtCommand::UpdateDemand { .. }
+            | DhtCommand::UnregisterDemand { .. }
+            | DhtCommand::DemandPeers { .. }
+            | DhtCommand::DemandLookupFinished { .. } => return None,
+        };
+        Some(Self::update(action))
+    }
+
     pub(super) fn update(action: DhtRuntimeCommandAction) -> DhtRuntimeCommandReduction {
         let effects = match action {
             DhtRuntimeCommandAction::StartGetPeers {

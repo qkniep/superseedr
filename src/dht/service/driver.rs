@@ -212,95 +212,16 @@ pub(in crate::dht::service) async fn run_service(
                 )
                 .await;
             }
-            LoopEvent::Command(DhtCommand::StartGetPeers {
-                info_hash,
-                response_tx,
-            }) => {
-                let reduction =
-                    DhtRuntimeCommandModel::update(DhtRuntimeCommandAction::StartGetPeers {
-                        info_hash,
-                        response_tx,
-                    });
-                apply_dht_runtime_command_effects(
-                    reduction.effects,
-                    &mut active_runtime,
-                    &command_tx,
-                    &mut service_state,
-                )
-                .await;
-            }
-            LoopEvent::Command(DhtCommand::StartGetPeersFamily {
-                info_hash,
-                family,
-                slice_class,
-                record_metrics,
-                merged_tx,
-                lookup_ids,
-                first_batch_seen,
-                accepting_families,
-            }) => {
-                let reduction = DhtRuntimeCommandModel::update(
-                    DhtRuntimeCommandAction::StartGetPeersFamily(DhtRuntimeLookupFamilyRequest {
-                        info_hash,
-                        family,
-                        slice_class,
-                        record_metrics,
-                        merged_tx,
-                        lookup_ids,
-                        first_batch_seen,
-                        accepting_families,
-                    }),
-                );
-                apply_dht_runtime_command_effects(
-                    reduction.effects,
-                    &mut active_runtime,
-                    &command_tx,
-                    &mut service_state,
-                )
-                .await;
-            }
-            LoopEvent::Command(DhtCommand::CancelLookups { lookup_ids }) => {
-                let reduction =
-                    DhtRuntimeCommandModel::update(DhtRuntimeCommandAction::CancelLookups {
-                        lookup_ids,
-                    });
-                apply_dht_runtime_command_effects(
-                    reduction.effects,
-                    &mut active_runtime,
-                    &command_tx,
-                    &mut service_state,
-                )
-                .await;
-            }
-            LoopEvent::Command(DhtCommand::ParkDemandLookups {
-                info_hash,
-                slice_class,
-                stop_reason,
-                total_peers,
-                unique_peers,
-                lookup_ids,
-            }) => {
-                let reduction =
-                    DhtRuntimeCommandModel::update(DhtRuntimeCommandAction::ParkDemandLookups {
-                        info_hash,
-                        slice_class,
-                        stop_reason,
-                        total_peers,
-                        unique_peers,
-                        lookup_ids,
-                    });
-                apply_dht_runtime_command_effects(
-                    reduction.effects,
-                    &mut active_runtime,
-                    &command_tx,
-                    &mut service_state,
-                )
-                .await;
-            }
-            LoopEvent::Command(DhtCommand::FinalizeDrainedDemandLookups { info_hash }) => {
-                let reduction = DhtRuntimeCommandModel::update(
-                    DhtRuntimeCommandAction::FinalizeDrainedDemandLookups { info_hash },
-                );
+            LoopEvent::Command(
+                command @ (DhtCommand::StartGetPeers { .. }
+                | DhtCommand::StartGetPeersFamily { .. }
+                | DhtCommand::CancelLookups { .. }
+                | DhtCommand::ParkDemandLookups { .. }
+                | DhtCommand::FinalizeDrainedDemandLookups { .. }
+                | DhtCommand::AnnouncePeer { .. }),
+            ) => {
+                let reduction = DhtRuntimeCommandModel::update_command(command)
+                    .expect("runtime command must reduce");
                 apply_dht_runtime_command_effects(
                     reduction.effects,
                     &mut active_runtime,
@@ -334,25 +255,6 @@ pub(in crate::dht::service) async fn run_service(
                     )
                     .await;
                 }
-            }
-            LoopEvent::Command(DhtCommand::AnnouncePeer {
-                info_hash,
-                port,
-                response_tx,
-            }) => {
-                let reduction =
-                    DhtRuntimeCommandModel::update(DhtRuntimeCommandAction::AnnouncePeer {
-                        info_hash,
-                        port,
-                        response_tx,
-                    });
-                apply_dht_runtime_command_effects(
-                    reduction.effects,
-                    &mut active_runtime,
-                    &command_tx,
-                    &mut service_state,
-                )
-                .await;
             }
             LoopEvent::DemandTick => {
                 start_due_demands_for_state(&mut active_runtime, &command_tx, &mut service_state)

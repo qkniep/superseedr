@@ -2,6 +2,41 @@ use super::test_support::*;
 use super::*;
 
 #[test]
+fn dht_runtime_command_model_reduces_runtime_commands_only() {
+    let info_hash = hash_index(43);
+    let (lookup_response_tx, _lookup_response_rx) = oneshot::channel();
+    let mut reduction = DhtRuntimeCommandModel::update_command(DhtCommand::StartGetPeers {
+        info_hash,
+        response_tx: lookup_response_tx,
+    })
+    .expect("runtime command reduction");
+
+    assert_eq!(reduction.effects.len(), 1);
+    assert!(matches!(
+        reduction.effects.pop(),
+        Some(DhtRuntimeCommandEffect::StartGetPeers {
+            info_hash: effect_hash,
+            ..
+        }) if effect_hash == info_hash
+    ));
+
+    let (subscriber_tx, _subscriber_rx) = mpsc::unbounded_channel();
+    let (response_tx, _response_rx) = oneshot::channel();
+    assert!(
+        DhtRuntimeCommandModel::update_command(DhtCommand::RegisterDemand {
+            info_hash,
+            demand: DhtDemandState {
+                awaiting_metadata: false,
+                connected_peers: 0,
+            },
+            subscriber_tx,
+            response_tx,
+        })
+        .is_none()
+    );
+}
+
+#[test]
 fn dht_runtime_command_model_routes_start_get_peers_and_announce() {
     let info_hash = hash_index(44);
     let (lookup_response_tx, _lookup_response_rx) = oneshot::channel();
