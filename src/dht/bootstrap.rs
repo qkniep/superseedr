@@ -59,6 +59,10 @@ impl BootstrapCoordinator {
         &self.config
     }
 
+    pub fn set_bootstrap_nodes(&mut self, bootstrap_nodes: Vec<SocketAddr>) {
+        self.config.bootstrap_nodes = bootstrap_nodes;
+    }
+
     pub fn startup_plan(
         &self,
         local_node_id: NodeId,

@@ -342,6 +342,7 @@ pub(in crate::dht::service) async fn build_runtime(
     let runtime = Runtime::bind(RuntimeConfig {
         local_node_id,
         bootstrap_nodes,
+        bootstrap_sources: config.bootstrap_nodes.clone(),
         ipv4_bind_addr: Some(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             config.port,

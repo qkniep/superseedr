@@ -27,6 +27,7 @@ use std::net::SocketAddr;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
+use tokio::net::lookup_host;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -63,6 +64,7 @@ const MAX_CACHED_RESPONDERS_PER_TARGET: usize = 16;
 pub struct RuntimeConfig {
     pub local_node_id: NodeId,
     pub bootstrap_nodes: Vec<SocketAddr>,
+    pub bootstrap_sources: Vec<String>,
     pub ipv4_bind_addr: Option<SocketAddr>,
     pub ipv6_bind_addr: Option<SocketAddr>,
     pub persistence: Option<PersistenceConfig>,
@@ -360,6 +362,8 @@ impl Runtime {
     }
 
     pub async fn bootstrap_startup(&mut self) -> io::Result<()> {
+        self.refresh_bootstrap_nodes_if_empty().await;
+
         let families = [AddressFamily::Ipv4, AddressFamily::Ipv6]
             .into_iter()
             .filter(|family| self.family_bound(*family))
@@ -377,6 +381,7 @@ impl Runtime {
 
     pub async fn run_maintenance(&mut self) -> io::Result<()> {
         self.cleanup_closed_lookups();
+        self.refresh_bootstrap_nodes_if_empty().await;
         let now = Instant::now();
         let local_node_id = self.config.local_node_id;
 
@@ -414,6 +419,7 @@ impl Runtime {
         target: LookupTarget,
     ) -> io::Result<(LookupId, mpsc::UnboundedReceiver<Vec<SocketAddr>>)> {
         self.cleanup_closed_lookups();
+        self.refresh_bootstrap_nodes_if_empty().await;
 
         if self.transport_for(family).is_none() {
             return Err(io::Error::new(
@@ -474,6 +480,20 @@ impl Runtime {
         );
         self.pump_lookup(lookup_id).await?;
         Ok((lookup_id, peer_rx))
+    }
+
+    async fn refresh_bootstrap_nodes_if_empty(&mut self) {
+        if !self.config.bootstrap_nodes.is_empty() || self.config.bootstrap_sources.is_empty() {
+            return;
+        }
+
+        let bootstrap_nodes = resolve_bootstrap_sources(&self.config.bootstrap_sources).await;
+        if bootstrap_nodes.is_empty() {
+            return;
+        }
+
+        self.config.bootstrap_nodes = bootstrap_nodes.clone();
+        self.bootstrap.set_bootstrap_nodes(bootstrap_nodes);
     }
 
     pub async fn start_lookup_with_state(
@@ -1387,6 +1407,24 @@ fn trace_lookup_result(transaction_id: TransactionId, stage: &str) {
     );
 }
 
+async fn resolve_bootstrap_sources(bootstrap_sources: &[String]) -> Vec<SocketAddr> {
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+
+    for bootstrap in bootstrap_sources {
+        let Ok(addresses) = lookup_host(bootstrap.as_str()).await else {
+            continue;
+        };
+        for addr in addresses {
+            if seen.insert(addr) {
+                resolved.push(addr);
+            }
+        }
+    }
+
+    resolved
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1587,6 +1625,7 @@ mod tests {
         let error = Runtime::bind(RuntimeConfig {
             local_node_id: seeded_node_id(0x01),
             bootstrap_nodes: Vec::new(),
+            bootstrap_sources: Vec::new(),
             ipv4_bind_addr: None,
             ipv6_bind_addr: None,
             persistence: None,
@@ -1612,6 +1651,7 @@ mod tests {
         let runtime = Runtime::bind(RuntimeConfig {
             local_node_id: seeded_node_id(0x02),
             bootstrap_nodes: Vec::new(),
+            bootstrap_sources: Vec::new(),
             ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
             ipv6_bind_addr: Some(occupied_addr),
             persistence: None,
@@ -1630,6 +1670,69 @@ mod tests {
                 | io::ErrorKind::Unsupported
                 | io::ErrorKind::PermissionDenied
         )
+    }
+
+    #[tokio::test]
+    async fn runtime_re_resolves_bootstrap_sources_when_initial_resolution_was_empty() {
+        let query_log = Arc::new(Mutex::new(Vec::new()));
+        let bootstrap_socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .expect("bind bootstrap");
+        let bootstrap_addr = bootstrap_socket.local_addr().expect("bootstrap addr");
+        let terminal_peers = [CompactPeer {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 43000),
+        }];
+        let handle = spawn_replay_responder(
+            bootstrap_socket,
+            seeded_node_id(0x70),
+            ReplayBehavior::Peers(terminal_peers.to_vec()),
+            query_log.clone(),
+        )
+        .await;
+
+        let mut runtime = Runtime::bind(RuntimeConfig {
+            local_node_id: seeded_node_id(0x71),
+            bootstrap_nodes: Vec::new(),
+            bootstrap_sources: vec![bootstrap_addr.to_string()],
+            ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+            ipv6_bind_addr: None,
+            persistence: None,
+        })
+        .await
+        .expect("bind runtime");
+
+        let (_lookup_id, mut peer_rx) = runtime
+            .start_get_peers(AddressFamily::Ipv4, seeded_info_hash(0x72))
+            .await
+            .expect("start get_peers lookup");
+        assert_eq!(runtime.config.bootstrap_nodes, vec![bootstrap_addr]);
+
+        let peers = timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::select! {
+                    maybe_batch = peer_rx.recv() => {
+                        return maybe_batch.expect("peer receiver closed before bootstrap reply");
+                    }
+                    step_result = runtime.step() => {
+                        let active = step_result.expect("runtime step");
+                        assert!(active, "runtime step loop terminated before bootstrap reply");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for bootstrap source lookup");
+
+        assert_eq!(
+            peers,
+            terminal_peers
+                .iter()
+                .map(|peer| peer.addr)
+                .collect::<Vec<_>>()
+        );
+        wait_for_query(query_log, bootstrap_addr, KrpcQueryKind::GetPeers).await;
+        handle.abort();
+        let _ = handle.await;
     }
 
     #[tokio::test]
@@ -1731,6 +1834,7 @@ mod tests {
         let mut runtime = Runtime::bind(RuntimeConfig {
             local_node_id: seeded_node_id(0x01),
             bootstrap_nodes: vec![bootstrap_a_addr, bootstrap_b_addr],
+            bootstrap_sources: Vec::new(),
             ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
             ipv6_bind_addr: None,
             persistence: None,
@@ -1838,6 +1942,7 @@ mod tests {
         let matching = Runtime::bind(RuntimeConfig {
             local_node_id,
             bootstrap_nodes: Vec::new(),
+            bootstrap_sources: Vec::new(),
             ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
             ipv6_bind_addr: None,
             persistence: Some(PersistenceConfig {
@@ -1853,6 +1958,7 @@ mod tests {
         let mismatched = Runtime::bind(RuntimeConfig {
             local_node_id: seeded_node_id(0x53),
             bootstrap_nodes: Vec::new(),
+            bootstrap_sources: Vec::new(),
             ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
             ipv6_bind_addr: None,
             persistence: Some(PersistenceConfig {
@@ -1925,6 +2031,7 @@ mod tests {
         let mut runtime = Runtime::bind(RuntimeConfig {
             local_node_id: seeded_node_id(0x01),
             bootstrap_nodes: vec![bootstrap_addr],
+            bootstrap_sources: Vec::new(),
             ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
             ipv6_bind_addr: None,
             persistence: None,

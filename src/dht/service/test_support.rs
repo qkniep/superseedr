@@ -95,6 +95,7 @@ pub(super) async fn local_ipv4_active_runtime_with_bootstrap(
     let runtime = Runtime::bind(RuntimeConfig {
         local_node_id: NodeId::from([9u8; NodeId::LEN]),
         bootstrap_nodes: bootstrap_nodes.clone(),
+        bootstrap_sources: Vec::new(),
         ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
         ipv6_bind_addr: None,
         persistence: None,
