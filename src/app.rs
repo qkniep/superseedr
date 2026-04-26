@@ -3572,7 +3572,10 @@ impl App {
             self.app_state.theme = Theme::builtin(new_settings.ui_theme);
         }
 
-        if new_settings.client_port != old_settings.client_port {
+        let port_changed = new_settings.client_port != old_settings.client_port;
+        let bootstrap_changed = new_settings.bootstrap_nodes != old_settings.bootstrap_nodes;
+
+        if port_changed {
             tracing::info!(
                 "Config update: Port changed to {}",
                 new_settings.client_port
@@ -3580,8 +3583,13 @@ impl App {
             if !self.rebind_listener(new_settings.client_port).await {
                 self.client_configs.client_port = old_settings.client_port;
                 let _ = self.rss_settings_tx.send(self.client_configs.clone());
+                if bootstrap_changed {
+                    tracing::info!("Config update: DHT bootstrap nodes changed.");
+                    self.dht_service
+                        .reconfigure(DhtServiceConfig::from_settings(&self.client_configs));
+                }
             }
-        } else if new_settings.bootstrap_nodes != old_settings.bootstrap_nodes {
+        } else if bootstrap_changed {
             tracing::info!("Config update: DHT bootstrap nodes changed.");
             self.dht_service
                 .reconfigure(DhtServiceConfig::from_settings(&self.client_configs));
@@ -8335,6 +8343,77 @@ mod tests {
             .expect("listener should remain bound");
         assert_eq!(app.client_configs.client_port, original_port);
         assert_eq!(rebound_port, original_port);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn apply_settings_update_reconfigures_dht_bootstrap_after_failed_port_rebind() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            bootstrap_nodes: vec!["127.0.0.1:9".to_string()],
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("create app");
+        let recorder = TestDhtRecorder::default();
+        app.dht_service = DhtService::from_test_recorder(recorder.clone());
+        app.dht_status_rx = app.dht_service.subscribe_status();
+
+        let original_port = app.client_configs.client_port;
+        let occupied_v4 = tokio::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .expect("bind occupied IPv4 port");
+        let occupied_port = occupied_v4
+            .local_addr()
+            .expect("occupied local addr")
+            .port();
+        let _occupied_v6 =
+            if TcpListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0))
+                .await
+                .is_ok()
+            {
+                match TcpListener::bind(SocketAddr::new(
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                    occupied_port,
+                ))
+                .await
+                {
+                    Ok(listener) => Some(listener),
+                    Err(error) if error.kind() == io::ErrorKind::AddrInUse => None,
+                    Err(error) => panic!("bind occupied IPv6 port: {error}"),
+                }
+            } else {
+                None
+            };
+
+        let mut next_settings = app.client_configs.clone();
+        next_settings.client_port = occupied_port;
+        next_settings.bootstrap_nodes = vec!["127.0.0.1:10".to_string()];
+
+        app.apply_settings_update(next_settings.clone(), false)
+            .await;
+
+        let recorded = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let recorded = recorder.recorded_reconfigures();
+                if !recorded.is_empty() {
+                    break recorded;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("DHT reconfigure should be recorded");
+        let config = recorded.last().expect("recorded reconfigure");
+        assert_eq!(app.client_configs.client_port, original_port);
+        assert_eq!(
+            app.client_configs.bootstrap_nodes,
+            next_settings.bootstrap_nodes
+        );
+        assert_eq!(config.port, original_port);
+        assert_eq!(config.bootstrap_nodes, next_settings.bootstrap_nodes);
 
         let _ = app.shutdown_tx.send(());
     }

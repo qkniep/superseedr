@@ -78,11 +78,14 @@ impl Drop for DhtDemandSubscription {
 
 #[cfg(test)]
 type RecordedAnnounces = Arc<StdMutex<Vec<(Vec<u8>, Option<u16>)>>>;
+#[cfg(test)]
+type RecordedReconfigures = Arc<StdMutex<Vec<DhtServiceConfig>>>;
 
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TestDhtRecorder {
     announce_requests: RecordedAnnounces,
+    reconfigure_requests: RecordedReconfigures,
 }
 
 #[cfg(test)]
@@ -91,6 +94,13 @@ impl TestDhtRecorder {
         self.announce_requests
             .lock()
             .expect("test dht recorder lock")
+            .clone()
+    }
+
+    pub(crate) fn recorded_reconfigures(&self) -> Vec<DhtServiceConfig> {
+        self.reconfigure_requests
+            .lock()
+            .expect("test dht reconfigure recorder lock")
             .clone()
     }
 }
@@ -264,13 +274,28 @@ impl DhtService {
         let handle = DhtHandle::from_test_recorder(recorder);
         let status_rx = handle.status_rx().clone();
         let (_wave_telemetry_tx, wave_telemetry_rx) = watch::channel(DhtWaveTelemetry::default());
-        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let recorder = match &handle.inner {
+            DhtHandleInner::Recorder { recorder, .. } => recorder.clone(),
+            _ => unreachable!("test recorder handle must use recorder inner"),
+        };
+        let task = Some(tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let DhtCommand::Reconfigure(config) = command {
+                    recorder
+                        .reconfigure_requests
+                        .lock()
+                        .expect("test dht reconfigure recorder lock")
+                        .push(config);
+                }
+            }
+        }));
         Self {
             handle,
             status_rx,
             wave_telemetry_rx,
             command_tx,
-            task: None,
+            task,
         }
     }
 }
