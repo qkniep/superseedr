@@ -87,6 +87,94 @@ fn demand_planner_plan_due_starts_due_demands_by_class_and_marks_state() {
         );
     }
 }
+
+#[test]
+fn demand_planner_updates_demand_metrics_without_starting_work() {
+    let now = Instant::now();
+    let info_hash = hash_index(160);
+    let mut planner = DemandPlannerModel::new(now);
+    planner.update(DemandPlannerAction::DemandRegistered {
+        info_hash,
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        now,
+    });
+
+    let metrics = DhtDemandMetrics {
+        accepting_new_peers: true,
+        total_pieces: 100,
+        completed_pieces: 25,
+        connected_peers: 4,
+        download_speed_bps: 64_000,
+        upload_speed_bps: 12_000,
+        ..Default::default()
+    };
+    let reduction =
+        planner.update(DemandPlannerAction::DemandMetricsUpdated { info_hash, metrics });
+
+    assert!(reduction.effects.is_empty());
+    assert_eq!(
+        planner
+            .scheduler
+            .entry_snapshot(info_hash)
+            .expect("demand entry")
+            .metrics,
+        metrics
+    );
+}
+
+#[test]
+fn demand_planner_uses_metrics_when_building_routine_lookup_plan() {
+    let now = Instant::now();
+    let info_hash = hash_index(161);
+    let mut planner = DemandPlannerModel::new(now);
+    planner.update(DemandPlannerAction::DemandRegistered {
+        info_hash,
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 4,
+        },
+        now,
+    });
+    planner.update(DemandPlannerAction::DemandMetricsUpdated {
+        info_hash,
+        metrics: DhtDemandMetrics {
+            accepting_new_peers: true,
+            complete: true,
+            total_pieces: 100,
+            completed_pieces: 100,
+            connected_peers: 4,
+            peers_interested_in_us: 2,
+            upload_speed_bps: 32_000,
+            ..Default::default()
+        },
+    });
+
+    let reduction = planner.update(DemandPlannerAction::PlanDue {
+        now,
+        runtime_available: true,
+    });
+    let DemandPlannerEffect::StartLookup(start) =
+        reduction.effects.into_iter().next().expect("start lookup")
+    else {
+        panic!("expected start lookup");
+    };
+
+    assert_eq!(start.candidate.info_hash, info_hash);
+    assert_eq!(start.plan.class, DemandSliceClass::RoutineRefresh);
+    assert_eq!(
+        start.plan.max_wall_time,
+        DHT_ROUTINE_SUPPORT_SLICE_WALL_TIME
+    );
+    assert_eq!(
+        start.plan.unique_peer_cap,
+        DHT_ROUTINE_SUPPORT_SLICE_UNIQUE_PEER_CAP
+    );
+    assert!(!start.plan.stop_after_first_batch);
+}
+
 #[test]
 fn demand_planner_plan_due_skips_draining_demands_but_launches_independent_work() {
     let now = Instant::now();

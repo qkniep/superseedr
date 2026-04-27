@@ -8,7 +8,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::super::{
     observe_action_effect_reduction, DemandPlannerAction, DemandPlannerEffect, DemandSliceClass,
-    DemandSubscriberAction, DemandSubscriberEffect, DhtCommand, DhtDemandState, InfoHash,
+    DemandSubscriberAction, DemandSubscriberEffect, DhtCommand, DhtDemandMetrics, DhtDemandState,
+    InfoHash,
 };
 use super::DhtServiceState;
 
@@ -24,6 +25,10 @@ pub(in crate::dht::service) enum DhtDemandCommandAction {
         info_hash: InfoHash,
         demand: DhtDemandState,
         now: Instant,
+    },
+    UpdateMetrics {
+        info_hash: InfoHash,
+        metrics: DhtDemandMetrics,
     },
     Unregister {
         info_hash: InfoHash,
@@ -87,6 +92,9 @@ impl DhtServiceState {
                 demand,
                 now,
             },
+            DhtCommand::UpdateDemandMetrics { info_hash, metrics } => {
+                DhtDemandCommandAction::UpdateMetrics { info_hash, metrics }
+            }
             DhtCommand::UnregisterDemand {
                 info_hash,
                 subscriber_id,
@@ -126,135 +134,146 @@ impl DhtServiceState {
         action: DhtDemandCommandAction,
     ) -> DhtDemandCommandReduction {
         let action_kind = action.kind();
-        let reduction = match action {
-            DhtDemandCommandAction::Register {
-                info_hash,
-                demand,
-                subscriber_tx,
-                response_tx,
-                now,
-            } => {
-                let reduction = self
-                    .demand_subscribers
-                    .update(DemandSubscriberAction::Register {
-                        info_hash,
-                        demand,
-                        subscriber_tx,
-                    });
-                let planner_effects =
-                    self.reduce_subscriber_planner_followups(&reduction.effects, now);
-                DhtDemandCommandReduction {
-                    effects: vec![
-                        DhtDemandCommandEffect::SendRegisterResponse {
-                            response_tx,
-                            subscriber_id: reduction.subscriber_id,
-                        },
-                        DhtDemandCommandEffect::ApplySubscriberEffects(reduction.effects),
-                        DhtDemandCommandEffect::ApplyPlannerEffects(planner_effects),
-                        DhtDemandCommandEffect::StartDueDemands,
-                    ],
+        let reduction =
+            match action {
+                DhtDemandCommandAction::Register {
+                    info_hash,
+                    demand,
+                    subscriber_tx,
+                    response_tx,
+                    now,
+                } => {
+                    let reduction =
+                        self.demand_subscribers
+                            .update(DemandSubscriberAction::Register {
+                                info_hash,
+                                demand,
+                                subscriber_tx,
+                            });
+                    let planner_effects =
+                        self.reduce_subscriber_planner_followups(&reduction.effects, now);
+                    DhtDemandCommandReduction {
+                        effects: vec![
+                            DhtDemandCommandEffect::SendRegisterResponse {
+                                response_tx,
+                                subscriber_id: reduction.subscriber_id,
+                            },
+                            DhtDemandCommandEffect::ApplySubscriberEffects(reduction.effects),
+                            DhtDemandCommandEffect::ApplyPlannerEffects(planner_effects),
+                            DhtDemandCommandEffect::StartDueDemands,
+                        ],
+                    }
                 }
-            }
-            DhtDemandCommandAction::Update {
-                info_hash,
-                demand,
-                now,
-            } => {
-                let reduction =
-                    self.update_demand_planner_action(DemandPlannerAction::DemandUpdated {
-                        info_hash,
-                        demand,
-                        now,
-                    });
-                DhtDemandCommandReduction {
-                    effects: vec![
-                        DhtDemandCommandEffect::ApplyPlannerEffects(reduction.effects),
-                        DhtDemandCommandEffect::StartDueDemands,
-                    ],
-                }
-            }
-            DhtDemandCommandAction::Unregister {
-                info_hash,
-                subscriber_id,
-                now,
-            } => {
-                let reduction =
-                    self.demand_subscribers
-                        .update(DemandSubscriberAction::Unregister {
+                DhtDemandCommandAction::Update {
+                    info_hash,
+                    demand,
+                    now,
+                } => {
+                    let reduction =
+                        self.update_demand_planner_action(DemandPlannerAction::DemandUpdated {
                             info_hash,
-                            subscriber_id,
+                            demand,
+                            now,
                         });
-                let planner_effects =
-                    self.reduce_subscriber_planner_followups(&reduction.effects, now);
-                DhtDemandCommandReduction {
-                    effects: vec![
-                        DhtDemandCommandEffect::ApplySubscriberEffects(reduction.effects),
-                        DhtDemandCommandEffect::ApplyPlannerEffects(planner_effects),
-                    ],
+                    DhtDemandCommandReduction {
+                        effects: vec![
+                            DhtDemandCommandEffect::ApplyPlannerEffects(reduction.effects),
+                            DhtDemandCommandEffect::StartDueDemands,
+                        ],
+                    }
                 }
-            }
-            DhtDemandCommandAction::PruneDeadSubscribers {
-                info_hash,
-                subscriber_ids,
-                now,
-            } => {
-                let reduction =
-                    self.demand_subscribers
-                        .update(DemandSubscriberAction::PruneDeadSubscribers {
+                DhtDemandCommandAction::UpdateMetrics { info_hash, metrics } => {
+                    let reduction = self.update_demand_planner_action(
+                        DemandPlannerAction::DemandMetricsUpdated { info_hash, metrics },
+                    );
+                    DhtDemandCommandReduction {
+                        effects: vec![DhtDemandCommandEffect::ApplyPlannerEffects(
+                            reduction.effects,
+                        )],
+                    }
+                }
+                DhtDemandCommandAction::Unregister {
+                    info_hash,
+                    subscriber_id,
+                    now,
+                } => {
+                    let reduction =
+                        self.demand_subscribers
+                            .update(DemandSubscriberAction::Unregister {
+                                info_hash,
+                                subscriber_id,
+                            });
+                    let planner_effects =
+                        self.reduce_subscriber_planner_followups(&reduction.effects, now);
+                    DhtDemandCommandReduction {
+                        effects: vec![
+                            DhtDemandCommandEffect::ApplySubscriberEffects(reduction.effects),
+                            DhtDemandCommandEffect::ApplyPlannerEffects(planner_effects),
+                        ],
+                    }
+                }
+                DhtDemandCommandAction::PruneDeadSubscribers {
+                    info_hash,
+                    subscriber_ids,
+                    now,
+                } => {
+                    let reduction = self.demand_subscribers.update(
+                        DemandSubscriberAction::PruneDeadSubscribers {
                             info_hash,
                             subscriber_ids,
+                        },
+                    );
+                    let planner_effects =
+                        self.reduce_subscriber_planner_followups(&reduction.effects, now);
+                    DhtDemandCommandReduction {
+                        effects: vec![
+                            DhtDemandCommandEffect::ApplySubscriberEffects(reduction.effects),
+                            DhtDemandCommandEffect::ApplyPlannerEffects(planner_effects),
+                        ],
+                    }
+                }
+                DhtDemandCommandAction::PeersReceived { info_hash, peers } => {
+                    self.record_recent_peers(&peers);
+                    let planner_reduction =
+                        self.update_demand_planner_action(DemandPlannerAction::PeersReceived {
+                            info_hash,
+                            peers: &peers,
                         });
-                let planner_effects =
-                    self.reduce_subscriber_planner_followups(&reduction.effects, now);
-                DhtDemandCommandReduction {
-                    effects: vec![
-                        DhtDemandCommandEffect::ApplySubscriberEffects(reduction.effects),
-                        DhtDemandCommandEffect::ApplyPlannerEffects(planner_effects),
-                    ],
+                    let subscriber_reduction = self
+                        .demand_subscribers
+                        .update(DemandSubscriberAction::DeliverPeers { info_hash, peers });
+                    DhtDemandCommandReduction {
+                        effects: vec![
+                            DhtDemandCommandEffect::ApplyPlannerEffects(planner_reduction.effects),
+                            DhtDemandCommandEffect::ApplySubscriberEffects(
+                                subscriber_reduction.effects,
+                            ),
+                        ],
+                    }
                 }
-            }
-            DhtDemandCommandAction::PeersReceived { info_hash, peers } => {
-                self.record_recent_peers(&peers);
-                let planner_reduction =
-                    self.update_demand_planner_action(DemandPlannerAction::PeersReceived {
-                        info_hash,
-                        peers: &peers,
-                    });
-                let subscriber_reduction = self
-                    .demand_subscribers
-                    .update(DemandSubscriberAction::DeliverPeers { info_hash, peers });
-                DhtDemandCommandReduction {
-                    effects: vec![
-                        DhtDemandCommandEffect::ApplyPlannerEffects(planner_reduction.effects),
-                        DhtDemandCommandEffect::ApplySubscriberEffects(
-                            subscriber_reduction.effects,
-                        ),
-                    ],
+                DhtDemandCommandAction::LookupFinished {
+                    info_hash,
+                    slice_class,
+                    total_peers,
+                    unique_peers,
+                    now,
+                } => {
+                    let reduction =
+                        self.update_demand_planner_action(DemandPlannerAction::LookupFinished {
+                            info_hash,
+                            slice_class,
+                            total_peers,
+                            unique_peers,
+                            now,
+                        });
+                    DhtDemandCommandReduction {
+                        effects: vec![
+                            DhtDemandCommandEffect::ApplyPlannerEffects(reduction.effects),
+                            DhtDemandCommandEffect::StartDueDemands,
+                        ],
+                    }
                 }
-            }
-            DhtDemandCommandAction::LookupFinished {
-                info_hash,
-                slice_class,
-                total_peers,
-                unique_peers,
-                now,
-            } => {
-                let reduction =
-                    self.update_demand_planner_action(DemandPlannerAction::LookupFinished {
-                        info_hash,
-                        slice_class,
-                        total_peers,
-                        unique_peers,
-                        now,
-                    });
-                DhtDemandCommandReduction {
-                    effects: vec![
-                        DhtDemandCommandEffect::ApplyPlannerEffects(reduction.effects),
-                        DhtDemandCommandEffect::StartDueDemands,
-                    ],
-                }
-            }
-        };
+            };
         observe_action_effect_reduction(
             "demand_command",
             action_kind,
@@ -295,6 +314,7 @@ impl DhtDemandCommandAction {
         match self {
             DhtDemandCommandAction::Register { .. } => "register",
             DhtDemandCommandAction::Update { .. } => "update",
+            DhtDemandCommandAction::UpdateMetrics { .. } => "update_metrics",
             DhtDemandCommandAction::Unregister { .. } => "unregister",
             DhtDemandCommandAction::PruneDeadSubscribers { .. } => "prune_dead_subscribers",
             DhtDemandCommandAction::PeersReceived { .. } => "peers_received",

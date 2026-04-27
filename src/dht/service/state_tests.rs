@@ -225,6 +225,32 @@ fn dht_demand_command_register_and_unregister_emit_subscriber_effects() {
     ));
     assert!(effects.next().is_none());
 
+    let metrics = DhtDemandMetrics {
+        accepting_new_peers: true,
+        total_pieces: 80,
+        completed_pieces: 20,
+        connected_peers: 3,
+        upload_speed_bps: 32_000,
+        ..Default::default()
+    };
+    let reduction =
+        state.update_demand_command(DhtDemandCommandAction::UpdateMetrics { info_hash, metrics });
+    let mut effects = reduction.effects.into_iter();
+    let Some(DhtDemandCommandEffect::ApplyPlannerEffects(planner_effects)) = effects.next() else {
+        panic!("expected planner effects");
+    };
+    assert!(planner_effects.is_empty());
+    assert!(effects.next().is_none());
+    assert_eq!(
+        state
+            .demand_planner
+            .scheduler
+            .entry_snapshot(info_hash)
+            .expect("demand entry")
+            .metrics,
+        metrics
+    );
+
     let reduction = state.update_demand_command(DhtDemandCommandAction::Unregister {
         info_hash,
         subscriber_id: 1,

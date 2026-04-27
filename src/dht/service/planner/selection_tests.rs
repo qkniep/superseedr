@@ -33,6 +33,51 @@ fn demand_lookup_plan_varies_by_demand_class() {
     assert!(metadata.unique_peer_cap > no_peers.unique_peer_cap);
     assert!(no_peers.unique_peer_cap > routine.unique_peer_cap);
 }
+
+#[test]
+fn routine_lookup_plan_expands_when_metrics_need_swarm_support() {
+    let demand = DhtDemandState {
+        awaiting_metadata: false,
+        connected_peers: 3,
+    };
+    let downloading = DemandLookupPlan::for_demand_with_metrics(
+        demand,
+        DhtDemandMetrics {
+            accepting_new_peers: true,
+            total_pieces: 100,
+            completed_pieces: 10,
+            connected_peers: 2,
+            downloading_peers: 0,
+            download_speed_bps: 0,
+            ..Default::default()
+        },
+    );
+    let seeding = DemandLookupPlan::for_demand_with_metrics(
+        demand,
+        DhtDemandMetrics {
+            accepting_new_peers: true,
+            complete: true,
+            total_pieces: 100,
+            completed_pieces: 100,
+            connected_peers: 8,
+            peers_interested_in_us: 3,
+            unchoked_upload_peers: 1,
+            ..Default::default()
+        },
+    );
+
+    for plan in [downloading, seeding] {
+        assert_eq!(plan.class, DemandSliceClass::RoutineRefresh);
+        assert_eq!(plan.max_wall_time, DHT_ROUTINE_SUPPORT_SLICE_WALL_TIME);
+        assert_eq!(plan.idle_timeout, DHT_ROUTINE_SUPPORT_SLICE_IDLE_TIMEOUT);
+        assert_eq!(
+            plan.unique_peer_cap,
+            DHT_ROUTINE_SUPPORT_SLICE_UNIQUE_PEER_CAP
+        );
+        assert!(!plan.stop_after_first_batch);
+    }
+}
+
 #[test]
 fn demand_planner_uses_spare_capacity_for_backed_off_no_peer_state() {
     let now = Instant::now();
@@ -658,6 +703,7 @@ fn select_spare_research_launches_uses_idle_capacity_for_backed_off_no_peer_work
     let snapshot = |byte: u8, demand: DhtDemandState| DemandEntrySnapshot {
         info_hash: hash(byte),
         demand,
+        metrics: DhtDemandMetrics::default(),
         next_eligible_at: now + Duration::from_secs(40),
         subscriber_count: 1,
         in_progress: false,
@@ -731,6 +777,7 @@ fn select_spare_research_launches_waits_when_demand_lookup_is_active() {
             awaiting_metadata: false,
             connected_peers: 0,
         },
+        metrics: DhtDemandMetrics::default(),
         next_eligible_at: now + Duration::from_secs(40),
         subscriber_count: 1,
         in_progress: false,

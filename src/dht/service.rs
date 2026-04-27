@@ -3,10 +3,10 @@
 
 use super::lookup::LookupQualitySnapshot;
 use super::persist::{PersistenceConfig, PersistenceManager};
-pub use super::scheduler::DhtDemandState;
 use super::scheduler::{
     DemandEntrySnapshot, DemandFinishMode, DemandScheduler, DueDemandCandidate,
 };
+pub use super::scheduler::{DhtDemandMetrics, DhtDemandState};
 use super::types::{AddressFamily, InfoHash, LookupId, NodeId};
 use super::{AnnouncePeerJob, LookupState, Runtime, RuntimeConfig};
 use crate::config::Settings;
@@ -154,9 +154,12 @@ const DHT_NO_CONNECTED_PEERS_SLICE_WALL_TIME: Duration = Duration::from_secs(4);
 const DHT_NO_CONNECTED_PEERS_SLICE_IDLE_TIMEOUT: Duration = Duration::from_millis(1500);
 const DHT_ROUTINE_SLICE_WALL_TIME: Duration = Duration::from_secs(2);
 const DHT_ROUTINE_SLICE_IDLE_TIMEOUT: Duration = Duration::from_millis(750);
+const DHT_ROUTINE_SUPPORT_SLICE_WALL_TIME: Duration = Duration::from_secs(4);
+const DHT_ROUTINE_SUPPORT_SLICE_IDLE_TIMEOUT: Duration = Duration::from_millis(1500);
 const DHT_AWAITING_METADATA_SLICE_UNIQUE_PEER_CAP: usize = 128;
 const DHT_NO_CONNECTED_PEERS_SLICE_UNIQUE_PEER_CAP: usize = 48;
 const DHT_ROUTINE_SLICE_UNIQUE_PEER_CAP: usize = 16;
+const DHT_ROUTINE_SUPPORT_SLICE_UNIQUE_PEER_CAP: usize = 48;
 const DHT_AWAITING_METADATA_STALLED_EMPTY_SLICE_RESET_THRESHOLD: u32 = 4;
 const DHT_NO_CONNECTED_PEERS_STALLED_EMPTY_SLICE_RESET_THRESHOLD: u32 = 3;
 const DHT_ROUTINE_STALLED_EMPTY_SLICE_RESET_THRESHOLD: u32 = 2;

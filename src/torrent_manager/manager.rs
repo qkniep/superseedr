@@ -43,7 +43,7 @@ use crate::storage::MultiFileInfo;
 use crate::command::TorrentCommand;
 use crate::command::TorrentCommandSummary;
 #[cfg(feature = "dht")]
-use crate::dht_service::DhtDemandState;
+use crate::dht_service::{DhtDemandMetrics, DhtDemandState};
 
 use crate::networking::session::PeerSessionParameters;
 use crate::networking::BlockInfo;
@@ -161,6 +161,8 @@ pub struct TorrentManager {
 
     #[cfg(feature = "dht")]
     dht_demand_state: Option<DhtDemandState>,
+    #[cfg(feature = "dht")]
+    dht_demand_metrics: Option<DhtDemandMetrics>,
 
     #[cfg(not(feature = "dht"))]
     #[allow(dead_code)]
@@ -168,6 +170,8 @@ pub struct TorrentManager {
 
     #[cfg(not(feature = "dht"))]
     dht_demand_state: (),
+    #[cfg(not(feature = "dht"))]
+    dht_demand_metrics: (),
 
     #[allow(dead_code)]
     dht_handle: crate::dht_service::DhtHandle,
@@ -197,32 +201,105 @@ impl TorrentManager {
     }
 
     #[cfg(feature = "dht")]
+    fn current_dht_demand_metrics(&self) -> DhtDemandMetrics {
+        let total_pieces = self.state.piece_manager.bitfield.len() as u32;
+        let completed_pieces = if self.state.torrent_status == TorrentStatus::Validating {
+            self.state.validation_pieces_found
+        } else {
+            total_pieces.saturating_sub(self.state.piece_manager.pieces_remaining as u32)
+        };
+        DhtDemandMetrics {
+            paused: self.state.is_paused,
+            accepting_new_peers: self.state.accepting_new_peers,
+            complete: self.state.torrent_status == TorrentStatus::Done,
+            total_pieces,
+            completed_pieces,
+            connected_peers: self.state.peers.len(),
+            interested_peers: self
+                .state
+                .peers
+                .values()
+                .filter(|peer| peer.am_interested)
+                .count(),
+            peers_interested_in_us: self
+                .state
+                .peers
+                .values()
+                .filter(|peer| peer.peer_is_interested_in_us)
+                .count(),
+            unchoked_download_peers: self
+                .state
+                .peers
+                .values()
+                .filter(|peer| peer.peer_choking == ChokeStatus::Unchoke)
+                .count(),
+            unchoked_upload_peers: self
+                .state
+                .peers
+                .values()
+                .filter(|peer| peer.am_choking == ChokeStatus::Unchoke)
+                .count(),
+            downloading_peers: self
+                .state
+                .peers
+                .values()
+                .filter(|peer| peer.download_speed_bps > 0)
+                .count(),
+            uploading_peers: self
+                .state
+                .peers
+                .values()
+                .filter(|peer| peer.upload_speed_bps > 0)
+                .count(),
+            download_speed_bps: self.state.total_dl_prev_avg_ema as u64,
+            upload_speed_bps: self.state.total_ul_prev_avg_ema as u64,
+            bytes_downloaded_this_tick: self.state.bytes_downloaded_in_interval,
+            bytes_uploaded_this_tick: self.state.bytes_uploaded_in_interval,
+        }
+    }
+
+    #[cfg(feature = "dht")]
     fn sync_dht_demand(&mut self) {
         if !self.run_loop_started || self.dht_task_handle.is_none() {
             return;
         }
 
         let desired_demand = self.current_dht_demand_state();
-        if self.dht_demand_state == Some(desired_demand) {
-            return;
+        if self.dht_demand_state != Some(desired_demand) {
+            let previous_demand = self.dht_demand_state;
+            let update_sent = self
+                .dht_handle
+                .update_demand(self.state.info_hash.clone(), desired_demand);
+            if dht_demand_log_enabled() {
+                tracing::info!(
+                    target: "superseedr::dht_demand",
+                    info_hash = %short_info_hash_hex(&self.state.info_hash),
+                    previous = ?previous_demand,
+                    desired = ?desired_demand,
+                    torrent_status = ?self.state.torrent_status,
+                    dht_update_sent = update_sent,
+                    "torrent manager dht demand sync"
+                );
+            }
+            self.dht_demand_state = Some(desired_demand);
         }
 
-        let previous_demand = self.dht_demand_state;
-        let update_sent = self
-            .dht_handle
-            .update_demand(self.state.info_hash.clone(), desired_demand);
-        if dht_demand_log_enabled() {
-            tracing::info!(
-                target: "superseedr::dht_demand",
-                info_hash = %short_info_hash_hex(&self.state.info_hash),
-                previous = ?previous_demand,
-                desired = ?desired_demand,
-                torrent_status = ?self.state.torrent_status,
-                dht_update_sent = update_sent,
-                "torrent manager dht demand sync"
-            );
+        let desired_metrics = self.current_dht_demand_metrics();
+        if self.dht_demand_metrics != Some(desired_metrics) {
+            let update_sent = self
+                .dht_handle
+                .update_demand_metrics(self.state.info_hash.clone(), desired_metrics);
+            if dht_demand_log_enabled() {
+                tracing::debug!(
+                    target: "superseedr::dht_demand",
+                    info_hash = %short_info_hash_hex(&self.state.info_hash),
+                    metrics = ?desired_metrics,
+                    dht_update_sent = update_sent,
+                    "torrent manager dht demand metrics sync"
+                );
+            }
+            self.dht_demand_metrics = Some(desired_metrics);
         }
-        self.dht_demand_state = Some(desired_demand);
     }
 
     #[cfg(not(feature = "dht"))]
@@ -266,6 +343,10 @@ impl TorrentManager {
         let dht_demand_state = None;
         #[cfg(not(feature = "dht"))]
         let dht_demand_state = ();
+        #[cfg(feature = "dht")]
+        let dht_demand_metrics = None;
+        #[cfg(not(feature = "dht"))]
+        let dht_demand_metrics = ();
 
         // Initialize empty state (AwaitingMetadata)
         let state = TorrentState::new(
@@ -287,6 +368,7 @@ impl TorrentManager {
             dht_rx,
             dht_task_handle,
             dht_demand_state,
+            dht_demand_metrics,
             shutdown_tx,
             incoming_peer_rx,
             metrics_tx,
@@ -1713,7 +1795,11 @@ impl TorrentManager {
     }
 
     #[cfg(feature = "dht")]
-    fn start_dht_lookup_task(&mut self, demand_state: DhtDemandState) {
+    fn start_dht_lookup_task(
+        &mut self,
+        demand_state: DhtDemandState,
+        demand_metrics: DhtDemandMetrics,
+    ) {
         if let Some(handle) = self.dht_task_handle.take() {
             handle.abort();
         }
@@ -1725,11 +1811,13 @@ impl TorrentManager {
         if let Some(handle) = dht_handle_clone.spawn_lookup_task(
             self.state.info_hash.clone(),
             demand_state,
+            demand_metrics,
             dht_tx_clone,
             shutdown_rx,
         ) {
             self.dht_task_handle = Some(handle);
             self.dht_demand_state = Some(demand_state);
+            self.dht_demand_metrics = Some(demand_metrics);
             if dht_demand_log_enabled() {
                 tracing::info!(
                     target: "superseedr::dht_demand",
@@ -1748,6 +1836,7 @@ impl TorrentManager {
             handle.abort();
         }
         self.dht_demand_state = None;
+        self.dht_demand_metrics = None;
     }
 
     #[cfg(feature = "dht")]
@@ -1762,8 +1851,9 @@ impl TorrentManager {
         }
 
         let demand_state = self.current_dht_demand_state();
+        let demand_metrics = self.current_dht_demand_metrics();
         if self.dht_task_handle.is_none() {
-            self.start_dht_lookup_task(demand_state);
+            self.start_dht_lookup_task(demand_state, demand_metrics);
         }
     }
 
@@ -3380,6 +3470,66 @@ mod resource_tests {
             DhtDemandState {
                 awaiting_metadata: false,
                 connected_peers: 1,
+            }
+        );
+    }
+
+    #[cfg(feature = "dht")]
+    #[tokio::test]
+    async fn test_current_dht_demand_metrics_reports_torrent_and_peer_activity() {
+        let mut manager =
+            TorrentManager::from_torrent(build_test_params(), create_dummy_torrent(4))
+                .expect("manager from torrent");
+        manager.state.torrent_status = TorrentStatus::Standard;
+        manager.state.accepting_new_peers = true;
+        manager.state.piece_manager.bitfield = vec![PieceStatus::Done, PieceStatus::Need];
+        manager.state.piece_manager.pieces_remaining = 1;
+        manager.state.total_dl_prev_avg_ema = 42_000.0;
+        manager.state.total_ul_prev_avg_ema = 7_000.0;
+        manager.state.bytes_downloaded_in_interval = 4096;
+        manager.state.bytes_uploaded_in_interval = 1024;
+
+        let (first_peer_tx, _first_peer_rx) = mpsc::channel(1);
+        let mut first_peer = crate::torrent_manager::state::PeerState::new(
+            "peer-a".into(),
+            first_peer_tx,
+            Instant::now(),
+        );
+        first_peer.am_interested = true;
+        first_peer.peer_is_interested_in_us = true;
+        first_peer.peer_choking = ChokeStatus::Unchoke;
+        first_peer.am_choking = ChokeStatus::Unchoke;
+        first_peer.download_speed_bps = 10;
+
+        let (second_peer_tx, _second_peer_rx) = mpsc::channel(1);
+        let mut second_peer = crate::torrent_manager::state::PeerState::new(
+            "peer-b".into(),
+            second_peer_tx,
+            Instant::now(),
+        );
+        second_peer.upload_speed_bps = 20;
+
+        manager.state.peers.insert("peer-a".into(), first_peer);
+        manager.state.peers.insert("peer-b".into(), second_peer);
+
+        assert_eq!(
+            manager.current_dht_demand_metrics(),
+            DhtDemandMetrics {
+                accepting_new_peers: true,
+                total_pieces: 2,
+                completed_pieces: 1,
+                connected_peers: 2,
+                interested_peers: 1,
+                peers_interested_in_us: 1,
+                unchoked_download_peers: 1,
+                unchoked_upload_peers: 1,
+                downloading_peers: 1,
+                uploading_peers: 1,
+                download_speed_bps: 42_000,
+                upload_speed_bps: 7_000,
+                bytes_downloaded_this_tick: 4096,
+                bytes_uploaded_this_tick: 1024,
+                ..Default::default()
             }
         );
     }

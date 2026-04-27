@@ -11,6 +11,48 @@ pub struct DhtDemandState {
     pub connected_peers: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DhtDemandMetrics {
+    pub paused: bool,
+    pub accepting_new_peers: bool,
+    pub complete: bool,
+    pub total_pieces: u32,
+    pub completed_pieces: u32,
+    pub connected_peers: usize,
+    pub interested_peers: usize,
+    pub peers_interested_in_us: usize,
+    pub unchoked_download_peers: usize,
+    pub unchoked_upload_peers: usize,
+    pub downloading_peers: usize,
+    pub uploading_peers: usize,
+    pub download_speed_bps: u64,
+    pub upload_speed_bps: u64,
+    pub bytes_downloaded_this_tick: u64,
+    pub bytes_uploaded_this_tick: u64,
+}
+
+impl DhtDemandMetrics {
+    pub(in crate::dht) fn wants_extended_routine_search(self) -> bool {
+        if self.paused || !self.accepting_new_peers || self.connected_peers == 0 {
+            return false;
+        }
+
+        let download_support_needed = !self.complete
+            && self.total_pieces > 0
+            && self.completed_pieces < self.total_pieces
+            && (self.connected_peers <= 2
+                || self.unchoked_download_peers == 0
+                || self.downloading_peers == 0
+                || self.download_speed_bps == 0);
+        let upload_support_useful = self.complete
+            && (self.peers_interested_in_us > self.unchoked_upload_peers
+                || self.uploading_peers > 0
+                || self.upload_speed_bps > 0);
+
+        download_support_needed || upload_support_useful
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DueDemandCandidate {
     pub info_hash: InfoHash,
@@ -23,6 +65,7 @@ pub(super) struct DueDemandCandidate {
 pub(super) struct DemandEntrySnapshot {
     pub info_hash: InfoHash,
     pub demand: DhtDemandState,
+    pub metrics: DhtDemandMetrics,
     pub next_eligible_at: Instant,
     pub subscriber_count: usize,
     pub in_progress: bool,
@@ -70,6 +113,7 @@ struct DemandEntry {
     next_eligible_at: Instant,
     in_progress: bool,
     demand: DhtDemandState,
+    metrics: DhtDemandMetrics,
     retrigger_pending: bool,
     no_connected_peers_backoff_step: u8,
 }
@@ -168,6 +212,7 @@ impl DemandScheduler {
                     next_eligible_at: now,
                     in_progress: false,
                     demand,
+                    metrics: DhtDemandMetrics::default(),
                     retrigger_pending: false,
                     no_connected_peers_backoff_step: 0,
                 });
@@ -202,6 +247,14 @@ impl DemandScheduler {
         Self::apply_demand_update(entry, demand, now);
     }
 
+    pub(super) fn update_metrics(&mut self, info_hash: InfoHash, metrics: DhtDemandMetrics) {
+        let Some(entry) = self.entries.get_mut(&info_hash) else {
+            return;
+        };
+
+        entry.metrics = metrics;
+    }
+
     pub(super) fn demand_state(&self, info_hash: InfoHash) -> Option<DhtDemandState> {
         self.entries.get(&info_hash).map(|entry| entry.demand)
     }
@@ -212,6 +265,7 @@ impl DemandScheduler {
             .map(|entry| DemandEntrySnapshot {
                 info_hash,
                 demand: entry.demand,
+                metrics: entry.metrics,
                 next_eligible_at: entry.next_eligible_at,
                 subscriber_count: entry.subscriber_count,
                 in_progress: entry.in_progress,
@@ -226,6 +280,7 @@ impl DemandScheduler {
             .map(|(info_hash, entry)| DemandEntrySnapshot {
                 info_hash: *info_hash,
                 demand: entry.demand,
+                metrics: entry.metrics,
                 next_eligible_at: entry.next_eligible_at,
                 subscriber_count: entry.subscriber_count,
                 in_progress: entry.in_progress,

@@ -21,8 +21,8 @@ pub(in crate::dht::service) type DhtCommandReceiver = mpsc::UnboundedReceiver<Dh
 pub(in crate::dht::service) fn send_dht_command(
     command_tx: &DhtCommandSender,
     command: DhtCommand,
-) -> Result<(), mpsc::error::SendError<DhtCommand>> {
-    command_tx.send(command)
+) -> Result<(), ()> {
+    command_tx.send(command).map_err(|_| ())
 }
 
 #[derive(Debug)]
@@ -117,6 +117,10 @@ pub(in crate::dht::service) enum DhtCommand {
     UpdateDemand {
         info_hash: InfoHash,
         demand: DhtDemandState,
+    },
+    UpdateDemandMetrics {
+        info_hash: InfoHash,
+        metrics: DhtDemandMetrics,
     },
     UnregisterDemand {
         info_hash: InfoHash,
@@ -408,6 +412,7 @@ impl DhtHandle {
         &self,
         info_hash: Vec<u8>,
         initial_demand: DhtDemandState,
+        initial_metrics: DhtDemandMetrics,
         dht_tx: Sender<Vec<SocketAddr>>,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) -> Option<JoinHandle<()>> {
@@ -416,13 +421,15 @@ impl DhtHandle {
             DhtHandleInner::Service { .. } => {
                 let handle = self.clone();
                 Some(tokio::spawn(async move {
+                    let metrics_info_hash = info_hash.as_ref().to_vec();
                     let mut subscription = match handle
-                        .register_demand(info_hash.as_ref().to_vec(), initial_demand)
+                        .register_demand(metrics_info_hash.clone(), initial_demand)
                         .await
                     {
                         Some(subscription) => subscription,
                         None => return,
                     };
+                    handle.update_demand_metrics(metrics_info_hash, initial_metrics);
 
                     loop {
                         tokio::select! {
@@ -570,6 +577,26 @@ impl DhtHandle {
                 DhtCommand::UpdateDemand {
                     info_hash: InfoHash::from(info_hash),
                     demand,
+                },
+            )
+            .is_ok(),
+            #[cfg(test)]
+            DhtHandleInner::Recorder { .. } => true,
+            DhtHandleInner::Disabled { .. } => true,
+        }
+    }
+
+    pub fn update_demand_metrics(&self, info_hash: Vec<u8>, metrics: DhtDemandMetrics) -> bool {
+        let Ok(info_hash) = <[u8; 20]>::try_from(info_hash) else {
+            return false;
+        };
+
+        match &self.inner {
+            DhtHandleInner::Service { command_tx, .. } => send_dht_command(
+                command_tx,
+                DhtCommand::UpdateDemandMetrics {
+                    info_hash: InfoHash::from(info_hash),
+                    metrics,
                 },
             )
             .is_ok(),

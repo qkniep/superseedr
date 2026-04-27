@@ -117,6 +117,26 @@ pub mod service {
         pub connected_peers: usize,
     }
 
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct DhtDemandMetrics {
+        pub paused: bool,
+        pub accepting_new_peers: bool,
+        pub complete: bool,
+        pub total_pieces: u32,
+        pub completed_pieces: u32,
+        pub connected_peers: usize,
+        pub interested_peers: usize,
+        pub peers_interested_in_us: usize,
+        pub unchoked_download_peers: usize,
+        pub unchoked_upload_peers: usize,
+        pub downloading_peers: usize,
+        pub uploading_peers: usize,
+        pub download_speed_bps: u64,
+        pub upload_speed_bps: u64,
+        pub bytes_downloaded_this_tick: u64,
+        pub bytes_uploaded_this_tick: u64,
+    }
+
     #[derive(Debug)]
     pub struct DhtService {
         handle: DhtHandle,
@@ -328,6 +348,7 @@ pub mod service {
             &self,
             _info_hash: Vec<u8>,
             _initial_demand: DhtDemandState,
+            _initial_metrics: DhtDemandMetrics,
             _dht_tx: Sender<Vec<SocketAddr>>,
             mut shutdown_rx: broadcast::Receiver<()>,
         ) -> Option<JoinHandle<()>> {
@@ -342,6 +363,14 @@ pub mod service {
         }
 
         pub fn update_demand(&self, _info_hash: Vec<u8>, _demand: DhtDemandState) -> bool {
+            true
+        }
+
+        pub fn update_demand_metrics(
+            &self,
+            _info_hash: Vec<u8>,
+            _metrics: DhtDemandMetrics,
+        ) -> bool {
             true
         }
 

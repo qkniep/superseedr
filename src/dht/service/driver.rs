@@ -129,6 +129,7 @@ pub(in crate::dht::service) async fn run_service(
             LoopEvent::Command(
                 command @ (DhtCommand::RegisterDemand { .. }
                 | DhtCommand::UpdateDemand { .. }
+                | DhtCommand::UpdateDemandMetrics { .. }
                 | DhtCommand::UnregisterDemand { .. }
                 | DhtCommand::DemandPeers { .. }
                 | DhtCommand::DemandLookupFinished { .. }),

@@ -303,6 +303,10 @@ pub(in crate::dht::service) enum DemandPlannerAction<'a> {
         demand: DhtDemandState,
         now: Instant,
     },
+    DemandMetricsUpdated {
+        info_hash: InfoHash,
+        metrics: DhtDemandMetrics,
+    },
     DemandSubscriberRemoved {
         info_hash: InfoHash,
     },
@@ -1033,6 +1037,13 @@ pub(in crate::dht::service) struct DemandLookupPlan {
 
 impl DemandLookupPlan {
     pub(in crate::dht::service) fn for_demand(demand: DhtDemandState) -> Self {
+        Self::for_demand_with_metrics(demand, DhtDemandMetrics::default())
+    }
+
+    pub(in crate::dht::service) fn for_demand_with_metrics(
+        demand: DhtDemandState,
+        metrics: DhtDemandMetrics,
+    ) -> Self {
         match DemandSliceClass::from_demand(demand) {
             DemandSliceClass::AwaitingMetadata => Self {
                 class: DemandSliceClass::AwaitingMetadata,
@@ -1047,6 +1058,13 @@ impl DemandLookupPlan {
                 max_wall_time: DHT_NO_CONNECTED_PEERS_SLICE_WALL_TIME,
                 stop_after_first_batch: false,
                 unique_peer_cap: DHT_NO_CONNECTED_PEERS_SLICE_UNIQUE_PEER_CAP,
+            },
+            DemandSliceClass::RoutineRefresh if metrics.wants_extended_routine_search() => Self {
+                class: DemandSliceClass::RoutineRefresh,
+                idle_timeout: DHT_ROUTINE_SUPPORT_SLICE_IDLE_TIMEOUT,
+                max_wall_time: DHT_ROUTINE_SUPPORT_SLICE_WALL_TIME,
+                stop_after_first_batch: false,
+                unique_peer_cap: DHT_ROUTINE_SUPPORT_SLICE_UNIQUE_PEER_CAP,
             },
             DemandSliceClass::RoutineRefresh => Self {
                 class: DemandSliceClass::RoutineRefresh,

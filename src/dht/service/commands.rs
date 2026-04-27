@@ -179,6 +179,7 @@ impl DhtRuntimeCommandModel {
             DhtCommand::Reconfigure(_)
             | DhtCommand::RegisterDemand { .. }
             | DhtCommand::UpdateDemand { .. }
+            | DhtCommand::UpdateDemandMetrics { .. }
             | DhtCommand::UnregisterDemand { .. }
             | DhtCommand::DemandPeers { .. }
             | DhtCommand::DemandLookupFinished { .. } => return None,

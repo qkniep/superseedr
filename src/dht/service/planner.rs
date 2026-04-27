@@ -72,6 +72,11 @@ impl DemandPlannerActionView {
                 demand_class: Some(DemandSliceClass::from_demand(*demand)),
                 ..Self::default()
             },
+            DemandPlannerAction::DemandMetricsUpdated { info_hash, .. } => Self {
+                kind: "demand_metrics_updated",
+                info_hash: Some(*info_hash),
+                ..Self::default()
+            },
             DemandPlannerAction::DemandSubscriberRemoved { info_hash } => Self {
                 kind: "demand_subscriber_removed",
                 info_hash: Some(*info_hash),
@@ -466,6 +471,10 @@ impl DemandPlannerModel {
                         plan_stats: None,
                     }
                 }
+                DemandPlannerAction::DemandMetricsUpdated { info_hash, metrics } => {
+                    demand_scheduler.update_metrics(info_hash, metrics);
+                    DemandPlannerReduction::default()
+                }
                 DemandPlannerAction::DemandSubscriberRemoved { info_hash } => {
                     let slice_class = demand_scheduler
                         .demand_state(info_hash)
@@ -600,7 +609,14 @@ impl DemandPlannerModel {
                                 .count();
                             let mut effects = Vec::new();
                             for (candidate, selection_reason) in planned_launches {
-                                let plan = DemandLookupPlan::for_demand(candidate.demand);
+                                let metrics = demand_scheduler
+                                    .entry_snapshot(candidate.info_hash)
+                                    .map(|snapshot| snapshot.metrics)
+                                    .unwrap_or_default();
+                                let plan = DemandLookupPlan::for_demand_with_metrics(
+                                    candidate.demand,
+                                    metrics,
+                                );
                                 if !demand_scheduler.mark_in_progress(candidate.info_hash) {
                                     planner_budget.refund(plan.class);
                                     continue;
