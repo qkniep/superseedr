@@ -12,9 +12,7 @@ pub fn is_cross_device_link_error(error: &io::Error) -> bool {
 }
 
 pub fn open_for_timestamp_update(destination: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new()
-        .write(true)
-        .open(destination)
+    fs::OpenOptions::new().write(true).open(destination)
 }
 
 pub fn move_file_with_fallback_impl<F>(
