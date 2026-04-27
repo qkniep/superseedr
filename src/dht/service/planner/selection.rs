@@ -57,14 +57,6 @@ pub(in crate::dht::service) fn demand_lookup_class_slot_cap(class: DemandSliceCl
     }
 }
 
-pub(in crate::dht::service) fn demand_slice_class_priority(class: DemandSliceClass) -> u8 {
-    match class {
-        DemandSliceClass::AwaitingMetadata => 3,
-        DemandSliceClass::NoConnectedPeers => 2,
-        DemandSliceClass::RoutineRefresh => 1,
-    }
-}
-
 pub(in crate::dht::service) fn due_candidate_has_reusable_parked_crawl(
     parked_crawls: &HashMap<InfoHash, DemandCrawlState>,
     candidate: DueDemandCandidate,
@@ -120,19 +112,61 @@ pub(in crate::dht::service) fn candidate_has_useful_yield_history(
         && candidate_last_unique_peers(planner_state, info_hash) > 0
 }
 
+pub(in crate::dht::service) fn candidate_wants_swarm_support(
+    candidate: DueDemandCandidate,
+) -> bool {
+    DemandSliceClass::from_demand(candidate.demand) == DemandSliceClass::RoutineRefresh
+        && candidate.metrics.wants_extended_routine_search()
+}
+
 pub(in crate::dht::service) fn candidate_selection_reason(
     candidate: DueDemandCandidate,
     parked_crawls: &HashMap<InfoHash, DemandCrawlState>,
     planner_state: &HashMap<InfoHash, DemandPlannerState>,
     now: Instant,
 ) -> DemandSelectionReason {
-    if candidate_has_useful_yield_history(planner_state, candidate.info_hash, now) {
+    if candidate_has_fairness_age(candidate, now) {
+        DemandSelectionReason::Fairness
+    } else if candidate_wants_swarm_support(candidate) {
+        DemandSelectionReason::SwarmSupport
+    } else if candidate_has_useful_yield_history(planner_state, candidate.info_hash, now) {
         DemandSelectionReason::UsefulYieldHistory
     } else if due_candidate_has_reusable_parked_crawl(parked_crawls, candidate, now) {
         DemandSelectionReason::ReusableParked
     } else {
         DemandSelectionReason::OverdueScarce
     }
+}
+
+pub(in crate::dht::service) fn demand_candidate_priority_score(
+    candidate: DueDemandCandidate,
+    planner_state: &HashMap<InfoHash, DemandPlannerState>,
+    now: Instant,
+) -> u64 {
+    let class = DemandSliceClass::from_demand(candidate.demand);
+    if class == DemandSliceClass::AwaitingMetadata {
+        return 100_000_000;
+    }
+
+    let mut score = 0u64;
+    if candidate_wants_swarm_support(candidate) {
+        score = score.saturating_add(3_000_000);
+    }
+    if class == DemandSliceClass::NoConnectedPeers {
+        score = score.saturating_add(2_000_000);
+    }
+    if candidate_has_useful_yield_history(planner_state, candidate.info_hash, now) {
+        score = score.saturating_add(1_000_000);
+    }
+
+    score = score.saturating_add(
+        (candidate_last_unique_peers(planner_state, candidate.info_hash).min(512) as u64)
+            .saturating_mul(10_000),
+    );
+    if candidate_has_fairness_age(candidate, now) {
+        score = score.saturating_add(6_000_000);
+    }
+    score
 }
 
 pub(in crate::dht::service) fn candidate_last_activity_age(
@@ -214,6 +248,7 @@ pub(in crate::dht::service) fn select_spare_research_launches(
         .map(|snapshot| DueDemandCandidate {
             info_hash: snapshot.info_hash,
             demand: snapshot.demand,
+            metrics: snapshot.metrics,
             next_eligible_at: snapshot.next_eligible_at,
             subscriber_count: snapshot.subscriber_count,
         })
@@ -289,8 +324,8 @@ pub(in crate::dht::service) fn select_due_demand_launches_with_stats(
     let mut candidates = due_candidates.to_vec();
 
     candidates.sort_by(|left, right| {
-        let left_class = DemandSliceClass::from_demand(left.demand);
-        let right_class = DemandSliceClass::from_demand(right.demand);
+        let left_score = demand_candidate_priority_score(*left, planner_state, now);
+        let right_score = demand_candidate_priority_score(*right, planner_state, now);
         let left_reusable = due_candidate_has_reusable_parked_crawl(parked_crawls, *left, now);
         let right_reusable = due_candidate_has_reusable_parked_crawl(parked_crawls, *right, now);
         let left_useful_age = candidate_last_useful_yield_age(planner_state, left.info_hash, now);
@@ -300,8 +335,8 @@ pub(in crate::dht::service) fn select_due_demand_launches_with_stats(
         let left_fairness = candidate_has_fairness_age(*left, now);
         let right_fairness = candidate_has_fairness_age(*right, now);
 
-        demand_slice_class_priority(right_class)
-            .cmp(&demand_slice_class_priority(left_class))
+        right_score
+            .cmp(&left_score)
             .then_with(|| right_fairness.cmp(&left_fairness))
             .then_with(|| match (left_useful_age, right_useful_age) {
                 (Some(left_age), Some(right_age)) => left_age.cmp(&right_age),

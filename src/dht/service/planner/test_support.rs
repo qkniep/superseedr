@@ -646,7 +646,7 @@ impl PlannerMachine {
         }
         let expected_metadata_waiters = scheduler_snapshots
             .iter()
-            .filter(|snapshot| snapshot.demand.awaiting_metadata)
+            .filter(|snapshot| snapshot.demand.is_awaiting_metadata())
             .count();
         prop_assert_eq!(
             self.planner.metadata_waiter_count(),

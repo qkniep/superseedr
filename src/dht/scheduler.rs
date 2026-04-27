@@ -11,6 +11,26 @@ pub struct DhtDemandState {
     pub connected_peers: usize,
 }
 
+impl DhtDemandState {
+    pub(in crate::dht) fn is_awaiting_metadata(self) -> bool {
+        self.awaiting_metadata
+    }
+
+    pub(in crate::dht) fn has_no_connected_peers(self) -> bool {
+        !self.awaiting_metadata && self.connected_peers == 0
+    }
+
+    fn scheduler_priority(self) -> u8 {
+        if self.is_awaiting_metadata() {
+            3
+        } else if self.has_no_connected_peers() {
+            2
+        } else {
+            1
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DhtDemandMetrics {
     pub paused: bool,
@@ -57,6 +77,7 @@ impl DhtDemandMetrics {
 pub(super) struct DueDemandCandidate {
     pub info_hash: InfoHash,
     pub demand: DhtDemandState,
+    pub metrics: DhtDemandMetrics,
     pub next_eligible_at: Instant,
     pub subscriber_count: usize,
 }
@@ -84,25 +105,6 @@ impl DemandFinishMode {
         match self {
             Self::Standard => 0,
             Self::AcceleratedNoConnectedPeersBackoff => 1,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum DemandClass {
-    RoutineRefresh,
-    NoConnectedPeers,
-    AwaitingMetadata,
-}
-
-impl DemandClass {
-    fn from_demand(demand: DhtDemandState) -> Self {
-        if demand.awaiting_metadata {
-            Self::AwaitingMetadata
-        } else if demand.connected_peers == 0 {
-            Self::NoConnectedPeers
-        } else {
-            Self::RoutineRefresh
         }
     }
 }
@@ -148,18 +150,18 @@ impl DemandScheduler {
         demand: DhtDemandState,
         no_connected_peers_backoff_step: u8,
     ) -> Duration {
-        match DemandClass::from_demand(demand) {
-            DemandClass::RoutineRefresh => self.routine_refresh_interval,
-            DemandClass::AwaitingMetadata => self.awaiting_metadata_interval,
-            DemandClass::NoConnectedPeers => {
-                let multiplier = 1u32
-                    .checked_shl(u32::from(no_connected_peers_backoff_step))
-                    .unwrap_or(u32::MAX);
-                let interval = self
-                    .no_connected_peers_base_interval
-                    .saturating_mul(multiplier);
-                std::cmp::min(interval, self.no_connected_peers_max_interval)
-            }
+        if demand.is_awaiting_metadata() {
+            self.awaiting_metadata_interval
+        } else if demand.has_no_connected_peers() {
+            let multiplier = 1u32
+                .checked_shl(u32::from(no_connected_peers_backoff_step))
+                .unwrap_or(u32::MAX);
+            let interval = self
+                .no_connected_peers_base_interval
+                .saturating_mul(multiplier);
+            std::cmp::min(interval, self.no_connected_peers_max_interval)
+        } else {
+            self.routine_refresh_interval
         }
     }
 
@@ -184,16 +186,16 @@ impl DemandScheduler {
     }
 
     fn apply_demand_update(entry: &mut DemandEntry, demand: DhtDemandState, now: Instant) {
-        let previous_class = DemandClass::from_demand(entry.demand);
-        let next_class = DemandClass::from_demand(demand);
+        let previous_no_connected_peers = entry.demand.has_no_connected_peers();
+        let previous_priority = entry.demand.scheduler_priority();
+        let next_no_connected_peers = demand.has_no_connected_peers();
+        let next_priority = demand.scheduler_priority();
         entry.demand = demand;
-        if next_class != DemandClass::NoConnectedPeers
-            || previous_class != DemandClass::NoConnectedPeers
-        {
+        if !next_no_connected_peers || !previous_no_connected_peers {
             entry.no_connected_peers_backoff_step = 0;
         }
 
-        if next_class > previous_class {
+        if next_priority > previous_priority {
             if entry.in_progress {
                 entry.retrigger_pending = true;
             } else {
@@ -302,10 +304,11 @@ impl DemandScheduler {
                     DueDemandCandidate {
                         info_hash: *info_hash,
                         demand: entry.demand,
+                        metrics: entry.metrics,
                         next_eligible_at: entry.next_eligible_at,
                         subscriber_count: entry.subscriber_count,
                     },
-                    DemandClass::from_demand(entry.demand),
+                    entry.demand.scheduler_priority(),
                 )
             })
             .collect::<Vec<_>>();
@@ -368,24 +371,22 @@ impl DemandScheduler {
         else {
             return;
         };
-        let demand_class = DemandClass::from_demand(demand);
-        let effective_no_connected_peers_backoff_step =
-            if demand_class == DemandClass::NoConnectedPeers {
-                self.capped_no_connected_peers_backoff_step(
-                    no_connected_peers_backoff_step
-                        .saturating_add(mode.no_connected_peers_backoff_extra_steps()),
-                )
-            } else {
+        let no_connected_peers = demand.has_no_connected_peers();
+        let effective_no_connected_peers_backoff_step = if no_connected_peers {
+            self.capped_no_connected_peers_backoff_step(
                 no_connected_peers_backoff_step
-            };
+                    .saturating_add(mode.no_connected_peers_backoff_extra_steps()),
+            )
+        } else {
+            no_connected_peers_backoff_step
+        };
         let next_eligible_at = if retrigger_pending {
             now
         } else {
             now + self.interval_for_demand(demand, effective_no_connected_peers_backoff_step)
         };
         let next_interval = next_eligible_at.saturating_duration_since(now);
-        let next_no_connected_peers_backoff_step = if demand_class == DemandClass::NoConnectedPeers
-        {
+        let next_no_connected_peers_backoff_step = if no_connected_peers {
             if next_interval < self.no_connected_peers_max_interval {
                 self.capped_no_connected_peers_backoff_step(
                     effective_no_connected_peers_backoff_step.saturating_add(1),
@@ -407,7 +408,7 @@ impl DemandScheduler {
             return;
         }
 
-        if demand_class == DemandClass::NoConnectedPeers {
+        if no_connected_peers {
             entry.no_connected_peers_backoff_step = next_no_connected_peers_backoff_step;
         } else {
             entry.no_connected_peers_backoff_step = 0;
@@ -535,13 +536,13 @@ mod tests {
                 snapshot.no_connected_peers_backoff_step
                     <= scheduler.no_connected_peers_backoff_step_cap()
             );
-            if DemandClass::from_demand(snapshot.demand) != DemandClass::NoConnectedPeers {
+            if !snapshot.demand.has_no_connected_peers() {
                 prop_assert_eq!(snapshot.no_connected_peers_backoff_step, 0);
             }
         }
 
         let due = scheduler.due_candidates(now);
-        let mut previous_class = None;
+        let mut previous_priority = None;
         for candidate in due {
             let snapshot = scheduler
                 .entry_snapshot(candidate.info_hash)
@@ -553,11 +554,11 @@ mod tests {
             prop_assert_eq!(snapshot.subscriber_count, candidate.subscriber_count);
             prop_assert_eq!(snapshot.next_eligible_at, candidate.next_eligible_at);
 
-            let class = DemandClass::from_demand(candidate.demand);
-            if let Some(previous_class) = previous_class {
-                prop_assert!(previous_class >= class);
+            let priority = candidate.demand.scheduler_priority();
+            if let Some(last_priority) = previous_priority {
+                prop_assert!(last_priority >= priority);
             }
-            previous_class = Some(class);
+            previous_priority = Some(priority);
         }
 
         Ok(())

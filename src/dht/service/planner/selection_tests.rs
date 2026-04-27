@@ -189,6 +189,7 @@ fn select_due_demand_launches_respects_class_slot_caps() {
                 awaiting_metadata: true,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now,
             subscriber_count: 1,
         },
@@ -198,6 +199,7 @@ fn select_due_demand_launches_respects_class_slot_caps() {
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now,
             subscriber_count: 1,
         },
@@ -207,6 +209,7 @@ fn select_due_demand_launches_respects_class_slot_caps() {
                 awaiting_metadata: false,
                 connected_peers: 1,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now,
             subscriber_count: 1,
         },
@@ -216,6 +219,7 @@ fn select_due_demand_launches_respects_class_slot_caps() {
                 awaiting_metadata: false,
                 connected_peers: 1,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now,
             subscriber_count: 1,
         },
@@ -239,6 +243,282 @@ fn select_due_demand_launches_respects_class_slot_caps() {
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].info_hash, hash(1));
 }
+
+#[test]
+fn candidate_priority_score_keeps_metadata_above_swarm_support() {
+    let now = Instant::now();
+    let metadata = DueDemandCandidate {
+        info_hash: hash_index(180),
+        demand: DhtDemandState {
+            awaiting_metadata: true,
+            connected_peers: 0,
+        },
+        metrics: DhtDemandMetrics::default(),
+        next_eligible_at: now,
+        subscriber_count: 1,
+    };
+    let swarm_support = DueDemandCandidate {
+        info_hash: hash_index(181),
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 4,
+        },
+        metrics: DhtDemandMetrics {
+            accepting_new_peers: true,
+            total_pieces: 100,
+            completed_pieces: 50,
+            connected_peers: 2,
+            download_speed_bps: 0,
+            ..Default::default()
+        },
+        next_eligible_at: now,
+        subscriber_count: 1,
+    };
+
+    assert!(
+        demand_candidate_priority_score(metadata, &HashMap::new(), now)
+            > demand_candidate_priority_score(swarm_support, &HashMap::new(), now)
+    );
+}
+
+#[test]
+fn candidate_priority_score_keeps_metadata_above_max_supported_yield() {
+    let now = Instant::now();
+    let metadata = DueDemandCandidate {
+        info_hash: hash_index(186),
+        demand: DhtDemandState {
+            awaiting_metadata: true,
+            connected_peers: 0,
+        },
+        metrics: DhtDemandMetrics::default(),
+        next_eligible_at: now,
+        subscriber_count: 1,
+    };
+    let supported_yield = DueDemandCandidate {
+        info_hash: hash_index(187),
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 8,
+        },
+        metrics: DhtDemandMetrics {
+            accepting_new_peers: true,
+            complete: true,
+            total_pieces: 100,
+            completed_pieces: 100,
+            connected_peers: 8,
+            peers_interested_in_us: 4,
+            upload_speed_bps: 128_000,
+            ..Default::default()
+        },
+        next_eligible_at: now - DHT_DEMAND_FAIRNESS_AGE,
+        subscriber_count: 1,
+    };
+    let mut planner_state = HashMap::new();
+    planner_state.insert(
+        supported_yield.info_hash,
+        DemandPlannerState {
+            last_started_at: Some(now - Duration::from_secs(20)),
+            last_finished_at: Some(now - Duration::from_secs(15)),
+            last_useful_yield_at: Some(now - Duration::from_secs(15)),
+            last_unique_peers: 10_000,
+        },
+    );
+
+    assert!(
+        demand_candidate_priority_score(metadata, &planner_state, now)
+            > demand_candidate_priority_score(supported_yield, &planner_state, now)
+    );
+}
+
+#[test]
+fn candidate_priority_score_prefers_no_peer_recovery_over_plain_routine() {
+    let now = Instant::now();
+    let no_peer = DueDemandCandidate {
+        info_hash: hash_index(188),
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        metrics: DhtDemandMetrics::default(),
+        next_eligible_at: now,
+        subscriber_count: 1,
+    };
+    let routine = DueDemandCandidate {
+        info_hash: hash_index(189),
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 4,
+        },
+        metrics: DhtDemandMetrics::default(),
+        next_eligible_at: now,
+        subscriber_count: 1,
+    };
+
+    assert!(
+        demand_candidate_priority_score(no_peer, &HashMap::new(), now)
+            > demand_candidate_priority_score(routine, &HashMap::new(), now)
+    );
+}
+
+#[test]
+fn select_due_demand_launches_prefers_swarm_support_over_cold_no_peer_recovery() {
+    let now = Instant::now();
+    let swarm_hash = hash_index(182);
+    let no_peer_hash = hash_index(183);
+    let candidates = vec![
+        DueDemandCandidate {
+            info_hash: no_peer_hash,
+            demand: DhtDemandState {
+                awaiting_metadata: false,
+                connected_peers: 0,
+            },
+            metrics: DhtDemandMetrics::default(),
+            next_eligible_at: now - Duration::from_secs(30),
+            subscriber_count: 1,
+        },
+        DueDemandCandidate {
+            info_hash: swarm_hash,
+            demand: DhtDemandState {
+                awaiting_metadata: false,
+                connected_peers: 4,
+            },
+            metrics: DhtDemandMetrics {
+                accepting_new_peers: true,
+                total_pieces: 100,
+                completed_pieces: 100,
+                complete: true,
+                connected_peers: 4,
+                peers_interested_in_us: 3,
+                unchoked_upload_peers: 1,
+                ..Default::default()
+            },
+            next_eligible_at: now,
+            subscriber_count: 1,
+        },
+    ];
+
+    let selected = select_due_demand_launches(
+        &candidates,
+        DemandSlotCounts::default(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &mut DemandPlannerBudget::new(now),
+        now,
+        1,
+    );
+
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].info_hash, swarm_hash);
+}
+
+#[test]
+fn select_due_demand_launches_allows_high_yield_routine_to_beat_cold_no_peer() {
+    let now = Instant::now();
+    let routine_hash = hash_index(184);
+    let no_peer_hash = hash_index(185);
+    let candidates = vec![
+        DueDemandCandidate {
+            info_hash: no_peer_hash,
+            demand: DhtDemandState {
+                awaiting_metadata: false,
+                connected_peers: 0,
+            },
+            metrics: DhtDemandMetrics::default(),
+            next_eligible_at: now,
+            subscriber_count: 1,
+        },
+        DueDemandCandidate {
+            info_hash: routine_hash,
+            demand: DhtDemandState {
+                awaiting_metadata: false,
+                connected_peers: 6,
+            },
+            metrics: DhtDemandMetrics::default(),
+            next_eligible_at: now,
+            subscriber_count: 1,
+        },
+    ];
+    let mut planner_state = HashMap::new();
+    planner_state.insert(
+        routine_hash,
+        DemandPlannerState {
+            last_started_at: Some(now - Duration::from_secs(20)),
+            last_finished_at: Some(now - Duration::from_secs(15)),
+            last_useful_yield_at: Some(now - Duration::from_secs(15)),
+            last_unique_peers: 320,
+        },
+    );
+
+    let selected = select_due_demand_launches(
+        &candidates,
+        DemandSlotCounts::default(),
+        &HashMap::new(),
+        &planner_state,
+        &mut DemandPlannerBudget::new(now),
+        now,
+        1,
+    );
+
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].info_hash, routine_hash);
+}
+
+#[test]
+fn select_due_demand_launches_does_not_bypass_routine_cap_for_high_yield() {
+    let now = Instant::now();
+    let routine_hash = hash_index(190);
+    let no_peer_hash = hash_index(191);
+    let candidates = vec![
+        DueDemandCandidate {
+            info_hash: routine_hash,
+            demand: DhtDemandState {
+                awaiting_metadata: false,
+                connected_peers: 6,
+            },
+            metrics: DhtDemandMetrics::default(),
+            next_eligible_at: now,
+            subscriber_count: 1,
+        },
+        DueDemandCandidate {
+            info_hash: no_peer_hash,
+            demand: DhtDemandState {
+                awaiting_metadata: false,
+                connected_peers: 0,
+            },
+            metrics: DhtDemandMetrics::default(),
+            next_eligible_at: now,
+            subscriber_count: 1,
+        },
+    ];
+    let mut planner_state = HashMap::new();
+    planner_state.insert(
+        routine_hash,
+        DemandPlannerState {
+            last_started_at: Some(now - Duration::from_secs(20)),
+            last_finished_at: Some(now - Duration::from_secs(15)),
+            last_useful_yield_at: Some(now - Duration::from_secs(15)),
+            last_unique_peers: 320,
+        },
+    );
+
+    let selected = select_due_demand_launches(
+        &candidates,
+        DemandSlotCounts {
+            awaiting_metadata: 0,
+            no_connected_peers: 0,
+            routine_refresh: DHT_ROUTINE_LOOKUP_SLOT_CAP,
+        },
+        &HashMap::new(),
+        &planner_state,
+        &mut DemandPlannerBudget::new(now),
+        now,
+        1,
+    );
+
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].info_hash, no_peer_hash);
+}
+
 #[test]
 fn select_due_demand_launches_prefers_reusable_parked_crawls_within_class() {
     let hash = |byte: u8| InfoHash::from([byte; InfoHash::LEN]);
@@ -250,6 +530,7 @@ fn select_due_demand_launches_prefers_reusable_parked_crawls_within_class() {
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now - Duration::from_secs(30),
             subscriber_count: 1,
         },
@@ -259,6 +540,7 @@ fn select_due_demand_launches_prefers_reusable_parked_crawls_within_class() {
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now - Duration::from_secs(10),
             subscriber_count: 1,
         },
@@ -314,6 +596,7 @@ fn select_due_demand_launches_prefers_recently_productive_crawls_within_class() 
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now - Duration::from_secs(30),
             subscriber_count: 1,
         },
@@ -323,6 +606,7 @@ fn select_due_demand_launches_prefers_recently_productive_crawls_within_class() 
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now - Duration::from_secs(10),
             subscriber_count: 1,
         },
@@ -364,6 +648,7 @@ fn select_due_demand_launches_prefers_stale_productive_crawls_within_class() {
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now - Duration::from_secs(60),
             subscriber_count: 1,
         },
@@ -373,6 +658,7 @@ fn select_due_demand_launches_prefers_stale_productive_crawls_within_class() {
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now - Duration::from_secs(10),
             subscriber_count: 1,
         },
@@ -414,6 +700,7 @@ fn select_due_demand_launches_fairness_age_overtakes_yield_history() {
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now - DHT_DEMAND_FAIRNESS_AGE - Duration::from_secs(1),
             subscriber_count: 1,
         },
@@ -423,6 +710,7 @@ fn select_due_demand_launches_fairness_age_overtakes_yield_history() {
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now - Duration::from_secs(10),
             subscriber_count: 1,
         },
@@ -464,6 +752,7 @@ fn select_due_demand_launches_does_not_bypass_class_cap_for_oldest_due_candidate
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now - Duration::from_secs(120),
             subscriber_count: 1,
         },
@@ -473,6 +762,7 @@ fn select_due_demand_launches_does_not_bypass_class_cap_for_oldest_due_candidate
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now - Duration::from_secs(10),
             subscriber_count: 1,
         },
@@ -506,6 +796,7 @@ fn demand_planner_budget_caps_repeated_no_peer_launch_batches() {
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now,
             subscriber_count: 1,
         })
@@ -564,6 +855,7 @@ fn demand_planner_selection_stats_report_throttled_due_candidates() {
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now - Duration::from_secs(u64::from(index + 1)),
             subscriber_count: 1,
         })
@@ -617,6 +909,7 @@ fn exhausted_no_peer_budget_does_not_block_metadata_launches() {
                 awaiting_metadata: false,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now,
             subscriber_count: 1,
         },
@@ -626,6 +919,7 @@ fn exhausted_no_peer_budget_does_not_block_metadata_launches() {
                 awaiting_metadata: true,
                 connected_peers: 0,
             },
+            metrics: DhtDemandMetrics::default(),
             next_eligible_at: now,
             subscriber_count: 1,
         },
@@ -664,6 +958,7 @@ fn no_peer_launch_budget_is_independent_of_catalog_size() {
                     awaiting_metadata: false,
                     connected_peers: 0,
                 },
+                metrics: DhtDemandMetrics::default(),
                 next_eligible_at: now,
                 subscriber_count: 1,
             })
@@ -803,7 +1098,7 @@ fn select_spare_research_launches_waits_when_demand_lookup_is_active() {
     assert!(selected.is_empty());
 }
 #[test]
-fn candidate_selection_reason_prefers_yield_then_reuse_then_due() {
+fn candidate_selection_reason_labels_fairness_support_yield_reuse_and_due() {
     let hash = |byte: u8| InfoHash::from([byte; InfoHash::LEN]);
     let now = Instant::now();
     let candidate = DueDemandCandidate {
@@ -812,6 +1107,7 @@ fn candidate_selection_reason_prefers_yield_then_reuse_then_due() {
             awaiting_metadata: false,
             connected_peers: 0,
         },
+        metrics: DhtDemandMetrics::default(),
         next_eligible_at: now,
         subscriber_count: 1,
     };
@@ -872,6 +1168,52 @@ fn candidate_selection_reason_prefers_yield_then_reuse_then_due() {
         candidate_selection_reason(candidate, &parked_crawls, &planner_state, now),
         DemandSelectionReason::OverdueScarce
     );
+
+    let swarm_support_candidate = DueDemandCandidate {
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 2,
+        },
+        metrics: DhtDemandMetrics {
+            accepting_new_peers: true,
+            total_pieces: 100,
+            completed_pieces: 50,
+            connected_peers: 2,
+            download_speed_bps: 0,
+            ..Default::default()
+        },
+        ..candidate
+    };
+    assert_eq!(
+        candidate_selection_reason(swarm_support_candidate, &parked_crawls, &planner_state, now),
+        DemandSelectionReason::SwarmSupport
+    );
+
+    let no_peer_with_stale_metrics = DueDemandCandidate {
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        ..swarm_support_candidate
+    };
+    assert_eq!(
+        candidate_selection_reason(
+            no_peer_with_stale_metrics,
+            &parked_crawls,
+            &planner_state,
+            now,
+        ),
+        DemandSelectionReason::OverdueScarce
+    );
+
+    let fairness_candidate = DueDemandCandidate {
+        next_eligible_at: now - DHT_DEMAND_FAIRNESS_AGE,
+        ..swarm_support_candidate
+    };
+    assert_eq!(
+        candidate_selection_reason(fairness_candidate, &parked_crawls, &planner_state, now),
+        DemandSelectionReason::Fairness
+    );
 }
 
 proptest! {
@@ -902,6 +1244,7 @@ proptest! {
             due_candidates.push(DueDemandCandidate {
                 info_hash,
                 demand: demand_for_fuzz_class(spec.demand_class, spec.connected_peers),
+                metrics: DhtDemandMetrics::default(),
                 next_eligible_at: test_instant_saturating_sub(
                     now,
                     Duration::from_millis(u64::from(spec.overdue_ms)),

@@ -410,6 +410,8 @@ impl DemandPlannerModel {
         let reduction = {
             let demand_scheduler = &mut self.scheduler;
             let demand_lookup_ids = &mut self.active;
+            let pending_starts = &mut self.pending_starts;
+            let pending_parks = &mut self.pending_parks;
             let parked_crawls = &mut self.parked_crawls;
             let draining_demands = &mut self.draining_demands;
             let planner_state = &mut self.state;
@@ -419,6 +421,8 @@ impl DemandPlannerModel {
                 DemandPlannerAction::RuntimeReset { now } => {
                     demand_scheduler.reset_active(now);
                     demand_lookup_ids.clear();
+                    pending_starts.clear();
+                    pending_parks.clear();
                     parked_crawls.clear();
                     draining_demands.clear();
                     planner_state.clear();
@@ -482,6 +486,8 @@ impl DemandPlannerModel {
                         .unwrap_or(DemandSliceClass::RoutineRefresh);
                     let mut effects = Vec::new();
                     if demand_scheduler.unregister(info_hash) {
+                        pending_starts.remove(&info_hash);
+                        pending_parks.remove(&info_hash);
                         if let Some(lookup) = demand_lookup_ids.remove(&info_hash) {
                             effects.push(DemandPlannerEffect::ParkActiveLookup(
                                 DemandParkActiveLookupEffect {
@@ -609,13 +615,9 @@ impl DemandPlannerModel {
                                 .count();
                             let mut effects = Vec::new();
                             for (candidate, selection_reason) in planned_launches {
-                                let metrics = demand_scheduler
-                                    .entry_snapshot(candidate.info_hash)
-                                    .map(|snapshot| snapshot.metrics)
-                                    .unwrap_or_default();
                                 let plan = DemandLookupPlan::for_demand_with_metrics(
                                     candidate.demand,
-                                    metrics,
+                                    candidate.metrics,
                                 );
                                 if !demand_scheduler.mark_in_progress(candidate.info_hash) {
                                     planner_budget.refund(plan.class);
@@ -625,6 +627,7 @@ impl DemandPlannerModel {
                                     .entry(candidate.info_hash)
                                     .or_default()
                                     .note_start(now);
+                                pending_starts.insert(candidate.info_hash, plan.class);
                                 effects.push(DemandPlannerEffect::StartLookup(
                                     DemandStartLookupEffect {
                                         candidate,
@@ -665,6 +668,7 @@ impl DemandPlannerModel {
                     slice_class,
                     lookup_ids,
                 } => {
+                    pending_starts.remove(&info_hash);
                     demand_lookup_ids.insert(
                         info_hash,
                         ActiveDemandLookup {
@@ -679,6 +683,7 @@ impl DemandPlannerModel {
                     slice_class,
                     now,
                 } => {
+                    pending_starts.remove(&info_hash);
                     planner_budget.refund(slice_class);
                     demand_scheduler.finish(info_hash, now);
                     DemandPlannerReduction::default()
@@ -722,6 +727,7 @@ impl DemandPlannerModel {
                 } => {
                     let previous = demand_scheduler.entry_snapshot(info_hash);
                     demand_lookup_ids.remove(&info_hash);
+                    pending_parks.insert(info_hash, slice_class);
                     DemandPlannerReduction {
                         effects: vec![DemandPlannerEffect::AdmitDrain(DemandAdmitDrainEffect {
                             info_hash,
@@ -746,6 +752,7 @@ impl DemandPlannerModel {
                     previous,
                     now,
                 } => {
+                    pending_parks.remove(&info_hash);
                     if drain_admission.is_none() {
                         planner_state
                             .entry(info_hash)

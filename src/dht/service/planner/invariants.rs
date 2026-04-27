@@ -153,6 +153,57 @@ pub(in crate::dht::service) fn check_demand_planner_invariants(
         }
     }
 
+    let mut pending_counts = DemandSlotCounts::default();
+    for (&info_hash, &slice_class) in &model.pending_starts {
+        if !occupied.insert(info_hash) {
+            return Err(DemandPlannerInvariantViolation::new(
+                "duplicate_pending_active_or_draining_demand",
+                Some(info_hash),
+                "demand is present in pending start and active/draining state",
+            ));
+        }
+        let Some(snapshot) = model.scheduler.entry_snapshot(info_hash) else {
+            return Err(DemandPlannerInvariantViolation::new(
+                "pending_start_without_scheduler_entry",
+                Some(info_hash),
+                "pending demand lookup start has no scheduler entry",
+            ));
+        };
+        if !snapshot.in_progress {
+            return Err(DemandPlannerInvariantViolation::new(
+                "pending_start_scheduler_not_in_progress",
+                Some(info_hash),
+                "pending demand lookup start is not marked in progress",
+            ));
+        }
+        pending_counts.record(slice_class);
+    }
+
+    for (&info_hash, &slice_class) in &model.pending_parks {
+        if !occupied.insert(info_hash) {
+            return Err(DemandPlannerInvariantViolation::new(
+                "duplicate_pending_park_active_or_draining_demand",
+                Some(info_hash),
+                "demand is present in pending park and active/draining/pending-start state",
+            ));
+        }
+        let Some(snapshot) = model.scheduler.entry_snapshot(info_hash) else {
+            return Err(DemandPlannerInvariantViolation::new(
+                "pending_park_without_scheduler_entry",
+                Some(info_hash),
+                "pending demand lookup park has no scheduler entry",
+            ));
+        };
+        if !snapshot.in_progress {
+            return Err(DemandPlannerInvariantViolation::new(
+                "pending_park_scheduler_not_in_progress",
+                Some(info_hash),
+                "pending demand lookup park is not marked in progress",
+            ));
+        }
+        pending_counts.record(slice_class);
+    }
+
     let scheduler_snapshots = model.scheduler.entry_snapshots();
     for snapshot in &scheduler_snapshots {
         if snapshot.subscriber_count == 0 {
@@ -164,29 +215,33 @@ pub(in crate::dht::service) fn check_demand_planner_invariants(
         }
         if snapshot.in_progress
             && !model.active.contains_key(&snapshot.info_hash)
+            && !model.pending_starts.contains_key(&snapshot.info_hash)
+            && !model.pending_parks.contains_key(&snapshot.info_hash)
             && !model.draining_demands.contains_key(&snapshot.info_hash)
         {
             return Err(DemandPlannerInvariantViolation::new(
                 "scheduler_in_progress_without_lookup",
                 Some(snapshot.info_hash),
-                "scheduler entry is in progress without active or draining lookup state",
+                "scheduler entry is in progress without pending, active, or draining lookup state",
             ));
         }
         if !snapshot.in_progress
             && (model.active.contains_key(&snapshot.info_hash)
+                || model.pending_starts.contains_key(&snapshot.info_hash)
+                || model.pending_parks.contains_key(&snapshot.info_hash)
                 || model.draining_demands.contains_key(&snapshot.info_hash))
         {
             return Err(DemandPlannerInvariantViolation::new(
                 "scheduler_idle_with_lookup",
                 Some(snapshot.info_hash),
-                "scheduler entry is idle while lookup state is tracked",
+                "scheduler entry is idle while pending, active, or draining lookup state is tracked",
             ));
         }
     }
 
     let expected_metadata_waiters = scheduler_snapshots
         .iter()
-        .filter(|snapshot| snapshot.demand.awaiting_metadata)
+        .filter(|snapshot| snapshot.demand.is_awaiting_metadata())
         .count();
     if model.metadata_waiter_count() != expected_metadata_waiters {
         return Err(DemandPlannerInvariantViolation::new(
@@ -201,33 +256,43 @@ pub(in crate::dht::service) fn check_demand_planner_invariants(
     }
 
     let active_counts = active_demand_lookup_slot_counts(&model.active);
-    if active_counts.awaiting_metadata > DHT_AWAITING_METADATA_SLOT_CAP {
+    let pending_awaiting_metadata = pending_counts.awaiting_metadata;
+    let awaiting_metadata_slots = active_counts
+        .awaiting_metadata
+        .saturating_add(pending_awaiting_metadata);
+    if awaiting_metadata_slots > DHT_AWAITING_METADATA_SLOT_CAP {
         return Err(DemandPlannerInvariantViolation::new(
             "awaiting_metadata_slot_cap_exceeded",
             None,
             format!(
-                "awaiting metadata active slots {} exceeded cap {}",
-                active_counts.awaiting_metadata, DHT_AWAITING_METADATA_SLOT_CAP
+                "awaiting metadata active plus pending slots {} exceeded cap {}",
+                awaiting_metadata_slots, DHT_AWAITING_METADATA_SLOT_CAP
             ),
         ));
     }
-    if active_counts.no_connected_peers > DHT_NO_CONNECTED_PEERS_SLOT_CAP {
+    let no_connected_peer_slots = active_counts
+        .no_connected_peers
+        .saturating_add(pending_counts.no_connected_peers);
+    if no_connected_peer_slots > DHT_NO_CONNECTED_PEERS_SLOT_CAP {
         return Err(DemandPlannerInvariantViolation::new(
             "no_connected_peers_slot_cap_exceeded",
             None,
             format!(
-                "no-peer active slots {} exceeded cap {}",
-                active_counts.no_connected_peers, DHT_NO_CONNECTED_PEERS_SLOT_CAP
+                "no-peer active plus pending slots {} exceeded cap {}",
+                no_connected_peer_slots, DHT_NO_CONNECTED_PEERS_SLOT_CAP
             ),
         ));
     }
-    if active_counts.routine_refresh > DHT_ROUTINE_LOOKUP_SLOT_CAP {
+    let routine_refresh_slots = active_counts
+        .routine_refresh
+        .saturating_add(pending_counts.routine_refresh);
+    if routine_refresh_slots > DHT_ROUTINE_LOOKUP_SLOT_CAP {
         return Err(DemandPlannerInvariantViolation::new(
             "routine_refresh_slot_cap_exceeded",
             None,
             format!(
-                "routine active slots {} exceeded cap {}",
-                active_counts.routine_refresh, DHT_ROUTINE_LOOKUP_SLOT_CAP
+                "routine active plus pending slots {} exceeded cap {}",
+                routine_refresh_slots, DHT_ROUTINE_LOOKUP_SLOT_CAP
             ),
         ));
     }
@@ -235,6 +300,8 @@ pub(in crate::dht::service) fn check_demand_planner_invariants(
     let consumed_slots = model
         .active
         .len()
+        .saturating_add(model.pending_starts.len())
+        .saturating_add(model.pending_parks.len())
         .saturating_add(drain_virtual_slot_count(model.draining_demands.len()));
     if consumed_slots > DHT_DEMAND_LOOKUP_SLOT_COUNT {
         return Err(DemandPlannerInvariantViolation::new(

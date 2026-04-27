@@ -361,6 +361,14 @@ fn demand_slice_metrics_record_starts_stops_and_resets() {
     );
     metrics.record_selection(
         DemandSliceClass::RoutineRefresh,
+        DemandSelectionReason::SwarmSupport,
+    );
+    metrics.record_selection(
+        DemandSliceClass::RoutineRefresh,
+        DemandSelectionReason::Fairness,
+    );
+    metrics.record_selection(
+        DemandSliceClass::RoutineRefresh,
         DemandSelectionReason::OverdueScarce,
     );
     metrics.record_selection(
@@ -398,6 +406,8 @@ fn demand_slice_metrics_record_starts_stops_and_resets() {
     assert_eq!(metrics.awaiting_metadata.selected_reusable_parked, 1);
     assert_eq!(metrics.no_connected_peers.selected_useful_yield_history, 1);
     assert_eq!(metrics.no_connected_peers.selected_spare_capacity, 1);
+    assert_eq!(metrics.routine_refresh.selected_swarm_support, 1);
+    assert_eq!(metrics.routine_refresh.selected_fairness, 1);
     assert_eq!(metrics.routine_refresh.selected_overdue_scarce, 1);
     assert_eq!(metrics.awaiting_metadata.wall_time_stops, 1);
     assert_eq!(metrics.awaiting_metadata.peers_yielded, 12);
@@ -408,7 +418,9 @@ fn demand_slice_metrics_record_starts_stops_and_resets() {
     assert_eq!(metrics.routine_refresh.low_quality_resets, 1);
     assert!(metrics.summary().contains("awaiting("));
     assert!(metrics.summary().contains("sel_reuse=1"));
+    assert!(metrics.summary().contains("sel_support=1"));
     assert!(metrics.summary().contains("sel_yield=1"));
+    assert!(metrics.summary().contains("sel_fair=1"));
     assert!(metrics.summary().contains("sel_due=1"));
     assert!(metrics.summary().contains("sel_spare=1"));
     assert!(metrics.summary().contains("reset_quality=1"));

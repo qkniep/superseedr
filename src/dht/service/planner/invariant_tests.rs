@@ -45,6 +45,77 @@ fn demand_planner_invariants_accept_normal_active_and_draining_state() {
 }
 
 #[test]
+fn demand_planner_invariants_accept_pending_lookup_start_state() {
+    let now = Instant::now();
+    let mut planner = DemandPlannerModel::new(now);
+    let info_hash = hash_index(106);
+    planner.update(DemandPlannerAction::DemandRegistered {
+        info_hash,
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        now,
+    });
+    assert!(planner.scheduler.mark_in_progress(info_hash));
+    planner
+        .pending_starts
+        .insert(info_hash, DemandSliceClass::NoConnectedPeers);
+
+    check_demand_planner_invariants(&planner).expect("valid planner invariants");
+}
+
+#[test]
+fn demand_planner_invariants_accept_pending_lookup_park_state() {
+    let now = Instant::now();
+    let mut planner = DemandPlannerModel::new(now);
+    let info_hash = hash_index(107);
+    planner.update(DemandPlannerAction::DemandRegistered {
+        info_hash,
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        now,
+    });
+    assert!(planner.scheduler.mark_in_progress(info_hash));
+    planner
+        .pending_parks
+        .insert(info_hash, DemandSliceClass::NoConnectedPeers);
+
+    check_demand_planner_invariants(&planner).expect("valid planner invariants");
+}
+
+#[test]
+fn demand_planner_invariants_accept_pending_park_after_demand_class_changes() {
+    let now = Instant::now();
+    let mut planner = DemandPlannerModel::new(now);
+    let info_hash = hash_index(108);
+    planner.update(DemandPlannerAction::DemandRegistered {
+        info_hash,
+        demand: DhtDemandState {
+            awaiting_metadata: true,
+            connected_peers: 0,
+        },
+        now,
+    });
+    assert!(planner.scheduler.mark_in_progress(info_hash));
+    planner
+        .pending_parks
+        .insert(info_hash, DemandSliceClass::AwaitingMetadata);
+    planner.update(DemandPlannerAction::DemandUpdated {
+        info_hash,
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 4,
+        },
+        now,
+    });
+
+    check_demand_planner_invariants(&planner).expect("valid planner invariants");
+}
+
+#[test]
 fn demand_planner_invariants_reject_active_without_scheduler_entry() {
     let now = Instant::now();
     let mut planner = DemandPlannerModel::new(now);

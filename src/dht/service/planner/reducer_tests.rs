@@ -548,7 +548,7 @@ fn demand_planner_duplicate_register_requests_drain_finalize_on_class_mismatch()
         .entry_snapshot(info_hash)
         .expect("demand entry");
     assert_eq!(snapshot.subscriber_count, 3);
-    assert!(snapshot.demand.awaiting_metadata);
+    assert!(snapshot.demand.is_awaiting_metadata());
 }
 #[test]
 fn demand_planner_subscriber_removed_action_detaches_lookup_work_on_final_subscriber() {

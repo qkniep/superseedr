@@ -492,6 +492,8 @@ pub(in crate::dht::service) struct DemandPlannerReduction {
 pub(in crate::dht::service) struct DemandPlannerModel {
     pub(in crate::dht::service) scheduler: DemandScheduler,
     pub(in crate::dht::service) active: HashMap<InfoHash, ActiveDemandLookup>,
+    pub(in crate::dht::service) pending_starts: HashMap<InfoHash, DemandSliceClass>,
+    pub(in crate::dht::service) pending_parks: HashMap<InfoHash, DemandSliceClass>,
     pub(in crate::dht::service) parked_crawls: HashMap<InfoHash, DemandCrawlState>,
     pub(in crate::dht::service) draining_demands: HashMap<InfoHash, DrainingDemandLookup>,
     pub(in crate::dht::service) state: HashMap<InfoHash, DemandPlannerState>,
@@ -508,6 +510,8 @@ impl DemandPlannerModel {
                 DHT_AWAITING_METADATA_REFRESH_INTERVAL,
             ),
             active: HashMap::new(),
+            pending_starts: HashMap::new(),
+            pending_parks: HashMap::new(),
             parked_crawls: HashMap::new(),
             draining_demands: HashMap::new(),
             state: HashMap::new(),
@@ -523,7 +527,9 @@ impl DemandPlannerModel {
         self.scheduler
             .entry_snapshots()
             .into_iter()
-            .filter(|snapshot| snapshot.demand.awaiting_metadata && snapshot.subscriber_count > 0)
+            .filter(|snapshot| {
+                snapshot.demand.is_awaiting_metadata() && snapshot.subscriber_count > 0
+            })
             .count()
     }
 
@@ -671,9 +677,9 @@ pub(in crate::dht::service) enum DemandSliceClass {
 
 impl DemandSliceClass {
     pub(in crate::dht::service) fn from_demand(demand: DhtDemandState) -> Self {
-        if demand.awaiting_metadata {
+        if demand.is_awaiting_metadata() {
             Self::AwaitingMetadata
-        } else if demand.connected_peers == 0 {
+        } else if demand.has_no_connected_peers() {
             Self::NoConnectedPeers
         } else {
             Self::RoutineRefresh
@@ -822,7 +828,9 @@ pub(in crate::dht::service) enum DemandCrawlResetReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::dht::service) enum DemandSelectionReason {
     ReusableParked,
+    SwarmSupport,
     UsefulYieldHistory,
+    Fairness,
     OverdueScarce,
     SpareCapacity,
 }
@@ -832,7 +840,9 @@ pub(in crate::dht::service) struct DemandSliceClassMetrics {
     pub(in crate::dht::service) fresh_starts: u64,
     pub(in crate::dht::service) resumed_starts: u64,
     pub(in crate::dht::service) selected_reusable_parked: u64,
+    pub(in crate::dht::service) selected_swarm_support: u64,
     pub(in crate::dht::service) selected_useful_yield_history: u64,
+    pub(in crate::dht::service) selected_fairness: u64,
     pub(in crate::dht::service) selected_overdue_scarce: u64,
     pub(in crate::dht::service) selected_spare_capacity: u64,
     pub(in crate::dht::service) natural_finishes: u64,
@@ -897,9 +907,15 @@ impl DemandSliceMetrics {
                 metrics.selected_reusable_parked =
                     metrics.selected_reusable_parked.saturating_add(1)
             }
+            DemandSelectionReason::SwarmSupport => {
+                metrics.selected_swarm_support = metrics.selected_swarm_support.saturating_add(1)
+            }
             DemandSelectionReason::UsefulYieldHistory => {
                 metrics.selected_useful_yield_history =
                     metrics.selected_useful_yield_history.saturating_add(1)
+            }
+            DemandSelectionReason::Fairness => {
+                metrics.selected_fairness = metrics.selected_fairness.saturating_add(1)
             }
             DemandSelectionReason::OverdueScarce => {
                 metrics.selected_overdue_scarce = metrics.selected_overdue_scarce.saturating_add(1)
@@ -970,7 +986,9 @@ impl DemandSliceMetrics {
             if metrics.fresh_starts > 0
                 || metrics.resumed_starts > 0
                 || metrics.selected_reusable_parked > 0
+                || metrics.selected_swarm_support > 0
                 || metrics.selected_useful_yield_history > 0
+                || metrics.selected_fairness > 0
                 || metrics.selected_overdue_scarce > 0
                 || metrics.selected_spare_capacity > 0
                 || metrics.natural_finishes > 0
@@ -993,11 +1011,13 @@ impl DemandSliceMetrics {
     pub(in crate::dht::service) fn summary(&self) -> String {
         fn fmt(label: &str, metrics: &DemandSliceClassMetrics) -> String {
             format!(
-                "{label}(fresh={} resumed={} sel_reuse={} sel_yield={} sel_due={} sel_spare={} natural={} wall={} idle={} first={} cap={} peers={} unique={} reset_stale={} reset_class={} reset_quality={})",
+                "{label}(fresh={} resumed={} sel_reuse={} sel_support={} sel_yield={} sel_fair={} sel_due={} sel_spare={} natural={} wall={} idle={} first={} cap={} peers={} unique={} reset_stale={} reset_class={} reset_quality={})",
                 metrics.fresh_starts,
                 metrics.resumed_starts,
                 metrics.selected_reusable_parked,
+                metrics.selected_swarm_support,
                 metrics.selected_useful_yield_history,
+                metrics.selected_fairness,
                 metrics.selected_overdue_scarce,
                 metrics.selected_spare_capacity,
                 metrics.natural_finishes,
