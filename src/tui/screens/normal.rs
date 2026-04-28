@@ -811,11 +811,11 @@ struct DhtWaveProfile {
 impl DhtWaveProfile {
     fn from_inputs(_status: &DhtStatus, telemetry: &DhtWaveTelemetry) -> Self {
         let query_signal = dht_wave_query_signal(telemetry);
-        let amplitude = (0.01 + query_signal * 0.38).clamp(0.0, 0.52);
-        let harmonic_amplitude = (0.004 + query_signal * 0.14).clamp(0.0, 0.20);
-        let frequency = (0.08 + query_signal * 0.22).clamp(0.06, 0.38);
-        let phase_speed = (0.03 + query_signal * 1.7).clamp(0.0, 2.0);
-        let crest_bias = ((query_signal - 0.5) * 0.08).clamp(-0.22, 0.22);
+        let amplitude = (0.01 + query_signal * 0.24).clamp(0.0, 0.52);
+        let harmonic_amplitude = (0.004 + query_signal * 0.13).clamp(0.0, 0.20);
+        let frequency = (0.08 + query_signal * 0.18).clamp(0.06, 0.38);
+        let phase_speed = (0.03 + query_signal * (0.85 + query_signal * 0.75)).clamp(0.0, 2.0);
+        let crest_bias = ((query_signal - 0.5) * 0.06).clamp(-0.22, 0.22);
 
         Self {
             amplitude,
@@ -829,7 +829,57 @@ impl DhtWaveProfile {
 
 fn dht_wave_query_signal(telemetry: &DhtWaveTelemetry) -> f64 {
     let total_queries = (telemetry.inflight_ipv4_queries + telemetry.inflight_ipv6_queries) as f64;
-    (total_queries / 64.0).clamp(0.0, 1.0)
+    if total_queries <= 0.0 {
+        0.0
+    } else {
+        (total_queries / (total_queries + 40.0)).clamp(0.0, 1.0)
+    }
+}
+
+fn dht_wave_y_axis_bounds(points: &[(f64, f64)]) -> [f64; 2] {
+    const MIN_HALF_SPAN: f64 = 0.18;
+    const MAX_HALF_SPAN: f64 = 1.08;
+
+    let max_abs = points.iter().map(|(_, y)| y.abs()).fold(0.0_f64, f64::max);
+    let half_span = (max_abs * 1.12).clamp(MIN_HALF_SPAN, MAX_HALF_SPAN);
+
+    [-half_span, half_span]
+}
+
+fn dht_wave_title_spans(
+    total_queries: usize,
+    demand_power_multiplier: u8,
+    ctx: &ThemeContext,
+) -> Vec<Span<'static>> {
+    let query_style = ctx.apply(
+        Style::default()
+            .fg(ctx.peer_discovered())
+            .add_modifier(Modifier::BOLD),
+    );
+    let multiplier = demand_power_multiplier.max(1);
+    if multiplier <= 1 {
+        return vec![Span::styled(total_queries.to_string(), query_style)];
+    }
+
+    vec![
+        Span::styled(
+            format!("{multiplier}x"),
+            ctx.apply(
+                Style::default()
+                    .fg(ctx.accent_peach())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ),
+        Span::styled(
+            "(",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+        ),
+        Span::styled(total_queries.to_string(), query_style),
+        Span::styled(
+            ")",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+        ),
+    ]
 }
 
 fn draw_dht_wave_panel(
@@ -872,17 +922,18 @@ fn draw_dht_wave_panel(
         let x = i as f64 * x_step;
         let theta = x * profile.frequency;
         let envelope = 0.84 + 0.16 * (theta * 0.33 + phase * 0.28).sin();
-        let discovery_boost = if app_state.ui.dht_wave.initialized {
-            app_state.ui.dht_wave.discovery_boost
+        let transient_boost = if app_state.ui.dht_wave.initialized {
+            app_state.ui.dht_wave.discovery_boost + app_state.ui.dht_wave.query_surge
         } else {
             0.0
         };
-        let dht_amplitude = (profile.amplitude + discovery_boost).clamp(0.05, 0.82);
+        let dht_amplitude = (profile.amplitude + transient_boost).clamp(0.05, 0.82);
         let carrier = profile.crest_bias * 0.35
             + envelope * dht_amplitude * (theta + phase).sin()
             + profile.harmonic_amplitude * ((theta * 2.35) - phase * 0.72).sin();
         dht_points.push((x, carrier.clamp(-1.04, 1.04)));
     }
+    let y_axis_bounds = dht_wave_y_axis_bounds(&dht_points);
 
     let datasets = vec![ratatui::widgets::Dataset::default()
         .marker(ratatui::symbols::Marker::Braille)
@@ -907,9 +958,10 @@ fn draw_dht_wave_panel(
                     .alignment(Alignment::Left),
                 )
                 .title_top(
-                    Line::from(Span::styled(
-                        format!("queries {}", total_queries),
-                        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+                    Line::from(dht_wave_title_spans(
+                        total_queries,
+                        dht_wave_telemetry.demand_power_multiplier,
+                        ctx,
                     ))
                     .alignment(Alignment::Right),
                 )
@@ -917,7 +969,7 @@ fn draw_dht_wave_panel(
                 .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
         )
         .x_axis(ratatui::widgets::Axis::default().bounds([0.0, x_bound as f64]))
-        .y_axis(ratatui::widgets::Axis::default().bounds([-1.08, 1.08]));
+        .y_axis(ratatui::widgets::Axis::default().bounds(y_axis_bounds));
 
     f.render_widget(chart, area);
 }
@@ -1077,6 +1129,38 @@ pub(crate) fn compute_footer_status_width(client_port: u16, overall_port_status:
         + FOOTER_STATUS_GUTTER
 }
 
+fn trim_footer_fps_number(mut value: String) -> String {
+    if value.contains('.') {
+        while value.ends_with('0') {
+            value.pop();
+        }
+        if value.ends_with('.') {
+            value.pop();
+        }
+    }
+    value
+}
+
+pub(crate) fn format_measured_render_fps(fps: f64) -> String {
+    if !fps.is_finite() || fps <= 0.0 {
+        "0".to_string()
+    } else if fps >= 10.0 {
+        format!("{fps:.0}")
+    } else if fps >= 1.0 {
+        trim_footer_fps_number(format!("{fps:.1}"))
+    } else {
+        trim_footer_fps_number(format!("{fps:.2}"))
+    }
+}
+
+pub(crate) fn footer_fps_label(app_state: &AppState) -> String {
+    format!(
+        "{}/{}fps",
+        format_measured_render_fps(app_state.ui.measured_render_fps),
+        app_state.data_rate.fps_label()
+    )
+}
+
 fn estimate_footer_left_content_width(app_state: &AppState, ctx: &ThemeContext) -> u16 {
     let fx_enabled = ctx.theme.effects.enabled();
     let theme_label = if fx_enabled {
@@ -1084,32 +1168,26 @@ fn estimate_footer_left_content_width(app_state: &AppState, ctx: &ThemeContext) 
     } else {
         ctx.theme.name.to_string()
     };
+    let fps_label = footer_fps_label(app_state);
 
     let content = if let Some(new_version) = &app_state.update_available {
         format!(
             "UPDATE AVAILABLE: v{} -> v{} | {} | {}",
-            APP_VERSION,
-            new_version,
-            app_state.data_rate.to_string(),
-            theme_label
+            APP_VERSION, new_version, fps_label, theme_label
         )
     } else {
         #[cfg(all(feature = "dht", feature = "pex"))]
         {
             format!(
                 "superseedr v{} | {} | {}",
-                APP_VERSION,
-                app_state.data_rate.to_string(),
-                theme_label
+                APP_VERSION, fps_label, theme_label
             )
         }
         #[cfg(not(all(feature = "dht", feature = "pex")))]
         {
             format!(
                 "superseedr [PRIVATE] v{} | {} | {}",
-                APP_VERSION,
-                app_state.data_rate.to_string(),
-                theme_label
+                APP_VERSION, fps_label, theme_label
             )
         }
     };
@@ -1191,6 +1269,7 @@ pub fn draw_footer(
         let current_ul_speed = *app_state.avg_upload_history.last().unwrap_or(&0);
         let fx_enabled = ctx.theme.effects.enabled();
         let theme_name = ctx.theme.name.to_string();
+        let fps_label = footer_fps_label(app_state);
         let fit_theme_label = |prefix: &str| -> String {
             let max_theme_width =
                 (client_id_chunk.width as usize).saturating_sub(prefix.chars().count());
@@ -1206,9 +1285,7 @@ pub fn draw_footer(
         let client_display_line = if let Some(new_version) = &app_state.update_available {
             let theme_display = fit_theme_label(&format!(
                 "UPDATE AVAILABLE: v{} -> v{} | {} | ",
-                APP_VERSION,
-                new_version,
-                app_state.data_rate.to_string()
+                APP_VERSION, new_version, fps_label
             ));
             Line::from(vec![
                 Span::styled(
@@ -1234,7 +1311,7 @@ pub fn draw_footer(
                     ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                 ),
                 Span::styled(
-                    app_state.data_rate.to_string(),
+                    fps_label.clone(),
                     ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
                 ),
                 Span::styled(
@@ -1249,11 +1326,8 @@ pub fn draw_footer(
         } else {
             #[cfg(all(feature = "dht", feature = "pex"))]
             {
-                let theme_display = fit_theme_label(&format!(
-                    "superseedr v{} | {} | ",
-                    APP_VERSION,
-                    app_state.data_rate.to_string()
-                ));
+                let theme_display =
+                    fit_theme_label(&format!("superseedr v{} | {} | ", APP_VERSION, fps_label));
                 Line::from(vec![
                     Span::styled(
                         "super",
@@ -1278,7 +1352,7 @@ pub fn draw_footer(
                         ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                     ),
                     Span::styled(
-                        app_state.data_rate.to_string(),
+                        fps_label.clone(),
                         ctx.apply(Style::default().fg(ctx.state_warning()).bold()),
                     ),
                     Span::styled(
@@ -1295,8 +1369,7 @@ pub fn draw_footer(
             {
                 let theme_display = fit_theme_label(&format!(
                     "superseedr [PRIVATE] v{} | {} | ",
-                    APP_VERSION,
-                    app_state.data_rate.to_string()
+                    APP_VERSION, fps_label
                 ));
                 Line::from(vec![
                     Span::styled(
@@ -1319,7 +1392,7 @@ pub fn draw_footer(
                         ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                     ),
                     Span::styled(
-                        app_state.data_rate.to_string(),
+                        fps_label.clone(),
                         ctx.apply(Style::default().fg(ctx.state_warning()).bold()),
                     ),
                     Span::styled(
@@ -7239,6 +7312,55 @@ mod tests {
     }
 
     #[test]
+    fn dht_wave_query_signal_uses_gentle_saturation() {
+        let q10 = dht_wave_query_signal(&DhtWaveTelemetry {
+            inflight_ipv4_queries: 10,
+            ..Default::default()
+        });
+        let q48 = dht_wave_query_signal(&DhtWaveTelemetry {
+            inflight_ipv4_queries: 48,
+            ..Default::default()
+        });
+        let q96 = dht_wave_query_signal(&DhtWaveTelemetry {
+            inflight_ipv4_queries: 96,
+            ..Default::default()
+        });
+
+        assert!(q10 < 0.30);
+        assert!(q48 > q10 + 0.30);
+        assert!(q96 > q48);
+    }
+
+    #[test]
+    fn dht_wave_title_is_query_count_without_multiplier() {
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let spans = dht_wave_title_spans(42, 1, &ctx);
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "42");
+    }
+
+    #[test]
+    fn dht_wave_title_colors_multiplier_prefix() {
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let spans = dht_wave_title_spans(42, 4, &ctx);
+
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[0].content, "4x");
+        assert_eq!(spans[1].content, "(");
+        assert_eq!(spans[2].content, "42");
+        assert_eq!(spans[3].content, ")");
+        assert_eq!(
+            spans[0].style,
+            ctx.apply(
+                Style::default()
+                    .fg(ctx.accent_peach())
+                    .add_modifier(Modifier::BOLD)
+            )
+        );
+    }
+
+    #[test]
     fn dht_wave_profile_ignores_health_when_query_count_matches() {
         let mut healthy = DhtStatus::default();
         healthy.health.enabled = true;
@@ -7282,6 +7404,22 @@ mod tests {
         assert!(route_warm_profile.phase_speed < 0.08);
         assert!(active_profile.amplitude > route_warm_profile.amplitude);
         assert!(active_profile.phase_speed > route_warm_profile.phase_speed);
+    }
+
+    #[test]
+    fn dht_wave_y_axis_bounds_scale_to_current_signal() {
+        let small_points = [(0.0, -0.04), (1.0, 0.05)];
+        let active_points = [(0.0, -0.24), (1.0, 0.28)];
+        let saturated_points = [(0.0, -1.3), (1.0, 1.2)];
+
+        let small_bounds = dht_wave_y_axis_bounds(&small_points);
+        let active_bounds = dht_wave_y_axis_bounds(&active_points);
+        let saturated_bounds = dht_wave_y_axis_bounds(&saturated_points);
+
+        assert_eq!(small_bounds, [-0.18, 0.18]);
+        assert!(active_bounds[0] < -0.30);
+        assert!(active_bounds[1] > 0.30);
+        assert_eq!(saturated_bounds, [-1.08, 1.08]);
     }
 
     #[test]

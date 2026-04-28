@@ -79,6 +79,401 @@ fn routine_lookup_plan_expands_when_metrics_need_swarm_support() {
 }
 
 #[test]
+fn demand_lookup_plan_boosts_metadata_and_swarm_support_without_global_cap_change() {
+    let now = Instant::now();
+    let metadata = DueDemandCandidate {
+        info_hash: hash_index(201),
+        demand: DhtDemandState {
+            awaiting_metadata: true,
+            connected_peers: 0,
+        },
+        metrics: DhtDemandMetrics::default(),
+        next_eligible_at: now,
+        subscriber_count: 1,
+    };
+    let swarm_support = DueDemandCandidate {
+        info_hash: hash_index(202),
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 4,
+        },
+        metrics: DhtDemandMetrics {
+            accepting_new_peers: true,
+            complete: true,
+            total_pieces: 100,
+            completed_pieces: 100,
+            connected_peers: 4,
+            peers_interested_in_us: 3,
+            unchoked_upload_peers: 1,
+            ..Default::default()
+        },
+        next_eligible_at: now,
+        subscriber_count: 1,
+    };
+
+    let metadata_plan = DemandLookupPlan::for_candidate(
+        metadata,
+        &HashMap::new(),
+        DemandSelectionReason::OverdueScarce,
+        DemandPlannerIdleSpeedProbeStatus::default(),
+        now,
+    );
+    let swarm_plan = DemandLookupPlan::for_candidate(
+        swarm_support,
+        &HashMap::new(),
+        DemandSelectionReason::SwarmSupport,
+        DemandPlannerIdleSpeedProbeStatus::default(),
+        now,
+    );
+
+    assert_eq!(metadata_plan.power_multiplier, 2);
+    assert_eq!(
+        metadata_plan.unique_peer_cap,
+        DHT_AWAITING_METADATA_SLICE_UNIQUE_PEER_CAP * 2
+    );
+    assert_eq!(swarm_plan.power_multiplier, 2);
+    assert_eq!(
+        swarm_plan.unique_peer_cap,
+        DHT_ROUTINE_SUPPORT_SLICE_UNIQUE_PEER_CAP * 2
+    );
+}
+
+#[test]
+fn demand_lookup_plan_boosts_only_productive_no_peer_candidates() {
+    let now = Instant::now();
+    let cold_hash = hash_index(203);
+    let useful_hash = hash_index(204);
+    let strong_hash = hash_index(205);
+    let no_peer_candidate = |info_hash| DueDemandCandidate {
+        info_hash,
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        metrics: DhtDemandMetrics::default(),
+        next_eligible_at: now,
+        subscriber_count: 1,
+    };
+    let mut planner_state = HashMap::new();
+    planner_state.insert(
+        useful_hash,
+        DemandPlannerState {
+            last_started_at: Some(now - Duration::from_secs(90)),
+            last_finished_at: Some(now - Duration::from_secs(80)),
+            last_useful_yield_at: Some(now - Duration::from_secs(80)),
+            last_unique_peers: 4,
+        },
+    );
+    planner_state.insert(
+        strong_hash,
+        DemandPlannerState {
+            last_started_at: Some(now - Duration::from_secs(20)),
+            last_finished_at: Some(now - Duration::from_secs(15)),
+            last_useful_yield_at: Some(now - Duration::from_secs(15)),
+            last_unique_peers: DHT_DEMAND_STRONG_YIELD_BOOST_MIN_UNIQUE_PEERS,
+        },
+    );
+
+    let cold = DemandLookupPlan::for_candidate(
+        no_peer_candidate(cold_hash),
+        &planner_state,
+        DemandSelectionReason::OverdueScarce,
+        DemandPlannerIdleSpeedProbeStatus::default(),
+        now,
+    );
+    let useful = DemandLookupPlan::for_candidate(
+        no_peer_candidate(useful_hash),
+        &planner_state,
+        DemandSelectionReason::UsefulYieldHistory,
+        DemandPlannerIdleSpeedProbeStatus::default(),
+        now,
+    );
+    let strong = DemandLookupPlan::for_candidate(
+        no_peer_candidate(strong_hash),
+        &planner_state,
+        DemandSelectionReason::UsefulYieldHistory,
+        DemandPlannerIdleSpeedProbeStatus::default(),
+        now,
+    );
+
+    assert_eq!(cold.power_multiplier, 1);
+    assert_eq!(
+        cold.unique_peer_cap,
+        DHT_NO_CONNECTED_PEERS_SLICE_UNIQUE_PEER_CAP
+    );
+    assert_eq!(useful.power_multiplier, 2);
+    assert_eq!(
+        useful.unique_peer_cap,
+        DHT_NO_CONNECTED_PEERS_SLICE_UNIQUE_PEER_CAP * 2
+    );
+    assert_eq!(strong.power_multiplier, 3);
+    assert_eq!(
+        strong.unique_peer_cap,
+        DHT_NO_CONNECTED_PEERS_SLICE_UNIQUE_PEER_CAP * 3
+    );
+}
+
+#[test]
+fn demand_lookup_plan_uses_idle_speed_probe_multiplier_for_unserved_demand() {
+    let now = Instant::now();
+    let candidate = DueDemandCandidate {
+        info_hash: hash_index(206),
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        metrics: DhtDemandMetrics {
+            accepting_new_peers: true,
+            ..Default::default()
+        },
+        next_eligible_at: now,
+        subscriber_count: 1,
+    };
+    let idle_probe = DemandPlannerIdleSpeedProbeStatus {
+        active: true,
+        demand_count: 1,
+        multiplier: 4,
+    };
+
+    let plan = DemandLookupPlan::for_candidate(
+        candidate,
+        &HashMap::new(),
+        DemandSelectionReason::IdleSpeedProbe,
+        idle_probe,
+        now,
+    );
+
+    assert_eq!(plan.power_multiplier, 4);
+    assert_eq!(
+        plan.unique_peer_cap,
+        DHT_NO_CONNECTED_PEERS_SLICE_UNIQUE_PEER_CAP * 4
+    );
+}
+
+#[test]
+fn idle_speed_probe_escalates_after_global_idle_with_demand() {
+    let now = Instant::now();
+    let mut probe = DemandPlannerIdleSpeedProbe::default();
+    let snapshot = DemandEntrySnapshot {
+        info_hash: hash_index(207),
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        metrics: DhtDemandMetrics {
+            accepting_new_peers: true,
+            ..Default::default()
+        },
+        next_eligible_at: now + Duration::from_secs(120),
+        subscriber_count: 1,
+        in_progress: false,
+        retrigger_pending: false,
+        no_connected_peers_backoff_step: 0,
+    };
+
+    let initial = probe.observe(&[snapshot], now);
+    assert!(!initial.active);
+    assert_eq!(initial.demand_count, 1);
+
+    let two_x = probe.observe(&[snapshot], now + DHT_IDLE_SPEED_PROBE_2X_MIN_IDLE);
+    assert!(two_x.active);
+    assert_eq!(two_x.multiplier, 2);
+
+    let three_x = probe.observe(&[snapshot], now + DHT_IDLE_SPEED_PROBE_3X_MIN_IDLE);
+    assert!(three_x.active);
+    assert_eq!(three_x.multiplier, 3);
+
+    let four_x = probe.observe(&[snapshot], now + DHT_IDLE_SPEED_PROBE_4X_MIN_IDLE);
+    assert!(four_x.active);
+    assert_eq!(four_x.multiplier, 4);
+
+    let active_metrics = DhtDemandMetrics {
+        accepting_new_peers: true,
+        download_speed_bps: 1,
+        ..Default::default()
+    };
+    let recovered = probe.observe(
+        &[DemandEntrySnapshot {
+            metrics: active_metrics,
+            ..snapshot
+        }],
+        now + DHT_IDLE_SPEED_PROBE_4X_MIN_IDLE + Duration::from_secs(1),
+    );
+    assert!(recovered.active);
+    assert_eq!(recovered.multiplier, 4);
+}
+
+#[test]
+fn idle_speed_probe_decays_after_activity_recovers() {
+    let now = Instant::now();
+    let mut probe = DemandPlannerIdleSpeedProbe::default();
+    let snapshot = DemandEntrySnapshot {
+        info_hash: hash_index(209),
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        metrics: DhtDemandMetrics {
+            accepting_new_peers: true,
+            ..Default::default()
+        },
+        next_eligible_at: now + Duration::from_secs(120),
+        subscriber_count: 1,
+        in_progress: false,
+        retrigger_pending: false,
+        no_connected_peers_backoff_step: 0,
+    };
+
+    assert!(!probe.observe(&[snapshot], now).active);
+    assert!(
+        probe
+            .observe(&[snapshot], now + DHT_IDLE_SPEED_PROBE_4X_MIN_IDLE)
+            .active
+    );
+
+    let active_snapshot = DemandEntrySnapshot {
+        metrics: DhtDemandMetrics {
+            accepting_new_peers: true,
+            download_speed_bps: 1,
+            ..Default::default()
+        },
+        ..snapshot
+    };
+
+    let still_four_x = probe.observe(
+        &[active_snapshot],
+        now + DHT_IDLE_SPEED_PROBE_4X_MIN_IDLE + Duration::from_secs(1),
+    );
+    assert!(still_four_x.active);
+    assert_eq!(still_four_x.multiplier, 4);
+
+    let three_x = probe.observe(
+        &[active_snapshot],
+        now + DHT_IDLE_SPEED_PROBE_4X_MIN_IDLE
+            + Duration::from_secs(1)
+            + DHT_IDLE_SPEED_PROBE_DECAY_INTERVAL,
+    );
+    assert!(three_x.active);
+    assert_eq!(three_x.multiplier, 3);
+
+    let two_x = probe.observe(
+        &[active_snapshot],
+        now + DHT_IDLE_SPEED_PROBE_4X_MIN_IDLE
+            + Duration::from_secs(1)
+            + DHT_IDLE_SPEED_PROBE_DECAY_INTERVAL * 2,
+    );
+    assert!(two_x.active);
+    assert_eq!(two_x.multiplier, 2);
+
+    let one_x = probe.observe(
+        &[active_snapshot],
+        now + DHT_IDLE_SPEED_PROBE_4X_MIN_IDLE
+            + Duration::from_secs(1)
+            + DHT_IDLE_SPEED_PROBE_DECAY_INTERVAL * 3,
+    );
+    assert!(!one_x.active);
+    assert_eq!(one_x.multiplier, 1);
+}
+
+#[test]
+fn idle_speed_probe_holds_decay_level_when_idle_resumes() {
+    let now = Instant::now();
+    let mut probe = DemandPlannerIdleSpeedProbe::default();
+    let idle_snapshot = DemandEntrySnapshot {
+        info_hash: hash_index(210),
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        metrics: DhtDemandMetrics {
+            accepting_new_peers: true,
+            ..Default::default()
+        },
+        next_eligible_at: now + Duration::from_secs(120),
+        subscriber_count: 1,
+        in_progress: false,
+        retrigger_pending: false,
+        no_connected_peers_backoff_step: 0,
+    };
+
+    assert!(!probe.observe(&[idle_snapshot], now).active);
+    assert!(
+        probe
+            .observe(&[idle_snapshot], now + DHT_IDLE_SPEED_PROBE_4X_MIN_IDLE)
+            .active
+    );
+
+    let active_snapshot = DemandEntrySnapshot {
+        metrics: DhtDemandMetrics {
+            accepting_new_peers: true,
+            download_speed_bps: 1,
+            ..Default::default()
+        },
+        ..idle_snapshot
+    };
+    let still_four_x = probe.observe(
+        &[active_snapshot],
+        now + DHT_IDLE_SPEED_PROBE_4X_MIN_IDLE + Duration::from_secs(1),
+    );
+    assert!(still_four_x.active);
+    assert_eq!(still_four_x.multiplier, 4);
+
+    let three_x = probe.observe(
+        &[active_snapshot],
+        now + DHT_IDLE_SPEED_PROBE_4X_MIN_IDLE
+            + Duration::from_secs(1)
+            + DHT_IDLE_SPEED_PROBE_DECAY_INTERVAL,
+    );
+    assert!(three_x.active);
+    assert_eq!(three_x.multiplier, 3);
+
+    let next_probe = probe.observe(
+        &[idle_snapshot],
+        now + DHT_IDLE_SPEED_PROBE_4X_MIN_IDLE
+            + Duration::from_secs(2)
+            + DHT_IDLE_SPEED_PROBE_DECAY_INTERVAL,
+    );
+    assert!(next_probe.active);
+    assert_eq!(next_probe.multiplier, 3);
+}
+
+#[test]
+fn idle_speed_probe_selects_not_yet_due_demand() {
+    let now = Instant::now();
+    let snapshot = DemandEntrySnapshot {
+        info_hash: hash_index(208),
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        metrics: DhtDemandMetrics {
+            accepting_new_peers: true,
+            ..Default::default()
+        },
+        next_eligible_at: now + Duration::from_secs(120),
+        subscriber_count: 1,
+        in_progress: false,
+        retrigger_pending: false,
+        no_connected_peers_backoff_step: 2,
+    };
+    let mut budget = DemandPlannerBudget::new(now);
+
+    let selected = select_idle_speed_probe_launches(
+        &[snapshot],
+        DemandSlotCounts::default(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &mut budget,
+        now,
+        1,
+    );
+
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].info_hash, snapshot.info_hash);
+}
+
+#[test]
 fn demand_planner_uses_spare_capacity_for_backed_off_no_peer_state() {
     let now = Instant::now();
     let info_hash = hash_index(67);
@@ -331,7 +726,7 @@ fn candidate_priority_score_keeps_metadata_above_max_supported_yield() {
 }
 
 #[test]
-fn candidate_priority_score_prefers_no_peer_recovery_over_plain_routine() {
+fn candidate_priority_score_does_not_inflate_cold_no_peer_recovery() {
     let now = Instant::now();
     let no_peer = DueDemandCandidate {
         info_hash: hash_index(188),
@@ -354,9 +749,9 @@ fn candidate_priority_score_prefers_no_peer_recovery_over_plain_routine() {
         subscriber_count: 1,
     };
 
-    assert!(
-        demand_candidate_priority_score(no_peer, &HashMap::new(), now)
-            > demand_candidate_priority_score(routine, &HashMap::new(), now)
+    assert_eq!(
+        demand_candidate_priority_score(no_peer, &HashMap::new(), now),
+        demand_candidate_priority_score(routine, &HashMap::new(), now)
     );
 }
 

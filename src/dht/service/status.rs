@@ -63,6 +63,7 @@ pub struct DhtWaveTelemetry {
     pub inflight_ipv4_queries: usize,
     pub inflight_ipv6_queries: usize,
     pub unique_peers_found_last_10s: usize,
+    pub demand_power_multiplier: u8,
 }
 
 #[derive(Debug)]
@@ -184,10 +185,12 @@ pub(super) fn publish_status(
 pub(super) fn build_wave_telemetry(
     active_runtime: Option<&ActiveRuntime>,
     unique_peers_found_last_10s: usize,
+    demand_power_multiplier: u8,
 ) -> DhtWaveTelemetry {
     let Some(active_runtime) = active_runtime else {
         return DhtWaveTelemetry {
             unique_peers_found_last_10s,
+            demand_power_multiplier,
             ..DhtWaveTelemetry::default()
         };
     };
@@ -201,6 +204,7 @@ pub(super) fn build_wave_telemetry(
         inflight_ipv4_queries,
         inflight_ipv6_queries,
         unique_peers_found_last_10s,
+        demand_power_multiplier,
     }
 }
 
@@ -208,10 +212,12 @@ pub(super) fn publish_wave_telemetry(
     wave_telemetry_tx: &watch::Sender<DhtWaveTelemetry>,
     active_runtime: Option<&ActiveRuntime>,
     recent_unique_peers: &mut RecentUniquePeers,
+    demand_power_multiplier: u8,
 ) {
     let telemetry = build_wave_telemetry(
         active_runtime,
         recent_unique_peers.unique_count(Instant::now()),
+        demand_power_multiplier,
     );
     if *wave_telemetry_tx.borrow() != telemetry {
         let _ = wave_telemetry_tx.send(telemetry);

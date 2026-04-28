@@ -164,13 +164,14 @@ fn demand_planner_uses_metrics_when_building_routine_lookup_plan() {
 
     assert_eq!(start.candidate.info_hash, info_hash);
     assert_eq!(start.plan.class, DemandSliceClass::RoutineRefresh);
+    assert_eq!(start.plan.power_multiplier, 2);
     assert_eq!(
         start.plan.max_wall_time,
-        DHT_ROUTINE_SUPPORT_SLICE_WALL_TIME
+        DHT_ROUTINE_SUPPORT_SLICE_WALL_TIME * 2
     );
     assert_eq!(
         start.plan.unique_peer_cap,
-        DHT_ROUTINE_SUPPORT_SLICE_UNIQUE_PEER_CAP
+        DHT_ROUTINE_SUPPORT_SLICE_UNIQUE_PEER_CAP * 2
     );
     assert!(!start.plan.stop_after_first_batch);
 }

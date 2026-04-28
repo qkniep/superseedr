@@ -352,6 +352,9 @@ pub(super) fn trace_demand_planner_reduction(
         plan_launch_budget = ?plan.map(|plan| plan.launch_budget),
         plan_due_total = ?plan.map(|plan| plan.due_total),
         plan_spare_selected = ?plan.map(|plan| plan.spare_selected),
+        plan_idle_probe_selected = ?plan.map(|plan| plan.idle_probe_selected),
+        plan_idle_probe_active = ?plan.map(|plan| plan.idle_probe_active),
+        plan_idle_probe_demand_count = ?plan.map(|plan| plan.idle_probe_demand_count),
         plan_parked_count = ?plan.map(|plan| plan.parked_count),
         plan_draining_count = ?plan.map(|plan| plan.draining_count),
         plan_drain_virtual_slots = ?plan.map(|plan| plan.drain_virtual_slots),
@@ -416,6 +419,7 @@ impl DemandPlannerModel {
             let draining_demands = &mut self.draining_demands;
             let planner_state = &mut self.state;
             let planner_budget = &mut self.budget;
+            let idle_speed_probe = &mut self.idle_speed_probe;
 
             match action {
                 DemandPlannerAction::RuntimeReset { now } => {
@@ -427,6 +431,7 @@ impl DemandPlannerModel {
                     draining_demands.clear();
                     planner_state.clear();
                     *planner_budget = DemandPlannerBudget::new(now);
+                    *idle_speed_probe = DemandPlannerIdleSpeedProbe::default();
                     DemandPlannerReduction::default()
                 }
                 DemandPlannerAction::DemandRegistered {
@@ -566,6 +571,7 @@ impl DemandPlannerModel {
                                     !draining_demands.contains_key(&snapshot.info_hash)
                                 })
                                 .collect::<Vec<_>>();
+                            let idle_probe = idle_speed_probe.observe(&demand_snapshots, now);
                             let due_selection = select_due_demand_launches_with_stats(
                                 &due_candidates,
                                 active_counts,
@@ -592,6 +598,37 @@ impl DemandPlannerModel {
                                 })
                                 .collect::<Vec<_>>();
 
+                            let mut planned_counts = active_counts;
+                            let mut excluded = HashSet::new();
+                            for (candidate, _) in &planned_launches {
+                                planned_counts
+                                    .record(DemandSliceClass::from_demand(candidate.demand));
+                                excluded.insert(candidate.info_hash);
+                            }
+                            let idle_probe_selected = if idle_probe.active
+                                && planned_launches.len() < launch_budget
+                            {
+                                let remaining_budget =
+                                    launch_budget.saturating_sub(planned_launches.len());
+                                let launches = select_idle_speed_probe_launches(
+                                    &demand_snapshots,
+                                    planned_counts,
+                                    &excluded,
+                                    parked_crawls,
+                                    planner_state,
+                                    planner_budget,
+                                    now,
+                                    remaining_budget,
+                                );
+                                let selected_count = launches.len();
+                                planned_launches.extend(launches.into_iter().map(|candidate| {
+                                    (candidate, DemandSelectionReason::IdleSpeedProbe)
+                                }));
+                                selected_count
+                            } else {
+                                0
+                            };
+
                             if planned_launches.is_empty() {
                                 planned_launches = select_spare_research_launches(
                                     &demand_snapshots,
@@ -615,9 +652,12 @@ impl DemandPlannerModel {
                                 .count();
                             let mut effects = Vec::new();
                             for (candidate, selection_reason) in planned_launches {
-                                let plan = DemandLookupPlan::for_demand_with_metrics(
-                                    candidate.demand,
-                                    candidate.metrics,
+                                let plan = DemandLookupPlan::for_candidate(
+                                    candidate,
+                                    planner_state,
+                                    selection_reason,
+                                    idle_probe,
+                                    now,
                                 );
                                 if !demand_scheduler.mark_in_progress(candidate.info_hash) {
                                     planner_budget.refund(plan.class);
@@ -651,6 +691,9 @@ impl DemandPlannerModel {
                                     due_total: due_candidates.len(),
                                     selection_stats,
                                     spare_selected,
+                                    idle_probe_selected,
+                                    idle_probe_active: idle_probe.active,
+                                    idle_probe_demand_count: idle_probe.demand_count,
                                     active_counts,
                                     parked_count: parked_crawls.len(),
                                     draining_count: draining_demands.len(),

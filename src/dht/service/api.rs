@@ -196,7 +196,7 @@ impl DhtService {
             0,
             initial.bootstrap,
         );
-        let initial_wave_telemetry = build_wave_telemetry(initial.active_runtime.as_ref(), 0);
+        let initial_wave_telemetry = build_wave_telemetry(initial.active_runtime.as_ref(), 0, 1);
 
         let (status_tx, status_rx) = watch::channel(initial_status);
         let (wave_telemetry_tx, wave_telemetry_rx) = watch::channel(initial_wave_telemetry);

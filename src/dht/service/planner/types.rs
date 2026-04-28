@@ -473,6 +473,9 @@ pub(in crate::dht::service) struct DemandPlannerPlanStats {
     pub(in crate::dht::service) due_total: usize,
     pub(in crate::dht::service) selection_stats: DemandPlannerSelectionStats,
     pub(in crate::dht::service) spare_selected: usize,
+    pub(in crate::dht::service) idle_probe_selected: usize,
+    pub(in crate::dht::service) idle_probe_active: bool,
+    pub(in crate::dht::service) idle_probe_demand_count: usize,
     pub(in crate::dht::service) active_counts: DemandSlotCounts,
     pub(in crate::dht::service) parked_count: usize,
     pub(in crate::dht::service) draining_count: usize,
@@ -488,6 +491,115 @@ pub(in crate::dht::service) struct DemandPlannerReduction {
     pub(in crate::dht::service) plan_stats: Option<DemandPlannerPlanStats>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::dht::service) struct DemandPlannerIdleSpeedProbeStatus {
+    pub(in crate::dht::service) active: bool,
+    pub(in crate::dht::service) demand_count: usize,
+    pub(in crate::dht::service) multiplier: u8,
+}
+
+#[derive(Debug)]
+pub(in crate::dht::service) struct DemandPlannerIdleSpeedProbe {
+    idle_since: Option<Instant>,
+    current_multiplier: u8,
+    decay_since: Option<Instant>,
+}
+
+impl Default for DemandPlannerIdleSpeedProbe {
+    fn default() -> Self {
+        Self {
+            idle_since: None,
+            current_multiplier: 1,
+            decay_since: None,
+        }
+    }
+}
+
+impl DemandPlannerIdleSpeedProbe {
+    pub(in crate::dht::service) fn current_multiplier(&self, _now: Instant) -> u8 {
+        self.current_multiplier.max(1)
+    }
+
+    pub(in crate::dht::service) fn observe(
+        &mut self,
+        snapshots: &[DemandEntrySnapshot],
+        now: Instant,
+    ) -> DemandPlannerIdleSpeedProbeStatus {
+        let mut activity = 0u64;
+        let mut demand_count = 0usize;
+        for snapshot in snapshots {
+            if snapshot.subscriber_count == 0 {
+                continue;
+            }
+            activity = activity.saturating_add(snapshot.metrics.activity_bps_or_bytes());
+            if snapshot.metrics.wants_idle_speed_probe_for(snapshot.demand) {
+                demand_count = demand_count.saturating_add(1);
+            }
+        }
+
+        if demand_count == 0 {
+            self.current_multiplier = 1;
+            self.idle_since = None;
+            self.decay_since = None;
+            return DemandPlannerIdleSpeedProbeStatus::default();
+        }
+
+        if activity > 0 {
+            self.idle_since = None;
+            self.decay_after_activity(now);
+            return self.status(demand_count);
+        }
+
+        self.decay_since = None;
+        let idle_since = *self.idle_since.get_or_insert(now);
+        let idle_age = now.saturating_duration_since(idle_since);
+        let idle_multiplier = if idle_age >= DHT_IDLE_SPEED_PROBE_4X_MIN_IDLE {
+            4
+        } else if idle_age >= DHT_IDLE_SPEED_PROBE_3X_MIN_IDLE {
+            3
+        } else if idle_age >= DHT_IDLE_SPEED_PROBE_2X_MIN_IDLE {
+            2
+        } else {
+            1
+        };
+        self.current_multiplier = self.current_multiplier.max(idle_multiplier);
+        self.status(demand_count)
+    }
+
+    fn decay_after_activity(&mut self, now: Instant) {
+        if self.current_multiplier <= 1 {
+            self.current_multiplier = 1;
+            self.decay_since = None;
+            return;
+        }
+
+        let mut decay_since = *self.decay_since.get_or_insert(now);
+        while self.current_multiplier > 1 {
+            let Some(next_decay_at) = decay_since.checked_add(DHT_IDLE_SPEED_PROBE_DECAY_INTERVAL)
+            else {
+                self.current_multiplier = 1;
+                self.decay_since = None;
+                return;
+            };
+            if now < next_decay_at {
+                break;
+            }
+            self.current_multiplier = self.current_multiplier.saturating_sub(1).max(1);
+            decay_since = next_decay_at;
+        }
+        self.decay_since = (self.current_multiplier > 1).then_some(decay_since);
+    }
+
+    fn status(&self, demand_count: usize) -> DemandPlannerIdleSpeedProbeStatus {
+        let multiplier = self.current_multiplier.max(1);
+        DemandPlannerIdleSpeedProbeStatus {
+            active: multiplier > 1,
+            demand_count,
+            multiplier,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(in crate::dht::service) struct DemandPlannerModel {
     pub(in crate::dht::service) scheduler: DemandScheduler,
@@ -498,6 +610,7 @@ pub(in crate::dht::service) struct DemandPlannerModel {
     pub(in crate::dht::service) draining_demands: HashMap<InfoHash, DrainingDemandLookup>,
     pub(in crate::dht::service) state: HashMap<InfoHash, DemandPlannerState>,
     pub(in crate::dht::service) budget: DemandPlannerBudget,
+    pub(in crate::dht::service) idle_speed_probe: DemandPlannerIdleSpeedProbe,
 }
 
 impl DemandPlannerModel {
@@ -516,6 +629,7 @@ impl DemandPlannerModel {
             draining_demands: HashMap::new(),
             state: HashMap::new(),
             budget: DemandPlannerBudget::new(now),
+            idle_speed_probe: DemandPlannerIdleSpeedProbe::default(),
         }
     }
 
@@ -833,6 +947,7 @@ pub(in crate::dht::service) enum DemandSelectionReason {
     Fairness,
     OverdueScarce,
     SpareCapacity,
+    IdleSpeedProbe,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -845,6 +960,7 @@ pub(in crate::dht::service) struct DemandSliceClassMetrics {
     pub(in crate::dht::service) selected_fairness: u64,
     pub(in crate::dht::service) selected_overdue_scarce: u64,
     pub(in crate::dht::service) selected_spare_capacity: u64,
+    pub(in crate::dht::service) selected_idle_speed_probe: u64,
     pub(in crate::dht::service) natural_finishes: u64,
     pub(in crate::dht::service) wall_time_stops: u64,
     pub(in crate::dht::service) idle_timeout_stops: u64,
@@ -923,6 +1039,10 @@ impl DemandSliceMetrics {
             DemandSelectionReason::SpareCapacity => {
                 metrics.selected_spare_capacity = metrics.selected_spare_capacity.saturating_add(1)
             }
+            DemandSelectionReason::IdleSpeedProbe => {
+                metrics.selected_idle_speed_probe =
+                    metrics.selected_idle_speed_probe.saturating_add(1)
+            }
         }
     }
 
@@ -991,6 +1111,7 @@ impl DemandSliceMetrics {
                 || metrics.selected_fairness > 0
                 || metrics.selected_overdue_scarce > 0
                 || metrics.selected_spare_capacity > 0
+                || metrics.selected_idle_speed_probe > 0
                 || metrics.natural_finishes > 0
                 || metrics.wall_time_stops > 0
                 || metrics.idle_timeout_stops > 0
@@ -1011,7 +1132,7 @@ impl DemandSliceMetrics {
     pub(in crate::dht::service) fn summary(&self) -> String {
         fn fmt(label: &str, metrics: &DemandSliceClassMetrics) -> String {
             format!(
-                "{label}(fresh={} resumed={} sel_reuse={} sel_support={} sel_yield={} sel_fair={} sel_due={} sel_spare={} natural={} wall={} idle={} first={} cap={} peers={} unique={} reset_stale={} reset_class={} reset_quality={})",
+                "{label}(fresh={} resumed={} sel_reuse={} sel_support={} sel_yield={} sel_fair={} sel_due={} sel_spare={} sel_idle_probe={} natural={} wall={} idle={} first={} cap={} peers={} unique={} reset_stale={} reset_class={} reset_quality={})",
                 metrics.fresh_starts,
                 metrics.resumed_starts,
                 metrics.selected_reusable_parked,
@@ -1020,6 +1141,7 @@ impl DemandSliceMetrics {
                 metrics.selected_fairness,
                 metrics.selected_overdue_scarce,
                 metrics.selected_spare_capacity,
+                metrics.selected_idle_speed_probe,
                 metrics.natural_finishes,
                 metrics.wall_time_stops,
                 metrics.idle_timeout_stops,
@@ -1053,6 +1175,7 @@ pub(in crate::dht::service) struct DemandLookupPlan {
     pub(in crate::dht::service) max_wall_time: Duration,
     pub(in crate::dht::service) stop_after_first_batch: bool,
     pub(in crate::dht::service) unique_peer_cap: usize,
+    pub(in crate::dht::service) power_multiplier: u8,
 }
 
 impl DemandLookupPlan {
@@ -1071,6 +1194,7 @@ impl DemandLookupPlan {
                 max_wall_time: DHT_AWAITING_METADATA_SLICE_WALL_TIME,
                 stop_after_first_batch: false,
                 unique_peer_cap: DHT_AWAITING_METADATA_SLICE_UNIQUE_PEER_CAP,
+                power_multiplier: 1,
             },
             DemandSliceClass::NoConnectedPeers => Self {
                 class: DemandSliceClass::NoConnectedPeers,
@@ -1078,6 +1202,7 @@ impl DemandLookupPlan {
                 max_wall_time: DHT_NO_CONNECTED_PEERS_SLICE_WALL_TIME,
                 stop_after_first_batch: false,
                 unique_peer_cap: DHT_NO_CONNECTED_PEERS_SLICE_UNIQUE_PEER_CAP,
+                power_multiplier: 1,
             },
             DemandSliceClass::RoutineRefresh if metrics.wants_extended_routine_search() => Self {
                 class: DemandSliceClass::RoutineRefresh,
@@ -1085,6 +1210,7 @@ impl DemandLookupPlan {
                 max_wall_time: DHT_ROUTINE_SUPPORT_SLICE_WALL_TIME,
                 stop_after_first_batch: false,
                 unique_peer_cap: DHT_ROUTINE_SUPPORT_SLICE_UNIQUE_PEER_CAP,
+                power_multiplier: 1,
             },
             DemandSliceClass::RoutineRefresh => Self {
                 class: DemandSliceClass::RoutineRefresh,
@@ -1092,7 +1218,93 @@ impl DemandLookupPlan {
                 max_wall_time: DHT_ROUTINE_SLICE_WALL_TIME,
                 stop_after_first_batch: true,
                 unique_peer_cap: DHT_ROUTINE_SLICE_UNIQUE_PEER_CAP,
+                power_multiplier: 1,
             },
         }
     }
+
+    pub(in crate::dht::service) fn for_candidate(
+        candidate: DueDemandCandidate,
+        planner_state: &HashMap<InfoHash, DemandPlannerState>,
+        selection_reason: DemandSelectionReason,
+        idle_probe: DemandPlannerIdleSpeedProbeStatus,
+        now: Instant,
+    ) -> Self {
+        Self::for_demand_with_metrics(candidate.demand, candidate.metrics).with_power_multiplier(
+            demand_lookup_power_multiplier(
+                candidate,
+                planner_state,
+                selection_reason,
+                idle_probe,
+                now,
+            ),
+        )
+    }
+
+    fn with_power_multiplier(mut self, multiplier: u8) -> Self {
+        let multiplier = multiplier.max(1);
+        self.power_multiplier = multiplier;
+        if multiplier > 1 {
+            let multiplier = u32::from(multiplier);
+            self.idle_timeout = multiply_duration(self.idle_timeout, multiplier);
+            self.max_wall_time = multiply_duration(self.max_wall_time, multiplier);
+            self.unique_peer_cap = self.unique_peer_cap.saturating_mul(multiplier as usize);
+        }
+        self
+    }
+}
+
+fn multiply_duration(duration: Duration, multiplier: u32) -> Duration {
+    duration.checked_mul(multiplier).unwrap_or(Duration::MAX)
+}
+
+fn demand_lookup_power_multiplier(
+    candidate: DueDemandCandidate,
+    planner_state: &HashMap<InfoHash, DemandPlannerState>,
+    selection_reason: DemandSelectionReason,
+    idle_probe: DemandPlannerIdleSpeedProbeStatus,
+    now: Instant,
+) -> u8 {
+    let class = DemandSliceClass::from_demand(candidate.demand);
+    let idle_probe_multiplier = if idle_probe.active
+        && candidate
+            .metrics
+            .wants_idle_speed_probe_for(candidate.demand)
+    {
+        idle_probe.multiplier
+    } else {
+        1
+    };
+
+    if class == DemandSliceClass::AwaitingMetadata {
+        return 2.max(idle_probe_multiplier);
+    }
+    if class == DemandSliceClass::RoutineRefresh
+        && candidate.metrics.wants_extended_routine_search()
+    {
+        return 2.max(idle_probe_multiplier);
+    }
+
+    if !matches!(selection_reason, DemandSelectionReason::UsefulYieldHistory) {
+        return idle_probe_multiplier;
+    }
+
+    let Some(state) = planner_state.get(&candidate.info_hash) else {
+        return idle_probe_multiplier;
+    };
+    let Some(last_yield_at) = state.last_useful_yield_at else {
+        return idle_probe_multiplier;
+    };
+    let age = now.saturating_duration_since(last_yield_at);
+    if age > DHT_DEMAND_USEFUL_YIELD_BOOST_MAX_AGE || state.last_unique_peers == 0 {
+        return idle_probe_multiplier;
+    }
+    let yield_multiplier = if age <= DHT_DEMAND_STRONG_YIELD_BOOST_MAX_AGE
+        && state.last_unique_peers >= DHT_DEMAND_STRONG_YIELD_BOOST_MIN_UNIQUE_PEERS
+    {
+        3
+    } else {
+        2
+    };
+    yield_multiplier.max(idle_probe_multiplier)
 }

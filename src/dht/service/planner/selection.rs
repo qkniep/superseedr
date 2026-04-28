@@ -152,9 +152,6 @@ pub(in crate::dht::service) fn demand_candidate_priority_score(
     if candidate_wants_swarm_support(candidate) {
         score = score.saturating_add(3_000_000);
     }
-    if class == DemandSliceClass::NoConnectedPeers {
-        score = score.saturating_add(2_000_000);
-    }
     if candidate_has_useful_yield_history(planner_state, candidate.info_hash, now) {
         score = score.saturating_add(1_000_000);
     }
@@ -283,6 +280,86 @@ pub(in crate::dht::service) fn select_spare_research_launches(
         if !planner_budget.try_consume(DemandSliceClass::NoConnectedPeers, now) {
             break;
         }
+        selected.push(candidate);
+    }
+
+    selected
+}
+
+pub(in crate::dht::service) fn select_idle_speed_probe_launches(
+    demand_snapshots: &[DemandEntrySnapshot],
+    active_counts: DemandSlotCounts,
+    excluded: &HashSet<InfoHash>,
+    parked_crawls: &HashMap<InfoHash, DemandCrawlState>,
+    planner_state: &HashMap<InfoHash, DemandPlannerState>,
+    planner_budget: &mut DemandPlannerBudget,
+    now: Instant,
+    total_budget: usize,
+) -> Vec<DueDemandCandidate> {
+    if total_budget == 0 {
+        return Vec::new();
+    }
+
+    let mut candidates = demand_snapshots
+        .iter()
+        .copied()
+        .filter(|snapshot| {
+            snapshot.subscriber_count > 0
+                && !snapshot.in_progress
+                && !excluded.contains(&snapshot.info_hash)
+                && snapshot.metrics.wants_idle_speed_probe_for(snapshot.demand)
+                && spare_research_candidate_ready(planner_state, snapshot.info_hash, now)
+        })
+        .map(|snapshot| DueDemandCandidate {
+            info_hash: snapshot.info_hash,
+            demand: snapshot.demand,
+            metrics: snapshot.metrics,
+            next_eligible_at: snapshot.next_eligible_at,
+            subscriber_count: snapshot.subscriber_count,
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|left, right| {
+        let left_score = demand_candidate_priority_score(*left, planner_state, now);
+        let right_score = demand_candidate_priority_score(*right, planner_state, now);
+        let left_reusable = due_candidate_has_reusable_parked_crawl(parked_crawls, *left, now);
+        let right_reusable = due_candidate_has_reusable_parked_crawl(parked_crawls, *right, now);
+        let left_activity_age = candidate_last_activity_age(planner_state, left.info_hash, now);
+        let right_activity_age = candidate_last_activity_age(planner_state, right.info_hash, now);
+
+        right_score
+            .cmp(&left_score)
+            .then_with(|| right_reusable.cmp(&left_reusable))
+            .then_with(|| match (left_activity_age, right_activity_age) {
+                (Some(left_age), Some(right_age)) => right_age.cmp(&left_age),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| left.next_eligible_at.cmp(&right.next_eligible_at))
+            .then_with(|| {
+                left.demand
+                    .connected_peers
+                    .cmp(&right.demand.connected_peers)
+            })
+            .then_with(|| right.subscriber_count.cmp(&left.subscriber_count))
+    });
+
+    let mut selected = Vec::new();
+    let mut planned_counts = active_counts;
+    for candidate in candidates {
+        if selected.len() >= total_budget {
+            break;
+        }
+
+        let class = DemandSliceClass::from_demand(candidate.demand);
+        if planned_counts.count(class) >= demand_lookup_class_slot_cap(class) {
+            continue;
+        }
+        if !planner_budget.try_consume(class, now) {
+            continue;
+        }
+        planned_counts.record(class);
         selected.push(candidate);
     }
 

@@ -97,6 +97,7 @@ pub mod service {
         pub inflight_ipv4_queries: usize,
         pub inflight_ipv6_queries: usize,
         pub unique_peers_found_last_10s: usize,
+        pub demand_power_multiplier: u8,
     }
 
     #[derive(Debug, Clone, Default)]

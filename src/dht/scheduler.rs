@@ -52,6 +52,23 @@ pub struct DhtDemandMetrics {
 }
 
 impl DhtDemandMetrics {
+    pub(in crate::dht) fn activity_bps_or_bytes(self) -> u64 {
+        self.download_speed_bps
+            .saturating_add(self.upload_speed_bps)
+            .saturating_add(self.bytes_downloaded_this_tick)
+            .saturating_add(self.bytes_uploaded_this_tick)
+    }
+
+    pub(in crate::dht) fn wants_idle_speed_probe_for(self, demand: DhtDemandState) -> bool {
+        if self.paused || !self.accepting_new_peers {
+            return false;
+        }
+
+        demand.is_awaiting_metadata()
+            || demand.has_no_connected_peers()
+            || self.wants_extended_routine_search()
+    }
+
     pub(in crate::dht) fn wants_extended_routine_search(self) -> bool {
         if self.paused || !self.accepting_new_peers || self.connected_peers == 0 {
             return false;

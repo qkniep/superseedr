@@ -365,17 +365,17 @@ impl DataRate {
         }
     }
 
-    pub fn to_string(self) -> &'static str {
+    pub fn fps_label(self) -> &'static str {
         match self {
-            DataRate::RateQuarter => "0.25 FPS",
-            DataRate::RateHalf => "0.5 FPS",
-            DataRate::Rate1s => "1 FPS",
-            DataRate::Rate2s => "2 FPS",
-            DataRate::Rate4s => "4 FPS",
-            DataRate::Rate10s => "10 FPS",
-            DataRate::Rate20s => "20 FPS",
-            DataRate::Rate30s => "30 FPS",
-            DataRate::Rate60s => "60 FPS",
+            DataRate::RateQuarter => "0.25",
+            DataRate::RateHalf => "0.5",
+            DataRate::Rate1s => "1",
+            DataRate::Rate2s => "2",
+            DataRate::Rate4s => "4",
+            DataRate::Rate10s => "10",
+            DataRate::Rate20s => "20",
+            DataRate::Rate30s => "30",
+            DataRate::Rate60s => "60",
         }
     }
 
@@ -979,12 +979,17 @@ pub struct DhtWaveUiState {
     pub crest_bias: f64,
     pub bootstrap_ratio: f64,
     pub discovery_boost: f64,
+    pub query_load: f64,
+    pub query_surge: f64,
     pub initialized: bool,
 }
 
 #[derive(Default)]
 pub struct UiState {
     pub needs_redraw: bool,
+    pub measured_render_fps: f64,
+    pub render_frames_in_fps_window: u32,
+    pub render_fps_window_started_at: Option<Instant>,
     pub effects_phase_time: f64,
     pub effects_last_wall_time: f64,
     pub effects_speed_multiplier: f64,
@@ -1419,18 +1424,29 @@ struct DhtWaveTargets {
     phase_speed: f64,
     crest_bias: f64,
     bootstrap_ratio: f64,
+    query_load: f64,
 }
 
-fn dht_wave_query_yield_ratio(telemetry: &DhtWaveTelemetry) -> f64 {
+fn dht_wave_query_load_signal(telemetry: &DhtWaveTelemetry) -> f64 {
+    let total_queries = (telemetry.inflight_ipv4_queries + telemetry.inflight_ipv6_queries) as f64;
+
+    if total_queries <= 0.0 {
+        0.0
+    } else {
+        (total_queries / (total_queries + 40.0)).clamp(0.0, 1.0)
+    }
+}
+
+fn dht_wave_query_pressure_signal(telemetry: &DhtWaveTelemetry) -> f64 {
     let total_queries = (telemetry.inflight_ipv4_queries + telemetry.inflight_ipv6_queries) as f64;
     let unique_peers_found_last_10s = telemetry.unique_peers_found_last_10s as f64;
 
     if total_queries <= 0.0 {
         0.0
     } else if unique_peers_found_last_10s <= 0.0 {
-        (total_queries / 16.0).clamp(0.0, 1.0)
+        (total_queries / (total_queries + 32.0)).clamp(0.0, 1.0)
     } else {
-        (total_queries / unique_peers_found_last_10s).clamp(0.0, 1.0)
+        (total_queries / (total_queries + unique_peers_found_last_10s * 3.0)).clamp(0.0, 1.0)
     }
 }
 
@@ -1442,7 +1458,8 @@ fn dht_wave_targets(status: &DhtStatus, telemetry: &DhtWaveTelemetry) -> DhtWave
         (health.responsive_ipv4_bootstrap_nodes + health.responsive_ipv6_bootstrap_nodes) as f64;
 
     let route_energy = (routes / 2_048.0).clamp(0.0, 1.0);
-    let ratio_signal = (dht_wave_query_yield_ratio(telemetry) / 0.02).clamp(0.0, 1.0);
+    let query_load = dht_wave_query_load_signal(telemetry);
+    let pressure_signal = dht_wave_query_pressure_signal(telemetry);
     let bootstrap_ratio = if bootstrap_total > 0.0 {
         (responsive_total / bootstrap_total).clamp(0.0, 1.0)
     } else if health.enabled {
@@ -1457,33 +1474,40 @@ fn dht_wave_targets(status: &DhtStatus, telemetry: &DhtWaveTelemetry) -> DhtWave
         None => 0.88,
     };
     let warning_boost = f64::from(status.warning.is_some() || health.recovery_pending);
-    let activity_energy = ratio_signal.max((warning_boost * 0.55).clamp(0.0, 1.0));
+    let activity_energy = query_load
+        .max(pressure_signal * 0.72)
+        .max((warning_boost * 0.55).clamp(0.0, 1.0));
 
-    let amplitude = ((0.01 + activity_energy * (0.16 + route_energy * 0.20))
+    let amplitude = ((0.01
+        + query_load * (0.08 + route_energy * 0.12)
+        + pressure_signal * 0.13
+        + warning_boost * 0.04)
         * firewalled_factor
         * enabled_factor)
         .clamp(0.0, 0.52);
     let harmonic_amplitude = ((0.004
-        + activity_energy
-            * (0.03
-                + ratio_signal * 0.10
-                + (1.0 - bootstrap_ratio) * 0.04
-                + warning_boost * 0.04))
+        + query_load * 0.055
+        + pressure_signal * 0.075
+        + activity_energy * ((1.0 - bootstrap_ratio) * 0.04 + warning_boost * 0.04))
         * enabled_factor)
         .clamp(0.0, 0.20);
     let frequency = (0.08
-        + activity_energy
-            * (0.08 + ratio_signal * 0.12 + (1.0 - bootstrap_ratio) * 0.04 + warning_boost * 0.03))
+        + query_load * 0.15
+        + pressure_signal * 0.07
+        + activity_energy * ((1.0 - bootstrap_ratio) * 0.04 + warning_boost * 0.03))
         .clamp(0.06, 0.38);
     let phase_speed = ((0.03
-        + activity_energy * (0.45 + ratio_signal * 1.4 + warning_boost * 0.35))
+        + query_load * (0.35 + query_load * 0.85)
+        + pressure_signal * 0.48
+        + warning_boost * 0.35)
         * enabled_factor)
         .clamp(0.0, 2.0);
     let crest_bias = match health.firewalled {
         Some(true) => -0.10,
         Some(false) => 0.06,
         None => 0.0,
-    } + ((route_energy - 0.5) * 0.12 * activity_energy);
+    } + ((route_energy - 0.5) * 0.08 * activity_energy)
+        + ((query_load - 0.5) * 0.05 * pressure_signal);
 
     DhtWaveTargets {
         amplitude,
@@ -1492,6 +1516,7 @@ fn dht_wave_targets(status: &DhtStatus, telemetry: &DhtWaveTelemetry) -> DhtWave
         phase_speed,
         crest_bias: crest_bias.clamp(-0.22, 0.22),
         bootstrap_ratio,
+        query_load,
     }
 }
 
@@ -1519,11 +1544,21 @@ fn advance_dht_wave_state(
         wave.crest_bias = target_wave.crest_bias;
         wave.bootstrap_ratio = target_wave.bootstrap_ratio;
         wave.discovery_boost = target_discovery_boost;
+        wave.query_load = target_wave.query_load;
+        wave.query_surge = 0.0;
         wave.initialized = true;
     } else {
         let profile_blend = dht_wave_smoothing_factor(frame_dt, 9.0);
         let phase_speed_blend = dht_wave_smoothing_factor(frame_dt, 14.0);
         let discovery_blend = dht_wave_smoothing_factor(frame_dt, 12.0);
+        let query_blend = dht_wave_smoothing_factor(frame_dt, 16.0);
+        let query_load_delta = (target_wave.query_load - wave.query_load).abs();
+        let target_query_surge = (query_load_delta * 0.32).clamp(0.0, 0.18);
+        let query_surge_blend = if target_query_surge > wave.query_surge {
+            dht_wave_smoothing_factor(frame_dt, 22.0)
+        } else {
+            dht_wave_smoothing_factor(frame_dt, 6.0)
+        };
         smooth_dht_wave_component(&mut wave.amplitude, target_wave.amplitude, profile_blend);
         smooth_dht_wave_component(
             &mut wave.harmonic_amplitude,
@@ -1547,8 +1582,32 @@ fn advance_dht_wave_state(
             target_discovery_boost,
             discovery_blend,
         );
+        smooth_dht_wave_component(&mut wave.query_load, target_wave.query_load, query_blend);
+        smooth_dht_wave_component(&mut wave.query_surge, target_query_surge, query_surge_blend);
     }
-    wave.phase = (wave.phase + frame_dt * wave.phase_speed).rem_euclid(DHT_WAVE_PHASE_WRAP_PERIOD);
+    wave.phase = (wave.phase + frame_dt * (wave.phase_speed + wave.query_surge * 1.3))
+        .rem_euclid(DHT_WAVE_PHASE_WRAP_PERIOD);
+}
+
+fn record_rendered_frame(ui: &mut UiState, now: Instant) {
+    let Some(window_started_at) = ui.render_fps_window_started_at else {
+        ui.render_fps_window_started_at = Some(now);
+        ui.render_frames_in_fps_window = 0;
+        return;
+    };
+
+    ui.render_frames_in_fps_window = ui.render_frames_in_fps_window.saturating_add(1);
+    let elapsed = now.saturating_duration_since(window_started_at);
+    if elapsed >= Duration::from_secs(1) {
+        let elapsed_secs = elapsed.as_secs_f64();
+        ui.measured_render_fps = if elapsed_secs > 0.0 {
+            f64::from(ui.render_frames_in_fps_window) / elapsed_secs
+        } else {
+            0.0
+        };
+        ui.render_frames_in_fps_window = 0;
+        ui.render_fps_window_started_at = Some(now);
+    }
 }
 
 fn spawn_persistence_writer(
@@ -2985,6 +3044,7 @@ impl App {
                                 &self.client_configs,
                             );
                         })?;
+                        record_rendered_frame(&mut self.app_state.ui, Instant::now());
                         self.app_state.ui.needs_redraw = false;
                     }
                 }
@@ -6929,8 +6989,8 @@ mod tests {
     use super::{
         advance_dht_wave_state, align_unpinned_sort_with_visible_activity,
         apply_network_history_persist_result, build_persist_payload, build_torrent_preview_tree,
-        clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
-        flush_persistence_writer_parts, format_filesystem_path_error,
+        clamp_selected_indices_in_state, compose_system_warning, dht_wave_targets,
+        extract_magnet_display_name, flush_persistence_writer_parts, format_filesystem_path_error,
         is_valid_incoming_bittorrent_handshake, move_file_with_fallback_impl, parse_hybrid_hashes,
         persisted_validation_status_from_metrics, prune_rss_feed_errors, queue_persistence_payload,
         refresh_autosort_after_stats, resolve_magnet_torrent_name, rss_settings_changed,
@@ -6947,7 +7007,7 @@ mod tests {
         clear_shared_config_state_for_tests, set_app_paths_override_for_tests, TorrentSettings,
     };
     use crate::control_service::control_event_details;
-    use crate::dht_service::{DhtService, TestDhtRecorder};
+    use crate::dht_service::{DhtService, DhtStatus, DhtWaveTelemetry, TestDhtRecorder};
     use crate::errors::StorageError;
     use crate::integrations::control::{read_control_request, ControlRequest};
     use crate::integrations::status::{self, AppOutputState};
@@ -6965,7 +7025,7 @@ mod tests {
     use std::io;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::PathBuf;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio::sync::watch;
@@ -7181,6 +7241,33 @@ mod tests {
         assert!(App::should_draw_this_frame(&AppMode::PowerSaving, true));
     }
 
+    #[test]
+    fn rendered_frame_meter_reports_completed_frames_per_second() {
+        let mut ui = UiState::default();
+        let start = Instant::now();
+
+        super::record_rendered_frame(&mut ui, start);
+        for frame in 1_u64..=44 {
+            super::record_rendered_frame(
+                &mut ui,
+                start + std::time::Duration::from_nanos(frame * 1_000_000_000 / 44),
+            );
+        }
+
+        assert!((ui.measured_render_fps - 44.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn rendered_frame_meter_handles_fractional_fps() {
+        let mut ui = UiState::default();
+        let start = Instant::now();
+
+        super::record_rendered_frame(&mut ui, start);
+        super::record_rendered_frame(&mut ui, start + std::time::Duration::from_secs(4));
+
+        assert!((ui.measured_render_fps - 0.25).abs() < 0.01);
+    }
+
     fn test_dht_wave_targets(
         amplitude: f64,
         harmonic_amplitude: f64,
@@ -7196,13 +7283,15 @@ mod tests {
             phase_speed,
             crest_bias,
             bootstrap_ratio,
+            query_load: 0.0,
         }
     }
 
     fn test_dht_wave_signal_at(wave: &DhtWaveUiState, x: f64) -> f64 {
         let theta = x * wave.frequency;
         let envelope = 0.84 + 0.16 * (theta * 0.33 + wave.phase * 0.28).sin();
-        let dht_amplitude = (wave.amplitude + wave.discovery_boost).clamp(0.05, 0.78);
+        let dht_amplitude =
+            (wave.amplitude + wave.discovery_boost + wave.query_surge).clamp(0.05, 0.78);
         let carrier = wave.crest_bias * 0.35
             + envelope * dht_amplitude * (theta + wave.phase).sin()
             + wave.harmonic_amplitude * ((theta * 2.35) - wave.phase * 0.72).sin();
@@ -7210,10 +7299,52 @@ mod tests {
     }
 
     #[test]
+    fn dht_wave_targets_remain_reactive_above_ten_queries() {
+        let mut status = DhtStatus::default();
+        status.health.enabled = true;
+        status.health.firewalled = Some(false);
+        status.health.cached_ipv4_routes = 900;
+
+        let q10 = dht_wave_targets(
+            &status,
+            &DhtWaveTelemetry {
+                inflight_ipv4_queries: 10,
+                ..Default::default()
+            },
+        );
+        let q48 = dht_wave_targets(
+            &status,
+            &DhtWaveTelemetry {
+                inflight_ipv4_queries: 48,
+                ..Default::default()
+            },
+        );
+        let q96 = dht_wave_targets(
+            &status,
+            &DhtWaveTelemetry {
+                inflight_ipv4_queries: 96,
+                ..Default::default()
+            },
+        );
+
+        assert!(q10.query_load < 0.30);
+        assert!(q48.query_load > q10.query_load);
+        assert!(q96.query_load > q48.query_load);
+        assert!(q48.amplitude > q10.amplitude);
+        assert!(q48.harmonic_amplitude > q10.harmonic_amplitude);
+        assert!(q48.frequency > q10.frequency);
+        assert!(q48.phase_speed > q10.phase_speed);
+    }
+
+    #[test]
     fn dht_wave_state_smooths_60fps_target_transition() {
         let frame_dt = 1.0 / 60.0;
         let idle = test_dht_wave_targets(0.01, 0.004, 0.08, 0.03, 0.0, 1.0);
         let busy = test_dht_wave_targets(0.36, 0.12, 0.24, 1.2, 0.10, 1.0);
+        let busy = DhtWaveTargets {
+            query_load: 0.75,
+            ..busy
+        };
         let mut wave = DhtWaveUiState::default();
 
         advance_dht_wave_state(&mut wave, idle, 0.0, frame_dt);
@@ -7278,6 +7409,8 @@ mod tests {
             crest_bias: target.crest_bias,
             bootstrap_ratio: target.bootstrap_ratio,
             discovery_boost: 0.0,
+            query_load: target.query_load,
+            query_surge: 0.0,
             initialized: true,
         };
 

@@ -240,6 +240,10 @@ pub(in crate::dht::service) async fn run_service(
             &wave_telemetry_tx,
             active_runtime.as_ref(),
             &mut service_state.recent_unique_peers,
+            service_state
+                .demand_planner
+                .idle_speed_probe
+                .current_multiplier(Instant::now()),
         );
     }
 }
