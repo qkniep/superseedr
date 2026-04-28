@@ -1246,7 +1246,6 @@ impl DemandLookupPlan {
         self.power_multiplier = multiplier;
         if multiplier > 1 {
             let multiplier = u32::from(multiplier);
-            self.idle_timeout = multiply_duration(self.idle_timeout, multiplier);
             self.max_wall_time = multiply_duration(self.max_wall_time, multiplier);
             self.unique_peer_cap = self.unique_peer_cap.saturating_mul(multiplier as usize);
         }

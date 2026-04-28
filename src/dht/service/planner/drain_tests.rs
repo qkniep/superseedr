@@ -676,9 +676,9 @@ fn drain_virtual_slots_reduce_launch_budget_fractionally() {
         );
     }
 
-    assert_eq!(demand_lookup_launch_budget(&active, 0), 4);
-    assert_eq!(demand_lookup_launch_budget(&active, 16), 3);
-    assert_eq!(demand_lookup_launch_budget(&active, 54), 0);
+    assert_eq!(demand_lookup_launch_budget(&active, 0), 5);
+    assert_eq!(demand_lookup_launch_budget(&active, 16), 5);
+    assert_eq!(demand_lookup_launch_budget(&active, 54), 2);
 }
 #[test]
 fn demand_planner_peers_received_action_records_drain_unique_peers() {

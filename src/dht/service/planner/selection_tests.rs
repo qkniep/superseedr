@@ -560,7 +560,10 @@ fn demand_lookup_launch_budget_respects_active_slot_cap() {
             },
         );
     }
-    assert_eq!(demand_lookup_launch_budget(&active, 0), 2);
+    assert_eq!(
+        demand_lookup_launch_budget(&active, 0),
+        DHT_DEMAND_LOOKUP_SLOT_FILL_PER_TICK.min(DHT_DEMAND_LOOKUP_SLOT_COUNT - 6)
+    );
 
     for byte in 6..10u8 {
         active.insert(
