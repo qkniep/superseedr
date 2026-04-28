@@ -459,19 +459,15 @@ mod tests {
     }
 
     #[test]
-    fn test_footer_fps_label_shows_actual_over_target() {
+    fn test_footer_fps_label_shows_target_only() {
         let app_state = crate::app::AppState {
             data_rate: crate::app::DataRate::Rate60s,
-            ui: crate::app::UiState {
-                measured_render_fps: 44.2,
-                ..Default::default()
-            },
             ..Default::default()
         };
 
         assert_eq!(
             crate::tui::screens::normal::footer_fps_label(&app_state),
-            "44/60fps"
+            "60fps"
         );
     }
 
@@ -479,16 +475,12 @@ mod tests {
     fn test_footer_fps_label_preserves_fractional_targets() {
         let app_state = crate::app::AppState {
             data_rate: crate::app::DataRate::RateQuarter,
-            ui: crate::app::UiState {
-                measured_render_fps: 0.25,
-                ..Default::default()
-            },
             ..Default::default()
         };
 
         assert_eq!(
             crate::tui::screens::normal::footer_fps_label(&app_state),
-            "0.25/0.25fps"
+            "0.25fps"
         );
     }
 }

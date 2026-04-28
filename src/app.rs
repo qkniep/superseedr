@@ -987,9 +987,6 @@ pub struct DhtWaveUiState {
 #[derive(Default)]
 pub struct UiState {
     pub needs_redraw: bool,
-    pub measured_render_fps: f64,
-    pub render_frames_in_fps_window: u32,
-    pub render_fps_window_started_at: Option<Instant>,
     pub effects_phase_time: f64,
     pub effects_last_wall_time: f64,
     pub effects_speed_multiplier: f64,
@@ -1587,27 +1584,6 @@ fn advance_dht_wave_state(
     }
     wave.phase = (wave.phase + frame_dt * (wave.phase_speed + wave.query_surge * 1.3))
         .rem_euclid(DHT_WAVE_PHASE_WRAP_PERIOD);
-}
-
-fn record_rendered_frame(ui: &mut UiState, now: Instant) {
-    let Some(window_started_at) = ui.render_fps_window_started_at else {
-        ui.render_fps_window_started_at = Some(now);
-        ui.render_frames_in_fps_window = 0;
-        return;
-    };
-
-    ui.render_frames_in_fps_window = ui.render_frames_in_fps_window.saturating_add(1);
-    let elapsed = now.saturating_duration_since(window_started_at);
-    if elapsed >= Duration::from_secs(1) {
-        let elapsed_secs = elapsed.as_secs_f64();
-        ui.measured_render_fps = if elapsed_secs > 0.0 {
-            f64::from(ui.render_frames_in_fps_window) / elapsed_secs
-        } else {
-            0.0
-        };
-        ui.render_frames_in_fps_window = 0;
-        ui.render_fps_window_started_at = Some(now);
-    }
 }
 
 fn spawn_persistence_writer(
@@ -3044,7 +3020,6 @@ impl App {
                                 &self.client_configs,
                             );
                         })?;
-                        record_rendered_frame(&mut self.app_state.ui, Instant::now());
                         self.app_state.ui.needs_redraw = false;
                     }
                 }
@@ -7025,7 +7000,7 @@ mod tests {
     use std::io;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::PathBuf;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio::sync::watch;
@@ -7239,33 +7214,6 @@ mod tests {
     fn should_only_draw_dirty_in_power_saving_mode() {
         assert!(!App::should_draw_this_frame(&AppMode::PowerSaving, false));
         assert!(App::should_draw_this_frame(&AppMode::PowerSaving, true));
-    }
-
-    #[test]
-    fn rendered_frame_meter_reports_completed_frames_per_second() {
-        let mut ui = UiState::default();
-        let start = Instant::now();
-
-        super::record_rendered_frame(&mut ui, start);
-        for frame in 1_u64..=44 {
-            super::record_rendered_frame(
-                &mut ui,
-                start + std::time::Duration::from_nanos(frame * 1_000_000_000 / 44),
-            );
-        }
-
-        assert!((ui.measured_render_fps - 44.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn rendered_frame_meter_handles_fractional_fps() {
-        let mut ui = UiState::default();
-        let start = Instant::now();
-
-        super::record_rendered_frame(&mut ui, start);
-        super::record_rendered_frame(&mut ui, start + std::time::Duration::from_secs(4));
-
-        assert!((ui.measured_render_fps - 0.25).abs() < 0.01);
     }
 
     fn test_dht_wave_targets(

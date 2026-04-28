@@ -1129,36 +1129,8 @@ pub(crate) fn compute_footer_status_width(client_port: u16, overall_port_status:
         + FOOTER_STATUS_GUTTER
 }
 
-fn trim_footer_fps_number(mut value: String) -> String {
-    if value.contains('.') {
-        while value.ends_with('0') {
-            value.pop();
-        }
-        if value.ends_with('.') {
-            value.pop();
-        }
-    }
-    value
-}
-
-pub(crate) fn format_measured_render_fps(fps: f64) -> String {
-    if !fps.is_finite() || fps <= 0.0 {
-        "0".to_string()
-    } else if fps >= 10.0 {
-        format!("{fps:.0}")
-    } else if fps >= 1.0 {
-        trim_footer_fps_number(format!("{fps:.1}"))
-    } else {
-        trim_footer_fps_number(format!("{fps:.2}"))
-    }
-}
-
 pub(crate) fn footer_fps_label(app_state: &AppState) -> String {
-    format!(
-        "{}/{}fps",
-        format_measured_render_fps(app_state.ui.measured_render_fps),
-        app_state.data_rate.fps_label()
-    )
+    format!("{}fps", app_state.data_rate.fps_label())
 }
 
 fn estimate_footer_left_content_width(app_state: &AppState, ctx: &ThemeContext) -> u16 {
