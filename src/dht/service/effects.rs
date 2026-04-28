@@ -581,6 +581,21 @@ pub(in crate::dht::service) async fn start_due_demands(
         .await
         {
             Ok(started) => {
+                if started
+                    .lookup_ids
+                    .lock()
+                    .expect("managed dht lookup ids lock")
+                    .is_empty()
+                {
+                    service_state.update_demand_planner_action(
+                        DemandPlannerAction::LookupStartFailed {
+                            info_hash,
+                            slice_class: plan.class,
+                            now: Instant::now(),
+                        },
+                    );
+                    continue;
+                }
                 service_state.update_demand_planner_action(DemandPlannerAction::LookupStarted {
                     info_hash,
                     slice_class: plan.class,

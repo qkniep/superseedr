@@ -54,6 +54,36 @@ async fn start_get_peers_lookup_without_seed_candidates_returns_empty_lookup() {
 }
 
 #[tokio::test]
+async fn start_due_demands_treats_empty_runtime_lookup_as_start_failure() {
+    let mut active_runtime = local_ipv4_active_runtime_without_bootstrap().await;
+    let config = disabled_service_config();
+    let mut service_state = DhtServiceState::new(config, 0, None);
+    let info_hash = hash_index(75);
+    let now = Instant::now();
+    let (command_tx, _command_rx) = mpsc::unbounded_channel();
+
+    service_state.update_demand_planner_action(DemandPlannerAction::DemandRegistered {
+        info_hash,
+        demand: DhtDemandState {
+            awaiting_metadata: false,
+            connected_peers: 0,
+        },
+        now,
+    });
+
+    start_due_demands(Some(&mut active_runtime), &command_tx, &mut service_state).await;
+
+    let snapshot = service_state
+        .demand_planner
+        .scheduler
+        .entry_snapshot(info_hash)
+        .expect("registered demand remains tracked");
+    assert!(!snapshot.in_progress);
+    assert!(service_state.demand_planner.active.is_empty());
+    assert!(service_state.demand_planner.pending_starts.is_empty());
+}
+
+#[tokio::test]
 async fn runtime_backed_park_lookup_moves_active_state_to_parked_crawl() {
     let mut active_runtime = local_ipv4_active_runtime().await;
     let info_hash = hash_index(76);
