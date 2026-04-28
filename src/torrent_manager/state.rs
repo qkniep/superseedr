@@ -38,6 +38,7 @@ const MAX_BLOCK_SIZE: u32 = 131_072;
 const UPLOAD_SLOTS_DEFAULT: usize = 4;
 const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 60;
 pub const MAX_PIPELINE_DEPTH: usize = 512;
+const KNOWN_SEEDER_TTL: Duration = Duration::from_secs(60 * 60);
 
 // Quality gate: once we have this many connected peers, pause admitting new peers
 // to avoid churn storms. This is intentionally independent of resource-manager limits.
@@ -339,6 +340,7 @@ pub struct TorrentState {
     pub trackers: HashMap<String, TrackerState>,
     pub timed_out_peers: HashMap<String, (u32, Instant)>,
     pub last_known_peers: HashSet<String>,
+    pub known_seeders: HashMap<String, Instant>,
     pub optimistic_unchoke_timer: Option<Instant>,
     pub validation_pieces_found: u32,
     pub now: Instant,
@@ -381,6 +383,7 @@ impl Default for TorrentState {
             trackers: HashMap::new(),
             timed_out_peers: HashMap::new(),
             last_known_peers: HashSet::new(),
+            known_seeders: HashMap::new(),
             optimistic_unchoke_timer: None,
             validation_pieces_found: 0,
             now: Instant::now(),
@@ -1885,6 +1888,9 @@ impl TorrentState {
             Action::Cleanup => {
                 let mut effects = Vec::new();
 
+                self.known_seeders
+                    .retain(|_, expires_at| self.now < *expires_at);
+
                 self.timed_out_peers
                     .retain(|_, (retry_count, _)| *retry_count < MAX_TIMEOUT_COUNT);
 
@@ -1936,6 +1942,15 @@ impl TorrentState {
                         if !peer.bitfield.is_empty()
                             && peer.bitfield.iter().all(|&has_piece| has_piece)
                         {
+                            self.known_seeders
+                                .insert(peer_id.clone(), self.now + KNOWN_SEEDER_TTL);
+                            tracing::debug!(
+                                target: "superseedr::peer_filter",
+                                event = "observed_full_bitfield_seeder",
+                                peer_id = %peer_id,
+                                known_seeders = self.known_seeders.len(),
+                                "observed full-bitfield seeder while already seeding"
+                            );
                             peers_to_disconnect.push(peer_id.clone());
                         }
                     }
@@ -2032,6 +2047,7 @@ impl TorrentState {
             Action::Delete => {
                 self.peers.clear();
                 self.last_known_peers.clear();
+                self.known_seeders.clear();
                 self.timed_out_peers.clear();
 
                 self.v2_proofs.clear();
@@ -3216,6 +3232,43 @@ mod tests {
             e,
             Effect::EmitManagerEvent(ManagerEvent::PeerDisconnected { .. })
         )));
+    }
+
+    #[test]
+    fn test_cleanup_records_full_bitfield_seeders_when_seeding() {
+        let mut state = create_empty_state();
+        state.torrent = Some(create_dummy_torrent(2));
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.bitfield = vec![PieceStatus::Done, PieceStatus::Done];
+        state.piece_manager.pieces_remaining = 0;
+        state.torrent_status = TorrentStatus::Done;
+
+        let peer_id = "127.0.0.1:6881";
+        add_peer(&mut state, peer_id);
+        state.peers.get_mut(peer_id).unwrap().bitfield = vec![true, true];
+
+        let effects = state.update(Action::Cleanup);
+
+        assert!(state
+            .known_seeders
+            .get(peer_id)
+            .is_some_and(|expires_at| *expires_at > state.now));
+        assert!(effects.iter().any(
+            |effect| matches!(effect, Effect::DisconnectPeer { peer_id: id } if id == peer_id)
+        ));
+    }
+
+    #[test]
+    fn test_cleanup_prunes_expired_known_seeders() {
+        let mut state = create_empty_state();
+        let peer_id = "127.0.0.1:6881".to_string();
+        let expires_at = state.now + Duration::from_secs(1);
+        state.known_seeders.insert(peer_id.clone(), expires_at);
+        state.now = expires_at + Duration::from_secs(1);
+
+        let _ = state.update(Action::Cleanup);
+
+        assert!(!state.known_seeders.contains_key(&peer_id));
     }
 
     #[test]

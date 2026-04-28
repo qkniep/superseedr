@@ -1888,6 +1888,27 @@ impl TorrentManager {
             });
 
         let peer_ip_port = peer_addr.to_string();
+        if self.state.torrent_status == TorrentStatus::Done {
+            if let Some(&expires_at) = self.state.known_seeders.get(&peer_ip_port) {
+                if Instant::now() < expires_at {
+                    tracing::debug!(
+                        target: "superseedr::peer_filter",
+                        event = "skip_known_seeder",
+                        peer = %peer_ip_port,
+                        "skipping outbound connect to known seeder"
+                    );
+                    return;
+                } else {
+                    self.state.known_seeders.remove(&peer_ip_port);
+                    tracing::debug!(
+                        target: "superseedr::peer_filter",
+                        event = "expired_known_seeder",
+                        peer = %peer_ip_port,
+                        "expired known seeder entry before outbound connect"
+                    );
+                }
+            }
+        }
 
         if let Some((failure_count, next_attempt_time)) =
             self.state.timed_out_peers.get(&peer_ip_port)
@@ -3391,6 +3412,28 @@ mod resource_tests {
             global_ul_bucket: Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)),
             file_priorities: HashMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_connect_to_peer_skips_unexpired_known_seeder() {
+        let mut manager =
+            TorrentManager::from_torrent(build_test_params(), create_dummy_torrent(1))
+                .expect("manager from torrent");
+        manager.state.torrent_status = TorrentStatus::Done;
+
+        let peer_addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+        let peer_key = peer_addr.to_string();
+        manager
+            .state
+            .known_seeders
+            .insert(peer_key.clone(), Instant::now() + Duration::from_secs(60));
+
+        manager.connect_to_peer(peer_addr);
+
+        assert!(
+            !manager.state.peers.contains_key(&peer_key),
+            "known seeders should not be registered for outbound connection"
+        );
     }
 
     #[cfg(feature = "dht")]
