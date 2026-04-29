@@ -286,6 +286,7 @@ pub(in crate::dht::service) fn select_spare_research_launches(
     selected
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::dht::service) fn select_idle_speed_probe_launches(
     demand_snapshots: &[DemandEntrySnapshot],
     active_counts: DemandSlotCounts,

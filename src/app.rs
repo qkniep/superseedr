@@ -6971,11 +6971,11 @@ mod tests {
         refresh_autosort_after_stats, resolve_magnet_torrent_name, rss_settings_changed,
         should_load_persisted_torrent, should_persist_network_history_on_interval,
         sort_and_filter_torrent_list_state, torrent_completion_percent,
-        torrent_is_effectively_incomplete, watched_parent_matches, App, AppClusterRole, AppCommand,
-        AppMode, AppRuntimeMode, AppState, ColumnId, CommandIngestResult, DhtWaveTargets,
-        DhtWaveUiState, FilePriority, IngestSource, ListenerSet, PeerInfo, PeerSortColumn,
-        PersistPayload, SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState,
-        TorrentMetrics, TorrentPreviewPayload, TorrentSortColumn, UiState, BITTORRENT_PROTOCOL_STR,
+        torrent_is_effectively_incomplete, App, AppClusterRole, AppCommand, AppMode,
+        AppRuntimeMode, AppState, ColumnId, CommandIngestResult, DhtWaveTargets, DhtWaveUiState,
+        FilePriority, IngestSource, ListenerSet, PeerInfo, PeerSortColumn, PersistPayload,
+        SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState, TorrentMetrics,
+        TorrentPreviewPayload, TorrentSortColumn, UiState, BITTORRENT_PROTOCOL_STR,
         DHT_WAVE_PHASE_WRAP_PERIOD,
     };
     use crate::config::{
@@ -9126,7 +9126,7 @@ mod tests {
                 .display()
         ));
 
-        assert!(watched_parent_matches(
+        assert!(super::watched_parent_matches(
             &verbatim_missing_path,
             &effective_root.join("inbox")
         ));
