@@ -64,6 +64,11 @@ pub enum Commands {
     ClearSharedConfig,
     #[command(about = "Show the effective shared root selection and its source")]
     ShowSharedConfig,
+    #[command(about = "Show resolved config, log, status, journal, and watch paths")]
+    ShowConfigs {
+        #[arg(long, help = "Include launcher, local, and shared layer details")]
+        all: bool,
+    },
     #[command(about = "Persist an explicit host identity for shared mode (optional)")]
     SetHostId {
         #[arg(
@@ -351,6 +356,7 @@ where
         | Commands::SetSharedConfig { .. }
         | Commands::ClearSharedConfig
         | Commands::ShowSharedConfig
+        | Commands::ShowConfigs { .. }
         | Commands::SetHostId { .. }
         | Commands::ClearHostId
         | Commands::ShowHostId

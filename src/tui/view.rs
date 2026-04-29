@@ -467,7 +467,7 @@ mod tests {
 
         assert_eq!(
             crate::tui::screens::normal::footer_fps_label(&app_state),
-            "60fps"
+            "60 fps"
         );
     }
 
@@ -480,7 +480,7 @@ mod tests {
 
         assert_eq!(
             crate::tui::screens::normal::footer_fps_label(&app_state),
-            "0.25fps"
+            "0.25 fps"
         );
     }
 }

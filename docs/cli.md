@@ -48,6 +48,7 @@ Inspect current state:
 superseedr status
 superseedr torrents
 superseedr journal
+superseedr show-configs
 ```
 
 Pause and resume:
@@ -163,6 +164,27 @@ Shared-config precedence is:
 1. `SUPERSEEDR_SHARED_CONFIG_DIR`
 2. persisted launcher shared-config sidecar
 3. normal standalone mode
+
+### `show-configs`
+
+```bash
+superseedr show-configs
+superseedr --json show-configs
+superseedr show-configs --all
+```
+
+Show resolved absolute paths and short descriptions for the effective config,
+log, status, journal, lock, and watch paths.
+
+Behavior:
+
+- default mode: reports only the effective paths Superseedr is actually using
+- `--all`: also reports launcher sidecars, local fallback paths, and shared
+  cluster internals
+- relative paths from settings are resolved to absolute paths without requiring
+  the destination to already exist
+- JSON mode keeps the resolved path tree and adds a `descriptions` array keyed
+  by section and field name
 
 ### `set-host-id`
 

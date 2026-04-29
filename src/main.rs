@@ -105,6 +105,477 @@ enum OutputMode {
     Json,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct ShowConfigsSnapshot {
+    shared_mode: bool,
+    host: HostIdentitySnapshot,
+    launcher: LauncherPathsSnapshot,
+    local: LocalPathsSnapshot,
+    effective: EffectivePathsSnapshot,
+    shared: Option<SharedPathsSnapshot>,
+    settings: SettingsPathSnapshot,
+    settings_load_error: Option<String>,
+    descriptions: Vec<ShowConfigsDescription>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct HostIdentitySnapshot {
+    host_id: String,
+    source: HostIdSource,
+    sidecar_path: Option<PathBuf>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LauncherPathsSnapshot {
+    shared_config_sidecar_path: Option<PathBuf>,
+    host_id_sidecar_path: Option<PathBuf>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LocalPathsSnapshot {
+    config_dir: Option<PathBuf>,
+    settings_path: Option<PathBuf>,
+    torrent_metadata_path: Option<PathBuf>,
+    config_backups_dir: Option<PathBuf>,
+    runtime_data_dir: Option<PathBuf>,
+    app_log_dir: Option<PathBuf>,
+    cli_log_dir: Option<PathBuf>,
+    persistence_dir: Option<PathBuf>,
+    event_journal_file: Option<PathBuf>,
+    status_file: Option<PathBuf>,
+    lock_file: Option<PathBuf>,
+    watch_dir: Option<PathBuf>,
+    processed_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct EffectiveConfigFilesSnapshot {
+    settings_path: Option<PathBuf>,
+    catalog_path: Option<PathBuf>,
+    torrent_metadata_path: Option<PathBuf>,
+    host_config_path: Option<PathBuf>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct EffectivePathsSnapshot {
+    config_files: EffectiveConfigFilesSnapshot,
+    runtime_data_dir: Option<PathBuf>,
+    app_log_dir: Option<PathBuf>,
+    local_app_log_dir: Option<PathBuf>,
+    cli_log_dir: Option<PathBuf>,
+    persistence_dir: Option<PathBuf>,
+    event_journal_file: Option<PathBuf>,
+    shared_event_journal_file: Option<PathBuf>,
+    status_file: Option<PathBuf>,
+    host_status_file: Option<PathBuf>,
+    lock_file: Option<PathBuf>,
+    command_watch_dir: Option<PathBuf>,
+    host_watch_dir: Option<PathBuf>,
+    runtime_watch_dirs: Vec<PathBuf>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SharedPathsSnapshot {
+    source: SharedConfigSource,
+    mount_root: PathBuf,
+    config_root: PathBuf,
+    settings_path: PathBuf,
+    catalog_path: PathBuf,
+    torrent_metadata_path: PathBuf,
+    torrents_dir: PathBuf,
+    cluster_revision_file: PathBuf,
+    lock_file: PathBuf,
+    inbox_dir: PathBuf,
+    processed_dir: PathBuf,
+    data_root: PathBuf,
+    host_dir: PathBuf,
+    host_config_path: PathBuf,
+    host_status_file: PathBuf,
+    leader_status_file: PathBuf,
+    host_log_dir: PathBuf,
+    host_persistence_dir: PathBuf,
+    shared_event_journal_file: PathBuf,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SettingsPathSnapshot {
+    default_download_folder: Option<PathBuf>,
+    watch_folder: Option<PathBuf>,
+    client_port: Option<u16>,
+    output_status_interval: Option<u64>,
+}
+
+#[derive(Debug, serde::Serialize, Clone, Copy)]
+struct ShowConfigsDescription {
+    section: &'static str,
+    key: &'static str,
+    label: &'static str,
+    description: &'static str,
+}
+
+const SHOW_CONFIG_DESCRIPTIONS: &[ShowConfigsDescription] = &[
+    ShowConfigsDescription {
+        section: "root",
+        key: "shared_mode",
+        label: "Shared Mode",
+        description: "Whether Superseedr is using the shared cluster config backend.",
+    },
+    ShowConfigsDescription {
+        section: "host",
+        key: "host_id",
+        label: "Host ID",
+        description: "Host identity used for shared host config, status, logs, and runtime state.",
+    },
+    ShowConfigsDescription {
+        section: "host",
+        key: "source",
+        label: "Host ID source",
+        description: "Where the effective host identity came from.",
+    },
+    ShowConfigsDescription {
+        section: "host",
+        key: "sidecar_path",
+        label: "Host ID sidecar",
+        description: "Per-user launcher file that stores a pinned host identity.",
+    },
+    ShowConfigsDescription {
+        section: "launcher",
+        key: "shared_config_sidecar_path",
+        label: "Shared config sidecar",
+        description: "Per-user launcher file that points installed or protocol starts at a shared root.",
+    },
+    ShowConfigsDescription {
+        section: "launcher",
+        key: "host_id_sidecar_path",
+        label: "Host ID sidecar",
+        description: "Per-user launcher file that pins the shared-mode host identity.",
+    },
+    ShowConfigsDescription {
+        section: "effective.config_files",
+        key: "settings_path",
+        label: "Settings",
+        description: "Active settings file for this run mode.",
+    },
+    ShowConfigsDescription {
+        section: "effective.config_files",
+        key: "catalog_path",
+        label: "Catalog",
+        description: "Shared-mode torrent catalog; unavailable in standalone mode.",
+    },
+    ShowConfigsDescription {
+        section: "effective.config_files",
+        key: "torrent_metadata_path",
+        label: "Torrent metadata",
+        description: "Active metadata cache for torrent names and persisted torrent-file references.",
+    },
+    ShowConfigsDescription {
+        section: "effective.config_files",
+        key: "host_config_path",
+        label: "Host config",
+        description: "Shared-mode host-specific config layer for this host.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "runtime_data_dir",
+        label: "Runtime data",
+        description: "Active runtime state directory for the current mode.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "app_log_dir",
+        label: "App logs",
+        description: "Directory used by the running app for rolling log files.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "local_app_log_dir",
+        label: "Local app logs",
+        description: "Always-local app log directory used outside shared host storage or as fallback context.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "cli_log_dir",
+        label: "CLI logs",
+        description: "Directory used by CLI invocations for command logs.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "persistence_dir",
+        label: "Persistence",
+        description: "Active runtime persistence directory for host-local history and journals.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "event_journal_file",
+        label: "Event journal",
+        description: "Host-local event journal file.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "shared_event_journal_file",
+        label: "Shared event journal",
+        description: "Shared cluster event journal file used in shared mode.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "status_file",
+        label: "Status file",
+        description: "Status snapshot read by the status command; leader snapshot in shared mode.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "host_status_file",
+        label: "Host status file",
+        description: "This host's own runtime status snapshot.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "lock_file",
+        label: "Lock file",
+        description: "Single-instance or shared-leader election lock file.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "command_watch_dir",
+        label: "Command watch dir",
+        description: "Directory where CLI commands write control or add request files.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "host_watch_dir",
+        label: "Host watch dir",
+        description: "Directory this host watches for local torrent, magnet, or path inputs.",
+    },
+    ShowConfigsDescription {
+        section: "effective",
+        key: "runtime_watch_dirs",
+        label: "Runtime watch dirs",
+        description: "All directories the current runtime watches for input or shared changes.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "config_dir",
+        label: "Config dir",
+        description: "Per-user standalone config directory.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "settings_path",
+        label: "Settings",
+        description: "Standalone settings.toml path.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "torrent_metadata_path",
+        label: "Torrent metadata",
+        description: "Standalone torrent metadata cache path.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "config_backups_dir",
+        label: "Config backups",
+        description: "Directory for local settings backup files.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "runtime_data_dir",
+        label: "Runtime data",
+        description: "Per-user runtime data directory outside shared host storage.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "app_log_dir",
+        label: "App logs",
+        description: "Local rolling app log directory.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "cli_log_dir",
+        label: "CLI logs",
+        description: "Local rolling CLI log directory.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "persistence_dir",
+        label: "Persistence",
+        description: "Local runtime persistence directory.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "event_journal_file",
+        label: "Event journal",
+        description: "Local event journal file.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "status_file",
+        label: "Status file",
+        description: "Local status snapshot file.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "lock_file",
+        label: "Lock file",
+        description: "Local single-instance lock file.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "watch_dir",
+        label: "Watch dir",
+        description: "Local drop folder for torrent, magnet, or path inputs.",
+    },
+    ShowConfigsDescription {
+        section: "local",
+        key: "processed_dir",
+        label: "Processed dir",
+        description: "Archive folder for processed local watch inputs.",
+    },
+    ShowConfigsDescription {
+        section: "settings",
+        key: "default_download_folder",
+        label: "Default download folder",
+        description: "Configured destination used when a torrent has no per-torrent download path.",
+    },
+    ShowConfigsDescription {
+        section: "settings",
+        key: "watch_folder",
+        label: "Watch folder",
+        description: "User-configured primary watch folder override.",
+    },
+    ShowConfigsDescription {
+        section: "settings",
+        key: "client_port",
+        label: "Client port",
+        description: "Configured BitTorrent listening port.",
+    },
+    ShowConfigsDescription {
+        section: "settings",
+        key: "output_status_interval",
+        label: "Status interval",
+        description: "Configured status snapshot dump interval in seconds.",
+    },
+    ShowConfigsDescription {
+        section: "settings",
+        key: "settings_load_error",
+        label: "Settings load error",
+        description: "Reason settings values are unavailable; path reporting remains best-effort.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "source",
+        label: "Source",
+        description: "Where the effective shared root selection came from.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "mount_root",
+        label: "Mount root",
+        description: "Shared data root as mounted on this host.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "config_root",
+        label: "Config root",
+        description: "Shared superseedr-config directory under the mount root.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "settings_path",
+        label: "Settings",
+        description: "Shared cluster-wide settings file.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "catalog_path",
+        label: "Catalog",
+        description: "Shared cluster-wide torrent catalog file.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "torrent_metadata_path",
+        label: "Torrent metadata",
+        description: "Shared torrent metadata cache path.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "torrents_dir",
+        label: "Torrents dir",
+        description: "Directory for canonical shared .torrent copies.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "cluster_revision_file",
+        label: "Cluster revision",
+        description: "Marker file used to signal shared catalog/config revision changes.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "lock_file",
+        label: "Lock file",
+        description: "Shared leader election lock file.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "inbox_dir",
+        label: "Inbox dir",
+        description: "Shared folder where CLI and follower nodes enqueue leader-bound requests.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "processed_dir",
+        label: "Processed dir",
+        description: "Shared archive folder for requests the leader has consumed.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "data_root",
+        label: "Data root",
+        description: "Shared payload data root for portable shared paths.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "host_dir",
+        label: "Host dir",
+        description: "Shared-mode host-local directory for this host.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "host_config_path",
+        label: "Host config",
+        description: "Host-specific shared config file.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "host_status_file",
+        label: "Host status",
+        description: "This host's shared-mode status snapshot.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "leader_status_file",
+        label: "Leader status",
+        description: "Shared leader status snapshot followed by shared CLI status.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "host_log_dir",
+        label: "Host logs",
+        description: "Shared-mode app log directory for this host.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "host_persistence_dir",
+        label: "Host persistence",
+        description: "Shared-mode host-local persistence directory for this host.",
+    },
+    ShowConfigsDescription {
+        section: "shared",
+        key: "shared_event_journal_file",
+        label: "Shared event journal",
+        description: "Shared cluster event journal file.",
+    },
+];
+
 // CLI types and process_input moved to integrations::cli
 
 fn init_tracing(
@@ -261,6 +732,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     tracing::info!("STARTING SUPERSEEDR");
+
+    if let Some(Commands::ShowConfigs { all }) = cli.command.as_ref() {
+        let (settings, settings_load_error) = match load_settings_for_cli() {
+            Ok(settings) => (Some(settings), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        if let Err(error) =
+            process_show_configs_command(settings.as_ref(), settings_load_error, *all, output_mode)
+        {
+            if output_mode == OutputMode::Json {
+                print_json_error(cli_command_name(cli.command.as_ref()), &error.to_string());
+            } else {
+                eprintln!("[Error] Application failed: {}", error);
+            }
+            std::process::exit(1);
+        }
+        tracing::info!("Show configs command processed, exiting temporary instance.");
+        return Ok(());
+    }
 
     if let Some(result) = process_launcher_setup_command(&cli, output_mode) {
         if let Err(error) = result {
@@ -606,6 +1096,892 @@ fn process_show_shared_config_command(output_mode: OutputMode) -> io::Result<()>
     Ok(())
 }
 
+fn process_show_configs_command(
+    settings: Option<&Settings>,
+    settings_load_error: Option<String>,
+    show_all: bool,
+    output_mode: OutputMode,
+) -> io::Result<()> {
+    let snapshot = build_show_configs_snapshot(settings, settings_load_error)?;
+    match output_mode {
+        OutputMode::Text => {
+            print_show_configs_text(&snapshot, show_all);
+            Ok(())
+        }
+        OutputMode::Json => {
+            print_success(
+                output_mode,
+                "show-configs",
+                "Resolved Superseedr configuration paths.",
+                show_configs_json_data(&snapshot, show_all),
+            );
+            Ok(())
+        }
+    }
+}
+
+fn build_show_configs_snapshot(
+    settings: Option<&Settings>,
+    settings_load_error: Option<String>,
+) -> io::Result<ShowConfigsSnapshot> {
+    let shared_selection = effective_shared_config_selection()?;
+    let host_selection = effective_host_id_selection()?;
+    let shared_mode = shared_selection.is_some();
+
+    let local_config_dir = config::app_config_dir();
+    let local_runtime_data_dir = config::local_runtime_data_dir();
+    let local_settings_path = config::local_settings_path();
+    let local_torrent_metadata_path = local_config_dir
+        .as_ref()
+        .map(|dir| dir.join("torrent_metadata.toml"));
+    let local_config_backups_dir = local_config_dir
+        .as_ref()
+        .map(|dir| dir.join("backups_settings_files"));
+    let local_persistence_dir = local_runtime_data_dir
+        .as_ref()
+        .map(|dir| dir.join("persistence"));
+    let local_event_journal_file = local_persistence_dir
+        .as_ref()
+        .map(|dir| dir.join("event_journal.toml"));
+    let local_status_file = local_runtime_data_dir
+        .as_ref()
+        .map(|dir| dir.join("status_files").join("app_state.json"));
+    let (local_watch_dir, local_processed_dir) = config::get_watch_path()
+        .map(|(watch_dir, processed_dir)| (Some(watch_dir), Some(processed_dir)))
+        .unwrap_or((None, None));
+
+    let launcher = LauncherPathsSnapshot {
+        shared_config_sidecar_path: absolute_path_opt(persisted_shared_config_path().ok())?,
+        host_id_sidecar_path: absolute_path_opt(persisted_host_id_path().ok())?,
+    };
+
+    let host = HostIdentitySnapshot {
+        host_id: host_selection.host_id.clone(),
+        source: host_selection.source,
+        sidecar_path: launcher.host_id_sidecar_path.clone(),
+    };
+
+    let shared_root = shared_selection
+        .as_ref()
+        .map(|selection| selection.config_root.clone());
+    let shared_host_dir = shared_root
+        .as_ref()
+        .map(|root| root.join("hosts").join(&host_selection.host_id));
+    let shared_host_config_path = shared_host_dir.as_ref().map(|dir| dir.join("config.toml"));
+    let shared_metadata_path = shared_root
+        .as_ref()
+        .map(|root| root.join("torrent_metadata.toml"));
+    let shared_catalog_path = shared_root.as_ref().map(|root| root.join("catalog.toml"));
+    let shared_settings_path = shared_root.as_ref().map(|root| root.join("settings.toml"));
+    let shared_event_journal_file = if shared_mode {
+        Some(crate::persistence::event_journal::shared_event_journal_state_file_path()?)
+    } else {
+        None
+    };
+
+    let shared = match shared_selection {
+        Some(selection) => {
+            let root = selection.config_root;
+            let mount = selection.mount_root;
+            let host_dir = root.join("hosts").join(&host_selection.host_id);
+            Some(SharedPathsSnapshot {
+                source: selection.source,
+                mount_root: absolute_path(mount.clone())?,
+                config_root: absolute_path(root.clone())?,
+                settings_path: absolute_path(root.join("settings.toml"))?,
+                catalog_path: absolute_path(root.join("catalog.toml"))?,
+                torrent_metadata_path: absolute_path(root.join("torrent_metadata.toml"))?,
+                torrents_dir: absolute_path(root.join("torrents"))?,
+                cluster_revision_file: absolute_path(root.join("cluster.revision"))?,
+                lock_file: absolute_path(root.join("superseedr.lock"))?,
+                inbox_dir: absolute_path(root.join("inbox"))?,
+                processed_dir: absolute_path(root.join("processed"))?,
+                data_root: absolute_path(mount)?,
+                host_dir: absolute_path(host_dir.clone())?,
+                host_config_path: absolute_path(host_dir.join("config.toml"))?,
+                host_status_file: absolute_path(host_dir.join("status.json"))?,
+                leader_status_file: absolute_path(root.join("status").join("leader.json"))?,
+                host_log_dir: absolute_path(host_dir.join("logs"))?,
+                host_persistence_dir: absolute_path(host_dir.join("persistence"))?,
+                shared_event_journal_file: absolute_path(
+                    root.join("journal").join("shared_event_journal.toml"),
+                )?,
+            })
+        }
+        None => None,
+    };
+
+    let effective_config_files = EffectiveConfigFilesSnapshot {
+        settings_path: absolute_path_opt(if shared_mode {
+            shared_settings_path
+        } else {
+            local_settings_path.clone()
+        })?,
+        catalog_path: absolute_path_opt(shared_catalog_path)?,
+        torrent_metadata_path: absolute_path_opt(if shared_mode {
+            shared_metadata_path
+        } else {
+            local_torrent_metadata_path.clone()
+        })?,
+        host_config_path: absolute_path_opt(shared_host_config_path)?,
+    };
+
+    let effective_runtime_data_dir = if shared_mode {
+        shared_host_dir.clone()
+    } else {
+        local_runtime_data_dir.clone()
+    };
+    let effective_app_log_dir = effective_runtime_data_dir
+        .as_ref()
+        .map(|dir| dir.join("logs"));
+    let effective_persistence_dir = effective_runtime_data_dir
+        .as_ref()
+        .map(|dir| dir.join("persistence"));
+    let effective_event_journal_file = effective_persistence_dir
+        .as_ref()
+        .map(|dir| dir.join("event_journal.toml"));
+    let effective_status_file = if shared_mode {
+        shared_root
+            .as_ref()
+            .map(|root| root.join("status").join("leader.json"))
+    } else {
+        local_status_file.clone()
+    };
+    let effective_host_status_file = if shared_mode {
+        shared_host_dir.as_ref().map(|dir| dir.join("status.json"))
+    } else {
+        local_status_file.clone()
+    };
+    let effective_lock_file = if shared_mode {
+        shared_root
+            .as_ref()
+            .map(|root| root.join("superseedr.lock"))
+    } else {
+        config::local_lock_path().or_else(|| {
+            env::current_dir()
+                .ok()
+                .map(|dir| dir.join("superseedr.lock"))
+        })
+    };
+    let host_watch_dir = settings
+        .and_then(config::resolve_host_watch_path)
+        .or_else(|| local_watch_dir.clone());
+    let command_watch_dir = if shared_mode {
+        shared_root.as_ref().map(|root| root.join("inbox"))
+    } else {
+        host_watch_dir.clone()
+    };
+    let runtime_watch_dirs = if let Some(settings) = settings {
+        config::configured_watch_paths(settings)
+    } else {
+        let mut paths = Vec::new();
+        push_unique_report_path(&mut paths, host_watch_dir.clone());
+        if shared_mode {
+            push_unique_report_path(&mut paths, shared_root.clone());
+            push_unique_report_path(
+                &mut paths,
+                shared_root.as_ref().map(|root| root.join("inbox")),
+            );
+        } else {
+            push_unique_report_path(&mut paths, command_watch_dir.clone());
+        }
+        paths
+    };
+    let settings_default_download_folder =
+        settings.and_then(|settings| settings.default_download_folder.clone());
+    let settings_watch_folder = settings.and_then(|settings| settings.watch_folder.clone());
+
+    Ok(ShowConfigsSnapshot {
+        shared_mode,
+        host,
+        launcher,
+        local: LocalPathsSnapshot {
+            config_dir: absolute_path_opt(local_config_dir)?,
+            settings_path: absolute_path_opt(local_settings_path)?,
+            torrent_metadata_path: absolute_path_opt(local_torrent_metadata_path)?,
+            config_backups_dir: absolute_path_opt(local_config_backups_dir)?,
+            runtime_data_dir: absolute_path_opt(local_runtime_data_dir.clone())?,
+            app_log_dir: absolute_path_opt(config::local_runtime_log_dir())?,
+            cli_log_dir: absolute_path_opt(config::local_cli_log_dir())?,
+            persistence_dir: absolute_path_opt(local_persistence_dir)?,
+            event_journal_file: absolute_path_opt(local_event_journal_file)?,
+            status_file: absolute_path_opt(local_status_file)?,
+            lock_file: absolute_path_opt(config::local_lock_path())?,
+            watch_dir: absolute_path_opt(local_watch_dir)?,
+            processed_dir: absolute_path_opt(local_processed_dir)?,
+        },
+        effective: EffectivePathsSnapshot {
+            config_files: effective_config_files,
+            runtime_data_dir: absolute_path_opt(effective_runtime_data_dir)?,
+            app_log_dir: absolute_path_opt(effective_app_log_dir)?,
+            local_app_log_dir: absolute_path_opt(
+                local_runtime_data_dir.as_ref().map(|dir| dir.join("logs")),
+            )?,
+            cli_log_dir: absolute_path_opt(
+                local_runtime_data_dir
+                    .as_ref()
+                    .map(|dir| dir.join("logs").join("cli")),
+            )?,
+            persistence_dir: absolute_path_opt(effective_persistence_dir)?,
+            event_journal_file: absolute_path_opt(effective_event_journal_file)?,
+            shared_event_journal_file: absolute_path_opt(shared_event_journal_file)?,
+            status_file: absolute_path_opt(effective_status_file)?,
+            host_status_file: absolute_path_opt(effective_host_status_file)?,
+            lock_file: absolute_path_opt(effective_lock_file)?,
+            command_watch_dir: absolute_path_opt(command_watch_dir)?,
+            host_watch_dir: absolute_path_opt(host_watch_dir)?,
+            runtime_watch_dirs: absolute_paths(runtime_watch_dirs)?,
+        },
+        shared,
+        settings: SettingsPathSnapshot {
+            default_download_folder: absolute_path_opt(settings_default_download_folder)?,
+            watch_folder: absolute_path_opt(settings_watch_folder)?,
+            client_port: settings.map(|settings| settings.client_port),
+            output_status_interval: settings.map(|settings| settings.output_status_interval),
+        },
+        settings_load_error,
+        descriptions: show_configs_descriptions(),
+    })
+}
+
+fn absolute_path(path: PathBuf) -> io::Result<PathBuf> {
+    std::path::absolute(path)
+}
+
+fn absolute_path_opt(path: Option<PathBuf>) -> io::Result<Option<PathBuf>> {
+    path.map(absolute_path).transpose()
+}
+
+fn absolute_paths(paths: Vec<PathBuf>) -> io::Result<Vec<PathBuf>> {
+    paths.into_iter().map(absolute_path).collect()
+}
+
+fn push_unique_report_path(paths: &mut Vec<PathBuf>, path: Option<PathBuf>) {
+    if let Some(path) = path {
+        if !paths.iter().any(|existing| existing == &path) {
+            paths.push(path);
+        }
+    }
+}
+
+fn show_configs_descriptions() -> Vec<ShowConfigsDescription> {
+    SHOW_CONFIG_DESCRIPTIONS.to_vec()
+}
+
+fn show_config_description(section: &str, key: &str) -> &'static str {
+    SHOW_CONFIG_DESCRIPTIONS
+        .iter()
+        .find(|entry| entry.section == section && entry.key == key)
+        .map(|entry| entry.description)
+        .unwrap_or("")
+}
+
+fn show_configs_json_data(snapshot: &ShowConfigsSnapshot, show_all: bool) -> Value {
+    if show_all {
+        return json!(snapshot);
+    }
+
+    json!({
+        "shared_mode": snapshot.shared_mode,
+        "host": &snapshot.host,
+        "effective": &snapshot.effective,
+        "settings": &snapshot.settings,
+        "settings_load_error": &snapshot.settings_load_error,
+        "descriptions": show_configs_effective_descriptions(),
+    })
+}
+
+fn show_configs_effective_descriptions() -> Vec<ShowConfigsDescription> {
+    SHOW_CONFIG_DESCRIPTIONS
+        .iter()
+        .copied()
+        .filter(|entry| {
+            matches!(
+                entry.section,
+                "root" | "host" | "effective" | "effective.config_files" | "settings"
+            )
+        })
+        .collect()
+}
+
+fn print_show_configs_text(snapshot: &ShowConfigsSnapshot, show_all: bool) {
+    if show_all {
+        println!("Superseedr resolved configuration");
+    } else {
+        println!("Superseedr effective configuration");
+    }
+    let shared_mode_label = if snapshot.shared_mode {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    println!(
+        "Shared Mode: {} - {}",
+        shared_mode_label,
+        show_config_description("root", "shared_mode")
+    );
+    println!(
+        "Host ID: {} ({}) - {}",
+        snapshot.host.host_id,
+        host_id_source_label(snapshot.host.source),
+        show_config_description("host", "host_id")
+    );
+
+    if !show_all {
+        print_show_configs_effective(snapshot);
+        print_show_configs_settings(snapshot);
+        return;
+    }
+
+    println!("\nLauncher:");
+    print_path_line(
+        "launcher",
+        "shared_config_sidecar_path",
+        "Shared config sidecar",
+        snapshot.launcher.shared_config_sidecar_path.as_ref(),
+    );
+    print_path_line(
+        "launcher",
+        "host_id_sidecar_path",
+        "Host ID sidecar",
+        snapshot.launcher.host_id_sidecar_path.as_ref(),
+    );
+
+    println!("\nEffective:");
+    print_path_line(
+        "effective.config_files",
+        "settings_path",
+        "Settings",
+        snapshot.effective.config_files.settings_path.as_ref(),
+    );
+    print_path_line(
+        "effective.config_files",
+        "catalog_path",
+        "Catalog",
+        snapshot.effective.config_files.catalog_path.as_ref(),
+    );
+    print_path_line(
+        "effective.config_files",
+        "torrent_metadata_path",
+        "Torrent metadata",
+        snapshot
+            .effective
+            .config_files
+            .torrent_metadata_path
+            .as_ref(),
+    );
+    print_path_line(
+        "effective.config_files",
+        "host_config_path",
+        "Host config",
+        snapshot.effective.config_files.host_config_path.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "runtime_data_dir",
+        "Runtime data",
+        snapshot.effective.runtime_data_dir.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "app_log_dir",
+        "App logs",
+        snapshot.effective.app_log_dir.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "local_app_log_dir",
+        "Local app logs",
+        snapshot.effective.local_app_log_dir.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "cli_log_dir",
+        "CLI logs",
+        snapshot.effective.cli_log_dir.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "persistence_dir",
+        "Persistence",
+        snapshot.effective.persistence_dir.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "event_journal_file",
+        "Event journal",
+        snapshot.effective.event_journal_file.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "shared_event_journal_file",
+        "Shared event journal",
+        snapshot.effective.shared_event_journal_file.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "status_file",
+        "Status file",
+        snapshot.effective.status_file.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "host_status_file",
+        "Host status file",
+        snapshot.effective.host_status_file.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "lock_file",
+        "Lock file",
+        snapshot.effective.lock_file.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "command_watch_dir",
+        "Command watch dir",
+        snapshot.effective.command_watch_dir.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "host_watch_dir",
+        "Host watch dir",
+        snapshot.effective.host_watch_dir.as_ref(),
+    );
+    print_path_list(
+        "effective",
+        "runtime_watch_dirs",
+        "Runtime watch dirs",
+        &snapshot.effective.runtime_watch_dirs,
+    );
+
+    println!("\nLocal:");
+    print_path_line(
+        "local",
+        "config_dir",
+        "Config dir",
+        snapshot.local.config_dir.as_ref(),
+    );
+    print_path_line(
+        "local",
+        "settings_path",
+        "Settings",
+        snapshot.local.settings_path.as_ref(),
+    );
+    print_path_line(
+        "local",
+        "torrent_metadata_path",
+        "Torrent metadata",
+        snapshot.local.torrent_metadata_path.as_ref(),
+    );
+    print_path_line(
+        "local",
+        "config_backups_dir",
+        "Config backups",
+        snapshot.local.config_backups_dir.as_ref(),
+    );
+    print_path_line(
+        "local",
+        "runtime_data_dir",
+        "Runtime data",
+        snapshot.local.runtime_data_dir.as_ref(),
+    );
+    print_path_line(
+        "local",
+        "app_log_dir",
+        "App logs",
+        snapshot.local.app_log_dir.as_ref(),
+    );
+    print_path_line(
+        "local",
+        "cli_log_dir",
+        "CLI logs",
+        snapshot.local.cli_log_dir.as_ref(),
+    );
+    print_path_line(
+        "local",
+        "persistence_dir",
+        "Persistence",
+        snapshot.local.persistence_dir.as_ref(),
+    );
+    print_path_line(
+        "local",
+        "event_journal_file",
+        "Event journal",
+        snapshot.local.event_journal_file.as_ref(),
+    );
+    print_path_line(
+        "local",
+        "status_file",
+        "Status file",
+        snapshot.local.status_file.as_ref(),
+    );
+    print_path_line(
+        "local",
+        "lock_file",
+        "Lock file",
+        snapshot.local.lock_file.as_ref(),
+    );
+    print_path_line(
+        "local",
+        "watch_dir",
+        "Watch dir",
+        snapshot.local.watch_dir.as_ref(),
+    );
+    print_path_line(
+        "local",
+        "processed_dir",
+        "Processed dir",
+        snapshot.local.processed_dir.as_ref(),
+    );
+
+    println!("\nSettings:");
+    print_path_line(
+        "settings",
+        "default_download_folder",
+        "Default download folder",
+        snapshot.settings.default_download_folder.as_ref(),
+    );
+    print_path_line(
+        "settings",
+        "watch_folder",
+        "Watch folder",
+        snapshot.settings.watch_folder.as_ref(),
+    );
+    match snapshot.settings.client_port {
+        Some(port) => print_value_line("settings", "client_port", "Client port", &port.to_string()),
+        None => print_value_line("settings", "client_port", "Client port", "<unavailable>"),
+    }
+    match snapshot.settings.output_status_interval {
+        Some(interval) => print_value_line(
+            "settings",
+            "output_status_interval",
+            "Status interval",
+            &format!("{interval} seconds"),
+        ),
+        None => print_value_line(
+            "settings",
+            "output_status_interval",
+            "Status interval",
+            "<unavailable>",
+        ),
+    }
+    if let Some(error) = &snapshot.settings_load_error {
+        print_value_line(
+            "settings",
+            "settings_load_error",
+            "Settings load error",
+            error,
+        );
+    }
+
+    println!("\nShared:");
+    if let Some(shared) = &snapshot.shared {
+        print_value_line(
+            "shared",
+            "source",
+            "Source",
+            shared_config_source_label(shared.source),
+        );
+        print_path_line(
+            "shared",
+            "mount_root",
+            "Mount root",
+            Some(&shared.mount_root),
+        );
+        print_path_line(
+            "shared",
+            "config_root",
+            "Config root",
+            Some(&shared.config_root),
+        );
+        print_path_line(
+            "shared",
+            "settings_path",
+            "Settings",
+            Some(&shared.settings_path),
+        );
+        print_path_line(
+            "shared",
+            "catalog_path",
+            "Catalog",
+            Some(&shared.catalog_path),
+        );
+        print_path_line(
+            "shared",
+            "torrent_metadata_path",
+            "Torrent metadata",
+            Some(&shared.torrent_metadata_path),
+        );
+        print_path_line(
+            "shared",
+            "torrents_dir",
+            "Torrents dir",
+            Some(&shared.torrents_dir),
+        );
+        print_path_line(
+            "shared",
+            "cluster_revision_file",
+            "Cluster revision",
+            Some(&shared.cluster_revision_file),
+        );
+        print_path_line("shared", "lock_file", "Lock file", Some(&shared.lock_file));
+        print_path_line("shared", "inbox_dir", "Inbox dir", Some(&shared.inbox_dir));
+        print_path_line(
+            "shared",
+            "processed_dir",
+            "Processed dir",
+            Some(&shared.processed_dir),
+        );
+        print_path_line("shared", "data_root", "Data root", Some(&shared.data_root));
+        print_path_line("shared", "host_dir", "Host dir", Some(&shared.host_dir));
+        print_path_line(
+            "shared",
+            "host_config_path",
+            "Host config",
+            Some(&shared.host_config_path),
+        );
+        print_path_line(
+            "shared",
+            "host_status_file",
+            "Host status",
+            Some(&shared.host_status_file),
+        );
+        print_path_line(
+            "shared",
+            "leader_status_file",
+            "Leader status",
+            Some(&shared.leader_status_file),
+        );
+        print_path_line(
+            "shared",
+            "host_log_dir",
+            "Host logs",
+            Some(&shared.host_log_dir),
+        );
+        print_path_line(
+            "shared",
+            "host_persistence_dir",
+            "Host persistence",
+            Some(&shared.host_persistence_dir),
+        );
+        print_path_line(
+            "shared",
+            "shared_event_journal_file",
+            "Shared event journal",
+            Some(&shared.shared_event_journal_file),
+        );
+    } else {
+        println!("  <disabled>");
+    }
+}
+
+fn print_path_line(section: &str, key: &str, label: &str, path: Option<&PathBuf>) {
+    let description = show_config_description(section, key);
+    match path {
+        Some(path) => print_described_line(label, &path.display().to_string(), description),
+        None => print_described_line(label, "<unavailable>", description),
+    }
+}
+
+fn print_value_line(section: &str, key: &str, label: &str, value: &str) {
+    print_described_line(label, value, show_config_description(section, key));
+}
+
+fn print_described_line(label: &str, value: &str, description: &str) {
+    if description.is_empty() {
+        println!("  {}: {}", label, value);
+    } else {
+        println!("  {}: {} - {}", label, value, description);
+    }
+}
+
+fn print_path_list(section: &str, key: &str, label: &str, paths: &[PathBuf]) {
+    let description = show_config_description(section, key);
+    if paths.is_empty() {
+        print_described_line(label, "<none>", description);
+        return;
+    }
+
+    if description.is_empty() {
+        println!("  {}:", label);
+    } else {
+        println!("  {}: {}", label, description);
+    }
+    for path in paths {
+        println!("    - {}", path.display());
+    }
+}
+
+fn print_show_configs_effective(snapshot: &ShowConfigsSnapshot) {
+    println!("\nEffective:");
+    print_path_line(
+        "effective.config_files",
+        "settings_path",
+        "Settings",
+        snapshot.effective.config_files.settings_path.as_ref(),
+    );
+    print_path_line(
+        "effective.config_files",
+        "catalog_path",
+        "Catalog",
+        snapshot.effective.config_files.catalog_path.as_ref(),
+    );
+    print_path_line(
+        "effective.config_files",
+        "torrent_metadata_path",
+        "Torrent metadata",
+        snapshot
+            .effective
+            .config_files
+            .torrent_metadata_path
+            .as_ref(),
+    );
+    print_path_line(
+        "effective.config_files",
+        "host_config_path",
+        "Host config",
+        snapshot.effective.config_files.host_config_path.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "runtime_data_dir",
+        "Runtime data",
+        snapshot.effective.runtime_data_dir.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "app_log_dir",
+        "App logs",
+        snapshot.effective.app_log_dir.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "local_app_log_dir",
+        "Local app logs",
+        snapshot.effective.local_app_log_dir.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "cli_log_dir",
+        "CLI logs",
+        snapshot.effective.cli_log_dir.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "persistence_dir",
+        "Persistence",
+        snapshot.effective.persistence_dir.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "event_journal_file",
+        "Event journal",
+        snapshot.effective.event_journal_file.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "shared_event_journal_file",
+        "Shared event journal",
+        snapshot.effective.shared_event_journal_file.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "status_file",
+        "Status file",
+        snapshot.effective.status_file.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "host_status_file",
+        "Host status file",
+        snapshot.effective.host_status_file.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "lock_file",
+        "Lock file",
+        snapshot.effective.lock_file.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "command_watch_dir",
+        "Command watch dir",
+        snapshot.effective.command_watch_dir.as_ref(),
+    );
+    print_path_line(
+        "effective",
+        "host_watch_dir",
+        "Host watch dir",
+        snapshot.effective.host_watch_dir.as_ref(),
+    );
+    print_path_list(
+        "effective",
+        "runtime_watch_dirs",
+        "Runtime watch dirs",
+        &snapshot.effective.runtime_watch_dirs,
+    );
+}
+
+fn print_show_configs_settings(snapshot: &ShowConfigsSnapshot) {
+    println!("\nSettings:");
+    print_path_line(
+        "settings",
+        "default_download_folder",
+        "Default download folder",
+        snapshot.settings.default_download_folder.as_ref(),
+    );
+    print_path_line(
+        "settings",
+        "watch_folder",
+        "Watch folder",
+        snapshot.settings.watch_folder.as_ref(),
+    );
+    match snapshot.settings.client_port {
+        Some(port) => print_value_line("settings", "client_port", "Client port", &port.to_string()),
+        None => print_value_line("settings", "client_port", "Client port", "<unavailable>"),
+    }
+    match snapshot.settings.output_status_interval {
+        Some(interval) => print_value_line(
+            "settings",
+            "output_status_interval",
+            "Status interval",
+            &format!("{interval} seconds"),
+        ),
+        None => print_value_line(
+            "settings",
+            "output_status_interval",
+            "Status interval",
+            "<unavailable>",
+        ),
+    }
+    if let Some(error) = &snapshot.settings_load_error {
+        print_value_line(
+            "settings",
+            "settings_load_error",
+            "Settings load error",
+            error,
+        );
+    }
+}
+
+fn shared_config_source_label(source: SharedConfigSource) -> &'static str {
+    match source {
+        SharedConfigSource::Env => "env",
+        SharedConfigSource::Launcher => "launcher",
+    }
+}
+
+fn host_id_source_label(source: HostIdSource) -> &'static str {
+    match source {
+        HostIdSource::Env => "env",
+        HostIdSource::Launcher => "launcher",
+        HostIdSource::Hostname => "hostname",
+        HostIdSource::System => "system",
+        HostIdSource::Default => "default",
+    }
+}
+
 fn process_set_host_id_command(host_id: &str, output_mode: OutputMode) -> io::Result<()> {
     let host_id = set_persisted_host_id(host_id)?;
     let sidecar_path = persisted_host_id_path()?;
@@ -763,6 +2139,9 @@ fn process_cli_request(
         Commands::SetSharedConfig { path } => process_set_shared_config_command(path, output_mode),
         Commands::ClearSharedConfig => process_clear_shared_config_command(output_mode),
         Commands::ShowSharedConfig => process_show_shared_config_command(output_mode),
+        Commands::ShowConfigs { all } => {
+            process_show_configs_command(Some(settings), None, *all, output_mode)
+        }
         Commands::Torrents => {
             process_torrents_command(settings, output_mode).map_err(io::Error::other)
         }
@@ -1651,6 +3030,7 @@ fn cli_command_name(command: Option<&Commands>) -> Option<&'static str> {
         Some(Commands::SetSharedConfig { .. }) => Some("set-shared-config"),
         Some(Commands::ClearSharedConfig) => Some("clear-shared-config"),
         Some(Commands::ShowSharedConfig) => Some("show-shared-config"),
+        Some(Commands::ShowConfigs { .. }) => Some("show-configs"),
         Some(Commands::SetHostId { .. }) => Some("set-host-id"),
         Some(Commands::ClearHostId) => Some("clear-host-id"),
         Some(Commands::ShowHostId) => Some("show-host-id"),
@@ -1793,6 +3173,53 @@ mod tests {
     fn shared_env_guard() -> &'static std::sync::Mutex<()> {
         static GUARD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         GUARD.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    struct EnvVarRestore {
+        key: &'static str,
+        value: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarRestore {
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                value: std::env::var_os(key),
+            }
+        }
+    }
+
+    impl Drop for EnvVarRestore {
+        fn drop(&mut self) {
+            match &self.value {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    struct AppPathsRestore;
+
+    impl Drop for AppPathsRestore {
+        fn drop(&mut self) {
+            crate::config::set_app_paths_override_for_tests(None);
+            clear_shared_config_state_for_tests();
+        }
+    }
+
+    fn set_test_app_paths(root: &Path) -> AppPathsRestore {
+        crate::config::set_app_paths_override_for_tests(Some((
+            root.join("config"),
+            root.join("data"),
+        )));
+        AppPathsRestore
+    }
+
+    fn assert_abs_opt(path: &Option<PathBuf>, label: &str) {
+        let path = path
+            .as_ref()
+            .unwrap_or_else(|| panic!("{label} should be available"));
+        assert!(path.is_absolute(), "{label} should be absolute: {path:?}");
     }
 
     fn sample_settings() -> Settings {
@@ -2141,6 +3568,161 @@ mod tests {
             json!("C:\\sample\\sidecar.toml")
         );
         assert_eq!(optional_path_json(None), Value::Null);
+    }
+
+    #[test]
+    fn show_configs_standalone_resolves_absolute_paths() {
+        let _guard = shared_env_guard().lock().unwrap();
+        let _shared_dir_restore = EnvVarRestore::capture("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let temp = tempdir().expect("create tempdir");
+        let _app_paths_restore = set_test_app_paths(temp.path());
+        std::env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+        clear_shared_config_state_for_tests();
+
+        let settings = Settings {
+            watch_folder: Some(PathBuf::from("relative-watch")),
+            default_download_folder: Some(PathBuf::from("relative-downloads")),
+            ..Settings::default()
+        };
+
+        let snapshot =
+            build_show_configs_snapshot(Some(&settings), None).expect("build path snapshot");
+
+        assert!(!snapshot.shared_mode);
+        assert!(snapshot.shared.is_none());
+        assert_abs_opt(&snapshot.local.config_dir, "local config dir");
+        assert_abs_opt(&snapshot.local.settings_path, "local settings path");
+        assert_abs_opt(
+            &snapshot.local.torrent_metadata_path,
+            "local torrent metadata path",
+        );
+        assert_abs_opt(&snapshot.effective.status_file, "effective status file");
+        assert_abs_opt(
+            &snapshot.effective.command_watch_dir,
+            "effective command watch dir",
+        );
+        assert_abs_opt(&snapshot.settings.watch_folder, "settings watch folder");
+        assert_abs_opt(
+            &snapshot.settings.default_download_folder,
+            "settings default download folder",
+        );
+        assert!(snapshot
+            .effective
+            .runtime_watch_dirs
+            .iter()
+            .all(|path| path.is_absolute()));
+        assert!(snapshot.descriptions.iter().any(|entry| {
+            entry.section == "effective"
+                && entry.key == "status_file"
+                && entry.description.contains("Status snapshot")
+        }));
+
+        let default_output = show_configs_json_data(&snapshot, false);
+        assert!(default_output.get("effective").is_some());
+        assert!(default_output.get("local").is_none());
+        assert!(default_output.get("shared").is_none());
+        assert!(default_output["descriptions"]
+            .as_array()
+            .expect("descriptions array")
+            .iter()
+            .all(|entry| entry["section"] != "local"));
+
+        let all_output = show_configs_json_data(&snapshot, true);
+        assert!(all_output.get("local").is_some());
+    }
+
+    #[test]
+    fn show_configs_without_loaded_settings_keeps_path_report_available() {
+        let _guard = shared_env_guard().lock().unwrap();
+        let _shared_dir_restore = EnvVarRestore::capture("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let temp = tempdir().expect("create tempdir");
+        let _app_paths_restore = set_test_app_paths(temp.path());
+        std::env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+        clear_shared_config_state_for_tests();
+
+        let snapshot = build_show_configs_snapshot(None, Some("settings failed".to_string()))
+            .expect("build path snapshot without settings");
+
+        assert!(!snapshot.shared_mode);
+        assert_eq!(
+            snapshot.settings_load_error.as_deref(),
+            Some("settings failed")
+        );
+        assert_eq!(snapshot.settings.client_port, None);
+        assert_eq!(snapshot.settings.output_status_interval, None);
+        assert_abs_opt(&snapshot.local.settings_path, "local settings path");
+        assert_abs_opt(
+            &snapshot.effective.command_watch_dir,
+            "effective command watch dir",
+        );
+        assert!(snapshot
+            .effective
+            .runtime_watch_dirs
+            .iter()
+            .all(|path| path.is_absolute()));
+        let value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert!(value["descriptions"]
+            .as_array()
+            .expect("descriptions array")
+            .iter()
+            .any(|entry| entry["section"] == "settings" && entry["key"] == "settings_load_error"));
+    }
+
+    #[test]
+    fn show_configs_shared_mode_includes_shared_absolute_paths() {
+        let _guard = shared_env_guard().lock().unwrap();
+        let _shared_dir_restore = EnvVarRestore::capture("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let _host_id_restore = EnvVarRestore::capture("SUPERSEEDR_SHARED_HOST_ID");
+        let _legacy_host_id_restore = EnvVarRestore::capture("SUPERSEEDR_HOST_ID");
+        let temp = tempdir().expect("create tempdir");
+        let _app_paths_restore = set_test_app_paths(temp.path());
+        let shared_root = temp.path().join("shared-root");
+
+        std::env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", &shared_root);
+        std::env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
+        std::env::remove_var("SUPERSEEDR_HOST_ID");
+        clear_shared_config_state_for_tests();
+
+        let settings = Settings {
+            watch_folder: Some(shared_root.join("watch-in")),
+            default_download_folder: Some(shared_root.join("downloads")),
+            ..Settings::default()
+        };
+
+        let snapshot =
+            build_show_configs_snapshot(Some(&settings), None).expect("build shared path snapshot");
+        let shared = snapshot.shared.as_ref().expect("shared paths");
+
+        assert!(snapshot.shared_mode);
+        assert_eq!(snapshot.host.host_id, "node-a");
+        assert!(shared.mount_root.is_absolute());
+        assert!(shared.config_root.is_absolute());
+        assert_eq!(
+            shared.config_root,
+            std::path::absolute(shared_root.join("superseedr-config"))
+                .expect("absolute shared config root")
+        );
+        assert_eq!(
+            snapshot.effective.config_files.catalog_path,
+            Some(shared.catalog_path.clone())
+        );
+        assert_eq!(
+            snapshot.effective.config_files.host_config_path,
+            Some(shared.host_config_path.clone())
+        );
+        assert_eq!(
+            snapshot.effective.command_watch_dir,
+            Some(shared.inbox_dir.clone())
+        );
+        assert_eq!(
+            snapshot.effective.shared_event_journal_file,
+            Some(shared.shared_event_journal_file.clone())
+        );
+        assert!(snapshot
+            .effective
+            .runtime_watch_dirs
+            .iter()
+            .all(|path| path.is_absolute()));
     }
 
     #[test]

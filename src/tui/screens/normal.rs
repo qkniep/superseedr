@@ -1130,7 +1130,7 @@ pub(crate) fn compute_footer_status_width(client_port: u16, overall_port_status:
 }
 
 pub(crate) fn footer_fps_label(app_state: &AppState) -> String {
-    format!("{}fps", app_state.data_rate.fps_label())
+    format!("{} fps", app_state.data_rate.fps_label())
 }
 
 fn estimate_footer_left_content_width(app_state: &AppState, ctx: &ThemeContext) -> u16 {
