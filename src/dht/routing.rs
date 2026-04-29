@@ -251,7 +251,7 @@ impl RoutingTable {
                 return outcome;
             }
 
-            if self.conflicts_with_existing_public_identity(&candidate) {
+            if self.has_blocking_public_identity_conflict(&candidate, now) {
                 return InsertOutcome::Discarded;
             }
 
@@ -497,24 +497,44 @@ impl RoutingTable {
         false
     }
 
-    fn conflicts_with_existing_public_identity(&self, candidate: &NodeRecord) -> bool {
-        self.buckets.iter().any(|bucket| {
+    fn has_blocking_public_identity_conflict(
+        &mut self,
+        candidate: &NodeRecord,
+        now: Instant,
+    ) -> bool {
+        let has_blocking_conflict = self.buckets.iter().any(|bucket| {
             bucket
                 .nodes
                 .iter()
                 .chain(bucket.replacements.iter())
-                .filter(|existing| existing.addr != candidate.addr)
                 .any(|existing| {
-                    same_public_identity_group(
-                        candidate.addr,
-                        candidate.node_id,
-                        candidate.bep42_state,
-                        existing.addr,
-                        existing.node_id,
-                        existing.bep42_state,
-                    )
+                    public_identity_conflicts(candidate, existing)
+                        && !public_identity_replacement_preferred(candidate, existing, now)
                 })
-        })
+        });
+        if has_blocking_conflict {
+            return true;
+        }
+
+        for bucket in &mut self.buckets {
+            let original_nodes = bucket.nodes.len();
+            bucket.nodes.retain(|existing| {
+                !(public_identity_conflicts(candidate, existing)
+                    && public_identity_replacement_preferred(candidate, existing, now))
+            });
+            let original_replacements = bucket.replacements.len();
+            bucket.replacements.retain(|existing| {
+                !(public_identity_conflicts(candidate, existing)
+                    && public_identity_replacement_preferred(candidate, existing, now))
+            });
+            if bucket.nodes.len() != original_nodes
+                || bucket.replacements.len() != original_replacements
+            {
+                bucket.last_changed_at = now;
+            }
+        }
+
+        false
     }
 }
 
@@ -618,6 +638,51 @@ fn questionable_probe_targets(bucket: &Bucket, now: Instant) -> Vec<SocketAddr> 
         .collect::<Vec<_>>();
     records.sort_by_key(least_recently_seen_at);
     records.into_iter().map(|record| record.addr).collect()
+}
+
+fn public_identity_conflicts(candidate: &NodeRecord, existing: &NodeRecord) -> bool {
+    candidate.addr != existing.addr
+        && same_public_identity_group(
+            candidate.addr,
+            candidate.node_id,
+            candidate.bep42_state,
+            existing.addr,
+            existing.node_id,
+            existing.bep42_state,
+        )
+}
+
+fn public_identity_replacement_preferred(
+    candidate: &NodeRecord,
+    existing: &NodeRecord,
+    now: Instant,
+) -> bool {
+    public_identity_preference_rank(candidate, now) < public_identity_preference_rank(existing, now)
+}
+
+fn public_identity_preference_rank(record: &NodeRecord, now: Instant) -> (u8, u8, u8, u8) {
+    (
+        node_status_rank(node_status(record, now)),
+        bep42_rank(record.bep42_state),
+        trust_rank(record.trust),
+        response_presence_rank(record.last_query_response_at),
+    )
+}
+
+fn node_status_rank(status: NodeStatus) -> u8 {
+    match status {
+        NodeStatus::Good => 0,
+        NodeStatus::Questionable => 1,
+        NodeStatus::Bad => 2,
+    }
+}
+
+fn response_presence_rank(last_response_at: Option<Instant>) -> u8 {
+    if last_response_at.is_some() {
+        0
+    } else {
+        1
+    }
 }
 
 fn least_recently_seen_at(record: &NodeRecord) -> Option<Instant> {
@@ -735,6 +800,19 @@ mod tests {
         NodeId::from([byte; NodeId::LEN])
     }
 
+    fn bep42_vector_node_id() -> NodeId {
+        NodeId::try_from(
+            &hex::decode("5fbfbff10c5d6a4ec8a88e4c6ab4c28b95eee401").expect("hex node id")[..],
+        )
+        .expect("node id")
+    }
+
+    fn responded_record(addr: SocketAddr, node_id: NodeId, now: Instant) -> NodeRecord {
+        let mut record = NodeRecord::new(addr, Some(node_id), now);
+        record.note_query_response(Some(node_id), now);
+        record
+    }
+
     #[test]
     fn record_response_marks_node_id_churn_suspicious() {
         let now = Instant::now();
@@ -764,5 +842,65 @@ mod tests {
         let nodes = table.all_nodes();
         assert_eq!(nodes[0].bep42_state, Bep42State::NonCompliant);
         assert_eq!(nodes[0].trust, NodeTrust::Suspicious);
+    }
+
+    #[test]
+    fn better_public_identity_candidate_replaces_suspicious_duplicate() {
+        let now = Instant::now();
+        let public_ip = Ipv4Addr::new(124, 31, 75, 21);
+        let mut table = RoutingTable::new(node_id(1), RoutingConfig::default(), now);
+        let suspicious_addr = SocketAddr::from((public_ip, 40_001));
+        let secure_addr = SocketAddr::from((public_ip, 40_002));
+
+        assert_eq!(
+            table.insert(responded_record(suspicious_addr, node_id(2), now), now),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(
+            table.insert(
+                responded_record(
+                    secure_addr,
+                    bep42_vector_node_id(),
+                    now + Duration::from_secs(1)
+                ),
+                now + Duration::from_secs(1),
+            ),
+            InsertOutcome::Inserted
+        );
+
+        let nodes = table.all_nodes();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].addr, secure_addr);
+        assert_eq!(nodes[0].bep42_state, Bep42State::Compliant);
+        assert_eq!(nodes[0].trust, NodeTrust::Neutral);
+    }
+
+    #[test]
+    fn weaker_public_identity_candidate_does_not_replace_secure_duplicate() {
+        let now = Instant::now();
+        let public_ip = Ipv4Addr::new(124, 31, 75, 21);
+        let mut table = RoutingTable::new(node_id(1), RoutingConfig::default(), now);
+        let secure_addr = SocketAddr::from((public_ip, 40_001));
+        let suspicious_addr = SocketAddr::from((public_ip, 40_002));
+
+        assert_eq!(
+            table.insert(
+                responded_record(secure_addr, bep42_vector_node_id(), now),
+                now
+            ),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(
+            table.insert(
+                responded_record(suspicious_addr, node_id(2), now + Duration::from_secs(1)),
+                now + Duration::from_secs(1),
+            ),
+            InsertOutcome::Discarded
+        );
+
+        let nodes = table.all_nodes();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].addr, secure_addr);
+        assert_eq!(nodes[0].bep42_state, Bep42State::Compliant);
     }
 }
