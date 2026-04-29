@@ -9640,6 +9640,8 @@ mod tests {
 
     #[tokio::test]
     async fn healthy_probe_requests_manager_recovery_but_does_not_flip_ui_until_metrics() {
+        let _guard = lock_shared_env();
+        let _temp_paths = configure_temp_app_paths_for_test();
         let settings = crate::config::Settings {
             client_port: 0,
             ..Default::default()

@@ -11,6 +11,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use thiserror::Error;
 
 pub const DEFAULT_KRPC_VERSION: &[u8; 4] = b"RS\0\x05";
+const MAX_KRPC_MESSAGE_BYTES: usize = 8 * 1024;
+const MAX_BENCODE_DEPTH: usize = 16;
+const MAX_BENCODE_TOKENS: usize = 512;
 const WANT_IPV4_NODES: &[u8; 2] = b"n4";
 const WANT_IPV6_NODES: &[u8; 2] = b"n6";
 
@@ -609,6 +612,14 @@ struct KrpcEnvelopeProbe {
 
 #[derive(Debug, Error)]
 pub enum KrpcDecodeError {
+    #[error("KRPC message exceeds size limit")]
+    MessageTooLarge,
+    #[error("KRPC message exceeds bencode depth limit")]
+    BencodeDepthExceeded,
+    #[error("KRPC message exceeds bencode token limit")]
+    BencodeTokenLimitExceeded,
+    #[error("invalid KRPC bencode structure")]
+    InvalidBencodeStructure,
     #[error("failed to decode KRPC message")]
     InvalidEnvelope(#[from] serde_bencode::Error),
     #[error("unsupported KRPC query '{0}'")]
@@ -620,6 +631,7 @@ pub enum KrpcDecodeError {
 }
 
 pub fn decode_message(bytes: &[u8]) -> Result<KrpcInboundMessage, KrpcDecodeError> {
+    validate_bencode_limits(bytes)?;
     let probe = serde_bencode::from_bytes::<KrpcEnvelopeProbe>(bytes)?;
     match probe.y.as_ref() {
         b"q" => decode_query(bytes, probe.q.as_deref()).map(KrpcInboundMessage::Query),
@@ -629,6 +641,90 @@ pub fn decode_message(bytes: &[u8]) -> Result<KrpcInboundMessage, KrpcDecodeErro
         b"e" => Ok(KrpcInboundMessage::Error(serde_bencode::from_bytes(bytes)?)),
         _ => Err(KrpcDecodeError::UnsupportedMessageType),
     }
+}
+
+fn validate_bencode_limits(bytes: &[u8]) -> Result<(), KrpcDecodeError> {
+    if bytes.len() > MAX_KRPC_MESSAGE_BYTES {
+        return Err(KrpcDecodeError::MessageTooLarge);
+    }
+
+    let mut tokens = 0usize;
+    let pos = validate_bencode_value(bytes, 0, 0, &mut tokens)?;
+    if pos != bytes.len() {
+        return Err(KrpcDecodeError::InvalidBencodeStructure);
+    }
+    Ok(())
+}
+
+fn validate_bencode_value(
+    bytes: &[u8],
+    mut pos: usize,
+    depth: usize,
+    tokens: &mut usize,
+) -> Result<usize, KrpcDecodeError> {
+    if depth > MAX_BENCODE_DEPTH {
+        return Err(KrpcDecodeError::BencodeDepthExceeded);
+    }
+    if pos >= bytes.len() {
+        return Err(KrpcDecodeError::InvalidBencodeStructure);
+    }
+
+    *tokens = tokens.saturating_add(1);
+    if *tokens > MAX_BENCODE_TOKENS {
+        return Err(KrpcDecodeError::BencodeTokenLimitExceeded);
+    }
+
+    match bytes[pos] {
+        b'i' => validate_bencode_integer(bytes, pos + 1),
+        b'l' | b'd' => {
+            pos += 1;
+            while pos < bytes.len() && bytes[pos] != b'e' {
+                pos = validate_bencode_value(bytes, pos, depth + 1, tokens)?;
+            }
+            if pos >= bytes.len() || bytes[pos] != b'e' {
+                return Err(KrpcDecodeError::InvalidBencodeStructure);
+            }
+            Ok(pos + 1)
+        }
+        b'0'..=b'9' => validate_bencode_bytes(bytes, pos),
+        _ => Err(KrpcDecodeError::InvalidBencodeStructure),
+    }
+}
+
+fn validate_bencode_integer(bytes: &[u8], mut pos: usize) -> Result<usize, KrpcDecodeError> {
+    if pos >= bytes.len() {
+        return Err(KrpcDecodeError::InvalidBencodeStructure);
+    }
+    if bytes[pos] == b'-' {
+        pos += 1;
+    }
+    let start = pos;
+    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    if pos == start || pos >= bytes.len() || bytes[pos] != b'e' {
+        return Err(KrpcDecodeError::InvalidBencodeStructure);
+    }
+    Ok(pos + 1)
+}
+
+fn validate_bencode_bytes(bytes: &[u8], mut pos: usize) -> Result<usize, KrpcDecodeError> {
+    let mut len = 0usize;
+    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+        len = len
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(usize::from(bytes[pos] - b'0')))
+            .ok_or(KrpcDecodeError::InvalidBencodeStructure)?;
+        pos += 1;
+    }
+    if pos >= bytes.len() || bytes[pos] != b':' {
+        return Err(KrpcDecodeError::InvalidBencodeStructure);
+    }
+    let value_start = pos + 1;
+    value_start
+        .checked_add(len)
+        .filter(|end| *end <= bytes.len())
+        .ok_or(KrpcDecodeError::InvalidBencodeStructure)
 }
 
 fn decode_query(
@@ -882,5 +978,42 @@ mod tests {
             serde_bencode::from_bytes::<KrpcResponseEnvelope>(&encoded).expect("decode response");
 
         assert_eq!(decoded.observed_addr(), Some(observed));
+    }
+
+    #[test]
+    fn decode_message_rejects_oversized_payload_before_deserialize() {
+        let payload = vec![b'0'; MAX_KRPC_MESSAGE_BYTES + 1];
+
+        assert!(matches!(
+            decode_message(&payload),
+            Err(KrpcDecodeError::MessageTooLarge)
+        ));
+    }
+
+    #[test]
+    fn decode_message_rejects_excessive_bencode_depth() {
+        let mut payload = Vec::new();
+        payload.extend(std::iter::repeat_n(b'l', MAX_BENCODE_DEPTH + 2));
+        payload.extend_from_slice(b"0:");
+        payload.extend(std::iter::repeat_n(b'e', MAX_BENCODE_DEPTH + 2));
+
+        assert!(matches!(
+            decode_message(&payload),
+            Err(KrpcDecodeError::BencodeDepthExceeded)
+        ));
+    }
+
+    #[test]
+    fn decode_message_rejects_excessive_bencode_tokens() {
+        let mut payload = Vec::from([b'l']);
+        for _ in 0..MAX_BENCODE_TOKENS {
+            payload.extend_from_slice(b"0:");
+        }
+        payload.push(b'e');
+
+        assert!(matches!(
+            decode_message(&payload),
+            Err(KrpcDecodeError::BencodeTokenLimitExceeded)
+        ));
     }
 }
