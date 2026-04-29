@@ -485,6 +485,21 @@ impl KrpcResponseBody {
         }
     }
 
+    pub fn with_peers_and_nodes(
+        node_id: NodeId,
+        peers: &[CompactPeer],
+        nodes: &[CompactNode],
+        family: AddressFamily,
+        token: &[u8],
+    ) -> Self {
+        let mut body = Self::with_peers(node_id, peers, token);
+        match family {
+            AddressFamily::Ipv4 => body.nodes = encode_compact_nodes(nodes, family),
+            AddressFamily::Ipv6 => body.nodes6 = encode_compact_nodes(nodes, family),
+        }
+        body
+    }
+
     pub fn with_closest_nodes(
         node_id: NodeId,
         nodes: &[CompactNode],

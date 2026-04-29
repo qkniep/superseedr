@@ -14,12 +14,16 @@ const ERROR_PROTOCOL: i64 = 203;
 const RATE_LIMITER_IDLE_TTL: Duration = Duration::from_secs(300);
 const RATE_LIMITER_PRUNE_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_RATE_LIMITER_ENTRIES: usize = 16_384;
+const DEFAULT_RESPONSE_BYTES_PER_SECOND: usize = 32 * 1024;
+const DEFAULT_RESPONSE_BURST_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct InboundConfig {
     pub family: AddressFamily,
     pub max_queries_per_second: usize,
     pub burst_capacity: usize,
+    pub response_bytes_per_second: usize,
+    pub response_burst_bytes: usize,
     pub closest_nodes_limit: usize,
 }
 
@@ -27,8 +31,10 @@ impl Default for InboundConfig {
     fn default() -> Self {
         Self {
             family: AddressFamily::Ipv4,
-            max_queries_per_second: 256,
-            burst_capacity: 512,
+            max_queries_per_second: 64,
+            burst_capacity: 128,
+            response_bytes_per_second: DEFAULT_RESPONSE_BYTES_PER_SECOND,
+            response_burst_bytes: DEFAULT_RESPONSE_BURST_BYTES,
             closest_nodes_limit: 8,
         }
     }
@@ -49,7 +55,10 @@ pub enum InboundAction {
 #[derive(Debug, Clone)]
 struct RateLimiter {
     last_refill_at: Instant,
+    last_seen_at: Instant,
     tokens: f64,
+    response_last_refill_at: Instant,
+    response_tokens: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -100,49 +109,58 @@ impl InboundActor {
         let requester_id = match query.requester_id() {
             Some(node_id) => node_id,
             None => {
-                return InboundAction::Error(KrpcErrorEnvelope::new(
-                    &transaction_id,
-                    ERROR_PROTOCOL,
-                    "invalid node id",
-                ));
+                return self.error_to(
+                    ctx.source.ip(),
+                    KrpcErrorEnvelope::new(&transaction_id, ERROR_PROTOCOL, "invalid node id"),
+                    now,
+                );
             }
         };
 
         remember_inbound_node(routing, ctx.source, requester_id, now);
 
         match query {
-            KrpcIncomingQuery::Ping { .. } => InboundAction::Respond(KrpcResponseEnvelope::new(
-                &transaction_id,
-                KrpcResponseBody::pong(local_node_id),
-            )),
+            KrpcIncomingQuery::Ping { .. } => self.respond_to(
+                ctx.source.ip(),
+                KrpcResponseEnvelope::new(&transaction_id, KrpcResponseBody::pong(local_node_id)),
+                now,
+            ),
             KrpcIncomingQuery::FindNode { args, .. } => {
                 let Ok(target) = NodeId::try_from(args.target.as_ref()) else {
-                    return InboundAction::Error(KrpcErrorEnvelope::new(
-                        &transaction_id,
-                        ERROR_PROTOCOL,
-                        "invalid target",
-                    ));
+                    return self.error_to(
+                        ctx.source.ip(),
+                        KrpcErrorEnvelope::new(&transaction_id, ERROR_PROTOCOL, "invalid target"),
+                        now,
+                    );
                 };
 
                 let nodes = self.closest_nodes_for(routing, target, ctx.source, now);
-                InboundAction::Respond(KrpcResponseEnvelope::new(
-                    &transaction_id,
-                    KrpcResponseBody::with_nodes(local_node_id, &nodes, self.config.family),
-                ))
+                self.respond_to(
+                    ctx.source.ip(),
+                    KrpcResponseEnvelope::new(
+                        &transaction_id,
+                        KrpcResponseBody::with_nodes(local_node_id, &nodes, self.config.family),
+                    ),
+                    now,
+                )
             }
             KrpcIncomingQuery::GetPeers { args, .. } => {
                 let Ok(info_hash) = InfoHash::try_from(args.info_hash.as_ref()) else {
-                    return InboundAction::Error(KrpcErrorEnvelope::new(
-                        &transaction_id,
-                        ERROR_PROTOCOL,
-                        "invalid info_hash",
-                    ));
+                    return self.error_to(
+                        ctx.source.ip(),
+                        KrpcErrorEnvelope::new(
+                            &transaction_id,
+                            ERROR_PROTOCOL,
+                            "invalid info_hash",
+                        ),
+                        now,
+                    );
                 };
 
-                let token = token_service.mint_for(ctx.source.ip(), now);
+                let token = token_service.mint_for(ctx.source.ip(), info_hash, now);
                 let peers = peer_store.peers_for(info_hash, self.config.family, wall_clock);
+                let nodes = self.closest_nodes_for(routing, info_hash.into(), ctx.source, now);
                 let body = if peers.is_empty() {
-                    let nodes = self.closest_nodes_for(routing, info_hash.into(), ctx.source, now);
                     KrpcResponseBody::with_closest_nodes(
                         local_node_id,
                         &nodes,
@@ -150,26 +168,41 @@ impl InboundActor {
                         &token,
                     )
                 } else {
-                    KrpcResponseBody::with_peers(local_node_id, &peers, &token)
+                    KrpcResponseBody::with_peers_and_nodes(
+                        local_node_id,
+                        &peers,
+                        &nodes,
+                        self.config.family,
+                        &token,
+                    )
                 };
 
-                InboundAction::Respond(KrpcResponseEnvelope::new(&transaction_id, body))
+                self.respond_to(
+                    ctx.source.ip(),
+                    KrpcResponseEnvelope::new(&transaction_id, body),
+                    now,
+                )
             }
             KrpcIncomingQuery::AnnouncePeer { args, .. } => {
                 let Ok(info_hash) = InfoHash::try_from(args.info_hash.as_ref()) else {
-                    return InboundAction::Error(KrpcErrorEnvelope::new(
-                        &transaction_id,
-                        ERROR_PROTOCOL,
-                        "invalid info_hash",
-                    ));
+                    return self.error_to(
+                        ctx.source.ip(),
+                        KrpcErrorEnvelope::new(
+                            &transaction_id,
+                            ERROR_PROTOCOL,
+                            "invalid info_hash",
+                        ),
+                        now,
+                    );
                 };
 
-                if !token_service.validate_for(ctx.source.ip(), args.token.as_ref(), now) {
-                    return InboundAction::Error(KrpcErrorEnvelope::new(
-                        &transaction_id,
-                        ERROR_PROTOCOL,
-                        "invalid token",
-                    ));
+                if !token_service.validate_for(ctx.source.ip(), info_hash, args.token.as_ref(), now)
+                {
+                    return self.error_to(
+                        ctx.source.ip(),
+                        KrpcErrorEnvelope::new(&transaction_id, ERROR_PROTOCOL, "invalid token"),
+                        now,
+                    );
                 }
 
                 let port = if args.implied_port.unwrap_or_default() != 0 {
@@ -179,11 +212,11 @@ impl InboundActor {
                 };
 
                 if port == 0 {
-                    return InboundAction::Error(KrpcErrorEnvelope::new(
-                        &transaction_id,
-                        ERROR_PROTOCOL,
-                        "invalid port",
-                    ));
+                    return self.error_to(
+                        ctx.source.ip(),
+                        KrpcErrorEnvelope::new(&transaction_id, ERROR_PROTOCOL, "invalid port"),
+                        now,
+                    );
                 }
 
                 let peer = CompactPeer {
@@ -191,10 +224,14 @@ impl InboundActor {
                 };
                 peer_store.insert(info_hash, peer, wall_clock);
 
-                InboundAction::Respond(KrpcResponseEnvelope::new(
-                    &transaction_id,
-                    KrpcResponseBody::pong(local_node_id),
-                ))
+                self.respond_to(
+                    ctx.source.ip(),
+                    KrpcResponseEnvelope::new(
+                        &transaction_id,
+                        KrpcResponseBody::pong(local_node_id),
+                    ),
+                    now,
+                )
             }
         }
     }
@@ -212,16 +249,21 @@ impl InboundActor {
             .burst_capacity
             .max(self.config.max_queries_per_second.max(1));
         let fill_rate = self.config.max_queries_per_second.max(1) as f64;
+        let response_burst = self.config.response_burst_bytes.max(1);
         let limiter = self
             .per_ip_rate_limits
             .entry(source_ip)
             .or_insert_with(|| RateLimiter {
                 last_refill_at: now,
+                last_seen_at: now,
                 tokens: burst as f64,
+                response_last_refill_at: now,
+                response_tokens: response_burst as f64,
             });
 
         let elapsed = now.saturating_duration_since(limiter.last_refill_at);
         limiter.last_refill_at = now;
+        limiter.last_seen_at = now;
         limiter.tokens = (limiter.tokens + elapsed.as_secs_f64() * fill_rate).min(burst as f64);
         if limiter.tokens < 1.0 {
             return false;
@@ -229,6 +271,72 @@ impl InboundActor {
 
         limiter.tokens -= 1.0;
         true
+    }
+
+    fn allow_response_bytes(&mut self, source_ip: IpAddr, bytes: usize, now: Instant) -> bool {
+        self.prune_stale_rate_limiters(now);
+        if !self.per_ip_rate_limits.contains_key(&source_ip)
+            && self.per_ip_rate_limits.len() >= MAX_RATE_LIMITER_ENTRIES
+        {
+            return false;
+        }
+
+        let burst = self.config.response_burst_bytes.max(1);
+        let query_burst = self.config.burst_capacity.max(1);
+        let fill_rate = self.config.response_bytes_per_second.max(1) as f64;
+        let limiter = self
+            .per_ip_rate_limits
+            .entry(source_ip)
+            .or_insert_with(|| RateLimiter {
+                last_refill_at: now,
+                last_seen_at: now,
+                tokens: query_burst as f64,
+                response_last_refill_at: now,
+                response_tokens: burst as f64,
+            });
+
+        let elapsed = now.saturating_duration_since(limiter.response_last_refill_at);
+        limiter.response_last_refill_at = now;
+        limiter.last_seen_at = now;
+        limiter.response_tokens =
+            (limiter.response_tokens + elapsed.as_secs_f64() * fill_rate).min(burst as f64);
+        let cost = bytes.max(1) as f64;
+        if limiter.response_tokens < cost {
+            return false;
+        }
+
+        limiter.response_tokens -= cost;
+        true
+    }
+
+    fn respond_to(
+        &mut self,
+        source_ip: IpAddr,
+        response: KrpcResponseEnvelope,
+        now: Instant,
+    ) -> InboundAction {
+        let Ok(payload) = serde_bencode::to_bytes(&response) else {
+            return InboundAction::Drop;
+        };
+        if !self.allow_response_bytes(source_ip, payload.len(), now) {
+            return InboundAction::Drop;
+        }
+        InboundAction::Respond(response)
+    }
+
+    fn error_to(
+        &mut self,
+        source_ip: IpAddr,
+        error: KrpcErrorEnvelope,
+        now: Instant,
+    ) -> InboundAction {
+        let Ok(payload) = serde_bencode::to_bytes(&error) else {
+            return InboundAction::Drop;
+        };
+        if !self.allow_response_bytes(source_ip, payload.len(), now) {
+            return InboundAction::Drop;
+        }
+        InboundAction::Error(error)
     }
 
     fn prune_stale_rate_limiters(&mut self, now: Instant) {
@@ -243,7 +351,7 @@ impl InboundActor {
         }
 
         self.per_ip_rate_limits.retain(|_, limiter| {
-            now.saturating_duration_since(limiter.last_refill_at) <= RATE_LIMITER_IDLE_TTL
+            now.saturating_duration_since(limiter.last_seen_at) <= RATE_LIMITER_IDLE_TTL
         });
         self.last_rate_limiter_prune_at = Some(now);
     }
@@ -285,7 +393,12 @@ fn remember_inbound_node(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use crate::dht::krpc::KrpcGetPeersArgs;
+    use crate::dht::peer_store::PeerStoreConfig;
+    use crate::dht::routing::RoutingConfig;
+    use crate::dht::token::TokenConfig;
+    use serde_bytes::ByteBuf;
+    use std::net::{Ipv4Addr, SocketAddr};
 
     fn source_ip(index: usize) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(
@@ -294,6 +407,14 @@ mod tests {
             ((index >> 8) & 0xff) as u8,
             (index & 0xff) as u8,
         ))
+    }
+
+    fn node_id(byte: u8) -> NodeId {
+        NodeId::from([byte; NodeId::LEN])
+    }
+
+    fn info_hash(byte: u8) -> InfoHash {
+        InfoHash::from([byte; InfoHash::LEN])
     }
 
     #[test]
@@ -325,5 +446,78 @@ mod tests {
         assert!(!actor.allow_query(rejected, start + Duration::from_secs(1)));
         assert_eq!(actor.per_ip_rate_limits.len(), MAX_RATE_LIMITER_ENTRIES);
         assert!(!actor.per_ip_rate_limits.contains_key(&rejected));
+    }
+
+    #[test]
+    fn response_byte_limiter_rejects_excess_payload_bytes() {
+        let start = Instant::now();
+        let source = source_ip(1);
+        let mut actor = InboundActor::new(InboundConfig {
+            response_bytes_per_second: 10,
+            response_burst_bytes: 10,
+            ..InboundConfig::default()
+        });
+
+        assert!(actor.allow_response_bytes(source, 8, start));
+        assert!(!actor.allow_response_bytes(source, 3, start));
+        assert!(actor.allow_response_bytes(source, 3, start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn get_peers_response_includes_values_and_closest_nodes() {
+        let now = Instant::now();
+        let wall_clock = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let mut actor = InboundActor::new(InboundConfig::default());
+        let mut routing = RoutingTable::new(
+            node_id(1),
+            RoutingConfig {
+                family: AddressFamily::Ipv4,
+                ..RoutingConfig::default()
+            },
+            now,
+        );
+        let route_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 40_001));
+        let mut route = NodeRecord::new(route_addr, Some(node_id(3)), now);
+        route.note_query_response(Some(node_id(3)), now);
+        assert_eq!(
+            routing.insert(route, now),
+            crate::dht::routing::InsertOutcome::Inserted
+        );
+
+        let hash = info_hash(9);
+        let mut peer_store = PeerStore::new(PeerStoreConfig::default());
+        peer_store.insert(
+            hash,
+            CompactPeer {
+                addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 50_001)),
+            },
+            wall_clock,
+        );
+        let mut token_service = TokenService::new(TokenConfig::default(), now);
+
+        let action = actor.handle_query(
+            InboundRequestContext {
+                source: SocketAddr::from((Ipv4Addr::LOCALHOST, 60_001)),
+            },
+            KrpcIncomingQuery::GetPeers {
+                transaction_id: ByteBuf::from(vec![1, 2, 3, 4]),
+                version: None,
+                args: KrpcGetPeersArgs::new(node_id(2), hash),
+            },
+            node_id(1),
+            &mut routing,
+            &mut token_service,
+            &mut peer_store,
+            now,
+            wall_clock,
+        );
+
+        let InboundAction::Respond(response) = action else {
+            panic!("expected get_peers response");
+        };
+        let body = response.r.expect("response body");
+        assert_eq!(body.peers(AddressFamily::Ipv4).len(), 1);
+        assert_eq!(body.closest_nodes(AddressFamily::Ipv4).len(), 1);
+        assert!(!body.token.is_empty());
     }
 }
