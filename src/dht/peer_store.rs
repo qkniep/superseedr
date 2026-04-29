@@ -88,6 +88,24 @@ impl PeerStore {
         true
     }
 
+    pub fn accepts_announces_for(
+        &mut self,
+        info_hash: InfoHash,
+        family: AddressFamily,
+        now: SystemTime,
+    ) -> bool {
+        self.prune_expired(now);
+
+        let key = PeerStoreKey { info_hash, family };
+        if let Some(bucket) = self.peers.get(&key) {
+            return bucket.len() < self.config.max_peers_per_info_hash
+                && self.total_peer_count() < self.config.max_total_peers;
+        }
+
+        self.peers.len() < self.config.max_info_hashes
+            && self.total_peer_count() < self.config.max_total_peers
+    }
+
     pub fn peers_for(
         &mut self,
         info_hash: InfoHash,
@@ -151,5 +169,47 @@ impl PeerStore {
             })
             .min_by_key(|(_, _, announced_at)| *announced_at)
             .map(|(key, idx, _)| (key, idx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    fn info_hash(byte: u8) -> InfoHash {
+        InfoHash::from([byte; InfoHash::LEN])
+    }
+
+    fn peer(octet: u8) -> CompactPeer {
+        CompactPeer {
+            addr: SocketAddr::from((Ipv4Addr::new(127, 0, 0, octet), 6881)),
+        }
+    }
+
+    #[test]
+    fn accepts_announces_for_rejects_full_hash_bucket() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let hash = info_hash(1);
+        let mut store = PeerStore::new(PeerStoreConfig {
+            max_peers_per_info_hash: 1,
+            ..PeerStoreConfig::default()
+        });
+
+        assert!(store.accepts_announces_for(hash, AddressFamily::Ipv4, now));
+        assert!(store.insert(hash, peer(1), now));
+        assert!(!store.accepts_announces_for(hash, AddressFamily::Ipv4, now));
+    }
+
+    #[test]
+    fn accepts_announces_for_rejects_global_pressure() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let mut store = PeerStore::new(PeerStoreConfig {
+            max_total_peers: 1,
+            ..PeerStoreConfig::default()
+        });
+
+        assert!(store.insert(info_hash(1), peer(1), now));
+        assert!(!store.accepts_announces_for(info_hash(2), AddressFamily::Ipv4, now));
     }
 }

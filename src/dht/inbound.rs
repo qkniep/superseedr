@@ -165,7 +165,15 @@ impl InboundActor {
                     );
                 };
 
-                let token = token_service.mint_for(ctx.source.ip(), info_hash, now);
+                let token = if peer_store.accepts_announces_for(
+                    info_hash,
+                    self.config.family,
+                    wall_clock,
+                ) {
+                    token_service.mint_for(ctx.source.ip(), info_hash, now)
+                } else {
+                    Vec::new()
+                };
                 let peers = peer_store.peers_for(info_hash, self.config.family, wall_clock);
                 let nodes = self.closest_nodes_for(routing, info_hash.into(), ctx.source, now);
                 let mut body = if peers.is_empty() {
@@ -618,5 +626,57 @@ mod tests {
         };
         let body = response.r.expect("response body");
         assert_eq!(body.closest_nodes(AddressFamily::Ipv6).len(), 1);
+    }
+
+    #[test]
+    fn get_peers_withholds_token_when_peer_store_is_full_for_hash() {
+        let now = Instant::now();
+        let wall_clock = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let mut actor = InboundActor::new(InboundConfig::default());
+        let mut routing = RoutingTable::new(
+            node_id(1),
+            RoutingConfig {
+                family: AddressFamily::Ipv4,
+                ..RoutingConfig::default()
+            },
+            now,
+        );
+        let hash = info_hash(9);
+        let mut peer_store = PeerStore::new(PeerStoreConfig {
+            max_peers_per_info_hash: 1,
+            ..PeerStoreConfig::default()
+        });
+        peer_store.insert(
+            hash,
+            CompactPeer {
+                addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 50_001)),
+            },
+            wall_clock,
+        );
+        let mut token_service = TokenService::new(TokenConfig::default(), now);
+
+        let action = actor.handle_query(
+            InboundRequestContext {
+                source: SocketAddr::from((Ipv4Addr::LOCALHOST, 60_001)),
+            },
+            KrpcIncomingQuery::GetPeers {
+                transaction_id: ByteBuf::from(vec![1, 2, 3, 4]),
+                version: None,
+                args: KrpcGetPeersArgs::new(node_id(2), hash),
+            },
+            node_id(1),
+            &mut routing,
+            None,
+            &mut token_service,
+            &mut peer_store,
+            now,
+            wall_clock,
+        );
+
+        let InboundAction::Respond(response) = action else {
+            panic!("expected get_peers response");
+        };
+        let body = response.r.expect("response body");
+        assert!(body.token.is_empty());
     }
 }
