@@ -46,6 +46,7 @@ pub(in crate::dht::service) async fn run_service(
     mut command_rx: DhtCommandReceiver,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
+    let mut local_node_id = local_node_id;
     let mut demand_tick = tokio::time::interval(DHT_DEMAND_SCHEDULER_INTERVAL);
     demand_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut drain_interval = tokio::time::interval(DHT_DEMAND_DRAIN_POLL_INTERVAL);
@@ -219,7 +220,11 @@ pub(in crate::dht::service) async fn run_service(
                 )
                 .await;
             }
-            LoopEvent::RuntimeStep(Ok(_)) => {}
+            LoopEvent::RuntimeStep(Ok(_)) => {
+                if let Some(active) = active_runtime.as_ref() {
+                    local_node_id = active.runtime.local_node_id();
+                }
+            }
             LoopEvent::RuntimeStep(Err(error)) => {
                 let reduction = DhtLifecycleModel::update(DhtLifecycleAction::RuntimeStepFailed {
                     warning: format!("DHT runtime step failed: {error}"),

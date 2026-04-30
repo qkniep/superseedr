@@ -348,6 +348,7 @@ pub(in crate::dht::service) async fn build_runtime(
     };
     let runtime = Runtime::bind(RuntimeConfig {
         local_node_id,
+        allow_public_ipv4_identity: std::env::var_os("SUPERSEEDR_DHT_NODE_ID_HEX").is_none(),
         bootstrap_nodes,
         bootstrap_sources: config.bootstrap_nodes.clone(),
         ipv4_bind_addr: Some(SocketAddr::new(

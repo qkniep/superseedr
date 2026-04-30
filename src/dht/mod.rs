@@ -49,6 +49,7 @@ pub use types::{
     NodeId, NodeRecord, NodeTrust, TransactionId,
 };
 
+use crate::dht::bep42::{classify_node, random_secure_node_id_for_ipv4};
 use crate::dht::bootstrap::{BootstrapConfig, BootstrapCoordinator};
 use crate::dht::health::DhtHealthSnapshot as InternalHealthSnapshot;
 use crate::dht::inbound::{InboundAction, InboundActor, InboundConfig, InboundRequestContext};
@@ -66,6 +67,7 @@ const MAX_CACHED_RESPONDERS_PER_TARGET: usize = 16;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub local_node_id: NodeId,
+    pub allow_public_ipv4_identity: bool,
     pub bootstrap_nodes: Vec<SocketAddr>,
     pub bootstrap_sources: Vec<String>,
     pub ipv4_bind_addr: Option<SocketAddr>,
@@ -298,6 +300,10 @@ impl Runtime {
 
     pub fn config(&self) -> &RuntimeConfig {
         &self.config
+    }
+
+    pub fn local_node_id(&self) -> NodeId {
+        self.config.local_node_id
     }
 
     pub fn family_bound(&self, family: AddressFamily) -> bool {
@@ -1000,8 +1006,10 @@ impl Runtime {
         }
 
         if let Some((voter, observed_addr)) = public_address_observation {
-            self.public_addresses
+            let confirmed = self
+                .public_addresses
                 .record_observation(voter, observed_addr);
+            self.apply_confirmed_public_identity(confirmed);
         }
 
         let other_family = opposite_family(result.family);
@@ -1083,6 +1091,40 @@ impl Runtime {
         }
 
         Ok(())
+    }
+
+    fn apply_confirmed_public_identity(&mut self, confirmed: Option<SocketAddr>) {
+        if !self.config.allow_public_ipv4_identity {
+            return;
+        }
+
+        let Some(SocketAddr::V4(public_addr)) = confirmed else {
+            return;
+        };
+        if classify_node(SocketAddr::V4(public_addr), Some(self.config.local_node_id))
+            == Bep42State::Compliant
+        {
+            return;
+        }
+
+        let Some(new_node_id) = random_secure_node_id_for_ipv4(*public_addr.ip()) else {
+            return;
+        };
+        let old_node_id = self.config.local_node_id;
+        if new_node_id == old_node_id {
+            return;
+        }
+
+        tracing::info!(
+            old_node_id = %node_id_hex(old_node_id),
+            new_node_id = %node_id_hex(new_node_id),
+            public_addr = %public_addr,
+            "DHT rotated local node ID to match confirmed public IPv4 identity"
+        );
+        self.config.local_node_id = new_node_id;
+        self.ipv4_routing.set_local_node_id(new_node_id);
+        self.ipv6_routing.set_local_node_id(new_node_id);
+        self.closest_responder_cache.clear();
     }
 
     async fn pump_lookup(&mut self, lookup_id: LookupId) -> io::Result<()> {
@@ -1807,6 +1849,7 @@ mod tests {
     async fn runtime_bind_requires_ipv4_transport() {
         let error = Runtime::bind(RuntimeConfig {
             local_node_id: seeded_node_id(0x01),
+            allow_public_ipv4_identity: false,
             bootstrap_nodes: Vec::new(),
             bootstrap_sources: Vec::new(),
             ipv4_bind_addr: None,
@@ -1833,6 +1876,7 @@ mod tests {
 
         let runtime = Runtime::bind(RuntimeConfig {
             local_node_id: seeded_node_id(0x02),
+            allow_public_ipv4_identity: false,
             bootstrap_nodes: Vec::new(),
             bootstrap_sources: Vec::new(),
             ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
@@ -1850,6 +1894,7 @@ mod tests {
     async fn runtime_does_not_register_lookup_without_seed_candidates() {
         let mut runtime = Runtime::bind(RuntimeConfig {
             local_node_id: seeded_node_id(0x03),
+            allow_public_ipv4_identity: false,
             bootstrap_nodes: Vec::new(),
             bootstrap_sources: Vec::new(),
             ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
@@ -1868,6 +1913,70 @@ mod tests {
         assert_eq!(runtime.active_lookup_count(), 0);
         assert!(runtime.lookup_quality_snapshot(lookup_id).is_none());
         assert!(peer_rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_rotates_local_node_id_after_confirmed_public_ipv4() {
+        let mut runtime = Runtime::bind(RuntimeConfig {
+            local_node_id: seeded_node_id(0x04),
+            allow_public_ipv4_identity: true,
+            bootstrap_nodes: Vec::new(),
+            bootstrap_sources: Vec::new(),
+            ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+            ipv6_bind_addr: None,
+            persistence: None,
+        })
+        .await
+        .expect("bind runtime");
+        let old_node_id = runtime.local_node_id();
+        let public_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(45, 67, 89, 10)), 6881);
+        let mut route = NodeRecord::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(45, 67, 89, 20)), 6881),
+            Some(seeded_node_id(0x44)),
+            Instant::now(),
+        );
+        route.note_query_response(Some(seeded_node_id(0x44)), Instant::now());
+        assert!(matches!(
+            runtime
+                .ipv4_routing
+                .table_mut()
+                .insert(route, Instant::now()),
+            InsertOutcome::Inserted
+        ));
+
+        runtime.apply_confirmed_public_identity(Some(public_addr));
+
+        assert_ne!(runtime.local_node_id(), old_node_id);
+        assert_eq!(
+            classify_node(public_addr, Some(runtime.local_node_id())),
+            Bep42State::Compliant
+        );
+        assert_eq!(
+            runtime.ipv4_routing.table().local_node_id(),
+            runtime.local_node_id()
+        );
+        assert_eq!(runtime.active_route_count(AddressFamily::Ipv4), 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_keeps_configured_local_node_id_when_public_identity_disabled() {
+        let mut runtime = Runtime::bind(RuntimeConfig {
+            local_node_id: seeded_node_id(0x05),
+            allow_public_ipv4_identity: false,
+            bootstrap_nodes: Vec::new(),
+            bootstrap_sources: Vec::new(),
+            ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+            ipv6_bind_addr: None,
+            persistence: None,
+        })
+        .await
+        .expect("bind runtime");
+        let old_node_id = runtime.local_node_id();
+        let public_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(45, 67, 89, 11)), 6881);
+
+        runtime.apply_confirmed_public_identity(Some(public_addr));
+
+        assert_eq!(runtime.local_node_id(), old_node_id);
     }
 
     fn ipv6_test_bind_unavailable(error: &io::Error) -> bool {
@@ -1899,6 +2008,7 @@ mod tests {
 
         let mut runtime = Runtime::bind(RuntimeConfig {
             local_node_id: seeded_node_id(0x71),
+            allow_public_ipv4_identity: false,
             bootstrap_nodes: Vec::new(),
             bootstrap_sources: vec![bootstrap_addr.to_string()],
             ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
@@ -2040,6 +2150,7 @@ mod tests {
 
         let mut runtime = Runtime::bind(RuntimeConfig {
             local_node_id: seeded_node_id(0x01),
+            allow_public_ipv4_identity: false,
             bootstrap_nodes: vec![bootstrap_a_addr, bootstrap_b_addr],
             bootstrap_sources: Vec::new(),
             ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
@@ -2148,6 +2259,7 @@ mod tests {
 
         let matching = Runtime::bind(RuntimeConfig {
             local_node_id,
+            allow_public_ipv4_identity: false,
             bootstrap_nodes: Vec::new(),
             bootstrap_sources: Vec::new(),
             ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
@@ -2164,6 +2276,7 @@ mod tests {
 
         let mismatched = Runtime::bind(RuntimeConfig {
             local_node_id: seeded_node_id(0x53),
+            allow_public_ipv4_identity: false,
             bootstrap_nodes: Vec::new(),
             bootstrap_sources: Vec::new(),
             ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
@@ -2237,6 +2350,7 @@ mod tests {
 
         let mut runtime = Runtime::bind(RuntimeConfig {
             local_node_id: seeded_node_id(0x01),
+            allow_public_ipv4_identity: false,
             bootstrap_nodes: vec![bootstrap_addr],
             bootstrap_sources: Vec::new(),
             ipv4_bind_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),

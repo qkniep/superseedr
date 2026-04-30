@@ -199,6 +199,10 @@ impl RoutingTable {
         self.local_node_id
     }
 
+    pub fn set_local_node_id(&mut self, local_node_id: NodeId) {
+        self.local_node_id = local_node_id;
+    }
+
     pub fn bucket_count(&self) -> usize {
         self.buckets.len()
     }
@@ -560,6 +564,10 @@ impl RoutingActor {
 
     pub fn table_mut(&mut self) -> &mut RoutingTable {
         &mut self.table
+    }
+
+    pub fn set_local_node_id(&mut self, local_node_id: NodeId) {
+        self.table.set_local_node_id(local_node_id);
     }
 }
 

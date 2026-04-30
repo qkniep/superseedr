@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use super::types::{Bep42State, NodeId};
+use rand::Rng;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 const IPV4_MASK: u32 = 0x030f3fff;
@@ -29,6 +30,24 @@ pub fn classify_ipv4(ip: Ipv4Addr, node_id: NodeId) -> Bep42State {
     } else {
         Bep42State::NonCompliant
     }
+}
+
+pub fn random_secure_node_id_for_ipv4(ip: Ipv4Addr) -> Option<NodeId> {
+    let mut entropy = [0u8; NodeId::LEN];
+    rand::rng().fill(&mut entropy);
+    secure_node_id_for_ipv4(ip, entropy)
+}
+
+pub fn secure_node_id_for_ipv4(ip: Ipv4Addr, mut entropy: [u8; NodeId::LEN]) -> Option<NodeId> {
+    if ipv4_is_exempt(ip) {
+        return None;
+    }
+
+    let prefix = id_prefix_ipv4(ip, entropy[NodeId::LEN - 1]);
+    entropy[0] = prefix[0];
+    entropy[1] = prefix[1];
+    entropy[2] = (prefix[2] & 0xf8) | (entropy[2] & 0x07);
+    Some(NodeId::from(entropy))
 }
 
 pub fn is_secure_public_candidate(
@@ -141,5 +160,21 @@ mod tests {
         let node_id = NodeId::from([1u8; 20]);
 
         assert_eq!(classify_node(addr, Some(node_id)), Bep42State::ExemptLocal);
+    }
+
+    #[test]
+    fn generated_ipv4_node_id_is_bep42_compliant() {
+        let ip = Ipv4Addr::new(45, 67, 89, 10);
+        let node_id =
+            secure_node_id_for_ipv4(ip, [0x42; NodeId::LEN]).expect("public ipv4 node id");
+
+        assert_eq!(classify_ipv4(ip, node_id), Bep42State::Compliant);
+    }
+
+    #[test]
+    fn generated_ipv4_node_id_rejects_exempt_addresses() {
+        let node_id = secure_node_id_for_ipv4(Ipv4Addr::LOCALHOST, [0x42; NodeId::LEN]);
+
+        assert_eq!(node_id, None);
     }
 }
