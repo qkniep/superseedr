@@ -28,6 +28,7 @@ use crate::control_service::{
     control_event_details, online_control_success_message, plan_control_request,
     ControlExecutionPlan,
 };
+use crate::dht_service::{DhtService, DhtServiceConfig, DhtStatus, DhtWaveTelemetry};
 use crate::persistence::activity_history::{
     load_activity_history_state, save_activity_history_state, ActivityHistoryPersistedState,
     ActivityHistoryRollupState,
@@ -47,6 +48,7 @@ use crate::token_bucket::TokenBucket;
 
 use crate::tui::effects::compute_effects_activity_speed_multiplier;
 use crate::tui::events;
+use crate::tui::layout::common::{ColumnId, PeerColumnId};
 use crate::tui::paste_burst::PasteBurst;
 use crate::tui::tree;
 use crate::tui::tree::RawNode;
@@ -94,11 +96,6 @@ use tokio::sync::watch;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
-#[cfg(feature = "dht")]
-use mainline::{async_dht::AsyncDht, Dht};
-#[cfg(not(feature = "dht"))]
-type AsyncDht = ();
 
 use sha1::Digest;
 use sha2::Sha256;
@@ -368,17 +365,17 @@ impl DataRate {
         }
     }
 
-    pub fn to_string(self) -> &'static str {
+    pub fn fps_label(self) -> &'static str {
         match self {
-            DataRate::RateQuarter => "0.25 FPS",
-            DataRate::RateHalf => "0.5 FPS",
-            DataRate::Rate1s => "1 FPS",
-            DataRate::Rate2s => "2 FPS",
-            DataRate::Rate4s => "4 FPS",
-            DataRate::Rate10s => "10 FPS",
-            DataRate::Rate20s => "20 FPS",
-            DataRate::Rate30s => "30 FPS",
-            DataRate::Rate60s => "60 FPS",
+            DataRate::RateQuarter => "0.25",
+            DataRate::RateHalf => "0.5",
+            DataRate::Rate1s => "1",
+            DataRate::Rate2s => "2",
+            DataRate::Rate4s => "4",
+            DataRate::Rate10s => "10",
+            DataRate::Rate20s => "20",
+            DataRate::Rate30s => "30",
+            DataRate::Rate60s => "60",
         }
     }
 
@@ -565,12 +562,21 @@ impl ChartPanelView {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SelectedHeader {
-    Torrent(usize),
-    Peer(usize),
+    Torrent(ColumnId),
+    Peer(PeerColumnId),
 }
 impl Default for SelectedHeader {
     fn default() -> Self {
-        SelectedHeader::Torrent(0)
+        SelectedHeader::Torrent(ColumnId::Name)
+    }
+}
+
+fn torrent_sort_header(column: TorrentSortColumn) -> ColumnId {
+    match column {
+        TorrentSortColumn::Name => ColumnId::Name,
+        TorrentSortColumn::Down => ColumnId::DownSpeed,
+        TorrentSortColumn::Up => ColumnId::UpSpeed,
+        TorrentSortColumn::Progress => ColumnId::Status,
     }
 }
 
@@ -963,6 +969,21 @@ pub struct RecentFileActivity {
     pub upload_at: Option<Instant>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DhtWaveUiState {
+    pub phase: f64,
+    pub amplitude: f64,
+    pub harmonic_amplitude: f64,
+    pub frequency: f64,
+    pub phase_speed: f64,
+    pub crest_bias: f64,
+    pub bootstrap_ratio: f64,
+    pub discovery_boost: f64,
+    pub query_load: f64,
+    pub query_surge: f64,
+    pub initialized: bool,
+}
+
 #[derive(Default)]
 pub struct UiState {
     pub needs_redraw: bool,
@@ -971,6 +992,7 @@ pub struct UiState {
     pub effects_speed_multiplier: f64,
     pub file_activity_download_phase: f64,
     pub file_activity_upload_phase: f64,
+    pub dht_wave: DhtWaveUiState,
     pub selected_header: SelectedHeader,
     pub selected_torrent_index: usize,
     pub selected_peer_index: usize,
@@ -1265,7 +1287,9 @@ pub struct AppState {
     pub theme: Theme,
 
     pub torrent_sort: (TorrentSortColumn, SortDirection),
+    pub torrent_sort_pinned: bool,
     pub peer_sort: (PeerSortColumn, SortDirection),
+    pub peer_sort_pinned: bool,
 
     pub chart_panel_view: ChartPanelView,
     pub graph_mode: GraphDisplayMode,
@@ -1315,14 +1339,13 @@ pub struct App {
     pub current_cluster_role: Option<AppClusterRole>,
     pub watched_paths: Vec<PathBuf>,
     pub base_system_warning: Option<String>,
-    #[cfg(feature = "dht")]
-    pub dht_bootstrap_warning: Option<String>,
 
     pub listener: Option<ListenerSet>,
 
     pub torrent_manager_incoming_peer_txs: HashMap<Vec<u8>, Sender<(TcpStream, Vec<u8>)>>,
     pub torrent_manager_command_txs: HashMap<Vec<u8>, Sender<ManagerCommand>>,
-    pub distributed_hash_table: AsyncDht,
+    pub dht_service: DhtService,
+    pub dht_status_rx: watch::Receiver<DhtStatus>,
     pub resource_manager: ResourceManagerClient,
     pub global_dl_bucket: Arc<TokenBucket>,
     pub global_ul_bucket: Arc<TokenBucket>,
@@ -1388,6 +1411,179 @@ fn initial_cluster_role_for_runtime_mode(runtime_mode: AppRuntimeMode) -> Option
         AppRuntimeMode::SharedLeader => Some(AppClusterRole::Leader),
         AppRuntimeMode::SharedFollower => Some(AppClusterRole::Follower),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DhtWaveTargets {
+    amplitude: f64,
+    harmonic_amplitude: f64,
+    frequency: f64,
+    phase_speed: f64,
+    crest_bias: f64,
+    bootstrap_ratio: f64,
+    query_load: f64,
+}
+
+fn dht_wave_query_load_signal(telemetry: &DhtWaveTelemetry) -> f64 {
+    let total_queries = (telemetry.inflight_ipv4_queries + telemetry.inflight_ipv6_queries) as f64;
+
+    if total_queries <= 0.0 {
+        0.0
+    } else {
+        (total_queries / (total_queries + 40.0)).clamp(0.0, 1.0)
+    }
+}
+
+fn dht_wave_query_pressure_signal(telemetry: &DhtWaveTelemetry) -> f64 {
+    let total_queries = (telemetry.inflight_ipv4_queries + telemetry.inflight_ipv6_queries) as f64;
+    let unique_peers_found_last_10s = telemetry.unique_peers_found_last_10s as f64;
+
+    if total_queries <= 0.0 {
+        0.0
+    } else if unique_peers_found_last_10s <= 0.0 {
+        (total_queries / (total_queries + 32.0)).clamp(0.0, 1.0)
+    } else {
+        (total_queries / (total_queries + unique_peers_found_last_10s * 3.0)).clamp(0.0, 1.0)
+    }
+}
+
+fn dht_wave_targets(status: &DhtStatus, telemetry: &DhtWaveTelemetry) -> DhtWaveTargets {
+    let health = &status.health;
+    let routes = (health.cached_ipv4_routes + health.cached_ipv6_routes) as f64;
+    let bootstrap_total = (health.ipv4_bootstrap_nodes + health.ipv6_bootstrap_nodes) as f64;
+    let responsive_total =
+        (health.responsive_ipv4_bootstrap_nodes + health.responsive_ipv6_bootstrap_nodes) as f64;
+
+    let route_energy = (routes / 2_048.0).clamp(0.0, 1.0);
+    let query_load = dht_wave_query_load_signal(telemetry);
+    let pressure_signal = dht_wave_query_pressure_signal(telemetry);
+    let bootstrap_ratio = if bootstrap_total > 0.0 {
+        (responsive_total / bootstrap_total).clamp(0.0, 1.0)
+    } else if health.enabled {
+        0.0
+    } else {
+        1.0
+    };
+    let enabled_factor = if health.enabled { 1.0 } else { 0.0 };
+    let firewalled_factor = match health.firewalled {
+        Some(true) => 0.72,
+        Some(false) => 1.0,
+        None => 0.88,
+    };
+    let warning_boost = f64::from(status.warning.is_some() || health.recovery_pending);
+    let activity_energy = query_load
+        .max(pressure_signal * 0.72)
+        .max((warning_boost * 0.55).clamp(0.0, 1.0));
+
+    let amplitude = ((0.01
+        + query_load * (0.08 + route_energy * 0.12)
+        + pressure_signal * 0.13
+        + warning_boost * 0.04)
+        * firewalled_factor
+        * enabled_factor)
+        .clamp(0.0, 0.52);
+    let harmonic_amplitude = ((0.004
+        + query_load * 0.055
+        + pressure_signal * 0.075
+        + activity_energy * ((1.0 - bootstrap_ratio) * 0.04 + warning_boost * 0.04))
+        * enabled_factor)
+        .clamp(0.0, 0.20);
+    let frequency = (0.08
+        + query_load * 0.15
+        + pressure_signal * 0.07
+        + activity_energy * ((1.0 - bootstrap_ratio) * 0.04 + warning_boost * 0.03))
+        .clamp(0.06, 0.38);
+    let phase_speed = ((0.03
+        + query_load * (0.35 + query_load * 0.85)
+        + pressure_signal * 0.48
+        + warning_boost * 0.35)
+        * enabled_factor)
+        .clamp(0.0, 2.0);
+    let crest_bias = match health.firewalled {
+        Some(true) => -0.10,
+        Some(false) => 0.06,
+        None => 0.0,
+    } + ((route_energy - 0.5) * 0.08 * activity_energy)
+        + ((query_load - 0.5) * 0.05 * pressure_signal);
+
+    DhtWaveTargets {
+        amplitude,
+        harmonic_amplitude,
+        frequency,
+        phase_speed,
+        crest_bias: crest_bias.clamp(-0.22, 0.22),
+        bootstrap_ratio,
+        query_load,
+    }
+}
+
+fn dht_wave_smoothing_factor(frame_dt: f64, rate: f64) -> f64 {
+    1.0 - (-frame_dt * rate).exp()
+}
+
+fn smooth_dht_wave_component(current: &mut f64, target: f64, factor: f64) {
+    *current += (target - *current) * factor;
+}
+
+const DHT_WAVE_PHASE_WRAP_PERIOD: f64 = std::f64::consts::TAU * 25.0;
+
+fn advance_dht_wave_state(
+    wave: &mut DhtWaveUiState,
+    target_wave: DhtWaveTargets,
+    target_discovery_boost: f64,
+    frame_dt: f64,
+) {
+    if !wave.initialized {
+        wave.amplitude = target_wave.amplitude;
+        wave.harmonic_amplitude = target_wave.harmonic_amplitude;
+        wave.frequency = target_wave.frequency;
+        wave.phase_speed = target_wave.phase_speed;
+        wave.crest_bias = target_wave.crest_bias;
+        wave.bootstrap_ratio = target_wave.bootstrap_ratio;
+        wave.discovery_boost = target_discovery_boost;
+        wave.query_load = target_wave.query_load;
+        wave.query_surge = 0.0;
+        wave.initialized = true;
+    } else {
+        let profile_blend = dht_wave_smoothing_factor(frame_dt, 9.0);
+        let phase_speed_blend = dht_wave_smoothing_factor(frame_dt, 14.0);
+        let discovery_blend = dht_wave_smoothing_factor(frame_dt, 12.0);
+        let query_blend = dht_wave_smoothing_factor(frame_dt, 16.0);
+        let query_load_delta = (target_wave.query_load - wave.query_load).abs();
+        let target_query_surge = (query_load_delta * 0.32).clamp(0.0, 0.18);
+        let query_surge_blend = if target_query_surge > wave.query_surge {
+            dht_wave_smoothing_factor(frame_dt, 22.0)
+        } else {
+            dht_wave_smoothing_factor(frame_dt, 6.0)
+        };
+        smooth_dht_wave_component(&mut wave.amplitude, target_wave.amplitude, profile_blend);
+        smooth_dht_wave_component(
+            &mut wave.harmonic_amplitude,
+            target_wave.harmonic_amplitude,
+            profile_blend,
+        );
+        smooth_dht_wave_component(&mut wave.frequency, target_wave.frequency, profile_blend);
+        smooth_dht_wave_component(
+            &mut wave.phase_speed,
+            target_wave.phase_speed,
+            phase_speed_blend,
+        );
+        smooth_dht_wave_component(&mut wave.crest_bias, target_wave.crest_bias, profile_blend);
+        smooth_dht_wave_component(
+            &mut wave.bootstrap_ratio,
+            target_wave.bootstrap_ratio,
+            profile_blend,
+        );
+        smooth_dht_wave_component(
+            &mut wave.discovery_boost,
+            target_discovery_boost,
+            discovery_blend,
+        );
+        smooth_dht_wave_component(&mut wave.query_load, target_wave.query_load, query_blend);
+        smooth_dht_wave_component(&mut wave.query_surge, target_query_surge, query_surge_blend);
+    }
+    wave.phase = (wave.phase + frame_dt * (wave.phase_speed + wave.query_surge * 1.3))
+        .rem_euclid(DHT_WAVE_PHASE_WRAP_PERIOD);
 }
 
 fn spawn_persistence_writer(
@@ -1496,6 +1692,22 @@ fn spawn_persistence_writer(
     (persistence_tx, persistence_task)
 }
 
+fn build_app_dht_service_config(client_configs: &Settings) -> DhtServiceConfig {
+    let config = DhtServiceConfig::from_settings(client_configs);
+    #[cfg(test)]
+    {
+        let mut config = config;
+        if client_configs.client_port == 0 {
+            config.preferred_backend = crate::dht_service::DhtBackendKind::Disabled;
+        }
+        config
+    }
+    #[cfg(not(test))]
+    {
+        config
+    }
+}
+
 impl App {
     #[cfg(test)]
     pub async fn new(
@@ -1563,44 +1775,13 @@ impl App {
             ResourceManager::new(rm_limits, shutdown_tx.clone());
         tokio::spawn(resource_manager.run());
 
-        #[cfg(feature = "dht")]
-        let bootstrap_nodes: Vec<&str> = client_configs
-            .bootstrap_nodes
-            .iter()
-            .map(AsRef::as_ref)
-            .collect();
-
-        #[cfg(feature = "dht")]
-        let (distributed_hash_table, dht_bootstrap_warning) = match Dht::builder()
-            .bootstrap(&bootstrap_nodes)
-            .port(client_configs.client_port)
-            .server_mode()
-            .build()
-        {
-            Ok(dht_server) => (dht_server.as_async(), None),
-            Err(e) => {
-                let warning = format!(
-                    "Warning: DHT bootstrap unavailable ({}). Running without bootstrap; retrying automatically.",
-                    e
-                );
-                tracing_event!(Level::WARN, "{}", warning);
-                let fallback = Dht::builder()
-                    .port(client_configs.client_port)
-                    .server_mode()
-                    .build()
-                    .map_err(|fallback_err| {
-                        format!(
-                            "Failed to initialize DHT startup fallback. Bootstrap error: {}. Fallback error: {}",
-                            e, fallback_err
-                        )
-                    })?
-                    .as_async();
-                (fallback, Some(warning))
-            }
-        };
-
-        #[cfg(not(feature = "dht"))]
-        let distributed_hash_table = ();
+        let dht_service = DhtService::new(
+            build_app_dht_service_config(&client_configs),
+            shutdown_tx.subscribe(),
+        )
+        .await
+        .map_err(io::Error::other)?;
+        let dht_status_rx = dht_service.subscribe_status();
 
         let dl_limit = client_configs.global_download_limit_bps as f64;
         let ul_limit = client_configs.global_upload_limit_bps as f64;
@@ -1612,23 +1793,34 @@ impl App {
 
         let tuning_controller = TuningController::new_adaptive(limits.clone());
         let tuning_state = tuning_controller.state().clone();
+        let torrent_sort_direction = if client_configs.torrent_sort_pinned {
+            client_configs.torrent_sort_direction
+        } else {
+            client_configs.torrent_sort_column.default_direction()
+        };
+        let peer_sort_direction = if client_configs.peer_sort_pinned {
+            client_configs.peer_sort_direction
+        } else {
+            client_configs.peer_sort_column.default_direction()
+        };
         let app_state = AppState {
             system_warning: None,
             system_error: None,
             limits: limits.clone(),
             ui: UiState {
                 needs_redraw: true,
+                selected_header: if client_configs.torrent_sort_pinned {
+                    SelectedHeader::Torrent(torrent_sort_header(client_configs.torrent_sort_column))
+                } else {
+                    SelectedHeader::default()
+                },
                 ..Default::default()
             },
             theme: Theme::builtin(client_configs.ui_theme),
-            torrent_sort: (
-                client_configs.torrent_sort_column,
-                client_configs.torrent_sort_direction,
-            ),
-            peer_sort: (
-                client_configs.peer_sort_column,
-                client_configs.peer_sort_direction,
-            ),
+            torrent_sort: (client_configs.torrent_sort_column, torrent_sort_direction),
+            peer_sort: (client_configs.peer_sort_column, peer_sort_direction),
+            torrent_sort_pinned: client_configs.torrent_sort_pinned,
+            peer_sort_pinned: client_configs.peer_sort_pinned,
             rss_runtime: RssRuntimeState {
                 history: persisted_rss_state.history,
                 preview_items: Vec::new(),
@@ -1669,12 +1861,11 @@ impl App {
             current_cluster_role,
             watched_paths,
             base_system_warning: system_warning,
-            #[cfg(feature = "dht")]
-            dht_bootstrap_warning,
             listener,
             torrent_manager_incoming_peer_txs: HashMap::new(),
             torrent_manager_command_txs: HashMap::new(),
-            distributed_hash_table,
+            dht_service,
+            dht_status_rx,
             resource_manager: resource_manager_client,
             global_dl_bucket,
             global_ul_bucket,
@@ -2687,7 +2878,6 @@ impl App {
 
         let mut stats_interval = time::interval(Duration::from_secs(1));
         let mut version_interval = time::interval(Duration::from_secs(24 * 60 * 60));
-        let mut dht_bootstrap_retry_interval = time::interval(Duration::from_secs(60));
         let mut network_history_persist_interval =
             time::interval(Duration::from_secs(NETWORK_HISTORY_PERSIST_INTERVAL_SECS));
         let mut watch_folder_rescan_interval =
@@ -2696,7 +2886,6 @@ impl App {
             time::interval(Duration::from_secs(SHARED_ROLE_RETRY_INTERVAL_SECS));
         let mut integrity_scheduler_interval = time::interval(INTEGRITY_SCHEDULER_TICK_INTERVAL);
         self.reschedule_tuning_deadline();
-        dht_bootstrap_retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         network_history_persist_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         watch_folder_rescan_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         shared_role_retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -2736,6 +2925,12 @@ impl App {
                 Some(event) = self.manager_event_rx.recv() => {
                     self.handle_manager_event(event);
                     self.app_state.ui.needs_redraw = true;
+                }
+                status_changed = self.dht_status_rx.changed() => {
+                    if status_changed.is_ok() {
+                        self.refresh_system_warning();
+                        self.app_state.ui.needs_redraw = true;
+                    }
                 }
 
                 Some(command) = self.app_command_rx.recv() => {
@@ -2814,8 +3009,16 @@ impl App {
                     self.drain_latest_torrent_metrics();
                     if Self::should_draw_this_frame(&self.app_state.mode, self.app_state.ui.needs_redraw) {
                         self.tick_ui_effects_clock();
+                        let dht_status = self.dht_service.current_status();
+                        let dht_wave_telemetry = self.dht_service.current_wave_telemetry();
                         terminal.draw(|f| {
-                            draw(f, &self.app_state, &self.client_configs);
+                            draw(
+                                f,
+                                &self.app_state,
+                                &dht_status,
+                                &dht_wave_telemetry,
+                                &self.client_configs,
+                            );
                         })?;
                         self.app_state.ui.needs_redraw = false;
                     }
@@ -2843,11 +3046,6 @@ impl App {
                             }
                         }
                     });
-                }
-                _ = dht_bootstrap_retry_interval.tick() => {
-                    if self.should_retry_dht_bootstrap() {
-                        self.maybe_retry_dht_bootstrap();
-                    }
                 }
             }
         }
@@ -2907,11 +3105,22 @@ impl App {
         self.app_state.ui.effects_last_wall_time = frame_wall_time;
         self.app_state.ui.effects_speed_multiplier = activity_speed_multiplier;
         self.app_state.ui.effects_phase_time += frame_dt * activity_speed_multiplier;
+
         let selected_torrent = self
             .app_state
             .torrent_list_order
             .get(self.app_state.ui.selected_torrent_index)
             .and_then(|info_hash| self.app_state.torrents.get(info_hash));
+        let dht_status = self.dht_service.current_status();
+        let dht_wave_telemetry = self.dht_service.current_wave_telemetry();
+        let target_wave = dht_wave_targets(&dht_status, &dht_wave_telemetry);
+        let target_discovery_boost = selected_torrent
+            .map(|torrent| {
+                (torrent.peers_discovered_this_tick as f64 / 10.0).clamp(0.0, 1.0) * 0.18
+            })
+            .unwrap_or_default();
+        let wave = &mut self.app_state.ui.dht_wave;
+        advance_dht_wave_state(wave, target_wave, target_discovery_boost, frame_dt);
         let download_steps_per_second = selected_torrent
             .map(|torrent| file_activity_wave_steps_per_second(torrent.smoothed_download_speed_bps))
             .unwrap_or_else(|| file_activity_wave_steps_per_second(0));
@@ -2933,67 +3142,9 @@ impl App {
     }
 
     fn refresh_system_warning(&mut self) {
+        let dht_warning = self.dht_service.current_warning();
         self.app_state.system_warning =
-            compose_system_warning(self.base_system_warning.as_deref(), {
-                #[cfg(feature = "dht")]
-                {
-                    self.dht_bootstrap_warning.as_deref()
-                }
-                #[cfg(not(feature = "dht"))]
-                {
-                    None
-                }
-            });
-    }
-
-    #[cfg(feature = "dht")]
-    fn should_retry_dht_bootstrap(&self) -> bool {
-        self.dht_bootstrap_warning.is_some()
-    }
-
-    #[cfg(not(feature = "dht"))]
-    fn should_retry_dht_bootstrap(&self) -> bool {
-        false
-    }
-
-    #[cfg(feature = "dht")]
-    fn maybe_retry_dht_bootstrap(&mut self) {
-        self.retry_dht_bootstrap();
-    }
-
-    #[cfg(not(feature = "dht"))]
-    fn maybe_retry_dht_bootstrap(&mut self) {}
-
-    #[cfg(feature = "dht")]
-    fn retry_dht_bootstrap(&mut self) {
-        let bootstrap_nodes: Vec<&str> = self
-            .client_configs
-            .bootstrap_nodes
-            .iter()
-            .map(AsRef::as_ref)
-            .collect();
-
-        match Dht::builder()
-            .bootstrap(&bootstrap_nodes)
-            .port(self.client_configs.client_port)
-            .server_mode()
-            .build()
-        {
-            Ok(new_dht_server) => {
-                let new_dht_handle = new_dht_server.as_async();
-                self.distributed_hash_table = new_dht_handle.clone();
-                for manager_tx in self.torrent_manager_command_txs.values() {
-                    let _ = manager_tx
-                        .try_send(ManagerCommand::UpdateDhtHandle(new_dht_handle.clone()));
-                }
-                self.dht_bootstrap_warning = None;
-                self.refresh_system_warning();
-                tracing_event!(Level::INFO, "DHT bootstrap recovered.");
-            }
-            Err(e) => {
-                tracing_event!(Level::DEBUG, "DHT bootstrap retry failed: {}", e);
-            }
-        }
+            compose_system_warning(self.base_system_warning.as_deref(), dht_warning.as_deref());
     }
 
     fn startup_crossterm_event_listener(&mut self) {
@@ -3081,8 +3232,16 @@ impl App {
             self.app_state.shutdown_progress =
                 managers_shut_down as f64 / total_managers_to_shut_down as f64;
             self.tick_ui_effects_clock();
+            let dht_status = self.dht_service.current_status();
+            let dht_wave_telemetry = self.dht_service.current_wave_telemetry();
             let _ = terminal.draw(|f| {
-                draw(f, &self.app_state, &self.client_configs);
+                draw(
+                    f,
+                    &self.app_state,
+                    &dht_status,
+                    &dht_wave_telemetry,
+                    &self.client_configs,
+                );
             });
 
             tokio::select! {
@@ -3183,6 +3342,46 @@ impl App {
 
     fn refresh_rss_derived(&mut self) {
         crate::tui::screens::rss::recompute_rss_derived(&mut self.app_state, &self.client_configs);
+    }
+
+    fn active_running_torrents_for_dht_announce(&self) -> Vec<Vec<u8>> {
+        self.app_state
+            .torrents
+            .iter()
+            .filter(|(info_hash, display)| {
+                display.latest_state.torrent_control_state == TorrentControlState::Running
+                    && display.latest_state.number_of_pieces_total > 0
+                    && self.torrent_manager_command_txs.contains_key(*info_hash)
+            })
+            .map(|(info_hash, _)| info_hash.clone())
+            .collect()
+    }
+
+    fn announce_torrents_to_dht<I>(&self, info_hashes: I)
+    where
+        I: IntoIterator<Item = Vec<u8>>,
+    {
+        let Some(port) =
+            (self.client_configs.client_port > 0).then_some(self.client_configs.client_port)
+        else {
+            return;
+        };
+
+        let dht_handle = self.dht_service.handle();
+        for info_hash in info_hashes {
+            let should_announce = self
+                .app_state
+                .torrents
+                .get(&info_hash)
+                .is_some_and(|display| display.latest_state.number_of_pieces_total > 0);
+            if !should_announce {
+                continue;
+            }
+            let dht_handle = dht_handle.clone();
+            tokio::spawn(async move {
+                let _ = dht_handle.announce_peer(info_hash, Some(port)).await;
+            });
+        }
     }
 
     fn remove_torrent_runtime(&mut self, info_hash: &[u8]) {
@@ -3408,7 +3607,10 @@ impl App {
             self.app_state.theme = Theme::builtin(new_settings.ui_theme);
         }
 
-        if new_settings.client_port != old_settings.client_port {
+        let port_changed = new_settings.client_port != old_settings.client_port;
+        let bootstrap_changed = new_settings.bootstrap_nodes != old_settings.bootstrap_nodes;
+
+        if port_changed {
             tracing::info!(
                 "Config update: Port changed to {}",
                 new_settings.client_port
@@ -3416,7 +3618,16 @@ impl App {
             if !self.rebind_listener(new_settings.client_port).await {
                 self.client_configs.client_port = old_settings.client_port;
                 let _ = self.rss_settings_tx.send(self.client_configs.clone());
+                if bootstrap_changed {
+                    tracing::info!("Config update: DHT bootstrap nodes changed.");
+                    self.dht_service
+                        .reconfigure(DhtServiceConfig::from_settings(&self.client_configs));
+                }
             }
+        } else if bootstrap_changed {
+            tracing::info!("Config update: DHT bootstrap nodes changed.");
+            self.dht_service
+                .reconfigure(DhtServiceConfig::from_settings(&self.client_configs));
         }
 
         if new_settings.global_download_limit_bps != old_settings.global_download_limit_bps {
@@ -3485,8 +3696,11 @@ impl App {
                         &mut self.app_state.externally_accessable_port_v6
                     }
                 };
-                if !*open_flag {
+                let just_opened = !*open_flag;
+                if just_opened {
                     *open_flag = true;
+                    let info_hashes = self.active_running_torrents_for_dht_announce();
+                    self.announce_torrents_to_dht(info_hashes);
                 }
                 self.app_state.ui.needs_redraw = true;
             }
@@ -4196,56 +4410,12 @@ impl App {
                                     .try_send(ManagerCommand::UpdateListenPort(bound_port));
                             }
 
-                            // Rebuild DHT if enabled
-                            #[cfg(feature = "dht")]
-                            {
-                                tracing::event!(Level::INFO, "Rebinding DHT server to new port...");
-                                let bootstrap_nodes: Vec<&str> = self
-                                    .client_configs
-                                    .bootstrap_nodes
-                                    .iter()
-                                    .map(AsRef::as_ref)
-                                    .collect();
-
-                                match Dht::builder()
-                                    .bootstrap(&bootstrap_nodes)
-                                    .port(bound_port)
-                                    .server_mode()
-                                    .build()
-                                {
-                                    Ok(new_dht_server) => {
-                                        let new_dht_handle = new_dht_server.as_async();
-                                        self.distributed_hash_table = new_dht_handle.clone();
-
-                                        for manager_tx in self.torrent_manager_command_txs.values()
-                                        {
-                                            let _ = manager_tx.try_send(
-                                                ManagerCommand::UpdateDhtHandle(
-                                                    new_dht_handle.clone(),
-                                                ),
-                                            );
-                                        }
-                                        self.dht_bootstrap_warning = None;
-                                        self.refresh_system_warning();
-                                        tracing::event!(
-                                            Level::INFO,
-                                            "DHT server rebound and handles updated."
-                                        );
-                                    }
-                                    Err(e) => {
-                                        self.dht_bootstrap_warning = Some(format!(
-                                            "Warning: DHT bootstrap unavailable ({}). Running without bootstrap; retrying automatically.",
-                                            e
-                                        ));
-                                        self.refresh_system_warning();
-                                        tracing::event!(
-                                            Level::ERROR,
-                                            "Failed to build new DHT server: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
+                            tracing::event!(
+                                Level::INFO,
+                                "Reconfiguring DHT service for new port..."
+                            );
+                            self.dht_service
+                                .reconfigure(DhtServiceConfig::from_settings(&self.client_configs));
                         }
                         Err(e) => {
                             tracing_event!(
@@ -4277,7 +4447,17 @@ impl App {
 
     fn calculate_stats(&mut self, sys: &mut System) {
         let was_seeding = self.app_state.is_seeding;
+        let previous_torrent_sort = self.app_state.torrent_sort;
+        let previous_peer_sort = self.app_state.peer_sort;
         UiTelemetry::on_second_tick(&mut self.app_state, sys);
+        align_unpinned_sort_with_visible_activity(&mut self.app_state);
+        if refresh_autosort_after_stats(
+            &mut self.app_state,
+            previous_torrent_sort,
+            previous_peer_sort,
+        ) {
+            self.app_state.ui.needs_redraw = true;
+        }
         NetworkHistoryTelemetry::on_second_tick(&mut self.app_state);
         self.tuning_controller.on_second_tick();
         self.app_state.tuning_countdown = self.tuning_controller.countdown_secs();
@@ -4910,13 +5090,10 @@ impl App {
         let global_dl_bucket_clone = self.global_dl_bucket.clone();
         let global_ul_bucket_clone = self.global_ul_bucket.clone();
 
-        #[cfg(feature = "dht")]
-        let dht_clone = self.distributed_hash_table.clone();
-        #[cfg(not(feature = "dht"))]
-        let dht_clone = ();
+        let dht_handle = self.dht_service.handle();
 
         let torrent_params = TorrentParameters {
-            dht_handle: dht_clone,
+            dht_handle,
             incoming_peer_rx,
             metrics_tx: torrent_metrics_tx,
             torrent_validation_status: is_validated,
@@ -4930,14 +5107,19 @@ impl App {
             global_ul_bucket: global_ul_bucket_clone,
             file_priorities: file_priorities.clone(),
         };
+        let start_paused = torrent_control_state == TorrentControlState::Paused;
+        let should_announce_on_add = torrent_control_state == TorrentControlState::Running
+            && (self.app_state.externally_accessable_port_v4
+                || self.app_state.externally_accessable_port_v6);
 
         match TorrentManager::from_torrent(torrent_params, torrent) {
             Ok(torrent_manager) => {
                 tokio::spawn(async move {
-                    let _ = torrent_manager
-                        .run(torrent_control_state == TorrentControlState::Paused)
-                        .await;
+                    let _ = torrent_manager.run(start_paused).await;
                 });
+                if should_announce_on_add {
+                    self.announce_torrents_to_dht(std::iter::once(info_hash.clone()));
+                }
                 tracing_event!(
                     Level::INFO,
                     info_hash = %hex::encode(&info_hash),
@@ -5062,7 +5244,7 @@ impl App {
         self.torrent_manager_command_txs
             .insert(info_hash.clone(), manager_command_tx);
 
-        let dht_clone = self.distributed_hash_table.clone();
+        let dht_handle = self.dht_service.handle();
         let (torrent_metrics_tx, torrent_metrics_rx) = watch::channel(TorrentMetrics::default());
         self.torrent_metric_watch_rxs
             .insert(info_hash.clone(), torrent_metrics_rx);
@@ -5071,7 +5253,7 @@ impl App {
         let global_dl_bucket_clone = self.global_dl_bucket.clone();
         let global_ul_bucket_clone = self.global_ul_bucket.clone();
         let torrent_params = TorrentParameters {
-            dht_handle: dht_clone,
+            dht_handle,
             incoming_peer_rx,
             metrics_tx: torrent_metrics_tx,
             torrent_validation_status: is_validated,
@@ -5085,14 +5267,19 @@ impl App {
             global_ul_bucket: global_ul_bucket_clone,
             file_priorities: file_priorities.clone(),
         };
+        let start_paused = torrent_control_state == TorrentControlState::Paused;
+        let should_announce_on_add = torrent_control_state == TorrentControlState::Running
+            && (self.app_state.externally_accessable_port_v4
+                || self.app_state.externally_accessable_port_v6);
 
         match TorrentManager::from_magnet(torrent_params, magnet, &magnet_link) {
             Ok(torrent_manager) => {
                 tokio::spawn(async move {
-                    let _ = torrent_manager
-                        .run(torrent_control_state == TorrentControlState::Paused)
-                        .await;
+                    let _ = torrent_manager.run(start_paused).await;
                 });
+                if should_announce_on_add {
+                    self.announce_torrents_to_dht(std::iter::once(info_hash.clone()));
+                }
                 self.dispatch_integrity_probe_batches();
                 CommandIngestResult::Added {
                     info_hash: Some(info_hash),
@@ -5260,6 +5447,9 @@ impl App {
             details: EventDetails::Ingest {
                 origin,
                 ingest_kind,
+                download_path: None,
+                container_name: None,
+                payload_path: None,
             },
             ..Default::default()
         });
@@ -5458,6 +5648,18 @@ impl App {
                 Some(message.clone()),
             ),
         };
+        let (download_path, container_name, payload_path) = info_hash_hex
+            .as_deref()
+            .and_then(|hash| hex::decode(hash).ok())
+            .and_then(|info_hash| self.app_state.torrents.get(&info_hash))
+            .map(|torrent| {
+                (
+                    torrent.latest_state.download_path.clone(),
+                    torrent.latest_state.container_name.clone(),
+                    Self::torrent_saved_location(&torrent.latest_state),
+                )
+            })
+            .unwrap_or_default();
 
         self.append_event_journal_entry(EventJournalEntry {
             host_id: self.event_journal_host_id.clone(),
@@ -5473,6 +5675,9 @@ impl App {
             details: EventDetails::Ingest {
                 origin,
                 ingest_kind,
+                download_path,
+                container_name,
+                payload_path,
             },
             ..Default::default()
         });
@@ -5739,47 +5944,14 @@ impl App {
                     let _ = manager_tx.try_send(ManagerCommand::UpdateListenPort(bound_port));
                 }
 
-                // Re-initialize DHT if enabled (Logic copied from handle_port_change)
-                #[cfg(feature = "dht")]
+                self.dht_service
+                    .reconfigure(DhtServiceConfig::from_settings(&self.client_configs));
+
+                if self.app_state.externally_accessable_port_v4
+                    || self.app_state.externally_accessable_port_v6
                 {
-                    let bootstrap_nodes: Vec<&str> = self
-                        .client_configs
-                        .bootstrap_nodes
-                        .iter()
-                        .map(AsRef::as_ref)
-                        .collect();
-
-                    match Dht::builder()
-                        .bootstrap(&bootstrap_nodes)
-                        .port(bound_port)
-                        .server_mode()
-                        .build()
-                    {
-                        Ok(new_dht_server) => {
-                            let new_dht_handle = new_dht_server.as_async();
-                            self.distributed_hash_table = new_dht_handle.clone();
-
-                            for manager_tx in self.torrent_manager_command_txs.values() {
-                                let _ = manager_tx.try_send(ManagerCommand::UpdateDhtHandle(
-                                    new_dht_handle.clone(),
-                                ));
-                            }
-                            self.dht_bootstrap_warning = None;
-                            self.refresh_system_warning();
-                        }
-                        Err(e) => {
-                            self.dht_bootstrap_warning = Some(format!(
-                                "Warning: DHT bootstrap unavailable ({}). Running without bootstrap; retrying automatically.",
-                                e
-                            ));
-                            self.refresh_system_warning();
-                            tracing_event!(
-                                Level::ERROR,
-                                "Failed to rebuild DHT on new port: {}",
-                                e
-                            );
-                        }
-                    }
+                    let info_hashes = self.active_running_torrents_for_dht_announce();
+                    self.announce_torrents_to_dht(info_hashes);
                 }
 
                 true
@@ -6004,6 +6176,7 @@ impl App {
             total_download_bps: s.avg_download_history.last().copied().unwrap_or(0),
             total_upload_bps: s.avg_upload_history.last().copied().unwrap_or(0),
             status_config: status::status_config_from_settings(&self.client_configs),
+            dht: self.dht_service.current_status(),
             torrents: torrent_metrics,
         }
     }
@@ -6183,6 +6356,9 @@ pub fn torrent_is_effectively_incomplete(metrics: &TorrentMetrics) -> bool {
     }
     if torrent_has_skipped_files(metrics) {
         return false;
+    }
+    if metrics.number_of_pieces_total == 0 {
+        return !metrics.is_complete;
     }
     metrics.number_of_pieces_total > 0
         && metrics.number_of_pieces_completed < metrics.number_of_pieces_total
@@ -6391,12 +6567,14 @@ pub(crate) fn sort_and_filter_torrent_list_state(app_state: &mut AppState) {
             return std::cmp::Ordering::Equal;
         };
 
-        let availability_ordering = a_torrent
-            .latest_state
-            .data_available
-            .cmp(&b_torrent.latest_state.data_available);
-        if availability_ordering != std::cmp::Ordering::Equal {
-            return availability_ordering;
+        if !app_state.torrent_sort_pinned {
+            let availability_ordering = a_torrent
+                .latest_state
+                .data_available
+                .cmp(&b_torrent.latest_state.data_available);
+            if availability_ordering != std::cmp::Ordering::Equal {
+                return availability_ordering;
+            }
         }
 
         let ordering = match sort_by {
@@ -6426,10 +6604,7 @@ pub(crate) fn sort_and_filter_torrent_list_state(app_state: &mut AppState) {
             }
         };
 
-        let default_direction = match sort_by {
-            TorrentSortColumn::Name => SortDirection::Ascending,
-            _ => SortDirection::Descending,
-        };
+        let default_direction = sort_by.default_direction();
         let primary_ordering = if sort_direction != default_direction {
             ordering.reverse()
         } else {
@@ -6464,6 +6639,120 @@ pub(crate) fn sort_and_filter_torrent_list_state(app_state: &mut AppState) {
     clamp_selected_indices_in_state(app_state);
 }
 
+fn has_effectively_incomplete_torrents(app_state: &AppState) -> bool {
+    app_state
+        .torrents
+        .values()
+        .any(|torrent| torrent_is_effectively_incomplete(&torrent.latest_state))
+}
+
+fn clear_finished_progress_priority_pin(app_state: &mut AppState) -> bool {
+    let is_progress_priority_pin = app_state.torrent_sort_pinned
+        && app_state.torrent_sort == (TorrentSortColumn::Progress, SortDirection::Ascending);
+    if !is_progress_priority_pin || app_state.torrents.is_empty() {
+        return false;
+    }
+    if has_effectively_incomplete_torrents(app_state) {
+        return false;
+    }
+
+    app_state.torrent_sort_pinned = false;
+    true
+}
+
+pub(crate) fn refresh_autosort_after_stats(
+    app_state: &mut AppState,
+    previous_torrent_sort: (TorrentSortColumn, SortDirection),
+    previous_peer_sort: (PeerSortColumn, SortDirection),
+) -> bool {
+    let previous_torrent_order = app_state.torrent_list_order.clone();
+    let torrent_sort_changed = app_state.torrent_sort != previous_torrent_sort;
+    let progress_priority_pin_cleared = clear_finished_progress_priority_pin(app_state);
+    if progress_priority_pin_cleared {
+        align_unpinned_sort_with_visible_activity(app_state);
+    }
+
+    if torrent_sort_changed || progress_priority_pin_cleared || !app_state.torrent_sort_pinned {
+        sort_and_filter_torrent_list_state(app_state);
+    }
+
+    let peer_sort_changed = app_state.peer_sort != previous_peer_sort;
+
+    torrent_sort_changed
+        || progress_priority_pin_cleared
+        || app_state.torrent_list_order != previous_torrent_order
+        || peer_sort_changed
+}
+
+fn set_torrent_sort_to_column(app_state: &mut AppState, column: TorrentSortColumn) {
+    app_state.torrent_sort = (column, column.default_direction());
+}
+
+fn set_peer_sort_to_column(app_state: &mut AppState, column: PeerSortColumn) {
+    app_state.peer_sort = (column, column.default_direction());
+}
+
+pub(crate) fn align_unpinned_sort_with_visible_activity(app_state: &mut AppState) {
+    if !app_state.torrent_sort_pinned {
+        let has_download_activity = app_state
+            .torrents
+            .values()
+            .any(|torrent| torrent.smoothed_download_speed_bps > 0);
+        let has_upload_activity = app_state
+            .torrents
+            .values()
+            .any(|torrent| torrent.smoothed_upload_speed_bps > 0);
+        let has_incomplete = has_effectively_incomplete_torrents(app_state);
+
+        let target = if has_download_activity && (!app_state.is_seeding || !has_upload_activity) {
+            TorrentSortColumn::Down
+        } else if has_upload_activity {
+            TorrentSortColumn::Up
+        } else if has_incomplete {
+            TorrentSortColumn::Progress
+        } else {
+            app_state.torrent_sort.0
+        };
+
+        if app_state.torrent_sort.0 != target {
+            set_torrent_sort_to_column(app_state, target);
+        }
+    }
+
+    if !app_state.peer_sort_pinned {
+        let selected_torrent = app_state
+            .torrent_list_order
+            .get(app_state.ui.selected_torrent_index)
+            .and_then(|info_hash| app_state.torrents.get(info_hash));
+        let has_download_activity = selected_torrent.is_some_and(|torrent| {
+            torrent
+                .latest_state
+                .peers
+                .iter()
+                .any(|peer| peer.download_speed_bps > 0)
+        });
+        let has_upload_activity = selected_torrent.is_some_and(|torrent| {
+            torrent
+                .latest_state
+                .peers
+                .iter()
+                .any(|peer| peer.upload_speed_bps > 0)
+        });
+
+        let target = if has_download_activity && (!app_state.is_seeding || !has_upload_activity) {
+            PeerSortColumn::DL
+        } else if has_upload_activity || app_state.is_seeding {
+            PeerSortColumn::UL
+        } else {
+            PeerSortColumn::DL
+        };
+
+        if app_state.peer_sort.0 != target {
+            set_peer_sort_to_column(app_state, target);
+        }
+    }
+}
+
 fn rss_settings_changed(old_settings: &Settings, new_settings: &Settings) -> bool {
     new_settings.rss != old_settings.rss
 }
@@ -6484,8 +6773,10 @@ fn build_persist_payload(
 
     client_configs.torrent_sort_column = app_state.torrent_sort.0;
     client_configs.torrent_sort_direction = app_state.torrent_sort.1;
+    client_configs.torrent_sort_pinned = app_state.torrent_sort_pinned;
     client_configs.peer_sort_column = app_state.peer_sort.0;
     client_configs.peer_sort_direction = app_state.peer_sort.1;
+    client_configs.peer_sort_pinned = app_state.peer_sort_pinned;
     let old_validation_statuses: HashMap<String, bool> = client_configs
         .torrents
         .iter()
@@ -6671,23 +6962,27 @@ mod tests {
     #![allow(clippy::await_holding_lock)]
 
     use super::{
+        advance_dht_wave_state, align_unpinned_sort_with_visible_activity,
         apply_network_history_persist_result, build_persist_payload, build_torrent_preview_tree,
-        clamp_selected_indices_in_state, compose_system_warning, extract_magnet_display_name,
-        flush_persistence_writer_parts, format_filesystem_path_error,
+        clamp_selected_indices_in_state, compose_system_warning, dht_wave_targets,
+        extract_magnet_display_name, flush_persistence_writer_parts, format_filesystem_path_error,
         is_valid_incoming_bittorrent_handshake, move_file_with_fallback_impl, parse_hybrid_hashes,
         persisted_validation_status_from_metrics, prune_rss_feed_errors, queue_persistence_payload,
-        resolve_magnet_torrent_name, rss_settings_changed, should_load_persisted_torrent,
-        should_persist_network_history_on_interval, sort_and_filter_torrent_list_state,
-        torrent_completion_percent, torrent_is_effectively_incomplete, App, AppClusterRole,
-        AppCommand, AppMode, AppRuntimeMode, AppState, CommandIngestResult, FilePriority,
-        IngestSource, ListenerSet, PeerInfo, PersistPayload, SelectedHeader, SortDirection,
-        TorrentControlState, TorrentDisplayState, TorrentMetrics, TorrentPreviewPayload,
-        TorrentSortColumn, UiState, BITTORRENT_PROTOCOL_STR,
+        refresh_autosort_after_stats, resolve_magnet_torrent_name, rss_settings_changed,
+        should_load_persisted_torrent, should_persist_network_history_on_interval,
+        sort_and_filter_torrent_list_state, torrent_completion_percent,
+        torrent_is_effectively_incomplete, App, AppClusterRole, AppCommand, AppMode,
+        AppRuntimeMode, AppState, ColumnId, CommandIngestResult, DhtWaveTargets, DhtWaveUiState,
+        FilePriority, IngestSource, ListenerSet, PeerInfo, PeerSortColumn, PersistPayload,
+        SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState, TorrentMetrics,
+        TorrentPreviewPayload, TorrentSortColumn, UiState, BITTORRENT_PROTOCOL_STR,
+        DHT_WAVE_PHASE_WRAP_PERIOD,
     };
     use crate::config::{
         clear_shared_config_state_for_tests, set_app_paths_override_for_tests, TorrentSettings,
     };
     use crate::control_service::control_event_details;
+    use crate::dht_service::{DhtService, DhtStatus, DhtWaveTelemetry, TestDhtRecorder};
     use crate::errors::StorageError;
     use crate::integrations::control::{read_control_request, ControlRequest};
     use crate::integrations::status::{self, AppOutputState};
@@ -6921,6 +7216,163 @@ mod tests {
         assert!(App::should_draw_this_frame(&AppMode::PowerSaving, true));
     }
 
+    fn test_dht_wave_targets(
+        amplitude: f64,
+        harmonic_amplitude: f64,
+        frequency: f64,
+        phase_speed: f64,
+        crest_bias: f64,
+        bootstrap_ratio: f64,
+    ) -> DhtWaveTargets {
+        DhtWaveTargets {
+            amplitude,
+            harmonic_amplitude,
+            frequency,
+            phase_speed,
+            crest_bias,
+            bootstrap_ratio,
+            query_load: 0.0,
+        }
+    }
+
+    fn test_dht_wave_signal_at(wave: &DhtWaveUiState, x: f64) -> f64 {
+        let theta = x * wave.frequency;
+        let envelope = 0.84 + 0.16 * (theta * 0.33 + wave.phase * 0.28).sin();
+        let dht_amplitude =
+            (wave.amplitude + wave.discovery_boost + wave.query_surge).clamp(0.05, 0.78);
+        let carrier = wave.crest_bias * 0.35
+            + envelope * dht_amplitude * (theta + wave.phase).sin()
+            + wave.harmonic_amplitude * ((theta * 2.35) - wave.phase * 0.72).sin();
+        carrier.clamp(-1.1, 1.1)
+    }
+
+    #[test]
+    fn dht_wave_targets_remain_reactive_above_ten_queries() {
+        let mut status = DhtStatus::default();
+        status.health.enabled = true;
+        status.health.firewalled = Some(false);
+        status.health.cached_ipv4_routes = 900;
+
+        let q10 = dht_wave_targets(
+            &status,
+            &DhtWaveTelemetry {
+                inflight_ipv4_queries: 10,
+                ..Default::default()
+            },
+        );
+        let q48 = dht_wave_targets(
+            &status,
+            &DhtWaveTelemetry {
+                inflight_ipv4_queries: 48,
+                ..Default::default()
+            },
+        );
+        let q96 = dht_wave_targets(
+            &status,
+            &DhtWaveTelemetry {
+                inflight_ipv4_queries: 96,
+                ..Default::default()
+            },
+        );
+
+        assert!(q10.query_load < 0.30);
+        assert!(q48.query_load > q10.query_load);
+        assert!(q96.query_load > q48.query_load);
+        assert!(q48.amplitude > q10.amplitude);
+        assert!(q48.harmonic_amplitude > q10.harmonic_amplitude);
+        assert!(q48.frequency > q10.frequency);
+        assert!(q48.phase_speed > q10.phase_speed);
+    }
+
+    #[test]
+    fn dht_wave_state_smooths_60fps_target_transition() {
+        let frame_dt = 1.0 / 60.0;
+        let idle = test_dht_wave_targets(0.01, 0.004, 0.08, 0.03, 0.0, 1.0);
+        let busy = test_dht_wave_targets(0.36, 0.12, 0.24, 1.2, 0.10, 1.0);
+        let busy = DhtWaveTargets {
+            query_load: 0.75,
+            ..busy
+        };
+        let mut wave = DhtWaveUiState::default();
+
+        advance_dht_wave_state(&mut wave, idle, 0.0, frame_dt);
+
+        let mut previous = wave.clone();
+        let mut max_amplitude_delta: f64 = 0.0;
+        let mut max_frequency_delta: f64 = 0.0;
+        let mut max_discovery_delta: f64 = 0.0;
+        let mut max_sample_delta: f64 = 0.0;
+
+        for frame in 0..120 {
+            let (target, discovery_boost) = if frame < 60 {
+                (idle, 0.0)
+            } else {
+                (busy, 0.18)
+            };
+            advance_dht_wave_state(&mut wave, target, discovery_boost, frame_dt);
+
+            max_amplitude_delta =
+                max_amplitude_delta.max((wave.amplitude - previous.amplitude).abs());
+            max_frequency_delta =
+                max_frequency_delta.max((wave.frequency - previous.frequency).abs());
+            max_discovery_delta =
+                max_discovery_delta.max((wave.discovery_boost - previous.discovery_boost).abs());
+
+            let previous_sample = test_dht_wave_signal_at(&previous, 18.0);
+            let sample = test_dht_wave_signal_at(&wave, 18.0);
+            max_sample_delta = max_sample_delta.max((sample - previous_sample).abs());
+
+            previous = wave.clone();
+        }
+
+        assert!(
+            max_amplitude_delta < 0.06,
+            "amplitude delta too large at 60fps: {max_amplitude_delta}"
+        );
+        assert!(
+            max_frequency_delta < 0.03,
+            "frequency delta too large at 60fps: {max_frequency_delta}"
+        );
+        assert!(
+            max_discovery_delta < 0.04,
+            "discovery delta too large at 60fps: {max_discovery_delta}"
+        );
+        assert!(
+            max_sample_delta < 0.12,
+            "signal delta too large at 60fps: {max_sample_delta}"
+        );
+    }
+
+    #[test]
+    fn dht_wave_state_stays_continuous_across_phase_wrap() {
+        let frame_dt = 1.0 / 60.0;
+        let target = test_dht_wave_targets(0.34, 0.11, 0.22, 2.0, 0.08, 1.0);
+        let phase_step = frame_dt * target.phase_speed;
+        let mut wave = DhtWaveUiState {
+            phase: DHT_WAVE_PHASE_WRAP_PERIOD - (phase_step * 0.5),
+            amplitude: target.amplitude,
+            harmonic_amplitude: target.harmonic_amplitude,
+            frequency: target.frequency,
+            phase_speed: target.phase_speed,
+            crest_bias: target.crest_bias,
+            bootstrap_ratio: target.bootstrap_ratio,
+            discovery_boost: 0.0,
+            query_load: target.query_load,
+            query_surge: 0.0,
+            initialized: true,
+        };
+
+        let before = test_dht_wave_signal_at(&wave, 18.0);
+        advance_dht_wave_state(&mut wave, target, 0.0, frame_dt);
+        let after = test_dht_wave_signal_at(&wave, 18.0);
+
+        assert!(
+            (after - before).abs() < 0.08,
+            "wave jumped too much across wrap: {}",
+            (after - before).abs()
+        );
+    }
+
     #[test]
     fn completion_helper_marks_seeding_complete() {
         let mut metrics = TorrentMetrics {
@@ -6945,6 +7397,24 @@ mod tests {
 
         assert!(!torrent_is_effectively_incomplete(&metrics));
         assert_eq!(torrent_completion_percent(&metrics), 100.0);
+    }
+
+    #[test]
+    fn completion_helper_marks_metadata_pending_incomplete() {
+        let metrics = TorrentMetrics::default();
+
+        assert!(torrent_is_effectively_incomplete(&metrics));
+        assert_eq!(torrent_completion_percent(&metrics), 0.0);
+    }
+
+    #[test]
+    fn completion_helper_marks_zero_piece_complete_when_metrics_say_complete() {
+        let metrics = TorrentMetrics {
+            is_complete: true,
+            ..Default::default()
+        };
+
+        assert!(!torrent_is_effectively_incomplete(&metrics));
     }
 
     #[test]
@@ -7024,7 +7494,7 @@ mod tests {
         let mut app_state = AppState {
             torrent_sort: (TorrentSortColumn::Name, SortDirection::Ascending),
             ui: UiState {
-                selected_header: SelectedHeader::Torrent(0),
+                selected_header: SelectedHeader::Torrent(ColumnId::Name),
                 selected_torrent_index: 5,
                 search_query: "spha".to_string(),
                 ..Default::default()
@@ -7074,6 +7544,474 @@ mod tests {
         assert_eq!(
             app_state.torrent_list_order,
             vec![unavailable_hash, available_hash]
+        );
+    }
+
+    #[test]
+    fn sort_and_filter_respects_pinned_sort_over_availability_priority() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Name, SortDirection::Ascending),
+            torrent_sort_pinned: true,
+            ..Default::default()
+        };
+
+        let unavailable_hash = b"unavailable_hash".to_vec();
+        let available_hash = b"available_hash".to_vec();
+
+        let mut unavailable = mock_display("zeta-sample.iso", 0);
+        unavailable.latest_state.data_available = false;
+
+        let available = mock_display("alpha-sample.iso", 0);
+
+        app_state
+            .torrents
+            .insert(unavailable_hash.clone(), unavailable);
+        app_state.torrents.insert(available_hash.clone(), available);
+
+        sort_and_filter_torrent_list_state(&mut app_state);
+
+        assert_eq!(
+            app_state.torrent_list_order,
+            vec![available_hash, unavailable_hash]
+        );
+    }
+
+    #[test]
+    fn sort_and_filter_progress_descending_puts_most_complete_first() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Progress, SortDirection::Descending),
+            torrent_sort_pinned: true,
+            ..Default::default()
+        };
+
+        let lower_hash = b"lower_hash".to_vec();
+        let higher_hash = b"higher_hash".to_vec();
+
+        let mut lower = mock_display("sample-lower.iso", 0);
+        lower.latest_state.number_of_pieces_total = 10;
+        lower.latest_state.number_of_pieces_completed = 2;
+
+        let mut higher = mock_display("sample-higher.iso", 0);
+        higher.latest_state.number_of_pieces_total = 10;
+        higher.latest_state.number_of_pieces_completed = 8;
+
+        app_state.torrents.insert(lower_hash.clone(), lower);
+        app_state.torrents.insert(higher_hash.clone(), higher);
+
+        sort_and_filter_torrent_list_state(&mut app_state);
+
+        assert_eq!(app_state.torrent_list_order, vec![higher_hash, lower_hash]);
+    }
+
+    #[test]
+    fn sort_and_filter_progress_ascending_puts_zero_progress_first() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Progress, SortDirection::Ascending),
+            torrent_sort_pinned: true,
+            ..Default::default()
+        };
+
+        let zero_hash = b"zero_hash".to_vec();
+        let partial_hash = b"partial_hash".to_vec();
+
+        let mut zero = mock_display("sample-zero.iso", 0);
+        zero.latest_state.number_of_pieces_total = 10;
+        zero.latest_state.number_of_pieces_completed = 0;
+
+        let mut partial = mock_display("sample-partial.iso", 0);
+        partial.latest_state.number_of_pieces_total = 10;
+        partial.latest_state.number_of_pieces_completed = 5;
+
+        app_state.torrents.insert(zero_hash.clone(), zero);
+        app_state.torrents.insert(partial_hash.clone(), partial);
+
+        sort_and_filter_torrent_list_state(&mut app_state);
+
+        assert_eq!(app_state.torrent_list_order, vec![zero_hash, partial_hash]);
+    }
+
+    #[test]
+    fn stats_autosort_refresh_reorders_torrents_when_sort_mode_changes() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Up, SortDirection::Descending),
+            peer_sort: (PeerSortColumn::UL, SortDirection::Descending),
+            ..Default::default()
+        };
+        let slow_hash = b"slow_hash".to_vec();
+        let fast_hash = b"fast_hash".to_vec();
+
+        let mut slow = mock_display("sample-slow.iso", 0);
+        slow.latest_state.data_available = true;
+        slow.smoothed_upload_speed_bps = 10;
+
+        let mut fast = mock_display("sample-fast.iso", 0);
+        fast.latest_state.data_available = true;
+        fast.smoothed_upload_speed_bps = 10_000;
+
+        app_state.torrents.insert(slow_hash.clone(), slow);
+        app_state.torrents.insert(fast_hash.clone(), fast);
+        app_state.torrent_list_order = vec![slow_hash.clone(), fast_hash.clone()];
+
+        let changed = refresh_autosort_after_stats(
+            &mut app_state,
+            (TorrentSortColumn::Down, SortDirection::Descending),
+            (PeerSortColumn::DL, SortDirection::Descending),
+        );
+
+        assert!(changed);
+        assert_eq!(app_state.torrent_list_order, vec![fast_hash, slow_hash]);
+    }
+
+    #[test]
+    fn stats_autosort_refresh_reorders_unpinned_torrents_when_speeds_change() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Down, SortDirection::Descending),
+            torrent_sort_pinned: false,
+            peer_sort: (PeerSortColumn::DL, SortDirection::Descending),
+            ..Default::default()
+        };
+        let old_fast_hash = b"old_fast_hash".to_vec();
+        let new_fast_hash = b"new_fast_hash".to_vec();
+
+        let mut old_fast = mock_display("sample-old-fast.iso", 0);
+        old_fast.latest_state.data_available = true;
+        old_fast.smoothed_download_speed_bps = 10;
+
+        let mut new_fast = mock_display("sample-new-fast.iso", 0);
+        new_fast.latest_state.data_available = true;
+        new_fast.smoothed_download_speed_bps = 10_000;
+
+        app_state.torrents.insert(old_fast_hash.clone(), old_fast);
+        app_state.torrents.insert(new_fast_hash.clone(), new_fast);
+        app_state.torrent_list_order = vec![old_fast_hash.clone(), new_fast_hash.clone()];
+
+        let changed = refresh_autosort_after_stats(
+            &mut app_state,
+            (TorrentSortColumn::Down, SortDirection::Descending),
+            (PeerSortColumn::DL, SortDirection::Descending),
+        );
+
+        assert!(changed);
+        assert_eq!(
+            app_state.torrent_list_order,
+            vec![new_fast_hash, old_fast_hash]
+        );
+    }
+
+    #[test]
+    fn stats_autosort_refresh_preserves_pinned_torrent_order_when_speeds_change() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Down, SortDirection::Descending),
+            torrent_sort_pinned: true,
+            peer_sort: (PeerSortColumn::DL, SortDirection::Descending),
+            ..Default::default()
+        };
+        let old_fast_hash = b"pinned_old_fast".to_vec();
+        let new_fast_hash = b"pinned_new_fast".to_vec();
+
+        let mut old_fast = mock_display("sample-pinned-old.iso", 0);
+        old_fast.latest_state.data_available = true;
+        old_fast.smoothed_download_speed_bps = 10;
+
+        let mut new_fast = mock_display("sample-pinned-new.iso", 0);
+        new_fast.latest_state.data_available = true;
+        new_fast.smoothed_download_speed_bps = 10_000;
+
+        app_state.torrents.insert(old_fast_hash.clone(), old_fast);
+        app_state.torrents.insert(new_fast_hash.clone(), new_fast);
+        app_state.torrent_list_order = vec![old_fast_hash.clone(), new_fast_hash.clone()];
+
+        let changed = refresh_autosort_after_stats(
+            &mut app_state,
+            (TorrentSortColumn::Down, SortDirection::Descending),
+            (PeerSortColumn::DL, SortDirection::Descending),
+        );
+
+        assert!(!changed);
+        assert_eq!(
+            app_state.torrent_list_order,
+            vec![old_fast_hash, new_fast_hash]
+        );
+    }
+
+    #[test]
+    fn stats_autosort_refresh_clears_finished_progress_priority_pin() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Progress, SortDirection::Ascending),
+            torrent_sort_pinned: true,
+            peer_sort: (PeerSortColumn::DL, SortDirection::Descending),
+            ..Default::default()
+        };
+        let complete_hash = b"complete_hash".to_vec();
+        let mut complete = mock_display("sample-complete.iso", 0);
+        complete.latest_state.data_available = true;
+        complete.latest_state.number_of_pieces_total = 10;
+        complete.latest_state.number_of_pieces_completed = 10;
+        app_state.torrents.insert(complete_hash.clone(), complete);
+        app_state.torrent_list_order = vec![complete_hash];
+
+        let changed = refresh_autosort_after_stats(
+            &mut app_state,
+            (TorrentSortColumn::Progress, SortDirection::Ascending),
+            (PeerSortColumn::DL, SortDirection::Descending),
+        );
+
+        assert!(changed);
+        assert!(!app_state.torrent_sort_pinned);
+        assert_eq!(
+            app_state.torrent_sort,
+            (TorrentSortColumn::Progress, SortDirection::Ascending)
+        );
+    }
+
+    #[test]
+    fn stats_autosort_refresh_keeps_progress_priority_pin_while_unfinished() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Progress, SortDirection::Ascending),
+            torrent_sort_pinned: true,
+            peer_sort: (PeerSortColumn::DL, SortDirection::Descending),
+            ..Default::default()
+        };
+        let incomplete_hash = b"incomplete_hash".to_vec();
+        let mut incomplete = mock_display("sample-incomplete.iso", 0);
+        incomplete.latest_state.data_available = true;
+        incomplete.latest_state.number_of_pieces_total = 10;
+        incomplete.latest_state.number_of_pieces_completed = 4;
+        app_state
+            .torrents
+            .insert(incomplete_hash.clone(), incomplete);
+        app_state.torrent_list_order = vec![incomplete_hash];
+
+        let changed = refresh_autosort_after_stats(
+            &mut app_state,
+            (TorrentSortColumn::Progress, SortDirection::Ascending),
+            (PeerSortColumn::DL, SortDirection::Descending),
+        );
+
+        assert!(!changed);
+        assert!(app_state.torrent_sort_pinned);
+        assert_eq!(
+            app_state.torrent_sort,
+            (TorrentSortColumn::Progress, SortDirection::Ascending)
+        );
+    }
+
+    #[test]
+    fn stats_autosort_refresh_keeps_progress_priority_pin_for_metadata_pending() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Progress, SortDirection::Ascending),
+            torrent_sort_pinned: true,
+            peer_sort: (PeerSortColumn::DL, SortDirection::Descending),
+            ..Default::default()
+        };
+        let pending_hash = b"metadata_pending_hash".to_vec();
+        let mut pending = mock_display("sample-metadata-pending.iso", 0);
+        pending.latest_state.data_available = true;
+        pending.latest_state.number_of_pieces_total = 0;
+        pending.latest_state.number_of_pieces_completed = 0;
+        pending.latest_state.is_complete = false;
+        app_state.torrents.insert(pending_hash.clone(), pending);
+        app_state.torrent_list_order = vec![pending_hash];
+
+        let changed = refresh_autosort_after_stats(
+            &mut app_state,
+            (TorrentSortColumn::Progress, SortDirection::Ascending),
+            (PeerSortColumn::DL, SortDirection::Descending),
+        );
+
+        assert!(!changed);
+        assert!(app_state.torrent_sort_pinned);
+        assert_eq!(
+            app_state.torrent_sort,
+            (TorrentSortColumn::Progress, SortDirection::Ascending)
+        );
+    }
+
+    #[test]
+    fn stats_autosort_refresh_keeps_non_progress_user_pin_after_completion() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Name, SortDirection::Ascending),
+            torrent_sort_pinned: true,
+            peer_sort: (PeerSortColumn::DL, SortDirection::Descending),
+            ..Default::default()
+        };
+        let complete_hash = b"user_pin_complete_hash".to_vec();
+        let mut complete = mock_display("sample-user-pin-complete.iso", 0);
+        complete.latest_state.data_available = true;
+        complete.latest_state.number_of_pieces_total = 10;
+        complete.latest_state.number_of_pieces_completed = 10;
+        app_state.torrents.insert(complete_hash.clone(), complete);
+        app_state.torrent_list_order = vec![complete_hash];
+
+        let changed = refresh_autosort_after_stats(
+            &mut app_state,
+            (TorrentSortColumn::Name, SortDirection::Ascending),
+            (PeerSortColumn::DL, SortDirection::Descending),
+        );
+
+        assert!(!changed);
+        assert!(app_state.torrent_sort_pinned);
+        assert_eq!(
+            app_state.torrent_sort,
+            (TorrentSortColumn::Name, SortDirection::Ascending)
+        );
+    }
+
+    #[test]
+    fn stats_autosort_refresh_clears_progress_pin_for_completed_probe_issue() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Progress, SortDirection::Ascending),
+            torrent_sort_pinned: true,
+            peer_sort: (PeerSortColumn::DL, SortDirection::Descending),
+            ..Default::default()
+        };
+        let unavailable_hash = b"complete_unavailable_hash".to_vec();
+        let available_hash = b"complete_available_hash".to_vec();
+
+        let mut unavailable = mock_display("sample-zeta.iso", 0);
+        unavailable.latest_state.data_available = false;
+        unavailable.latest_state.number_of_pieces_total = 10;
+        unavailable.latest_state.number_of_pieces_completed = 10;
+
+        let mut available = mock_display("sample-alpha.iso", 0);
+        available.latest_state.data_available = true;
+        available.latest_state.number_of_pieces_total = 10;
+        available.latest_state.number_of_pieces_completed = 10;
+
+        app_state
+            .torrents
+            .insert(unavailable_hash.clone(), unavailable);
+        app_state.torrents.insert(available_hash.clone(), available);
+        app_state.torrent_list_order = vec![available_hash.clone(), unavailable_hash.clone()];
+
+        let changed = refresh_autosort_after_stats(
+            &mut app_state,
+            (TorrentSortColumn::Progress, SortDirection::Ascending),
+            (PeerSortColumn::DL, SortDirection::Descending),
+        );
+
+        assert!(changed);
+        assert!(!app_state.torrent_sort_pinned);
+        assert_eq!(app_state.torrent_list_order[0], unavailable_hash);
+    }
+
+    #[test]
+    fn stats_autosort_refresh_marks_change_when_only_peer_sort_changes() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Down, SortDirection::Descending),
+            peer_sort: (PeerSortColumn::UL, SortDirection::Descending),
+            ..Default::default()
+        };
+
+        let changed = refresh_autosort_after_stats(
+            &mut app_state,
+            (TorrentSortColumn::Down, SortDirection::Descending),
+            (PeerSortColumn::DL, SortDirection::Descending),
+        );
+
+        assert!(changed);
+    }
+
+    #[test]
+    fn align_unpinned_sort_uses_upload_when_only_upload_is_visible() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Down, SortDirection::Descending),
+            ..Default::default()
+        };
+        let hash = b"hash_a".to_vec();
+        let mut torrent = mock_display("sample-upload.iso", 0);
+        torrent.latest_state.data_available = true;
+        torrent.smoothed_upload_speed_bps = 4_096;
+        app_state.torrents.insert(hash, torrent);
+
+        align_unpinned_sort_with_visible_activity(&mut app_state);
+
+        assert_eq!(
+            app_state.torrent_sort,
+            (TorrentSortColumn::Up, SortDirection::Descending)
+        );
+    }
+
+    #[test]
+    fn align_unpinned_sort_preserves_current_sort_when_idle_and_complete() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Down, SortDirection::Descending),
+            ..Default::default()
+        };
+        let hash = b"hash_a".to_vec();
+        let mut torrent = mock_display("sample-complete.iso", 0);
+        torrent.latest_state.data_available = true;
+        torrent.latest_state.number_of_pieces_total = 10;
+        torrent.latest_state.number_of_pieces_completed = 10;
+        app_state.torrents.insert(hash, torrent);
+
+        align_unpinned_sort_with_visible_activity(&mut app_state);
+
+        assert_eq!(
+            app_state.torrent_sort,
+            (TorrentSortColumn::Down, SortDirection::Descending)
+        );
+    }
+
+    #[test]
+    fn align_unpinned_sort_preserves_pinned_torrent_sort() {
+        let mut app_state = AppState {
+            torrent_sort: (TorrentSortColumn::Down, SortDirection::Descending),
+            torrent_sort_pinned: true,
+            ..Default::default()
+        };
+        let hash = b"hash_a".to_vec();
+        let mut torrent = mock_display("sample-upload.iso", 0);
+        torrent.latest_state.data_available = true;
+        torrent.smoothed_upload_speed_bps = 4_096;
+        app_state.torrents.insert(hash, torrent);
+
+        align_unpinned_sort_with_visible_activity(&mut app_state);
+
+        assert_eq!(
+            app_state.torrent_sort,
+            (TorrentSortColumn::Down, SortDirection::Descending)
+        );
+    }
+
+    #[test]
+    fn align_unpinned_sort_uses_peer_upload_when_only_peer_upload_is_visible() {
+        let mut app_state = AppState {
+            peer_sort: (PeerSortColumn::DL, SortDirection::Descending),
+            ..Default::default()
+        };
+        let hash = b"hash_a".to_vec();
+        let mut torrent = mock_display("sample-peer-upload.iso", 1);
+        torrent.latest_state.peers[0].upload_speed_bps = 2_048;
+        app_state.torrent_list_order = vec![hash.clone()];
+        app_state.torrents.insert(hash, torrent);
+
+        align_unpinned_sort_with_visible_activity(&mut app_state);
+
+        assert_eq!(
+            app_state.peer_sort,
+            (PeerSortColumn::UL, SortDirection::Descending)
+        );
+    }
+
+    #[test]
+    fn align_unpinned_sort_keeps_peer_speed_sort_when_peer_activity_is_idle() {
+        let mut app_state = AppState {
+            is_seeding: true,
+            peer_sort: (PeerSortColumn::Address, SortDirection::Ascending),
+            ..Default::default()
+        };
+        let hash = b"hash_a".to_vec();
+        app_state
+            .torrents
+            .insert(hash.clone(), mock_display("sample-peer-idle.iso", 1));
+        app_state.torrent_list_order = vec![hash];
+
+        align_unpinned_sort_with_visible_activity(&mut app_state);
+
+        assert_eq!(
+            app_state.peer_sort,
+            (PeerSortColumn::UL, SortDirection::Descending)
         );
     }
 
@@ -7319,6 +8257,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebind_listener_reannounces_running_torrents_on_new_port_when_already_reachable() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("create app");
+        let recorder = TestDhtRecorder::default();
+        app.dht_service = DhtService::from_test_recorder(recorder.clone());
+        app.dht_status_rx = app.dht_service.subscribe_status();
+        app.app_state.externally_accessable_port_v4 = true;
+
+        let running_hash = vec![3; 20];
+        let (running_tx, _running_rx) = mpsc::channel(1);
+        app.torrent_manager_command_txs
+            .insert(running_hash.clone(), running_tx);
+        let mut running_display = TorrentDisplayState::default();
+        running_display.latest_state.info_hash = running_hash.clone();
+        running_display.latest_state.torrent_name = "port reannounce sample".to_string();
+        running_display.latest_state.torrent_control_state = TorrentControlState::Running;
+        running_display.latest_state.number_of_pieces_total = 1;
+        app.app_state
+            .torrents
+            .insert(running_hash.clone(), running_display);
+
+        assert!(app.rebind_listener(0).await);
+        tokio::task::yield_now().await;
+
+        let bound_port = app.client_configs.client_port;
+        assert_ne!(bound_port, 0);
+        assert_eq!(
+            recorder.recorded_announces(),
+            vec![(running_hash, Some(bound_port))]
+        );
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn mark_port_open_announces_running_torrents_once_per_family_transition() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("create app");
+        app.client_configs.client_port = 6681;
+        let recorder = TestDhtRecorder::default();
+        app.dht_service = DhtService::from_test_recorder(recorder.clone());
+        app.dht_status_rx = app.dht_service.subscribe_status();
+
+        let running_hash = vec![1; 20];
+        let paused_hash = vec![2; 20];
+        let (running_tx, _running_rx) = mpsc::channel(1);
+        let (paused_tx, _paused_rx) = mpsc::channel(1);
+        app.torrent_manager_command_txs
+            .insert(running_hash.clone(), running_tx);
+        app.torrent_manager_command_txs
+            .insert(paused_hash.clone(), paused_tx);
+
+        let mut running_display = TorrentDisplayState::default();
+        running_display.latest_state.info_hash = running_hash.clone();
+        running_display.latest_state.torrent_name = "announce running torrent".to_string();
+        running_display.latest_state.torrent_control_state = TorrentControlState::Running;
+        running_display.latest_state.number_of_pieces_total = 1;
+        app.app_state
+            .torrents
+            .insert(running_hash.clone(), running_display);
+
+        let mut paused_display = TorrentDisplayState::default();
+        paused_display.latest_state.info_hash = paused_hash.clone();
+        paused_display.latest_state.torrent_name = "announce paused torrent".to_string();
+        paused_display.latest_state.torrent_control_state = TorrentControlState::Paused;
+        app.app_state
+            .torrents
+            .insert(paused_hash.clone(), paused_display);
+
+        app.handle_app_command(AppCommand::MarkPortOpen(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            6681,
+        )))
+        .await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            recorder.recorded_announces(),
+            vec![(running_hash.clone(), Some(6681))]
+        );
+
+        app.handle_app_command(AppCommand::MarkPortOpen(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            6681,
+        )))
+        .await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            recorder.recorded_announces(),
+            vec![(running_hash.clone(), Some(6681))]
+        );
+
+        app.handle_app_command(AppCommand::MarkPortOpen(SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            6681,
+        )))
+        .await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            recorder.recorded_announces(),
+            vec![
+                (running_hash.clone(), Some(6681)),
+                (running_hash, Some(6681))
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn apply_settings_update_restores_previous_port_when_rebind_fails() {
         let settings = crate::config::Settings {
             client_port: 0,
@@ -7366,6 +8424,77 @@ mod tests {
             .expect("listener should remain bound");
         assert_eq!(app.client_configs.client_port, original_port);
         assert_eq!(rebound_port, original_port);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn apply_settings_update_reconfigures_dht_bootstrap_after_failed_port_rebind() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            bootstrap_nodes: vec!["127.0.0.1:9".to_string()],
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("create app");
+        let recorder = TestDhtRecorder::default();
+        app.dht_service = DhtService::from_test_recorder(recorder.clone());
+        app.dht_status_rx = app.dht_service.subscribe_status();
+
+        let original_port = app.client_configs.client_port;
+        let occupied_v4 = tokio::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .expect("bind occupied IPv4 port");
+        let occupied_port = occupied_v4
+            .local_addr()
+            .expect("occupied local addr")
+            .port();
+        let _occupied_v6 =
+            if TcpListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0))
+                .await
+                .is_ok()
+            {
+                match TcpListener::bind(SocketAddr::new(
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                    occupied_port,
+                ))
+                .await
+                {
+                    Ok(listener) => Some(listener),
+                    Err(error) if error.kind() == io::ErrorKind::AddrInUse => None,
+                    Err(error) => panic!("bind occupied IPv6 port: {error}"),
+                }
+            } else {
+                None
+            };
+
+        let mut next_settings = app.client_configs.clone();
+        next_settings.client_port = occupied_port;
+        next_settings.bootstrap_nodes = vec!["127.0.0.1:10".to_string()];
+
+        app.apply_settings_update(next_settings.clone(), false)
+            .await;
+
+        let recorded = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let recorded = recorder.recorded_reconfigures();
+                if !recorded.is_empty() {
+                    break recorded;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("DHT reconfigure should be recorded");
+        let config = recorded.last().expect("recorded reconfigure");
+        assert_eq!(app.client_configs.client_port, original_port);
+        assert_eq!(
+            app.client_configs.bootstrap_nodes,
+            next_settings.bootstrap_nodes
+        );
+        assert_eq!(config.port, original_port);
+        assert_eq!(config.bootstrap_nodes, next_settings.bootstrap_nodes);
 
         let _ = app.shutdown_tx.send(());
     }
@@ -7687,17 +8816,34 @@ mod tests {
             .await
             .expect("build app");
         let queued_path = std::env::temp_dir().join("event-journal-alpha.magnet");
+        let download_path = std::env::temp_dir().join("event-journal-downloads");
+        let info_hash = vec![0x11; 20];
+        app.app_state.torrents.insert(
+            info_hash.clone(),
+            TorrentDisplayState {
+                latest_state: TorrentMetrics {
+                    info_hash: info_hash.clone(),
+                    torrent_name: "Sample Alpha".to_string(),
+                    download_path: Some(download_path.clone()),
+                    container_name: Some("Sample Alpha".to_string()),
+                    is_multi_file: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let initial_entry_count = app.app_state.event_journal_state.entries.len();
 
         app.record_watch_path_discovered(&queued_path);
         app.record_ingest_result(
             &queued_path,
             &CommandIngestResult::Duplicate {
-                info_hash: Some(vec![0x11; 20]),
+                info_hash: Some(info_hash),
                 torrent_name: Some("Sample Alpha".to_string()),
             },
         );
 
-        let entries = &app.app_state.event_journal_state.entries;
+        let entries = &app.app_state.event_journal_state.entries[initial_entry_count..];
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].event_type, EventType::IngestQueued);
         assert_eq!(entries[1].event_type, EventType::IngestDuplicate);
@@ -7709,7 +8855,40 @@ mod tests {
             EventDetails::Ingest {
                 origin: IngestOrigin::WatchFolder,
                 ingest_kind: IngestKind::MagnetFile,
+                download_path: None,
+                container_name: None,
+                payload_path: None,
             }
+        );
+        assert_eq!(
+            entries[1].details,
+            EventDetails::Ingest {
+                origin: IngestOrigin::WatchFolder,
+                ingest_kind: IngestKind::MagnetFile,
+                download_path: Some(download_path.clone()),
+                container_name: Some("Sample Alpha".to_string()),
+                payload_path: Some(download_path.join("Sample Alpha")),
+            }
+        );
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn startup_selected_header_reflects_pinned_torrent_sort() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            torrent_sort_column: TorrentSortColumn::Progress,
+            torrent_sort_pinned: true,
+            ..Default::default()
+        };
+        let app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+
+        assert_eq!(
+            app.app_state.ui.selected_header,
+            SelectedHeader::Torrent(ColumnId::Status)
         );
 
         let _ = app.shutdown_tx.send(());
@@ -7947,7 +9126,7 @@ mod tests {
                 .display()
         ));
 
-        assert!(watched_parent_matches(
+        assert!(super::watched_parent_matches(
             &verbatim_missing_path,
             &effective_root.join("inbox")
         ));
@@ -8461,6 +9640,8 @@ mod tests {
 
     #[tokio::test]
     async fn healthy_probe_requests_manager_recovery_but_does_not_flip_ui_until_metrics() {
+        let _guard = lock_shared_env();
+        let _temp_paths = configure_temp_app_paths_for_test();
         let settings = crate::config::Settings {
             client_port: 0,
             ..Default::default()

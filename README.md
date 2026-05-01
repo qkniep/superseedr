@@ -245,6 +245,9 @@ superseedr add "/path/to/linux.iso.torrent"
 # Inspect the current shared launcher selection
 superseedr show-shared-config
 
+# Show resolved config, log, status, journal, and watch paths
+superseedr show-configs
+
 # Persist shared launcher config for installed/protocol launches
 superseedr set-shared-config "/path/to/seedbox"
 

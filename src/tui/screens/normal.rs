@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: 2025 The superseedr Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::app::align_unpinned_sort_with_visible_activity;
 use crate::app::file_activity_wave_steps_per_second;
 use crate::app::sort_and_filter_torrent_list_state;
 use crate::app::torrent_completion_percent;
+use crate::app::torrent_is_effectively_incomplete;
 use crate::app::AppCommand;
 use crate::app::BrowserPane;
 use crate::app::ChartPanelView;
@@ -15,8 +17,8 @@ use crate::app::{
     App, AppMode, AppState, ConfigItem, RssScreen, SelectedHeader, TorrentControlState,
     TorrentDisplayState,
 };
-use crate::config::Settings;
-use crate::config::SortDirection;
+use crate::config::{PeerSortColumn, Settings, SortDirection, TorrentSortColumn};
+use crate::dht_service::{DhtStatus, DhtWaveTelemetry};
 use crate::integrations::control::ControlRequest;
 use crate::persistence::activity_history::{ActivityHistoryPoint, ActivityHistorySeries};
 use crate::persistence::network_history::NetworkHistoryPoint;
@@ -402,6 +404,7 @@ pub enum UiAction {
     ThemeNext,
     TogglePauseSelected,
     SortBySelectedColumn,
+    ClearManualSorting,
     OpenHelp,
     PasteText(String),
 }
@@ -603,14 +606,32 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                 compute_visible_torrent_columns(app_state, layout_plan.list.width);
             let (_, visible_peer_columns) =
                 compute_visible_peer_columns(app_state, layout_plan.peers.width);
+            let raw_selected_header = app_state.ui.selected_header;
+            let selected_torrent_has_peers = selected_torrent_has_peers(app_state);
+            let selected_header = normalize_selected_header(
+                raw_selected_header,
+                selected_torrent_has_peers,
+                &visible_torrent_columns,
+                &visible_peer_columns,
+            );
+            app_state.ui.selected_header = selected_header;
 
-            match app_state.ui.selected_header {
-                SelectedHeader::Torrent(i) => {
+            match selected_header {
+                SelectedHeader::Torrent(column_id) => {
                     let cols = get_torrent_columns();
-                    if let Some(def) = visible_torrent_columns
-                        .get(i)
-                        .and_then(|&real_idx| cols.get(real_idx))
-                    {
+                    if let Some(i) = torrent_column_index(column_id) {
+                        if !visible_torrent_columns.contains(&i) {
+                            return ReduceResult {
+                                redraw: true,
+                                effects: Vec::new(),
+                            };
+                        }
+                        let Some(def) = cols.get(i) else {
+                            return ReduceResult {
+                                redraw: true,
+                                effects: Vec::new(),
+                            };
+                        };
                         if let Some(column) = def.sort_enum {
                             if app_state.torrent_sort.0 == column {
                                 app_state.torrent_sort.1 =
@@ -621,18 +642,29 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                                     };
                             } else {
                                 app_state.torrent_sort.0 = column;
-                                app_state.torrent_sort.1 = SortDirection::Descending;
+                                app_state.torrent_sort.1 = column.default_direction();
                             }
+                            app_state.torrent_sort_pinned =
+                                !torrent_sort_column_uses_autosort(column);
                             sort_and_filter_torrent_list_state(app_state);
                         }
                     }
                 }
-                SelectedHeader::Peer(i) => {
+                SelectedHeader::Peer(column_id) => {
                     let cols = get_peer_columns();
-                    if let Some(def) = visible_peer_columns
-                        .get(i)
-                        .and_then(|&real_idx| cols.get(real_idx))
-                    {
+                    if let Some(i) = peer_column_index(column_id) {
+                        if !visible_peer_columns.contains(&i) {
+                            return ReduceResult {
+                                redraw: true,
+                                effects: Vec::new(),
+                            };
+                        }
+                        let Some(def) = cols.get(i) else {
+                            return ReduceResult {
+                                redraw: true,
+                                effects: Vec::new(),
+                            };
+                        };
                         if let Some(column) = def.sort_enum {
                             if app_state.peer_sort.0 == column {
                                 app_state.peer_sort.1 =
@@ -643,12 +675,24 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
                                     };
                             } else {
                                 app_state.peer_sort.0 = column;
-                                app_state.peer_sort.1 = SortDirection::Descending;
+                                app_state.peer_sort.1 = column.default_direction();
                             }
+                            app_state.peer_sort_pinned = !peer_sort_column_uses_autosort(column);
                         }
                     }
                 }
             };
+
+            ReduceResult {
+                redraw: true,
+                effects: Vec::new(),
+            }
+        }
+        UiAction::ClearManualSorting => {
+            app_state.torrent_sort_pinned = false;
+            app_state.peer_sort_pinned = false;
+            align_unpinned_sort_with_visible_activity(app_state);
+            sort_and_filter_torrent_list_state(app_state);
 
             ReduceResult {
                 redraw: true,
@@ -699,15 +743,25 @@ fn map_key_to_ui_action(key: KeyEvent) -> Option<UiAction> {
         KeyCode::Char('>') => Some(UiAction::ThemeNext),
         KeyCode::Char('p') => Some(UiAction::TogglePauseSelected),
         KeyCode::Char('s') => Some(UiAction::SortBySelectedColumn),
+        KeyCode::Char('S') => Some(UiAction::ClearManualSorting),
         KeyCode::Up
         | KeyCode::Char('k')
         | KeyCode::Down
         | KeyCode::Char('j')
         | KeyCode::Left
         | KeyCode::Char('h')
+        | KeyCode::Char('l')
         | KeyCode::Right => Some(UiAction::Navigate(key.code)),
         _ => None,
     }
+}
+
+fn torrent_sort_column_uses_autosort(column: TorrentSortColumn) -> bool {
+    matches!(column, TorrentSortColumn::Down | TorrentSortColumn::Up)
+}
+
+fn peer_sort_column_uses_autosort(column: PeerSortColumn) -> bool {
+    matches!(column, PeerSortColumn::DL | PeerSortColumn::UL)
 }
 
 pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
@@ -731,11 +785,193 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
         draw_peer_stream(f, app_state, r, ctx);
     }
     if let Some(r) = plan.block_stream {
-        draw_block_stream_and_disk_orb(f, app_state, r, ctx);
+        draw_block_stream_and_disk_orb(
+            f,
+            app_state,
+            screen.dht_status,
+            screen.dht_wave_telemetry,
+            r,
+            ctx,
+        );
     }
     if let Some(r) = plan.stats {
         draw_stats_panel(f, app_state, settings, r, ctx);
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DhtWaveProfile {
+    amplitude: f64,
+    harmonic_amplitude: f64,
+    frequency: f64,
+    phase_speed: f64,
+    crest_bias: f64,
+}
+
+impl DhtWaveProfile {
+    fn from_inputs(_status: &DhtStatus, telemetry: &DhtWaveTelemetry) -> Self {
+        let query_signal = dht_wave_query_signal(telemetry);
+        let amplitude = (0.01 + query_signal * 0.24).clamp(0.0, 0.52);
+        let harmonic_amplitude = (0.004 + query_signal * 0.13).clamp(0.0, 0.20);
+        let frequency = (0.08 + query_signal * 0.18).clamp(0.06, 0.38);
+        let phase_speed = (0.03 + query_signal * (0.85 + query_signal * 0.75)).clamp(0.0, 2.0);
+        let crest_bias = ((query_signal - 0.5) * 0.06).clamp(-0.22, 0.22);
+
+        Self {
+            amplitude,
+            harmonic_amplitude,
+            frequency,
+            phase_speed,
+            crest_bias,
+        }
+    }
+}
+
+fn dht_wave_query_signal(telemetry: &DhtWaveTelemetry) -> f64 {
+    let total_queries = (telemetry.inflight_ipv4_queries + telemetry.inflight_ipv6_queries) as f64;
+    if total_queries <= 0.0 {
+        0.0
+    } else {
+        (total_queries / (total_queries + 40.0)).clamp(0.0, 1.0)
+    }
+}
+
+fn dht_wave_y_axis_bounds(points: &[(f64, f64)]) -> [f64; 2] {
+    const MIN_HALF_SPAN: f64 = 0.18;
+    const MAX_HALF_SPAN: f64 = 1.08;
+
+    let max_abs = points.iter().map(|(_, y)| y.abs()).fold(0.0_f64, f64::max);
+    let half_span = (max_abs * 1.12).clamp(MIN_HALF_SPAN, MAX_HALF_SPAN);
+
+    [-half_span, half_span]
+}
+
+fn dht_wave_title_spans(
+    total_queries: usize,
+    demand_power_multiplier: u8,
+    ctx: &ThemeContext,
+) -> Vec<Span<'static>> {
+    let query_style = ctx.apply(
+        Style::default()
+            .fg(ctx.peer_discovered())
+            .add_modifier(Modifier::BOLD),
+    );
+    let multiplier = demand_power_multiplier.max(1);
+    if multiplier <= 1 {
+        return vec![Span::styled(total_queries.to_string(), query_style)];
+    }
+
+    vec![
+        Span::styled(
+            format!("{multiplier}x"),
+            ctx.apply(
+                Style::default()
+                    .fg(ctx.accent_peach())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ),
+        Span::styled(
+            "(",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+        ),
+        Span::styled(total_queries.to_string(), query_style),
+        Span::styled(
+            ")",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+        ),
+    ]
+}
+
+fn draw_dht_wave_panel(
+    f: &mut Frame,
+    app_state: &AppState,
+    dht_status: &DhtStatus,
+    dht_wave_telemetry: &DhtWaveTelemetry,
+    area: Rect,
+    ctx: &ThemeContext,
+) {
+    if area.height < 3 || area.width < 10 {
+        return;
+    }
+
+    let profile = if app_state.ui.dht_wave.initialized {
+        DhtWaveProfile {
+            amplitude: app_state.ui.dht_wave.amplitude,
+            harmonic_amplitude: app_state.ui.dht_wave.harmonic_amplitude,
+            frequency: app_state.ui.dht_wave.frequency,
+            phase_speed: app_state.ui.dht_wave.phase_speed,
+            crest_bias: app_state.ui.dht_wave.crest_bias,
+        }
+    } else {
+        DhtWaveProfile::from_inputs(dht_status, dht_wave_telemetry)
+    };
+    let total_queries =
+        dht_wave_telemetry.inflight_ipv4_queries + dht_wave_telemetry.inflight_ipv6_queries;
+    let x_bound = area.width.saturating_sub(3).max(1) as usize;
+    let phase = if app_state.ui.dht_wave.initialized {
+        app_state.ui.dht_wave.phase
+    } else {
+        app_state.ui.effects_phase_time * profile.phase_speed
+    };
+
+    let sample_count = (x_bound.max(1) * 3).max(16);
+    let x_step = x_bound as f64 / sample_count as f64;
+    let mut dht_points = Vec::with_capacity(sample_count + 1);
+
+    for i in 0..=sample_count {
+        let x = i as f64 * x_step;
+        let theta = x * profile.frequency;
+        let envelope = 0.84 + 0.16 * (theta * 0.33 + phase * 0.28).sin();
+        let transient_boost = if app_state.ui.dht_wave.initialized {
+            app_state.ui.dht_wave.discovery_boost + app_state.ui.dht_wave.query_surge
+        } else {
+            0.0
+        };
+        let dht_amplitude = (profile.amplitude + transient_boost).clamp(0.05, 0.82);
+        let carrier = profile.crest_bias * 0.35
+            + envelope * dht_amplitude * (theta + phase).sin()
+            + profile.harmonic_amplitude * ((theta * 2.35) - phase * 0.72).sin();
+        dht_points.push((x, carrier.clamp(-1.04, 1.04)));
+    }
+    let y_axis_bounds = dht_wave_y_axis_bounds(&dht_points);
+
+    let datasets = vec![ratatui::widgets::Dataset::default()
+        .marker(ratatui::symbols::Marker::Braille)
+        .graph_type(ratatui::widgets::GraphType::Line)
+        .style(
+            ctx.apply(
+                Style::default()
+                    .fg(ctx.peer_discovered())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .data(&dht_points)];
+
+    let chart = ratatui::widgets::Chart::new(datasets)
+        .block(
+            Block::default()
+                .title_top(
+                    Line::from(Span::styled(
+                        "DHT",
+                        ctx.apply(Style::default().fg(ctx.peer_discovered())),
+                    ))
+                    .alignment(Alignment::Left),
+                )
+                .title_top(
+                    Line::from(dht_wave_title_spans(
+                        total_queries,
+                        dht_wave_telemetry.demand_power_multiplier,
+                        ctx,
+                    ))
+                    .alignment(Alignment::Right),
+                )
+                .borders(Borders::ALL)
+                .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border))),
+        )
+        .x_axis(ratatui::widgets::Axis::default().bounds([0.0, x_bound as f64]))
+        .y_axis(ratatui::widgets::Axis::default().bounds(y_axis_bounds));
+
+    f.render_widget(chart, area);
 }
 
 pub fn draw_status_error_popup(f: &mut Frame, error_text: &str, ctx: &ThemeContext) {
@@ -893,6 +1129,10 @@ pub(crate) fn compute_footer_status_width(client_port: u16, overall_port_status:
         + FOOTER_STATUS_GUTTER
 }
 
+pub(crate) fn footer_fps_label(app_state: &AppState) -> String {
+    format!("{} fps", app_state.data_rate.fps_label())
+}
+
 fn estimate_footer_left_content_width(app_state: &AppState, ctx: &ThemeContext) -> u16 {
     let fx_enabled = ctx.theme.effects.enabled();
     let theme_label = if fx_enabled {
@@ -900,32 +1140,26 @@ fn estimate_footer_left_content_width(app_state: &AppState, ctx: &ThemeContext) 
     } else {
         ctx.theme.name.to_string()
     };
+    let fps_label = footer_fps_label(app_state);
 
     let content = if let Some(new_version) = &app_state.update_available {
         format!(
             "UPDATE AVAILABLE: v{} -> v{} | {} | {}",
-            APP_VERSION,
-            new_version,
-            app_state.data_rate.to_string(),
-            theme_label
+            APP_VERSION, new_version, fps_label, theme_label
         )
     } else {
         #[cfg(all(feature = "dht", feature = "pex"))]
         {
             format!(
                 "superseedr v{} | {} | {}",
-                APP_VERSION,
-                app_state.data_rate.to_string(),
-                theme_label
+                APP_VERSION, fps_label, theme_label
             )
         }
         #[cfg(not(all(feature = "dht", feature = "pex")))]
         {
             format!(
                 "superseedr [PRIVATE] v{} | {} | {}",
-                APP_VERSION,
-                app_state.data_rate.to_string(),
-                theme_label
+                APP_VERSION, fps_label, theme_label
             )
         }
     };
@@ -1003,10 +1237,13 @@ pub fn draw_footer(
     let status_chunk = footer_layout[2];
 
     if show_branding {
+        #[cfg(all(feature = "dht", feature = "pex"))]
         let current_dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
+        #[cfg(all(feature = "dht", feature = "pex"))]
         let current_ul_speed = *app_state.avg_upload_history.last().unwrap_or(&0);
         let fx_enabled = ctx.theme.effects.enabled();
         let theme_name = ctx.theme.name.to_string();
+        let fps_label = footer_fps_label(app_state);
         let fit_theme_label = |prefix: &str| -> String {
             let max_theme_width =
                 (client_id_chunk.width as usize).saturating_sub(prefix.chars().count());
@@ -1022,9 +1259,7 @@ pub fn draw_footer(
         let client_display_line = if let Some(new_version) = &app_state.update_available {
             let theme_display = fit_theme_label(&format!(
                 "UPDATE AVAILABLE: v{} -> v{} | {} | ",
-                APP_VERSION,
-                new_version,
-                app_state.data_rate.to_string()
+                APP_VERSION, new_version, fps_label
             ));
             Line::from(vec![
                 Span::styled(
@@ -1050,7 +1285,7 @@ pub fn draw_footer(
                     ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                 ),
                 Span::styled(
-                    app_state.data_rate.to_string(),
+                    fps_label.clone(),
                     ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
                 ),
                 Span::styled(
@@ -1065,11 +1300,8 @@ pub fn draw_footer(
         } else {
             #[cfg(all(feature = "dht", feature = "pex"))]
             {
-                let theme_display = fit_theme_label(&format!(
-                    "superseedr v{} | {} | ",
-                    APP_VERSION,
-                    app_state.data_rate.to_string()
-                ));
+                let theme_display =
+                    fit_theme_label(&format!("superseedr v{} | {} | ", APP_VERSION, fps_label));
                 Line::from(vec![
                     Span::styled(
                         "super",
@@ -1094,7 +1326,7 @@ pub fn draw_footer(
                         ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                     ),
                     Span::styled(
-                        app_state.data_rate.to_string(),
+                        fps_label.clone(),
                         ctx.apply(Style::default().fg(ctx.state_warning()).bold()),
                     ),
                     Span::styled(
@@ -1111,8 +1343,7 @@ pub fn draw_footer(
             {
                 let theme_display = fit_theme_label(&format!(
                     "superseedr [PRIVATE] v{} | {} | ",
-                    APP_VERSION,
-                    app_state.data_rate.to_string()
+                    APP_VERSION, fps_label
                 ));
                 Line::from(vec![
                     Span::styled(
@@ -1135,7 +1366,7 @@ pub fn draw_footer(
                         ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
                     ),
                     Span::styled(
-                        app_state.data_rate.to_string(),
+                        fps_label.clone(),
                         ctx.apply(Style::default().fg(ctx.state_warning()).bold()),
                     ),
                     Span::styled(
@@ -1372,6 +1603,92 @@ fn format_peer_address_for_table(address: &str) -> String {
     }
 }
 
+fn selected_torrent_has_peers(app_state: &AppState) -> bool {
+    app_state
+        .torrent_list_order
+        .get(app_state.ui.selected_torrent_index)
+        .and_then(|info_hash| app_state.torrents.get(info_hash))
+        .is_some_and(|torrent| !torrent.latest_state.peers.is_empty())
+}
+
+fn nearest_visible_column(visible_columns: &[usize], selected_column: usize) -> Option<usize> {
+    visible_columns
+        .iter()
+        .copied()
+        .find(|&idx| idx >= selected_column)
+        .or_else(|| visible_columns.last().copied())
+}
+
+fn torrent_column_id_for_index(index: usize) -> Option<ColumnId> {
+    get_torrent_columns().get(index).map(|column| column.id)
+}
+
+fn peer_column_id_for_index(index: usize) -> Option<PeerColumnId> {
+    get_peer_columns().get(index).map(|column| column.id)
+}
+
+fn torrent_column_index(column_id: ColumnId) -> Option<usize> {
+    get_torrent_columns()
+        .iter()
+        .position(|column| column.id == column_id)
+}
+
+fn peer_column_index(column_id: PeerColumnId) -> Option<usize> {
+    get_peer_columns()
+        .iter()
+        .position(|column| column.id == column_id)
+}
+
+fn nearest_visible_torrent_column(
+    visible_columns: &[usize],
+    selected_column: ColumnId,
+) -> Option<ColumnId> {
+    let selected_index = torrent_column_index(selected_column).unwrap_or(usize::MAX);
+    nearest_visible_column(visible_columns, selected_index).and_then(torrent_column_id_for_index)
+}
+
+fn nearest_visible_peer_column(
+    visible_columns: &[usize],
+    selected_column: PeerColumnId,
+) -> Option<PeerColumnId> {
+    let selected_index = peer_column_index(selected_column).unwrap_or(usize::MAX);
+    nearest_visible_column(visible_columns, selected_index).and_then(peer_column_id_for_index)
+}
+
+fn last_visible_torrent_column(visible_columns: &[usize]) -> Option<ColumnId> {
+    nearest_visible_column(visible_columns, usize::MAX).and_then(torrent_column_id_for_index)
+}
+
+fn normalize_selected_header(
+    selected_header: SelectedHeader,
+    selected_torrent_has_peers: bool,
+    visible_torrent_columns: &[usize],
+    visible_peer_columns: &[usize],
+) -> SelectedHeader {
+    match selected_header {
+        SelectedHeader::Torrent(column_id) => {
+            nearest_visible_torrent_column(visible_torrent_columns, column_id)
+                .map(SelectedHeader::Torrent)
+                .unwrap_or(SelectedHeader::Torrent(ColumnId::Name))
+        }
+        SelectedHeader::Peer(column_id) => {
+            if selected_torrent_has_peers {
+                nearest_visible_peer_column(visible_peer_columns, column_id)
+                    .map(SelectedHeader::Peer)
+                    .unwrap_or_else(|| {
+                        last_visible_torrent_column(visible_torrent_columns)
+                            .map(SelectedHeader::Torrent)
+                            .unwrap_or(SelectedHeader::Torrent(ColumnId::Name))
+                    })
+            } else {
+                last_visible_torrent_column(visible_torrent_columns)
+                    .map(SelectedHeader::Torrent)
+                    .unwrap_or(SelectedHeader::Torrent(ColumnId::Name))
+            }
+        }
+    }
+}
+
 pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
     let mut table_state = TableState::default();
     if matches!(app_state.ui.selected_header, SelectedHeader::Torrent(_)) {
@@ -1384,10 +1701,9 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
     let (sort_col, sort_dir) = app_state.torrent_sort;
     let header_cells: Vec<Cell> = visible_indices
         .iter()
-        .enumerate()
-        .map(|(visual_idx, &real_idx)| {
+        .map(|&real_idx| {
             let def = &all_cols[real_idx];
-            let is_selected = app_state.ui.selected_header == SelectedHeader::Torrent(visual_idx);
+            let is_selected = app_state.ui.selected_header == SelectedHeader::Torrent(def.id);
             let is_sorting = def.sort_enum == Some(sort_col);
 
             let mut style = ctx.apply(Style::default().fg(ctx.state_warning()));
@@ -1442,9 +1758,8 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                             let def = &all_cols[real_idx];
                             match def.id {
                                 ColumnId::Status => {
-                                    let display_pct = torrent_completion_percent(state);
-                                    Cell::from(format!("{:.1}%", display_pct))
-                                        .style(ctx.apply(Style::default().fg(row_color)))
+                                    let status = torrent_status_cell(torrent, ctx);
+                                    Cell::from(status.text).style(status.style)
                                 }
                                 ColumnId::Name => {
                                     let name = if app_state.anonymize_torrent_names {
@@ -1880,6 +2195,39 @@ fn torrent_list_row_color(torrent: &TorrentDisplayState, ctx: &ThemeContext) -> 
             TorrentControlState::Paused => ctx.theme.semantic.surface1,
             TorrentControlState::Deleting => ctx.state_error(),
         }
+    }
+}
+
+struct TorrentStatusCell {
+    text: String,
+    style: Style,
+}
+
+fn torrent_status_cell(torrent: &TorrentDisplayState, ctx: &ThemeContext) -> TorrentStatusCell {
+    let state = &torrent.latest_state;
+    let metadata_pending = matches!(
+        torrent.latest_file_probe_status,
+        Some(TorrentFileProbeStatus::PendingMetadata)
+    ) || (state.number_of_pieces_total == 0
+        && torrent_is_effectively_incomplete(state));
+
+    if metadata_pending {
+        return TorrentStatusCell {
+            text: "Meta".to_string(),
+            style: ctx.apply(Style::default().fg(ctx.state_warning())),
+        };
+    }
+
+    if !state.data_available {
+        return TorrentStatusCell {
+            text: "Files".to_string(),
+            style: ctx.apply(Style::default().fg(ctx.state_error())),
+        };
+    }
+
+    TorrentStatusCell {
+        text: format!("{:.1}%", torrent_completion_percent(state)),
+        style: ctx.apply(Style::default().fg(torrent_list_row_color(torrent, ctx))),
     }
 }
 
@@ -3319,6 +3667,8 @@ fn should_use_compact_peer_stream_legend(
 pub fn draw_block_stream_and_disk_orb(
     f: &mut Frame,
     app_state: &AppState,
+    dht_status: &DhtStatus,
+    dht_wave_telemetry: &DhtWaveTelemetry,
     area: Rect,
     ctx: &ThemeContext,
 ) {
@@ -3335,15 +3685,34 @@ pub fn draw_block_stream_and_disk_orb(
             draw_disk_health_panel(f, app_state, split[1], ctx);
         }
         BlockStreamDiskLayoutMode::Stacked => {
-            let split = Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)])
+            if should_insert_dht_between_blocks_and_disk(app_state.screen_area, area) {
+                let split = Layout::vertical([
+                    Constraint::Min(4),
+                    Constraint::Length(6),
+                    Constraint::Length(7),
+                ])
                 .split(area);
-            draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
-            draw_disk_health_panel(f, app_state, split[1], ctx);
+                draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
+                draw_dht_wave_panel(f, app_state, dht_status, dht_wave_telemetry, split[1], ctx);
+                draw_disk_health_panel(f, app_state, split[2], ctx);
+            } else {
+                let split =
+                    Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)])
+                        .split(area);
+                draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
+                draw_disk_health_panel(f, app_state, split[1], ctx);
+            }
         }
         BlockStreamDiskLayoutMode::DiskOnly => {
             draw_disk_health_panel(f, app_state, area, ctx);
         }
     }
+}
+
+fn should_insert_dht_between_blocks_and_disk(screen_area: Rect, area: Rect) -> bool {
+    let is_horizontal_mode =
+        screen_area.width >= 100 && (screen_area.height as f32 <= screen_area.width as f32 * 0.6);
+    is_horizontal_mode && area.height >= 14 && area.width >= 10
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3994,12 +4363,11 @@ pub fn draw_peers_table(
                 } else {
                     let header_cells: Vec<Cell> = visible_indices
                         .iter()
-                        .enumerate()
-                        .map(|(visual_idx, &real_idx)| {
+                        .map(|&real_idx| {
                             let def = &all_peer_cols[real_idx];
 
                             let is_selected =
-                                app_state.ui.selected_header == SelectedHeader::Peer(visual_idx);
+                                app_state.ui.selected_header == SelectedHeader::Peer(def.id);
                             let is_sorting = def.sort_enum == Some(sort_by);
 
                             let mut style = ctx.apply(Style::default().fg(ctx.state_warning()));
@@ -5122,8 +5490,7 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
         .get(app_state.ui.selected_torrent_index)
         .and_then(|info_hash| app_state.torrents.get(info_hash));
 
-    let selected_torrent_has_peers =
-        selected_torrent.is_some_and(|torrent| !torrent.latest_state.peers.is_empty());
+    let selected_torrent_has_peers = selected_torrent_has_peers(app_state);
 
     let selected_torrent_peer_count =
         selected_torrent.map_or(0, |torrent| torrent.latest_state.peers.len());
@@ -5134,25 +5501,13 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
         compute_visible_torrent_columns(app_state, layout_plan.list.width);
     let (_, visible_peer_columns) =
         compute_visible_peer_columns(app_state, layout_plan.peers.width);
-    let torrent_col_count = visible_torrent_columns.len();
-    let peer_col_count = visible_peer_columns.len();
 
-    app_state.ui.selected_header = match app_state.ui.selected_header {
-        SelectedHeader::Torrent(i) => {
-            if torrent_col_count == 0 {
-                SelectedHeader::Torrent(0)
-            } else {
-                SelectedHeader::Torrent(i.min(torrent_col_count - 1))
-            }
-        }
-        SelectedHeader::Peer(i) => {
-            if !selected_torrent_has_peers || peer_col_count == 0 {
-                SelectedHeader::Torrent(torrent_col_count.saturating_sub(1))
-            } else {
-                SelectedHeader::Peer(i.min(peer_col_count - 1))
-            }
-        }
-    };
+    app_state.ui.selected_header = normalize_selected_header(
+        app_state.ui.selected_header,
+        selected_torrent_has_peers,
+        &visible_torrent_columns,
+        &visible_peer_columns,
+    );
 
     match key_code {
         KeyCode::Up | KeyCode::Char('k') => match app_state.ui.selected_header {
@@ -5187,36 +5542,88 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
         },
         KeyCode::Left | KeyCode::Char('h') => {
             app_state.ui.selected_header = match app_state.ui.selected_header {
-                SelectedHeader::Torrent(0) => {
-                    if selected_torrent_has_peers && peer_col_count > 0 {
-                        SelectedHeader::Peer(peer_col_count - 1)
+                SelectedHeader::Torrent(column_id) => {
+                    let real_idx = torrent_column_index(column_id).unwrap_or(0);
+                    let pos = visible_torrent_columns
+                        .iter()
+                        .position(|&idx| idx == real_idx)
+                        .unwrap_or(0);
+                    if pos > 0 {
+                        torrent_column_id_for_index(visible_torrent_columns[pos - 1])
+                            .map(SelectedHeader::Torrent)
+                            .unwrap_or(SelectedHeader::Torrent(column_id))
+                    } else if selected_torrent_has_peers {
+                        visible_peer_columns
+                            .last()
+                            .copied()
+                            .and_then(peer_column_id_for_index)
+                            .map(SelectedHeader::Peer)
+                            .unwrap_or(SelectedHeader::Torrent(column_id))
                     } else {
-                        SelectedHeader::Torrent(0)
+                        SelectedHeader::Torrent(column_id)
                     }
                 }
-                SelectedHeader::Torrent(i) => SelectedHeader::Torrent(i - 1),
-                SelectedHeader::Peer(0) => {
-                    SelectedHeader::Torrent(torrent_col_count.saturating_sub(1))
+                SelectedHeader::Peer(column_id) => {
+                    let real_idx = peer_column_index(column_id).unwrap_or(0);
+                    let pos = visible_peer_columns
+                        .iter()
+                        .position(|&idx| idx == real_idx)
+                        .unwrap_or(0);
+                    if pos > 0 {
+                        peer_column_id_for_index(visible_peer_columns[pos - 1])
+                            .map(SelectedHeader::Peer)
+                            .unwrap_or(SelectedHeader::Peer(column_id))
+                    } else {
+                        visible_torrent_columns
+                            .last()
+                            .copied()
+                            .and_then(torrent_column_id_for_index)
+                            .map(SelectedHeader::Torrent)
+                            .unwrap_or(SelectedHeader::Torrent(ColumnId::Name))
+                    }
                 }
-                SelectedHeader::Peer(i) => SelectedHeader::Peer(i - 1),
             };
         }
         KeyCode::Right | KeyCode::Char('l') => {
             app_state.ui.selected_header = match app_state.ui.selected_header {
-                SelectedHeader::Torrent(i) => {
-                    if i < torrent_col_count.saturating_sub(1) {
-                        SelectedHeader::Torrent(i + 1)
-                    } else if selected_torrent_has_peers && peer_col_count > 0 {
-                        SelectedHeader::Peer(0)
+                SelectedHeader::Torrent(column_id) => {
+                    let real_idx = torrent_column_index(column_id).unwrap_or(0);
+                    let pos = visible_torrent_columns
+                        .iter()
+                        .position(|&idx| idx == real_idx)
+                        .unwrap_or(0);
+                    if pos + 1 < visible_torrent_columns.len() {
+                        torrent_column_id_for_index(visible_torrent_columns[pos + 1])
+                            .map(SelectedHeader::Torrent)
+                            .unwrap_or(SelectedHeader::Torrent(column_id))
+                    } else if selected_torrent_has_peers {
+                        visible_peer_columns
+                            .first()
+                            .copied()
+                            .and_then(peer_column_id_for_index)
+                            .map(SelectedHeader::Peer)
+                            .unwrap_or(SelectedHeader::Torrent(column_id))
                     } else {
-                        SelectedHeader::Torrent(i)
+                        SelectedHeader::Torrent(column_id)
                     }
                 }
-                SelectedHeader::Peer(i) => {
-                    if i < peer_col_count.saturating_sub(1) {
-                        SelectedHeader::Peer(i + 1)
+                SelectedHeader::Peer(column_id) => {
+                    let real_idx = peer_column_index(column_id).unwrap_or(0);
+                    let pos = visible_peer_columns
+                        .iter()
+                        .position(|&idx| idx == real_idx)
+                        .unwrap_or(0);
+                    if pos + 1 < visible_peer_columns.len() {
+                        peer_column_id_for_index(visible_peer_columns[pos + 1])
+                            .map(SelectedHeader::Peer)
+                            .unwrap_or(SelectedHeader::Peer(column_id))
                     } else {
-                        SelectedHeader::Torrent(0)
+                        visible_torrent_columns
+                            .first()
+                            .copied()
+                            .and_then(torrent_column_id_for_index)
+                            .map(SelectedHeader::Torrent)
+                            .unwrap_or(SelectedHeader::Torrent(ColumnId::Name))
                     }
                 }
             };
@@ -5524,7 +5931,6 @@ mod tests {
     use tempfile::tempdir;
 
     fn create_mock_metrics(peer_count: usize) -> TorrentMetrics {
-        let mut metrics = TorrentMetrics::default();
         let mut peers = Vec::new();
         for i in 0..peer_count {
             peers.push(PeerInfo {
@@ -5532,8 +5938,14 @@ mod tests {
                 ..Default::default()
             });
         }
-        metrics.peers = peers;
-        metrics
+        TorrentMetrics {
+            data_available: true,
+            is_complete: true,
+            number_of_pieces_total: 1,
+            number_of_pieces_completed: 1,
+            peers,
+            ..Default::default()
+        }
     }
 
     fn create_mock_display_state(peer_count: usize) -> TorrentDisplayState {
@@ -5620,7 +6032,7 @@ mod tests {
     fn reducer_navigate_updates_selection() {
         let mut app_state = create_test_app_state();
         app_state.ui.selected_torrent_index = 0;
-        app_state.ui.selected_header = SelectedHeader::Torrent(0);
+        app_state.ui.selected_header = SelectedHeader::Torrent(ColumnId::Name);
 
         let result = reduce_ui_action(&mut app_state, UiAction::Navigate(KeyCode::Down));
 
@@ -6339,6 +6751,18 @@ mod tests {
             map_key_to_ui_action(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
             Some(UiAction::ToggleTorrentFiles)
         );
+        assert_eq!(
+            map_key_to_ui_action(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE)),
+            Some(UiAction::ClearManualSorting)
+        );
+    }
+
+    #[test]
+    fn keymap_includes_vim_right_navigation() {
+        assert_eq!(
+            map_key_to_ui_action(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+            Some(UiAction::Navigate(KeyCode::Char('l')))
+        );
     }
 
     #[test]
@@ -6548,7 +6972,7 @@ mod tests {
     fn reducer_sort_by_selected_column_updates_torrent_sort() {
         let mut app_state = create_test_app_state();
         app_state.screen_area = Rect::new(0, 0, 220, 80);
-        app_state.ui.selected_header = SelectedHeader::Torrent(1);
+        app_state.ui.selected_header = SelectedHeader::Torrent(ColumnId::Name);
         app_state.torrent_sort = (TorrentSortColumn::Down, SortDirection::Descending);
 
         if let Some(t) = app_state.torrents.get_mut("hash_a".as_bytes()) {
@@ -6567,7 +6991,71 @@ mod tests {
         let _ = reduce_ui_action(&mut app_state, UiAction::SortBySelectedColumn);
 
         assert_eq!(app_state.torrent_sort.0, TorrentSortColumn::Name);
-        assert_eq!(app_state.torrent_sort.1, SortDirection::Descending);
+        assert_eq!(app_state.torrent_sort.1, SortDirection::Ascending);
+        assert!(app_state.torrent_sort_pinned);
+    }
+
+    #[test]
+    fn reducer_sort_by_selected_column_keeps_dynamic_torrent_column_identity() {
+        let mut app_state = create_test_app_state();
+        app_state.screen_area = Rect::new(0, 0, 220, 80);
+        app_state.ui.selected_header = SelectedHeader::Torrent(ColumnId::Status);
+        app_state.torrent_sort = (TorrentSortColumn::Down, SortDirection::Descending);
+
+        let _ = reduce_ui_action(&mut app_state, UiAction::SortBySelectedColumn);
+
+        assert_eq!(
+            app_state.ui.selected_header,
+            SelectedHeader::Torrent(ColumnId::Name)
+        );
+        assert_eq!(app_state.torrent_sort.0, TorrentSortColumn::Name);
+
+        for torrent in app_state.torrents.values_mut() {
+            torrent.latest_state.number_of_pieces_total = 10;
+            torrent.latest_state.number_of_pieces_completed = 5;
+        }
+        app_state.torrent_sort = (TorrentSortColumn::Down, SortDirection::Descending);
+
+        let _ = reduce_ui_action(&mut app_state, UiAction::SortBySelectedColumn);
+
+        assert_eq!(
+            app_state.ui.selected_header,
+            SelectedHeader::Torrent(ColumnId::Name)
+        );
+        assert_eq!(app_state.torrent_sort.0, TorrentSortColumn::Name);
+    }
+
+    #[test]
+    fn reducer_sort_by_selected_column_sorts_visible_dynamic_download_column() {
+        let mut app_state = create_test_app_state();
+        app_state.screen_area = Rect::new(0, 0, 220, 80);
+        app_state.ui.selected_header = SelectedHeader::Torrent(ColumnId::DownSpeed);
+
+        if let Some(t) = app_state.torrents.get_mut("hash_a".as_bytes()) {
+            t.smoothed_download_speed_bps = 100;
+        }
+        if let Some(t) = app_state.torrents.get_mut("hash_b".as_bytes()) {
+            t.smoothed_download_speed_bps = 2_000;
+        }
+
+        let _ = reduce_ui_action(&mut app_state, UiAction::SortBySelectedColumn);
+
+        assert_eq!(
+            app_state.ui.selected_header,
+            SelectedHeader::Torrent(ColumnId::DownSpeed)
+        );
+        assert_eq!(
+            app_state.torrent_sort,
+            (TorrentSortColumn::Down, SortDirection::Descending)
+        );
+        assert!(
+            !app_state.torrent_sort_pinned,
+            "DL/UL torrent sorting is autosort-managed, not a manual pin"
+        );
+        assert_eq!(
+            app_state.torrent_list_order,
+            vec!["hash_b".as_bytes().to_vec(), "hash_a".as_bytes().to_vec()]
+        );
     }
 
     #[test]
@@ -6575,13 +7063,58 @@ mod tests {
         let mut app_state = create_test_app_state();
         app_state.screen_area = Rect::new(0, 0, 220, 80);
         app_state.ui.selected_torrent_index = 0;
-        app_state.ui.selected_header = SelectedHeader::Peer(0);
+        app_state.ui.selected_header = SelectedHeader::Peer(PeerColumnId::Flags);
         app_state.peer_sort = (PeerSortColumn::Address, SortDirection::Ascending);
 
         let _ = reduce_ui_action(&mut app_state, UiAction::SortBySelectedColumn);
 
         assert_eq!(app_state.peer_sort.0, PeerSortColumn::Flags);
         assert_eq!(app_state.peer_sort.1, SortDirection::Descending);
+        assert!(app_state.peer_sort_pinned);
+    }
+
+    #[test]
+    fn reducer_sort_by_selected_column_selects_visible_dynamic_peer_download_column() {
+        let mut app_state = create_test_app_state();
+        app_state.screen_area = Rect::new(0, 0, 220, 80);
+        app_state.ui.selected_torrent_index = 0;
+        app_state.ui.selected_header = SelectedHeader::Peer(PeerColumnId::DownSpeed);
+
+        let torrent = app_state
+            .torrents
+            .get_mut("hash_a".as_bytes())
+            .expect("test torrent exists");
+        torrent.latest_state.peers[0].download_speed_bps = 2_000;
+
+        let _ = reduce_ui_action(&mut app_state, UiAction::SortBySelectedColumn);
+
+        assert_eq!(
+            app_state.ui.selected_header,
+            SelectedHeader::Peer(PeerColumnId::DownSpeed)
+        );
+        assert_eq!(
+            app_state.peer_sort,
+            (PeerSortColumn::DL, SortDirection::Descending)
+        );
+        assert!(
+            !app_state.peer_sort_pinned,
+            "DL/UL peer sorting is autosort-managed, not a manual pin"
+        );
+    }
+
+    #[test]
+    fn reducer_clear_manual_sorting_resumes_autosort() {
+        let mut app_state = create_test_app_state();
+        app_state.torrent_sort = (TorrentSortColumn::Name, SortDirection::Ascending);
+        app_state.torrent_sort_pinned = true;
+        app_state.peer_sort = (PeerSortColumn::Address, SortDirection::Ascending);
+        app_state.peer_sort_pinned = true;
+
+        let result = reduce_ui_action(&mut app_state, UiAction::ClearManualSorting);
+
+        assert!(result.redraw);
+        assert!(!app_state.torrent_sort_pinned);
+        assert!(!app_state.peer_sort_pinned);
     }
 
     #[test]
@@ -6666,6 +7199,27 @@ mod tests {
     }
 
     #[test]
+    fn torrent_status_cell_shows_metadata_pending() {
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.is_complete = false;
+        torrent.latest_state.number_of_pieces_total = 0;
+        torrent.latest_state.number_of_pieces_completed = 0;
+
+        assert_eq!(torrent_status_cell(&torrent, &ctx).text, "Meta");
+    }
+
+    #[test]
+    fn torrent_status_cell_shows_file_probe_issue() {
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.data_available = false;
+        torrent.latest_file_probe_status = Some(TorrentFileProbeStatus::Files(Vec::new()));
+
+        assert_eq!(torrent_status_cell(&torrent, &ctx).text, "Files");
+    }
+
+    #[test]
     fn reducer_open_help_emits_help_effect() {
         let mut app_state = create_test_app_state();
         let out = reduce_ui_action(&mut app_state, UiAction::OpenHelp);
@@ -6706,6 +7260,140 @@ mod tests {
         let data = [0_u64, 10, 0];
         let smoothed = peer_stream_smoothed_activity(&data, 1);
         assert!((smoothed - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn dht_wave_profile_responds_to_query_count() {
+        let quiet = DhtStatus::default();
+        let quiet_telemetry = DhtWaveTelemetry {
+            inflight_ipv4_queries: 4,
+            ..Default::default()
+        };
+
+        let busy = quiet.clone();
+        let busy_telemetry = DhtWaveTelemetry {
+            inflight_ipv4_queries: 40,
+            inflight_ipv6_queries: 24,
+            ..Default::default()
+        };
+
+        let quiet_profile = DhtWaveProfile::from_inputs(&quiet, &quiet_telemetry);
+        let busy_profile = DhtWaveProfile::from_inputs(&busy, &busy_telemetry);
+
+        assert!(busy_profile.amplitude > quiet_profile.amplitude);
+        assert!(busy_profile.phase_speed > quiet_profile.phase_speed);
+        assert!(busy_profile.frequency >= quiet_profile.frequency);
+    }
+
+    #[test]
+    fn dht_wave_query_signal_uses_gentle_saturation() {
+        let q10 = dht_wave_query_signal(&DhtWaveTelemetry {
+            inflight_ipv4_queries: 10,
+            ..Default::default()
+        });
+        let q48 = dht_wave_query_signal(&DhtWaveTelemetry {
+            inflight_ipv4_queries: 48,
+            ..Default::default()
+        });
+        let q96 = dht_wave_query_signal(&DhtWaveTelemetry {
+            inflight_ipv4_queries: 96,
+            ..Default::default()
+        });
+
+        assert!(q10 < 0.30);
+        assert!(q48 > q10 + 0.30);
+        assert!(q96 > q48);
+    }
+
+    #[test]
+    fn dht_wave_title_is_query_count_without_multiplier() {
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let spans = dht_wave_title_spans(42, 1, &ctx);
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "42");
+    }
+
+    #[test]
+    fn dht_wave_title_colors_multiplier_prefix() {
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let spans = dht_wave_title_spans(42, 4, &ctx);
+
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[0].content, "4x");
+        assert_eq!(spans[1].content, "(");
+        assert_eq!(spans[2].content, "42");
+        assert_eq!(spans[3].content, ")");
+        assert_eq!(
+            spans[0].style,
+            ctx.apply(
+                Style::default()
+                    .fg(ctx.accent_peach())
+                    .add_modifier(Modifier::BOLD)
+            )
+        );
+    }
+
+    #[test]
+    fn dht_wave_profile_ignores_health_when_query_count_matches() {
+        let mut healthy = DhtStatus::default();
+        healthy.health.enabled = true;
+        healthy.health.cached_ipv4_routes = 900;
+        healthy.health.firewalled = Some(false);
+        let healthy_telemetry = DhtWaveTelemetry {
+            inflight_ipv4_queries: 12,
+            ..Default::default()
+        };
+
+        let mut constrained = healthy.clone();
+        constrained.health.enabled = false;
+        constrained.health.firewalled = Some(true);
+        let constrained_telemetry = healthy_telemetry.clone();
+
+        let healthy_profile = DhtWaveProfile::from_inputs(&healthy, &healthy_telemetry);
+        let constrained_profile = DhtWaveProfile::from_inputs(&constrained, &constrained_telemetry);
+
+        assert_eq!(healthy_profile.amplitude, constrained_profile.amplitude);
+        assert_eq!(healthy_profile.phase_speed, constrained_profile.phase_speed);
+    }
+
+    #[test]
+    fn dht_wave_profile_stays_nearly_flat_when_only_routes_are_warm() {
+        let mut route_warm = DhtStatus::default();
+        route_warm.health.cached_ipv4_routes = 1_400;
+        route_warm.health.cached_ipv6_routes = 260;
+        let route_warm_telemetry = DhtWaveTelemetry::default();
+
+        let active = route_warm.clone();
+        let active_telemetry = DhtWaveTelemetry {
+            inflight_ipv4_queries: 10,
+            inflight_ipv6_queries: 4,
+            ..Default::default()
+        };
+
+        let route_warm_profile = DhtWaveProfile::from_inputs(&route_warm, &route_warm_telemetry);
+        let active_profile = DhtWaveProfile::from_inputs(&active, &active_telemetry);
+
+        assert!(route_warm_profile.amplitude < 0.03);
+        assert!(route_warm_profile.phase_speed < 0.08);
+        assert!(active_profile.amplitude > route_warm_profile.amplitude);
+        assert!(active_profile.phase_speed > route_warm_profile.phase_speed);
+    }
+
+    #[test]
+    fn dht_wave_y_axis_bounds_scale_to_current_signal() {
+        let small_points = [(0.0, -0.04), (1.0, 0.05)];
+        let active_points = [(0.0, -0.24), (1.0, 0.28)];
+        let saturated_points = [(0.0, -1.3), (1.0, 1.2)];
+
+        let small_bounds = dht_wave_y_axis_bounds(&small_points);
+        let active_bounds = dht_wave_y_axis_bounds(&active_points);
+        let saturated_bounds = dht_wave_y_axis_bounds(&saturated_points);
+
+        assert_eq!(small_bounds, [-0.18, 0.18]);
+        assert!(active_bounds[0] < -0.30);
+        assert!(active_bounds[1] > 0.30);
+        assert_eq!(saturated_bounds, [-1.08, 1.08]);
     }
 
     #[test]
@@ -6817,6 +7505,18 @@ mod tests {
         let mode =
             block_stream_and_disk_layout_mode(Rect::new(0, 0, 64, 90), Rect::new(0, 0, 33, 18));
         assert_eq!(mode, BlockStreamDiskLayoutMode::Stacked);
+    }
+
+    #[test]
+    fn dht_inserts_between_blocks_and_disk_only_in_horizontal_mode() {
+        assert!(should_insert_dht_between_blocks_and_disk(
+            Rect::new(0, 0, 150, 60),
+            Rect::new(0, 0, 17, 27)
+        ));
+        assert!(!should_insert_dht_between_blocks_and_disk(
+            Rect::new(0, 0, 90, 70),
+            Rect::new(0, 0, 40, 18)
+        ));
     }
 
     #[test]

@@ -690,11 +690,7 @@ impl PeerSession {
 
     #[cfg(feature = "pex")]
     fn handle_pex(&self, peers_list: Vec<String>) {
-        if let Some(pex_id) = self
-            .peer_extended_id_mappings
-            .get(ClientExtendedId::UtPex.as_str())
-            .copied()
-        {
+        if let Some(pex_id) = self.peer_advertised_extension_id(ClientExtendedId::UtPex) {
             let peers: Vec<SocketAddr> = peers_list
                 .iter()
                 .filter(|&ip| *ip != self.peer_ip_port)
@@ -733,6 +729,26 @@ impl PeerSession {
         }
     }
 
+    #[cfg(feature = "pex")]
+    fn peer_advertised_extension_id(&self, extension: ClientExtendedId) -> Option<u8> {
+        self.peer_extended_id_mappings
+            .get(extension.as_str())
+            .copied()
+            .filter(|id| *id != ClientExtendedId::Handshake.id())
+    }
+
+    fn peer_extension_id(&self, extension: ClientExtendedId) -> Option<u8> {
+        match self
+            .peer_extended_id_mappings
+            .get(extension.as_str())
+            .copied()
+        {
+            Some(id) if id == ClientExtendedId::Handshake.id() => None,
+            Some(id) => Some(id),
+            None => Some(extension.id()),
+        }
+    }
+
     async fn handle_extended_message(
         &mut self,
         extended_id: u8,
@@ -752,16 +768,19 @@ impl PeerSession {
                                 piece: 0,
                                 total_size: None,
                             };
-                            if let Ok(payload_bytes) = serde_bencode::to_bytes(&request) {
-                                let _ = self.writer_tx.try_send(Message::Extended(
-                                    ClientExtendedId::UtMetadata.id(),
-                                    payload_bytes,
-                                ));
+                            if let (Some(metadata_id), Ok(payload_bytes)) = (
+                                self.peer_extension_id(ClientExtendedId::UtMetadata),
+                                serde_bencode::to_bytes(&request),
+                            ) {
+                                let _ = self
+                                    .writer_tx
+                                    .try_send(Message::Extended(metadata_id, payload_bytes));
                             }
                         }
                     }
                 }
             }
+            return Ok(());
         }
 
         #[cfg(feature = "pex")]
@@ -793,7 +812,9 @@ impl PeerSession {
             }
         }
 
-        if extended_id == ClientExtendedId::UtMetadata.id() && !self.peer_session_established {
+        if Some(extended_id) == self.peer_extension_id(ClientExtendedId::UtMetadata)
+            && !self.peer_session_established
+        {
             if let Some(ref handshake_data) = self.peer_extended_handshake_payload {
                 if let Some(torrent_metadata_len) = handshake_data.metadata_size {
                     let torrent_metadata_len_usize = torrent_metadata_len as usize;
@@ -834,11 +855,13 @@ impl PeerSession {
                                 piece: self.peer_torrent_metadata_piece_count,
                                 total_size: None,
                             };
-                            if let Ok(payload_bytes) = serde_bencode::to_bytes(&request) {
-                                let _ = self.writer_tx.try_send(Message::Extended(
-                                    ClientExtendedId::UtMetadata.id(),
-                                    payload_bytes,
-                                ));
+                            if let (Some(metadata_id), Ok(payload_bytes)) = (
+                                self.peer_extension_id(ClientExtendedId::UtMetadata),
+                                serde_bencode::to_bytes(&request),
+                            ) {
+                                let _ = self
+                                    .writer_tx
+                                    .try_send(Message::Extended(metadata_id, payload_bytes));
                             }
                         }
                     }
@@ -953,6 +976,7 @@ impl PeerSession {
 mod tests {
     use super::*;
     use crate::networking::protocol::{generate_message, Message};
+    use crate::torrent_file::Torrent;
 
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1046,6 +1070,28 @@ mod tests {
         )
     }
 
+    fn build_session_for_extended_message_tests() -> (PeerSession, mpsc::Receiver<TorrentCommand>) {
+        let infinite_bucket = Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY));
+        let (manager_tx, manager_rx) = mpsc::channel(16);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (shutdown_tx, _) = broadcast::channel(1);
+
+        let params = PeerSessionParameters {
+            info_hash: [0u8; 20].to_vec(),
+            torrent_metadata_length: None,
+            connection_type: ConnectionType::Outgoing,
+            torrent_manager_rx: cmd_rx,
+            torrent_manager_tx: manager_tx,
+            peer_ip_port: "extended-id-peer:1337".to_string(),
+            client_id: b"-SS1000-EXTENDEDTEST".to_vec(),
+            global_dl_bucket: infinite_bucket.clone(),
+            global_ul_bucket: infinite_bucket,
+            shutdown_tx,
+        };
+
+        (PeerSession::new(params), manager_rx)
+    }
+
     struct WindowDriveHarness<'a> {
         client_cmd_tx: &'a mpsc::Sender<TorrentCommand>,
         manager_event_rx: &'a mut mpsc::Receiver<TorrentCommand>,
@@ -1105,6 +1151,135 @@ mod tests {
         response[1..20].copy_from_slice(b"BitTorrent protocol");
         response[20..28].copy_from_slice(&[0, 0, 0, 0, 0, 0x10, 0, 0]);
         network.write_all(&response).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn metadata_request_uses_peer_advertised_extension_id() {
+        let (mut session, _manager_rx) = build_session_for_extended_message_tests();
+        let mut extensions = HashMap::new();
+        extensions.insert(ClientExtendedId::UtMetadata.as_str().to_string(), 7);
+        let handshake = ExtendedHandshakePayload {
+            m: extensions,
+            metadata_size: Some(1),
+            lt_v2: None,
+        };
+
+        session
+            .handle_extended_message(
+                ClientExtendedId::Handshake.id(),
+                serde_bencode::to_bytes(&handshake).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let outbound = session
+            .writer_rx
+            .as_mut()
+            .unwrap()
+            .recv()
+            .await
+            .expect("expected metadata request");
+
+        match outbound {
+            Message::Extended(7, payload) => {
+                let request: MetadataMessage = serde_bencode::from_bytes(&payload).unwrap();
+                assert_eq!(request.msg_type, 0);
+                assert_eq!(request.piece, 0);
+                assert_eq!(request.total_size, None);
+            }
+            other => panic!("expected metadata request on peer-advertised id, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_extension_id_zero_is_ignored() {
+        let (mut session, mut manager_rx) = build_session_for_extended_message_tests();
+        let mut extensions = HashMap::new();
+        extensions.insert(ClientExtendedId::UtMetadata.as_str().to_string(), 0);
+        let handshake = ExtendedHandshakePayload {
+            m: extensions,
+            metadata_size: Some(1),
+            lt_v2: None,
+        };
+
+        session
+            .handle_extended_message(
+                ClientExtendedId::Handshake.id(),
+                serde_bencode::to_bytes(&handshake).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(session.writer_rx.as_mut().unwrap().try_recv().is_err());
+        assert!(session.peer_torrent_metadata_pieces.is_empty());
+
+        let metadata_header = MetadataMessage {
+            msg_type: 1,
+            piece: 0,
+            total_size: Some(1),
+        };
+        let mut metadata_payload = serde_bencode::to_bytes(&metadata_header).unwrap();
+        metadata_payload.push(b'x');
+
+        session
+            .handle_extended_message(ClientExtendedId::Handshake.id(), metadata_payload)
+            .await
+            .unwrap();
+
+        assert!(session.peer_torrent_metadata_pieces.is_empty());
+        assert!(manager_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn metadata_piece_on_peer_advertised_extension_id_is_accepted() {
+        let (mut session, mut manager_rx) = build_session_for_extended_message_tests();
+        let info_bytes =
+            b"d6:lengthi16384e4:name13:dup_meta_test12:piece lengthi16384e6:pieces20:00000000000000000000ee"
+                .to_vec();
+        let mut extensions = HashMap::new();
+        extensions.insert(ClientExtendedId::UtMetadata.as_str().to_string(), 7);
+        let handshake = ExtendedHandshakePayload {
+            m: extensions,
+            metadata_size: Some(info_bytes.len() as i64),
+            lt_v2: None,
+        };
+
+        session
+            .handle_extended_message(
+                ClientExtendedId::Handshake.id(),
+                serde_bencode::to_bytes(&handshake).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let _initial_request = session.writer_rx.as_mut().unwrap().recv().await;
+
+        let metadata_header = MetadataMessage {
+            msg_type: 1,
+            piece: 0,
+            total_size: Some(info_bytes.len()),
+        };
+        let mut metadata_payload = serde_bencode::to_bytes(&metadata_header).unwrap();
+        metadata_payload.extend_from_slice(&info_bytes);
+
+        session
+            .handle_extended_message(7, metadata_payload)
+            .await
+            .unwrap();
+
+        match manager_rx
+            .recv()
+            .await
+            .expect("expected metadata torrent command")
+        {
+            TorrentCommand::MetadataTorrent(torrent, metadata_len) => {
+                let Torrent { info, .. } = *torrent;
+                assert_eq!(metadata_len, info_bytes.len() as i64);
+                assert_eq!(info.name, "dup_meta_test");
+                assert_eq!(info.piece_length, 16_384);
+            }
+            other => panic!("expected metadata torrent command, got {other:?}"),
+        }
     }
 
     #[tokio::test]

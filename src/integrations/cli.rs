@@ -45,7 +45,13 @@ pub enum Commands {
     #[command(about = "Request graceful shutdown of the running client or shared leader")]
     StopClient,
     #[command(about = "Show the event journal")]
-    Journal,
+    Journal {
+        #[arg(
+            long,
+            help = "Analyze journal ingest entries that can recover missing catalog items"
+        )]
+        catalog_recovery: bool,
+    },
     #[command(about = "Persist the shared root used for launcher and protocol-handler starts")]
     SetSharedConfig {
         #[arg(
@@ -58,6 +64,11 @@ pub enum Commands {
     ClearSharedConfig,
     #[command(about = "Show the effective shared root selection and its source")]
     ShowSharedConfig,
+    #[command(about = "Show resolved config, log, status, journal, and watch paths")]
+    ShowConfigs {
+        #[arg(long, help = "Include launcher, local, and shared layer details")]
+        all: bool,
+    },
     #[command(about = "Persist an explicit host identity for shared mode (optional)")]
     SetHostId {
         #[arg(
@@ -341,10 +352,11 @@ where
         }
         Commands::Add { .. }
         | Commands::StopClient
-        | Commands::Journal
+        | Commands::Journal { .. }
         | Commands::SetSharedConfig { .. }
         | Commands::ClearSharedConfig
         | Commands::ShowSharedConfig
+        | Commands::ShowConfigs { .. }
         | Commands::SetHostId { .. }
         | Commands::ClearHostId
         | Commands::ShowHostId
@@ -642,7 +654,9 @@ mod tests {
     #[test]
     fn journal_command_is_not_mapped_to_control_request() {
         assert!(matches!(
-            command_to_control_request(&Commands::Journal),
+            command_to_control_request(&Commands::Journal {
+                catalog_recovery: false,
+            }),
             Ok(None)
         ));
     }

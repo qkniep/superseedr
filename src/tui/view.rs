@@ -9,6 +9,7 @@ use crate::tui::screens::{
 };
 
 use crate::app::{AppMode, AppState};
+use crate::dht_service::{DhtStatus, DhtWaveTelemetry};
 use crate::theme::ThemeContext;
 
 use crate::tui::effects::apply_theme_effects_to_frame;
@@ -19,11 +20,17 @@ use crate::tui::particles::{
 
 use crate::config::Settings;
 
-pub fn draw(f: &mut Frame, app_state: &AppState, settings: &Settings) {
+pub fn draw(
+    f: &mut Frame,
+    app_state: &AppState,
+    dht_status: &DhtStatus,
+    dht_wave_telemetry: &DhtWaveTelemetry,
+    settings: &Settings,
+) {
     let area = f.area();
 
     let ctx = ThemeContext::new(app_state.theme, app_state.ui.effects_phase_time);
-    let screen = ScreenContext::new(app_state, settings, &ctx);
+    let screen = ScreenContext::new(app_state, dht_status, dht_wave_telemetry, settings, &ctx);
 
     match &app_state.mode {
         AppMode::Help => {
@@ -449,5 +456,31 @@ mod tests {
 
         assert!(computed > raw);
         assert_eq!(computed, raw + 2);
+    }
+
+    #[test]
+    fn test_footer_fps_label_shows_target_only() {
+        let app_state = crate::app::AppState {
+            data_rate: crate::app::DataRate::Rate60s,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            crate::tui::screens::normal::footer_fps_label(&app_state),
+            "60 fps"
+        );
+    }
+
+    #[test]
+    fn test_footer_fps_label_preserves_fractional_targets() {
+        let app_state = crate::app::AppState {
+            data_rate: crate::app::DataRate::RateQuarter,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            crate::tui::screens::normal::footer_fps_label(&app_state),
+            "0.25 fps"
+        );
     }
 }

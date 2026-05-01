@@ -81,10 +81,18 @@ pub fn has_incomplete_torrents(app_state: &AppState) -> bool {
         .any(|t| torrent_is_effectively_incomplete(&t.latest_state))
 }
 
+pub fn has_unavailable_torrents(app_state: &AppState) -> bool {
+    app_state
+        .torrents
+        .values()
+        .any(|t| !t.latest_state.data_available)
+}
+
 pub fn active_torrent_column_indices(app_state: &AppState) -> Vec<usize> {
     let has_dl_activity = torrent_has_download_activity(app_state);
     let has_ul_activity = torrent_has_upload_activity(app_state);
     let has_incomplete = has_incomplete_torrents(app_state);
+    let has_unavailable = has_unavailable_torrents(app_state);
 
     get_torrent_columns()
         .iter()
@@ -93,7 +101,7 @@ pub fn active_torrent_column_indices(app_state: &AppState) -> Vec<usize> {
             let is_active = match col.id {
                 ColumnId::DownSpeed => has_dl_activity,
                 ColumnId::UpSpeed => has_ul_activity,
-                ColumnId::Status => has_incomplete,
+                ColumnId::Status => has_incomplete || has_unavailable,
                 ColumnId::Name => true,
             };
             is_active.then_some(idx)
@@ -350,7 +358,10 @@ pub fn compute_smart_table_layout(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_visible_peer_columns, get_peer_columns, PeerColumnId};
+    use super::{
+        compute_visible_peer_columns, compute_visible_torrent_columns, get_peer_columns,
+        PeerColumnId,
+    };
     use crate::app::{AppState, PeerInfo, TorrentDisplayState, TorrentMetrics};
     use ratatui::layout::Constraint;
 
@@ -358,6 +369,10 @@ mod tests {
         let mut app_state = AppState::default();
         let torrent = TorrentDisplayState {
             latest_state: TorrentMetrics {
+                data_available: true,
+                is_complete: true,
+                number_of_pieces_total: 1,
+                number_of_pieces_completed: 1,
                 peers: vec![
                     PeerInfo {
                         address: "127.0.0.1:6881".to_string(),
@@ -422,5 +437,54 @@ mod tests {
 
         assert!(!visible.contains(&3), "upload column should stay hidden");
         assert!(visible.contains(&4), "download column should be visible");
+    }
+
+    #[test]
+    fn torrent_columns_hide_inactive_speed_columns() {
+        let app_state = peer_test_app_state();
+        let (_constraints, visible) = compute_visible_torrent_columns(&app_state, 120);
+
+        assert_eq!(visible, vec![1], "only name should be visible when idle");
+    }
+
+    #[test]
+    fn torrent_columns_show_only_active_speed_direction() {
+        let mut app_state = peer_test_app_state();
+        if let Some(torrent) = app_state.torrents.get_mut(b"hash_a".as_slice()) {
+            torrent.smoothed_download_speed_bps = 32;
+        }
+        let (_constraints, visible) = compute_visible_torrent_columns(&app_state, 120);
+
+        assert!(!visible.contains(&2), "upload column should stay hidden");
+        assert!(visible.contains(&3), "download column should be visible");
+    }
+
+    #[test]
+    fn torrent_columns_show_done_when_torrent_is_incomplete() {
+        let mut app_state = peer_test_app_state();
+        if let Some(torrent) = app_state.torrents.get_mut(b"hash_a".as_slice()) {
+            torrent.latest_state.is_complete = false;
+            torrent.latest_state.number_of_pieces_total = 10;
+            torrent.latest_state.number_of_pieces_completed = 5;
+        }
+        let (_constraints, visible) = compute_visible_torrent_columns(&app_state, 120);
+
+        assert!(visible.contains(&0), "done column should be visible");
+        assert!(visible.contains(&1), "name column should stay visible");
+    }
+
+    #[test]
+    fn torrent_columns_show_done_when_torrent_data_is_unavailable() {
+        let mut app_state = peer_test_app_state();
+        if let Some(torrent) = app_state.torrents.get_mut(b"hash_a".as_slice()) {
+            torrent.latest_state.data_available = false;
+        }
+        let (_constraints, visible) = compute_visible_torrent_columns(&app_state, 120);
+
+        assert!(
+            visible.contains(&0),
+            "done column should be visible for file probe issues"
+        );
+        assert!(visible.contains(&1), "name column should stay visible");
     }
 }
