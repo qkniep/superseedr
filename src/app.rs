@@ -158,6 +158,11 @@ const STARTUP_ROLLING_LOADS_PER_INTERVAL: usize = 1;
 const SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 const INCOMING_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 const PORT_FAMILY_HIGHLIGHT_DURATION: Duration = Duration::from_secs(2);
+const UI_FPS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const NORMAL_IDLE_FRAME_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+const NORMAL_ANIMATION_RECENT_BLOCK_ROWS: usize = 64;
+const NORMAL_ANIMATION_RECENT_PEER_EVENTS: usize = 120;
+const NORMAL_ANIMATION_FILE_ACTIVITY_WINDOW: Duration = Duration::from_secs(4);
 const BITTORRENT_PROTOCOL_STR: &[u8] = b"BitTorrent protocol";
 
 pub struct ListenerSet {
@@ -377,6 +382,21 @@ impl DataRate {
             DataRate::Rate30s => "30",
             DataRate::Rate60s => "60",
         }
+    }
+
+    pub fn frame_interval(self) -> Duration {
+        let target_fps = match self {
+            DataRate::RateQuarter => 0.25,
+            DataRate::RateHalf => 0.5,
+            DataRate::Rate1s => 1.0,
+            DataRate::Rate2s => 2.0,
+            DataRate::Rate4s => 4.0,
+            DataRate::Rate10s => 10.0,
+            DataRate::Rate20s => 20.0,
+            DataRate::Rate30s => 30.0,
+            DataRate::Rate60s => 60.0,
+        };
+        Duration::from_secs_f64(1.0 / target_fps)
     }
 
     /// Cycles to the next (slower) data rate (lower FPS).
@@ -990,6 +1010,9 @@ pub struct UiState {
     pub effects_phase_time: f64,
     pub effects_last_wall_time: f64,
     pub effects_speed_multiplier: f64,
+    pub measured_fps: Option<f64>,
+    pub fps_sample_started_at: Option<Instant>,
+    pub fps_sample_frames: u32,
     pub file_activity_download_phase: f64,
     pub file_activity_upload_phase: f64,
     pub dht_wave: DhtWaveUiState,
@@ -1006,6 +1029,29 @@ pub struct UiState {
     pub normal_paste_burst: PasteBurst,
     #[allow(dead_code)]
     pub rss: RssUiState,
+}
+
+impl UiState {
+    fn record_drawn_frame(&mut self, now: Instant) {
+        let Some(sample_started_at) = self.fps_sample_started_at else {
+            self.fps_sample_started_at = Some(now);
+            self.fps_sample_frames = 0;
+            return;
+        };
+
+        self.fps_sample_frames = self.fps_sample_frames.saturating_add(1);
+        let elapsed = now.saturating_duration_since(sample_started_at);
+        if elapsed < UI_FPS_SAMPLE_INTERVAL {
+            return;
+        }
+
+        let elapsed_secs = elapsed.as_secs_f64();
+        if elapsed_secs > 0.0 {
+            self.measured_fps = Some(self.fps_sample_frames as f64 / elapsed_secs);
+        }
+        self.fps_sample_started_at = Some(now);
+        self.fps_sample_frames = 0;
+    }
 }
 
 #[derive(Default)]
@@ -2913,9 +2959,9 @@ impl App {
             self.flush_pending_watch_commands();
 
             let current_target_framerate = match self.app_state.mode {
-                AppMode::Welcome => Duration::from_millis(16), // Force 60 FPS for animation
-                AppMode::PowerSaving => Duration::from_secs(1), // Force 1 FPS for Zen mode
-                _ => Duration::from_millis(self.app_state.data_rate.as_ms()), // User-defined FPS
+                AppMode::Welcome => DataRate::Rate60s.frame_interval(), // Force 60 FPS for animation
+                AppMode::PowerSaving => Duration::from_secs(1),         // Force 1 FPS for Zen mode
+                _ => self.app_state.data_rate.frame_interval(),         // User-defined FPS
             };
             let next_tuning_at = self.next_tuning_at;
             let next_paste_flush_at = self.app_state.ui.normal_paste_burst.next_deadline();
@@ -3017,10 +3063,32 @@ impl App {
                 }
 
                 _ = time::sleep_until(next_draw_time.into()) => {
-                    next_draw_time = Instant::now() + current_target_framerate;
+                    let frame_started_at = Instant::now();
+                    Self::advance_next_draw_time(
+                        &mut next_draw_time,
+                        frame_started_at,
+                        current_target_framerate,
+                    );
                     self.drain_latest_torrent_metrics();
                     self.sync_dht_peer_slot_usage();
-                    if Self::should_draw_this_frame(&self.app_state.mode, self.app_state.ui.needs_redraw) {
+                    let normal_animation_active = if matches!(self.app_state.mode, AppMode::Normal)
+                    {
+                        let dht_wave_telemetry = self.dht_service.current_wave_telemetry();
+                        Self::normal_mode_animation_active(
+                            &self.app_state,
+                            Some(&dht_wave_telemetry),
+                            frame_started_at,
+                        )
+                    } else {
+                        false
+                    };
+                    let should_draw = Self::should_draw_this_frame(
+                        &self.app_state.mode,
+                        self.app_state.ui.needs_redraw,
+                        normal_animation_active,
+                    );
+                    if should_draw {
+                        self.app_state.ui.record_drawn_frame(frame_started_at);
                         self.tick_ui_effects_clock();
                         let dht_status = self.dht_service.current_status();
                         let dht_wave_telemetry = self.dht_service.current_wave_telemetry();
@@ -3034,6 +3102,9 @@ impl App {
                             );
                         })?;
                         self.app_state.ui.needs_redraw = false;
+                    } else if matches!(self.app_state.mode, AppMode::Normal) {
+                        next_draw_time = frame_started_at
+                            + Self::normal_idle_frame_check_interval(current_target_framerate);
                     }
                 }
                 _ = version_interval.tick() => {
@@ -3071,11 +3142,131 @@ impl App {
         Ok(())
     }
 
-    fn should_draw_this_frame(mode: &AppMode, ui_needs_redraw: bool) -> bool {
-        if matches!(mode, AppMode::PowerSaving) {
-            ui_needs_redraw
-        } else {
-            true
+    fn should_draw_this_frame(
+        mode: &AppMode,
+        ui_needs_redraw: bool,
+        normal_animation_active: bool,
+    ) -> bool {
+        match mode {
+            AppMode::PowerSaving => ui_needs_redraw,
+            AppMode::Normal => ui_needs_redraw || normal_animation_active,
+            _ => true,
+        }
+    }
+
+    fn normal_mode_animation_active(
+        app_state: &AppState,
+        dht_wave_telemetry: Option<&DhtWaveTelemetry>,
+        now: Instant,
+    ) -> bool {
+        if app_state.theme.effects.enabled() {
+            return true;
+        }
+
+        if app_state.disk_health_state_level > 0
+            || app_state.disk_health_ema > 0.01
+            || app_state.disk_health_peak_hold > 0.01
+        {
+            return true;
+        }
+
+        if Self::dht_wave_animation_active(&app_state.ui.dht_wave, dht_wave_telemetry) {
+            return true;
+        }
+
+        app_state
+            .torrent_list_order
+            .get(app_state.ui.selected_torrent_index)
+            .and_then(|info_hash| app_state.torrents.get(info_hash))
+            .is_some_and(|torrent| Self::selected_torrent_animation_active(torrent, now))
+    }
+
+    fn dht_wave_animation_active(
+        wave: &DhtWaveUiState,
+        telemetry: Option<&DhtWaveTelemetry>,
+    ) -> bool {
+        if telemetry.is_some_and(|telemetry| {
+            telemetry.active_lookups > 0
+                || telemetry.active_user_lookups > 0
+                || telemetry.inflight_ipv4_queries > 0
+                || telemetry.inflight_ipv6_queries > 0
+                || telemetry.unique_peers_found_last_10s > 0
+        }) {
+            return true;
+        }
+
+        wave.query_load > 0.01
+            || wave.discovery_boost > 0.01
+            || wave.query_surge > 0.01
+            || (wave.phase_speed > 0.05
+                && (wave.amplitude > 0.02 || wave.harmonic_amplitude > 0.01))
+    }
+
+    fn selected_torrent_animation_active(torrent: &TorrentDisplayState, now: Instant) -> bool {
+        if torrent.smoothed_download_speed_bps > 0
+            || torrent.smoothed_upload_speed_bps > 0
+            || torrent.disk_read_speed_bps > 0
+            || torrent.disk_write_speed_bps > 0
+            || torrent.peers_discovered_this_tick > 0
+            || torrent.peers_connected_this_tick > 0
+            || torrent.peers_disconnected_this_tick > 0
+        {
+            return true;
+        }
+
+        let metrics = &torrent.latest_state;
+        if metrics.blocks_in_this_tick > 0
+            || metrics.blocks_out_this_tick > 0
+            || metrics
+                .blocks_in_history
+                .iter()
+                .rev()
+                .take(NORMAL_ANIMATION_RECENT_BLOCK_ROWS)
+                .any(|&blocks| blocks > 0)
+            || metrics
+                .blocks_out_history
+                .iter()
+                .rev()
+                .take(NORMAL_ANIMATION_RECENT_BLOCK_ROWS)
+                .any(|&blocks| blocks > 0)
+        {
+            return true;
+        }
+
+        if torrent
+            .peer_discovery_history
+            .iter()
+            .chain(torrent.peer_connection_history.iter())
+            .chain(torrent.peer_disconnect_history.iter())
+            .rev()
+            .take(NORMAL_ANIMATION_RECENT_PEER_EVENTS)
+            .any(|&events| events > 0)
+        {
+            return true;
+        }
+
+        torrent.recent_file_activity.values().any(|activity| {
+            [activity.download_at, activity.upload_at]
+                .into_iter()
+                .flatten()
+                .any(|seen_at| {
+                    now.saturating_duration_since(seen_at) <= NORMAL_ANIMATION_FILE_ACTIVITY_WINDOW
+                })
+        })
+    }
+
+    fn normal_idle_frame_check_interval(target_frame_interval: Duration) -> Duration {
+        target_frame_interval.max(NORMAL_IDLE_FRAME_CHECK_INTERVAL)
+    }
+
+    fn advance_next_draw_time(
+        next_draw_time: &mut Instant,
+        frame_started_at: Instant,
+        target_frame_interval: Duration,
+    ) {
+        *next_draw_time += target_frame_interval;
+        while *next_draw_time <= frame_started_at {
+            *next_draw_time += target_frame_interval;
         }
     }
 
@@ -7018,10 +7209,10 @@ mod tests {
         should_load_persisted_torrent, should_persist_network_history_on_interval,
         sort_and_filter_torrent_list_state, torrent_completion_percent,
         torrent_is_effectively_incomplete, App, AppClusterRole, AppCommand, AppMode,
-        AppRuntimeMode, AppState, ColumnId, CommandIngestResult, DhtWaveTargets, DhtWaveUiState,
-        FilePriority, IngestSource, ListenerSet, PeerInfo, PeerSortColumn, PersistPayload,
-        SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState, TorrentMetrics,
-        TorrentPreviewPayload, TorrentSortColumn, UiState, BITTORRENT_PROTOCOL_STR,
+        AppRuntimeMode, AppState, ColumnId, CommandIngestResult, DataRate, DhtWaveTargets,
+        DhtWaveUiState, FilePriority, IngestSource, ListenerSet, PeerInfo, PeerSortColumn,
+        PersistPayload, SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState,
+        TorrentMetrics, TorrentPreviewPayload, TorrentSortColumn, UiState, BITTORRENT_PROTOCOL_STR,
         DHT_WAVE_PHASE_WRAP_PERIOD,
     };
     use crate::config::{
@@ -7046,7 +7237,7 @@ mod tests {
     use std::io;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::PathBuf;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio::sync::watch;
@@ -7262,21 +7453,123 @@ mod tests {
     }
 
     #[test]
-    fn should_draw_every_frame_in_normal_mode() {
-        assert!(App::should_draw_this_frame(&AppMode::Normal, false));
-        assert!(App::should_draw_this_frame(&AppMode::Normal, true));
+    fn should_draw_normal_mode_when_dirty_or_animating() {
+        assert!(!App::should_draw_this_frame(&AppMode::Normal, false, false));
+        assert!(App::should_draw_this_frame(&AppMode::Normal, true, false));
+        assert!(App::should_draw_this_frame(&AppMode::Normal, false, true));
     }
 
     #[test]
     fn should_draw_every_frame_in_welcome_mode() {
-        assert!(App::should_draw_this_frame(&AppMode::Welcome, false));
-        assert!(App::should_draw_this_frame(&AppMode::Welcome, true));
+        assert!(App::should_draw_this_frame(&AppMode::Welcome, false, false));
+        assert!(App::should_draw_this_frame(&AppMode::Welcome, true, false));
     }
 
     #[test]
     fn should_only_draw_dirty_in_power_saving_mode() {
-        assert!(!App::should_draw_this_frame(&AppMode::PowerSaving, false));
-        assert!(App::should_draw_this_frame(&AppMode::PowerSaving, true));
+        assert!(!App::should_draw_this_frame(
+            &AppMode::PowerSaving,
+            false,
+            true
+        ));
+        assert!(App::should_draw_this_frame(
+            &AppMode::PowerSaving,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn normal_animation_gate_is_idle_for_static_state() {
+        let app_state = AppState::default();
+
+        assert!(!App::normal_mode_animation_active(
+            &app_state,
+            None,
+            Instant::now()
+        ));
+    }
+
+    #[test]
+    fn normal_animation_gate_detects_selected_torrent_activity() {
+        let mut app_state = AppState::default();
+        let info_hash = b"active_hash".to_vec();
+        let mut torrent = TorrentDisplayState::default();
+        torrent.latest_state.blocks_in_history = vec![0, 0, 1];
+        app_state.torrents.insert(info_hash.clone(), torrent);
+        app_state.torrent_list_order.push(info_hash);
+
+        assert!(App::normal_mode_animation_active(
+            &app_state,
+            None,
+            Instant::now()
+        ));
+    }
+
+    #[test]
+    fn normal_animation_gate_detects_dht_query_activity() {
+        let app_state = AppState::default();
+        let telemetry = DhtWaveTelemetry {
+            inflight_ipv4_queries: 1,
+            ..Default::default()
+        };
+
+        assert!(App::normal_mode_animation_active(
+            &app_state,
+            Some(&telemetry),
+            Instant::now()
+        ));
+    }
+
+    #[test]
+    fn normal_idle_check_uses_light_polling_cadence_for_fast_targets() {
+        assert_eq!(
+            App::normal_idle_frame_check_interval(DataRate::Rate60s.frame_interval()),
+            super::NORMAL_IDLE_FRAME_CHECK_INTERVAL
+        );
+    }
+
+    #[test]
+    fn normal_idle_check_preserves_slower_targets() {
+        assert_eq!(
+            App::normal_idle_frame_check_interval(DataRate::Rate1s.frame_interval()),
+            DataRate::Rate1s.frame_interval()
+        );
+    }
+
+    #[test]
+    fn data_rate_sixty_uses_precise_frame_interval() {
+        assert!(
+            (DataRate::Rate60s.frame_interval().as_secs_f64() - (1.0 / 60.0)).abs() < 0.000_001
+        );
+    }
+
+    #[test]
+    fn draw_scheduler_recovers_from_late_timer_wakeups() {
+        let start = Instant::now();
+        let interval = DataRate::Rate60s.frame_interval();
+        let mut next_draw_time = start;
+
+        App::advance_next_draw_time(
+            &mut next_draw_time,
+            start + Duration::from_millis(2),
+            interval,
+        );
+
+        assert!(next_draw_time < start + interval + Duration::from_millis(1));
+    }
+
+    #[test]
+    fn ui_fps_counter_measures_drawn_frames_per_second() {
+        let mut ui = UiState::default();
+        let start = Instant::now();
+
+        ui.record_drawn_frame(start);
+        for frame in 1..=44 {
+            ui.record_drawn_frame(start + Duration::from_secs_f64(frame as f64 / 44.0));
+        }
+
+        assert_eq!(ui.measured_fps, Some(44.0));
     }
 
     fn test_dht_wave_targets(
