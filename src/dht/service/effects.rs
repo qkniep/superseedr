@@ -111,6 +111,7 @@ pub(in crate::dht::service) async fn apply_dht_service_effects(
                     service_state.service.warning_owned(),
                     service_state.service.generation(),
                     service_state.service.config().preferred_backend,
+                    literal_bootstrap_summary(&service_state.service.config().bootstrap_nodes),
                 );
             }
             DhtServiceEffect::StartDueDemands => {
@@ -231,6 +232,7 @@ pub(in crate::dht::service) async fn apply_dht_lifecycle_effects(
                     service_state.service.warning_owned(),
                     service_state.service.generation(),
                     service_state.service.config().preferred_backend,
+                    literal_bootstrap_summary(&service_state.service.config().bootstrap_nodes),
                 );
             }
             DhtLifecycleEffect::ExpireRecentUniquePeers => {

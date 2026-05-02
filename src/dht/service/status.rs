@@ -169,13 +169,14 @@ pub(super) fn publish_status(
     warning: Option<String>,
     generation: u64,
     preferred_backend: DhtBackendKind,
+    configured_bootstrap: BootstrapSummary,
 ) {
     let backend = active_runtime
         .map(|active| active.backend)
         .unwrap_or(DhtBackendKind::Disabled);
     let bootstrap = active_runtime
         .map(|active| active.bootstrap)
-        .unwrap_or_default();
+        .unwrap_or(configured_bootstrap);
     let _ = status_tx.send(build_status(
         active_runtime,
         backend,
