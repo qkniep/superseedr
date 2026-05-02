@@ -15,6 +15,7 @@ mod errors;
 mod fs_atomic;
 mod integrations;
 mod integrity_scheduler;
+mod logging;
 mod networking;
 mod persistence;
 mod resource_manager;
@@ -75,9 +76,6 @@ use crate::persistence::event_journal::{
 };
 use crate::torrent_identity::{info_hash_from_torrent_bytes, info_hash_from_torrent_source};
 use serde_json::{json, Value};
-
-use tracing_appender::rolling::RollingFileAppender;
-use tracing_appender::rolling::Rotation;
 
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::env;
@@ -584,7 +582,7 @@ fn init_tracing(
     log_dirs: Vec<PathBuf>,
     filename_prefix: &str,
     emit_stderr: bool,
-) -> Vec<tracing_appender::non_blocking::WorkerGuard> {
+) -> Vec<logging::LogWorkerGuard> {
     let quiet_filter = Targets::new()
         .with_default(DEFAULT_LOG_FILTER)
         .with_target("mainline::rpc::socket", LevelFilter::ERROR);
@@ -606,16 +604,8 @@ fn init_tracing(
                 suppressed_failures.push(message);
             }
         } else {
-            match RollingFileAppender::builder()
-                .rotation(Rotation::DAILY)
-                .max_log_files(31)
-                .filename_prefix(filename_prefix)
-                .filename_suffix("log")
-                .build(&log_dir)
-            {
-                Ok(general_log) => {
-                    let (non_blocking_general, guard_general) =
-                        tracing_appender::non_blocking(general_log);
+            match logging::non_blocking_daily_file_writer(&log_dir, filename_prefix, 31) {
+                Ok((non_blocking_general, guard_general)) => {
                     let general_layer = fmt::layer()
                         .with_writer(non_blocking_general)
                         .with_ansi(false)

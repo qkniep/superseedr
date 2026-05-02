@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use chrono::{DateTime, Local, TimeZone};
-use figment::providers::{Env, Serialized};
-use figment::Figment;
 use sha1::{Digest, Sha1};
 use tracing::{event as tracing_event, Level};
 
@@ -316,6 +314,9 @@ mod string_usize_map {
 const SHARED_CONFIG_DIR_ENV: &str = "SUPERSEEDR_SHARED_CONFIG_DIR";
 const SHARED_HOST_ID_ENV: &str = "SUPERSEEDR_SHARED_HOST_ID";
 const LEGACY_SHARED_HOST_ID_ENV: &str = "SUPERSEEDR_HOST_ID";
+const CLIENT_PORT_ENV: &str = "SUPERSEEDR_CLIENT_PORT";
+const DEFAULT_DOWNLOAD_FOLDER_ENV: &str = "SUPERSEEDR_DEFAULT_DOWNLOAD_FOLDER";
+const OUTPUT_STATUS_INTERVAL_ENV: &str = "SUPERSEEDR_OUTPUT_STATUS_INTERVAL";
 const SHARED_TORRENT_SOURCE_PREFIX: &str = "shared:";
 const SHARED_CONFIG_SUBDIR: &str = "superseedr-config";
 const LAUNCHER_SHARED_CONFIG_FILE: &str = "launcher_shared_config.toml";
@@ -1304,10 +1305,39 @@ fn decode_catalog_torrent_source(source: &str, shared_root: Option<&Path>) -> St
 }
 
 fn apply_env_overrides(settings: &Settings) -> io::Result<Settings> {
-    Figment::from(Serialized::defaults(settings.clone()))
-        .merge(Env::prefixed("SUPERSEEDR_"))
-        .extract::<Settings>()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    let mut resolved = settings.clone();
+
+    if let Some(client_port) = parse_env_override(CLIENT_PORT_ENV)? {
+        resolved.client_port = client_port;
+    }
+    if let Some(default_download_folder) = env::var_os(DEFAULT_DOWNLOAD_FOLDER_ENV) {
+        resolved.default_download_folder = Some(PathBuf::from(default_download_folder));
+    }
+    if let Some(output_status_interval) = parse_env_override(OUTPUT_STATUS_INTERVAL_ENV)? {
+        resolved.output_status_interval = output_status_interval;
+    }
+
+    Ok(resolved)
+}
+
+fn parse_env_override<T>(key: &str) -> io::Result<Option<T>>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    match env::var(key) {
+        Ok(value) => value.parse::<T>().map(Some).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid {key}={value:?}: {error}"),
+            )
+        }),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{key} must be valid Unicode"),
+        )),
+    }
 }
 
 fn read_toml_or_default<T>(path: &Path) -> io::Result<T>
@@ -1690,7 +1720,7 @@ impl NormalConfigBackend {
             );
             let settings = first_run_settings();
             self.save_settings(&settings)?;
-            return Ok(settings);
+            return apply_env_overrides(&settings);
         }
 
         tracing_event!(
@@ -1716,10 +1746,10 @@ impl NormalConfigBackend {
                     Level::INFO,
                     "Local runtime lock is held; returning first-run settings without bootstrapping."
                 );
-                return Ok(settings);
+                return apply_env_overrides(&settings);
             }
             self.save_settings(&settings)?;
-            return Ok(settings);
+            return apply_env_overrides(&settings);
         }
 
         tracing_event!(
@@ -2496,10 +2526,32 @@ fn cleanup_old_backups(backup_dir: &PathBuf, limit: usize) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use figment::providers::{Format, Toml};
-    use figment::Figment;
+    use std::ffi::OsString;
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    struct EnvVarRestore {
+        key: &'static str,
+        value: Option<OsString>,
+    }
+
+    impl EnvVarRestore {
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                value: env::var_os(key),
+            }
+        }
+    }
+
+    impl Drop for EnvVarRestore {
+        fn drop(&mut self) {
+            match &self.value {
+                Some(value) => env::set_var(self.key, value),
+                None => env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn test_full_settings_parsing() {
@@ -2550,10 +2602,8 @@ mod tests {
             torrent_control_state = "Paused"
         "#;
 
-        let settings: Settings = Figment::new()
-            .merge(Toml::string(toml_str))
-            .extract()
-            .expect("Failed to parse full TOML string");
+        let settings: Settings =
+            deserialize_versioned_toml(toml_str).expect("Failed to parse full TOML string");
 
         assert_eq!(settings.client_id, "test-client-id-123");
         assert_eq!(settings.client_port, 12345);
@@ -2593,10 +2643,8 @@ mod tests {
             download_path = "/partial/path"
         "#;
 
-        let settings: Settings = Figment::new()
-            .merge(Toml::string(toml_str))
-            .extract()
-            .expect("Failed to parse partial TOML string");
+        let settings: Settings =
+            deserialize_versioned_toml(toml_str).expect("Failed to parse partial TOML string");
 
         let default_settings = Settings::default();
 
@@ -2629,10 +2677,8 @@ mod tests {
     fn test_default_settings() {
         let toml_str = "";
 
-        let settings: Settings = Figment::new()
-            .merge(Toml::string(toml_str))
-            .extract()
-            .expect("Failed to parse empty string");
+        let settings: Settings =
+            deserialize_versioned_toml(toml_str).expect("Failed to parse empty string");
 
         let default_settings = Settings::default();
 
@@ -2656,9 +2702,7 @@ mod tests {
             ui_theme = 123
         "#;
 
-        let settings: Settings = Figment::new()
-            .merge(Toml::string(toml_str))
-            .extract()
+        let settings: Settings = deserialize_versioned_toml(toml_str)
             .expect("Settings parsing should not fail for non-string ui_theme");
 
         assert_eq!(settings.client_id, "theme-type-regression");
@@ -2679,17 +2723,15 @@ mod tests {
             max_preview_items = 50
 
             [[rss.filters]]
-            regex = "ubuntu"
+            regex = "linux image"
             enabled = true
         "#;
 
-        let settings: Settings = Figment::new()
-            .merge(Toml::string(toml_str))
-            .extract()
+        let settings: Settings = deserialize_versioned_toml(toml_str)
             .expect("Settings parsing should accept legacy rss.filters.regex key");
 
         assert_eq!(settings.rss.filters.len(), 1);
-        assert_eq!(settings.rss.filters[0].query, "ubuntu");
+        assert_eq!(settings.rss.filters[0].query, "linux image");
         assert!(matches!(settings.rss.filters[0].mode, RssFilterMode::Fuzzy));
         assert!(settings.rss.filters[0].enabled);
     }
@@ -2706,9 +2748,7 @@ mod tests {
             enabled = true
         "#;
 
-        let settings: Settings = Figment::new()
-            .merge(Toml::string(toml_str))
-            .extract()
+        let settings: Settings = deserialize_versioned_toml(toml_str)
             .expect("Settings parsing should accept rss.filters.mode");
 
         assert_eq!(settings.rss.filters.len(), 1);
@@ -2724,8 +2764,7 @@ mod tests {
             torrent_control_state = "UNKNOWN"
         "#;
 
-        let result: Result<Settings, figment::Error> =
-            Figment::new().merge(Toml::string(toml_str)).extract();
+        let result: io::Result<Settings> = deserialize_versioned_toml(toml_str);
 
         assert!(
             result.is_err(),
@@ -2743,6 +2782,73 @@ mod tests {
                 "Error message should mention the field 'torrent_control_state'"
             );
         }
+    }
+
+    #[test]
+    fn test_apply_env_overrides_handles_supported_env_vars() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let _client_port = EnvVarRestore::capture(CLIENT_PORT_ENV);
+        let _default_download_folder = EnvVarRestore::capture(DEFAULT_DOWNLOAD_FOLDER_ENV);
+        let _output_status_interval = EnvVarRestore::capture(OUTPUT_STATUS_INTERVAL_ENV);
+        let download_dir = tempdir().expect("create download dir");
+
+        env::set_var(CLIENT_PORT_ENV, "61234");
+        env::set_var(DEFAULT_DOWNLOAD_FOLDER_ENV, download_dir.path());
+        env::set_var(OUTPUT_STATUS_INTERVAL_ENV, "9");
+
+        let settings = Settings {
+            client_port: 7777,
+            default_download_folder: Some(PathBuf::from("from-file")),
+            output_status_interval: 3,
+            ..Settings::default()
+        };
+        let resolved = apply_env_overrides(&settings).expect("apply env overrides");
+
+        assert_eq!(resolved.client_port, 61234);
+        assert_eq!(
+            resolved.default_download_folder,
+            Some(download_dir.path().to_path_buf())
+        );
+        assert_eq!(resolved.output_status_interval, 9);
+    }
+
+    #[test]
+    fn test_apply_env_overrides_invalid_numeric_env_reports_key() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let _client_port = EnvVarRestore::capture(CLIENT_PORT_ENV);
+        env::set_var(CLIENT_PORT_ENV, "not-a-port");
+
+        let error = apply_env_overrides(&Settings::default())
+            .expect_err("invalid client port env should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains(CLIENT_PORT_ENV),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains("not-a-port"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_apply_env_overrides_ignores_unsupported_settings_vars() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let _private_client = EnvVarRestore::capture("SUPERSEEDR_PRIVATE_CLIENT");
+        let _watch_path = EnvVarRestore::capture("SUPERSEEDR_WATCH_PATH_1");
+
+        env::set_var("SUPERSEEDR_PRIVATE_CLIENT", "true");
+        env::set_var("SUPERSEEDR_WATCH_PATH_1", "/ignored-watch");
+
+        let settings = Settings {
+            private_client: false,
+            ..Settings::default()
+        };
+        let resolved = apply_env_overrides(&settings).expect("apply env overrides");
+
+        assert!(!resolved.private_client);
+        assert!(additional_watch_paths().is_empty());
     }
 
     #[test]
@@ -3091,6 +3197,62 @@ mod tests {
     }
 
     #[test]
+    fn test_normal_backend_load_applies_supported_env_overrides() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let _client_port = EnvVarRestore::capture(CLIENT_PORT_ENV);
+        let _default_download_folder = EnvVarRestore::capture(DEFAULT_DOWNLOAD_FOLDER_ENV);
+        let _output_status_interval = EnvVarRestore::capture(OUTPUT_STATUS_INTERVAL_ENV);
+        let dir = tempdir().expect("create tempdir");
+        let download_dir = dir.path().join("env-downloads");
+        let backend = NormalConfigBackend {
+            paths: NormalConfigPaths {
+                settings_path: dir.path().join("settings.toml"),
+                metadata_path: dir.path().join("torrent_metadata.toml"),
+                backup_dir: dir.path().join("backups_settings_files"),
+            },
+        };
+        let settings = Settings {
+            client_port: 7000,
+            default_download_folder: Some(dir.path().join("file-downloads")),
+            output_status_interval: 3,
+            ..Settings::default()
+        };
+
+        backend.save_settings(&settings).expect("save settings");
+        env::set_var(CLIENT_PORT_ENV, "61234");
+        env::set_var(DEFAULT_DOWNLOAD_FOLDER_ENV, &download_dir);
+        env::set_var(OUTPUT_STATUS_INTERVAL_ENV, "11");
+
+        let loaded = backend.load_settings().expect("load settings");
+
+        assert_eq!(loaded.client_port, 61234);
+        assert_eq!(loaded.default_download_folder, Some(download_dir));
+        assert_eq!(loaded.output_status_interval, 11);
+    }
+
+    #[test]
+    fn test_normal_backend_first_run_applies_env_overrides_without_persisting_them() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let _client_port = EnvVarRestore::capture(CLIENT_PORT_ENV);
+        let dir = tempdir().expect("create tempdir");
+        let backend = NormalConfigBackend {
+            paths: NormalConfigPaths {
+                settings_path: dir.path().join("settings.toml"),
+                metadata_path: dir.path().join("torrent_metadata.toml"),
+                backup_dir: dir.path().join("backups_settings_files"),
+            },
+        };
+        env::set_var(CLIENT_PORT_ENV, "61234");
+
+        let loaded = backend.load_settings().expect("load settings");
+        let persisted: Settings =
+            read_toml_or_default(&backend.paths.settings_path).expect("read persisted settings");
+
+        assert_eq!(loaded.client_port, 61234);
+        assert_eq!(persisted.client_port, Settings::default().client_port);
+    }
+
+    #[test]
     fn test_shared_backend_routes_shared_and_host_fields() {
         let _guard = shared_backend_guard().lock().unwrap();
         clear_shared_config_state();
@@ -3346,6 +3508,36 @@ mod tests {
         let host: HostConfig =
             read_toml_or_default(&backend.paths.host_path).expect("read bootstrapped host file");
         assert_eq!(host, HostConfig::default());
+    }
+
+    #[test]
+    fn test_shared_backend_validates_env_overridden_default_download_folder() {
+        let _guard = shared_backend_guard().lock().unwrap();
+        let _default_download_folder = EnvVarRestore::capture(DEFAULT_DOWNLOAD_FOLDER_ENV);
+        let _host_id = EnvVarRestore::capture(SHARED_HOST_ID_ENV);
+        let _legacy_host_id = EnvVarRestore::capture(LEGACY_SHARED_HOST_ID_ENV);
+        clear_shared_config_state();
+        let dir = tempdir().expect("create tempdir");
+        let shared_mount = dir.path().join("shared-mount");
+        fs::create_dir_all(&shared_mount).expect("create shared mount");
+        env::set_var(SHARED_HOST_ID_ENV, "node-a");
+        env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        let backend = shared_backend_for_mount_root(&shared_mount).expect("shared backend");
+        env::set_var(
+            DEFAULT_DOWNLOAD_FOLDER_ENV,
+            dir.path().join("outside-downloads"),
+        );
+
+        let error = backend
+            .load_settings()
+            .expect_err("env override outside shared root should fail validation");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("default_download_folder"),
+            "unexpected error: {error}"
+        );
+        clear_shared_config_state();
     }
 
     #[test]
