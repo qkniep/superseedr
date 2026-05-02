@@ -1451,7 +1451,7 @@ fn backup_shared_catalog_before_write(
     cleanup_shared_catalog_backups(&backup_dir, policy.retained_backups)
 }
 
-fn write_shared_cluster_revision_marker(root_dir: &Path) -> io::Result<()> {
+fn write_shared_cluster_revision_marker(root_dir: &Path) -> io::Result<String> {
     let revision_path = root_dir.join("cluster.revision");
     let revision = format!(
         "{}\n",
@@ -1460,7 +1460,34 @@ fn write_shared_cluster_revision_marker(root_dir: &Path) -> io::Result<()> {
             .unwrap_or_default()
             .as_millis()
     );
-    write_string_atomically(&revision_path, &revision)
+    write_string_atomically(&revision_path, &revision)?;
+    Ok(revision.trim().to_string())
+}
+
+fn shared_config_revision_snapshot(
+    paths: &SharedConfigPaths,
+    revision: String,
+) -> Option<LoggedSharedConfigRevision> {
+    let revision = revision.trim().to_string();
+    if revision.is_empty() {
+        return None;
+    }
+
+    Some(LoggedSharedConfigRevision {
+        root_dir: paths.root_dir.clone(),
+        host_id: paths.host_id.clone(),
+        revision,
+    })
+}
+
+fn mark_shared_config_revision_seen(paths: &SharedConfigPaths, revision: String) {
+    let Some(next) = shared_config_revision_snapshot(paths, revision) else {
+        return;
+    };
+    let mut logged = logged_shared_config_revision()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *logged = Some(next);
 }
 
 fn log_shared_config_revision_if_changed(paths: &SharedConfigPaths) {
@@ -1468,16 +1495,10 @@ fn log_shared_config_revision_if_changed(paths: &SharedConfigPaths) {
     let Ok(revision) = fs::read_to_string(revision_path) else {
         return;
     };
-    let revision = revision.trim().to_string();
-    if revision.is_empty() {
+    let Some(next) = shared_config_revision_snapshot(paths, revision) else {
         return;
-    }
-
-    let next = LoggedSharedConfigRevision {
-        root_dir: paths.root_dir.clone(),
-        host_id: paths.host_id.clone(),
-        revision,
     };
+
     let mut logged = logged_shared_config_revision()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1828,7 +1849,8 @@ impl SharedConfigBackend {
         }
 
         if shared_settings_changed || shared_catalog_changed || shared_metadata_changed {
-            write_shared_cluster_revision_marker(&self.paths.root_dir)?;
+            let revision = write_shared_cluster_revision_marker(&self.paths.root_dir)?;
+            mark_shared_config_revision_seen(&self.paths, revision);
         }
         Ok(())
     }
