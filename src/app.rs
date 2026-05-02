@@ -159,6 +159,10 @@ const SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 const INCOMING_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 const PORT_FAMILY_HIGHLIGHT_DURATION: Duration = Duration::from_secs(2);
 const UI_FPS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const NORMAL_IDLE_FRAME_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+const NORMAL_ANIMATION_RECENT_BLOCK_ROWS: usize = 64;
+const NORMAL_ANIMATION_RECENT_PEER_EVENTS: usize = 120;
+const NORMAL_ANIMATION_FILE_ACTIVITY_WINDOW: Duration = Duration::from_secs(4);
 const BITTORRENT_PROTOCOL_STR: &[u8] = b"BitTorrent protocol";
 
 pub struct ListenerSet {
@@ -3067,7 +3071,23 @@ impl App {
                     );
                     self.drain_latest_torrent_metrics();
                     self.sync_dht_peer_slot_usage();
-                    if Self::should_draw_this_frame(&self.app_state.mode, self.app_state.ui.needs_redraw) {
+                    let normal_animation_active = if matches!(self.app_state.mode, AppMode::Normal)
+                    {
+                        let dht_wave_telemetry = self.dht_service.current_wave_telemetry();
+                        Self::normal_mode_animation_active(
+                            &self.app_state,
+                            Some(&dht_wave_telemetry),
+                            frame_started_at,
+                        )
+                    } else {
+                        false
+                    };
+                    let should_draw = Self::should_draw_this_frame(
+                        &self.app_state.mode,
+                        self.app_state.ui.needs_redraw,
+                        normal_animation_active,
+                    );
+                    if should_draw {
                         self.app_state.ui.record_drawn_frame(frame_started_at);
                         self.tick_ui_effects_clock();
                         let dht_status = self.dht_service.current_status();
@@ -3082,6 +3102,9 @@ impl App {
                             );
                         })?;
                         self.app_state.ui.needs_redraw = false;
+                    } else if matches!(self.app_state.mode, AppMode::Normal) {
+                        next_draw_time = frame_started_at
+                            + Self::normal_idle_frame_check_interval(current_target_framerate);
                     }
                 }
                 _ = version_interval.tick() => {
@@ -3119,12 +3142,121 @@ impl App {
         Ok(())
     }
 
-    fn should_draw_this_frame(mode: &AppMode, ui_needs_redraw: bool) -> bool {
-        if matches!(mode, AppMode::PowerSaving) {
-            ui_needs_redraw
-        } else {
-            true
+    fn should_draw_this_frame(
+        mode: &AppMode,
+        ui_needs_redraw: bool,
+        normal_animation_active: bool,
+    ) -> bool {
+        match mode {
+            AppMode::PowerSaving => ui_needs_redraw,
+            AppMode::Normal => ui_needs_redraw || normal_animation_active,
+            _ => true,
         }
+    }
+
+    fn normal_mode_animation_active(
+        app_state: &AppState,
+        dht_wave_telemetry: Option<&DhtWaveTelemetry>,
+        now: Instant,
+    ) -> bool {
+        if app_state.theme.effects.enabled() {
+            return true;
+        }
+
+        if app_state.disk_health_state_level > 0
+            || app_state.disk_health_ema > 0.01
+            || app_state.disk_health_peak_hold > 0.01
+        {
+            return true;
+        }
+
+        if Self::dht_wave_animation_active(&app_state.ui.dht_wave, dht_wave_telemetry) {
+            return true;
+        }
+
+        app_state
+            .torrent_list_order
+            .get(app_state.ui.selected_torrent_index)
+            .and_then(|info_hash| app_state.torrents.get(info_hash))
+            .is_some_and(|torrent| Self::selected_torrent_animation_active(torrent, now))
+    }
+
+    fn dht_wave_animation_active(
+        wave: &DhtWaveUiState,
+        telemetry: Option<&DhtWaveTelemetry>,
+    ) -> bool {
+        if telemetry.is_some_and(|telemetry| {
+            telemetry.active_lookups > 0
+                || telemetry.active_user_lookups > 0
+                || telemetry.inflight_ipv4_queries > 0
+                || telemetry.inflight_ipv6_queries > 0
+                || telemetry.unique_peers_found_last_10s > 0
+        }) {
+            return true;
+        }
+
+        wave.query_load > 0.01
+            || wave.discovery_boost > 0.01
+            || wave.query_surge > 0.01
+            || (wave.phase_speed > 0.05
+                && (wave.amplitude > 0.02 || wave.harmonic_amplitude > 0.01))
+    }
+
+    fn selected_torrent_animation_active(torrent: &TorrentDisplayState, now: Instant) -> bool {
+        if torrent.smoothed_download_speed_bps > 0
+            || torrent.smoothed_upload_speed_bps > 0
+            || torrent.disk_read_speed_bps > 0
+            || torrent.disk_write_speed_bps > 0
+            || torrent.peers_discovered_this_tick > 0
+            || torrent.peers_connected_this_tick > 0
+            || torrent.peers_disconnected_this_tick > 0
+        {
+            return true;
+        }
+
+        let metrics = &torrent.latest_state;
+        if metrics.blocks_in_this_tick > 0
+            || metrics.blocks_out_this_tick > 0
+            || metrics
+                .blocks_in_history
+                .iter()
+                .rev()
+                .take(NORMAL_ANIMATION_RECENT_BLOCK_ROWS)
+                .any(|&blocks| blocks > 0)
+            || metrics
+                .blocks_out_history
+                .iter()
+                .rev()
+                .take(NORMAL_ANIMATION_RECENT_BLOCK_ROWS)
+                .any(|&blocks| blocks > 0)
+        {
+            return true;
+        }
+
+        if torrent
+            .peer_discovery_history
+            .iter()
+            .chain(torrent.peer_connection_history.iter())
+            .chain(torrent.peer_disconnect_history.iter())
+            .rev()
+            .take(NORMAL_ANIMATION_RECENT_PEER_EVENTS)
+            .any(|&events| events > 0)
+        {
+            return true;
+        }
+
+        torrent.recent_file_activity.values().any(|activity| {
+            [activity.download_at, activity.upload_at]
+                .into_iter()
+                .flatten()
+                .any(|seen_at| {
+                    now.saturating_duration_since(seen_at) <= NORMAL_ANIMATION_FILE_ACTIVITY_WINDOW
+                })
+        })
+    }
+
+    fn normal_idle_frame_check_interval(target_frame_interval: Duration) -> Duration {
+        target_frame_interval.max(NORMAL_IDLE_FRAME_CHECK_INTERVAL)
     }
 
     fn advance_next_draw_time(
@@ -7321,21 +7453,88 @@ mod tests {
     }
 
     #[test]
-    fn should_draw_every_frame_in_normal_mode() {
-        assert!(App::should_draw_this_frame(&AppMode::Normal, false));
-        assert!(App::should_draw_this_frame(&AppMode::Normal, true));
+    fn should_draw_normal_mode_when_dirty_or_animating() {
+        assert!(!App::should_draw_this_frame(&AppMode::Normal, false, false));
+        assert!(App::should_draw_this_frame(&AppMode::Normal, true, false));
+        assert!(App::should_draw_this_frame(&AppMode::Normal, false, true));
     }
 
     #[test]
     fn should_draw_every_frame_in_welcome_mode() {
-        assert!(App::should_draw_this_frame(&AppMode::Welcome, false));
-        assert!(App::should_draw_this_frame(&AppMode::Welcome, true));
+        assert!(App::should_draw_this_frame(&AppMode::Welcome, false, false));
+        assert!(App::should_draw_this_frame(&AppMode::Welcome, true, false));
     }
 
     #[test]
     fn should_only_draw_dirty_in_power_saving_mode() {
-        assert!(!App::should_draw_this_frame(&AppMode::PowerSaving, false));
-        assert!(App::should_draw_this_frame(&AppMode::PowerSaving, true));
+        assert!(!App::should_draw_this_frame(
+            &AppMode::PowerSaving,
+            false,
+            true
+        ));
+        assert!(App::should_draw_this_frame(
+            &AppMode::PowerSaving,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn normal_animation_gate_is_idle_for_static_state() {
+        let app_state = AppState::default();
+
+        assert!(!App::normal_mode_animation_active(
+            &app_state,
+            None,
+            Instant::now()
+        ));
+    }
+
+    #[test]
+    fn normal_animation_gate_detects_selected_torrent_activity() {
+        let mut app_state = AppState::default();
+        let info_hash = b"active_hash".to_vec();
+        let mut torrent = TorrentDisplayState::default();
+        torrent.latest_state.blocks_in_history = vec![0, 0, 1];
+        app_state.torrents.insert(info_hash.clone(), torrent);
+        app_state.torrent_list_order.push(info_hash);
+
+        assert!(App::normal_mode_animation_active(
+            &app_state,
+            None,
+            Instant::now()
+        ));
+    }
+
+    #[test]
+    fn normal_animation_gate_detects_dht_query_activity() {
+        let app_state = AppState::default();
+        let telemetry = DhtWaveTelemetry {
+            inflight_ipv4_queries: 1,
+            ..Default::default()
+        };
+
+        assert!(App::normal_mode_animation_active(
+            &app_state,
+            Some(&telemetry),
+            Instant::now()
+        ));
+    }
+
+    #[test]
+    fn normal_idle_check_uses_light_polling_cadence_for_fast_targets() {
+        assert_eq!(
+            App::normal_idle_frame_check_interval(DataRate::Rate60s.frame_interval()),
+            super::NORMAL_IDLE_FRAME_CHECK_INTERVAL
+        );
+    }
+
+    #[test]
+    fn normal_idle_check_preserves_slower_targets() {
+        assert_eq!(
+            App::normal_idle_frame_check_interval(DataRate::Rate1s.frame_interval()),
+            DataRate::Rate1s.frame_interval()
+        );
     }
 
     #[test]
