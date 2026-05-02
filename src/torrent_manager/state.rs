@@ -13,6 +13,7 @@ use crate::tracker::normalize_tracker_urls;
 
 use crate::app::FilePriority;
 
+use rand::seq::SliceRandom;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Semaphore;
 
@@ -478,6 +479,19 @@ impl TorrentState {
         state
     }
 
+    fn release_active_blocks(&mut self, active_blocks: &HashSet<(u32, u32, u32)>) {
+        for &(piece_index, block_offset, block_len) in active_blocks {
+            if let Some(addr) = self
+                .piece_manager
+                .block_manager
+                .inflate_address_from_overlay(piece_index, block_offset, block_len)
+            {
+                let global_idx = self.piece_manager.block_manager.flatten_address(addr);
+                self.piece_manager.block_manager.unmark_pending(global_idx);
+            }
+        }
+    }
+
     fn get_piece_size(&self, piece_index: u32) -> usize {
         if let Some(torrent) = &self.torrent {
             let piece_len = torrent.info.piece_length as u64;
@@ -729,6 +743,7 @@ impl TorrentState {
                     self.piece_manager.need_queue.clear();
                     self.piece_manager.pending_queue.clear();
                     self.piece_manager.clear_assembly_buffers();
+                    self.piece_manager.block_manager.pending_blocks.clear();
 
                     for peer in self.peers.values_mut() {
                         peer.pending_requests.clear();
@@ -866,6 +881,8 @@ impl TorrentState {
                     return effects;
                 }
                 let mut available_slots = max_depth - current_inflight;
+                let is_endgame = self.torrent_status == TorrentStatus::Endgame;
+                let mut rng = rand::rng();
 
                 let mut pending_pieces: Vec<u32> = peer.pending_requests.iter().cloned().collect();
                 pending_pieces.sort();
@@ -879,9 +896,12 @@ impl TorrentState {
                     {
                         continue;
                     }
-                    let block_addrs = self
+                    let mut block_addrs = self
                         .piece_manager
                         .requestable_block_addresses_for_piece(piece_index);
+                    if is_endgame {
+                        block_addrs.shuffle(&mut rng);
+                    }
 
                     for addr in block_addrs {
                         if available_slots == 0 {
@@ -899,6 +919,23 @@ impl TorrentState {
                             continue;
                         }
 
+                        let global_pending_idx =
+                            if !self.piece_manager.block_manager.is_non_aligned_piece_grid() {
+                                Some(self.piece_manager.block_manager.flatten_address(addr))
+                            } else {
+                                None
+                            };
+                        if !is_endgame
+                            && global_pending_idx.is_some_and(|idx| {
+                                self.piece_manager
+                                    .block_manager
+                                    .pending_blocks
+                                    .contains(&idx)
+                            })
+                        {
+                            continue;
+                        }
+
                         // Is peer already working on it?
                         if peer.active_blocks.contains(&(
                             addr.piece_index,
@@ -909,6 +946,9 @@ impl TorrentState {
                         }
 
                         request_batch.push((addr.piece_index, addr.byte_offset, final_len));
+                        if let Some(idx) = global_pending_idx {
+                            self.piece_manager.block_manager.mark_pending(idx);
+                        }
                         peer.active_blocks
                             .insert((addr.piece_index, addr.byte_offset, final_len));
 
@@ -916,17 +956,16 @@ impl TorrentState {
                     }
                 }
 
-                let candidate_pool: Box<dyn Iterator<Item = &u32> + '_> =
-                    if self.torrent_status == TorrentStatus::Endgame {
-                        Box::new(
-                            self.piece_manager
-                                .need_queue
-                                .iter()
-                                .chain(self.piece_manager.pending_queue.keys()),
-                        )
-                    } else {
-                        Box::new(self.piece_manager.need_queue.iter())
-                    };
+                let candidate_pool: Box<dyn Iterator<Item = &u32> + '_> = if is_endgame {
+                    Box::new(
+                        self.piece_manager
+                            .pending_queue
+                            .keys()
+                            .chain(self.piece_manager.need_queue.iter()),
+                    )
+                } else {
+                    Box::new(self.piece_manager.need_queue.iter())
+                };
 
                 let mut valid_candidates: Vec<u32> = candidate_pool
                     .copied()
@@ -942,6 +981,16 @@ impl TorrentState {
                         if self.writing_pieces.contains(&p_idx) {
                             return false;
                         }
+                        if !self.piece_manager.piece_priorities.is_empty()
+                            && self
+                                .piece_manager
+                                .piece_priorities
+                                .get(p_idx as usize)
+                                .copied()
+                                == Some(EffectivePiecePriority::Skip)
+                        {
+                            return false;
+                        }
                         // Don't request what we already asked this specific peer for
                         if peer.pending_requests.contains(&p_idx) {
                             return false;
@@ -950,11 +999,51 @@ impl TorrentState {
                     })
                     .collect();
 
-                // Sort ascending: Lower availability count = Rarer = Higher Priority
-                valid_candidates.sort_by_key(|&p_idx| {
-                    // FIX: Call the helper method we just created
-                    self.piece_manager.get_piece_availability(p_idx)
-                });
+                if is_endgame {
+                    valid_candidates.shuffle(&mut rng);
+                }
+                if self.piece_manager.piece_priorities.is_empty() {
+                    if !is_endgame {
+                        valid_candidates.sort_by_key(|&p_idx| {
+                            self.piece_manager
+                                .piece_rarity
+                                .get(&p_idx)
+                                .copied()
+                                .unwrap_or(usize::MAX)
+                        });
+                    }
+                } else {
+                    valid_candidates.sort_by(|a, b| {
+                        let prio_a = self
+                            .piece_manager
+                            .piece_priorities
+                            .get(*a as usize)
+                            .copied()
+                            .unwrap_or(EffectivePiecePriority::Normal);
+                        let prio_b = self
+                            .piece_manager
+                            .piece_priorities
+                            .get(*b as usize)
+                            .copied()
+                            .unwrap_or(EffectivePiecePriority::Normal);
+
+                        prio_b.cmp(&prio_a).then_with(|| {
+                            let rare_a = self
+                                .piece_manager
+                                .piece_rarity
+                                .get(a)
+                                .copied()
+                                .unwrap_or(usize::MAX);
+                            let rare_b = self
+                                .piece_manager
+                                .piece_rarity
+                                .get(b)
+                                .copied()
+                                .unwrap_or(usize::MAX);
+                            rare_a.cmp(&rare_b)
+                        })
+                    });
+                }
 
                 let pieces_to_request = valid_candidates.into_iter().take(available_slots);
 
@@ -963,21 +1052,13 @@ impl TorrentState {
                         break;
                     }
 
-                    // --- A. Update State ---
-                    self.piece_manager
-                        .mark_as_pending(piece_index, peer_id.clone());
-                    peer.pending_requests.insert(piece_index);
-
-                    if self.piece_manager.need_queue.is_empty()
-                        && self.torrent_status != TorrentStatus::Endgame
-                    {
-                        self.torrent_status = TorrentStatus::Endgame;
-                    }
-
-                    // --- B. Generate Block Requests ---
-                    let block_addrs = self
+                    let mut block_addrs = self
                         .piece_manager
                         .requestable_block_addresses_for_piece(piece_index);
+                    if is_endgame {
+                        block_addrs.shuffle(&mut rng);
+                    }
+                    let mut piece_requests = Vec::new();
 
                     for addr in block_addrs {
                         if available_slots == 0 {
@@ -995,6 +1076,23 @@ impl TorrentState {
                             continue;
                         }
 
+                        let global_pending_idx =
+                            if !self.piece_manager.block_manager.is_non_aligned_piece_grid() {
+                                Some(self.piece_manager.block_manager.flatten_address(addr))
+                            } else {
+                                None
+                            };
+                        if !is_endgame
+                            && global_pending_idx.is_some_and(|idx| {
+                                self.piece_manager
+                                    .block_manager
+                                    .pending_blocks
+                                    .contains(&idx)
+                            })
+                        {
+                            continue;
+                        }
+
                         if peer.active_blocks.contains(&(
                             addr.piece_index,
                             addr.byte_offset,
@@ -1003,11 +1101,37 @@ impl TorrentState {
                             continue;
                         }
 
-                        request_batch.push((addr.piece_index, addr.byte_offset, final_len));
-                        peer.active_blocks
-                            .insert((addr.piece_index, addr.byte_offset, final_len));
-
+                        piece_requests.push((
+                            addr.piece_index,
+                            addr.byte_offset,
+                            final_len,
+                            global_pending_idx,
+                        ));
                         available_slots -= 1;
+                    }
+
+                    if piece_requests.is_empty() {
+                        continue;
+                    }
+
+                    self.piece_manager
+                        .mark_as_pending(piece_index, peer_id.clone());
+                    peer.pending_requests.insert(piece_index);
+
+                    if self.piece_manager.need_queue.is_empty()
+                        && self.torrent_status != TorrentStatus::Endgame
+                    {
+                        self.torrent_status = TorrentStatus::Endgame;
+                    }
+
+                    for (piece_index, byte_offset, final_len, global_pending_idx) in piece_requests
+                    {
+                        request_batch.push((piece_index, byte_offset, final_len));
+                        if let Some(idx) = global_pending_idx {
+                            self.piece_manager.block_manager.mark_pending(idx);
+                        }
+                        peer.active_blocks
+                            .insert((piece_index, byte_offset, final_len));
                     }
                 }
 
@@ -1087,11 +1211,13 @@ impl TorrentState {
 
                 for pid in batch {
                     if let Some(removed_peer) = self.peers.remove(&pid) {
+                        self.release_active_blocks(&removed_peer.active_blocks);
                         for piece_index in removed_peer.pending_requests {
                             if self.piece_manager.bitfield.get(piece_index as usize)
                                 != Some(&PieceStatus::Done)
                             {
-                                self.piece_manager.requeue_pending_to_need(piece_index);
+                                self.piece_manager
+                                    .release_pending_peer_or_requeue(piece_index, &pid);
                             }
                         }
                         effects.push(Effect::DisconnectPeer { peer_id: pid });
@@ -1146,9 +1272,10 @@ impl TorrentState {
             }
 
             Action::PeerChoked { peer_id } => {
+                let mut active_blocks = None;
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.inflight_requests = 0;
-                    peer.active_blocks.clear();
+                    active_blocks = Some(std::mem::take(&mut peer.active_blocks));
                     peer.peer_choking = ChokeStatus::Choke;
 
                     let pieces_to_requeue = std::mem::take(&mut peer.pending_requests);
@@ -1156,9 +1283,13 @@ impl TorrentState {
                         if self.piece_manager.bitfield.get(piece_index as usize)
                             != Some(&PieceStatus::Done)
                         {
-                            self.piece_manager.requeue_pending_to_need(piece_index);
+                            self.piece_manager
+                                .release_pending_peer_or_requeue(piece_index, &peer_id);
                         }
                     }
+                }
+                if let Some(active_blocks) = active_blocks {
+                    self.release_active_blocks(&active_blocks);
                 }
 
                 vec![Effect::DoNothing]
@@ -1245,6 +1376,14 @@ impl TorrentState {
                     let block_len = data.len() as u32;
                     peer.active_blocks
                         .remove(&(piece_index, block_offset, block_len));
+                    if let Some(addr) = self
+                        .piece_manager
+                        .block_manager
+                        .inflate_address_from_overlay(piece_index, block_offset, block_len)
+                    {
+                        let global_idx = self.piece_manager.block_manager.flatten_address(addr);
+                        self.piece_manager.block_manager.unmark_pending(global_idx);
+                    }
 
                     // Only credit the peer if the block was useful
                     if !is_piece_unneeded {
@@ -1829,6 +1968,7 @@ impl TorrentState {
                 self.piece_manager.pending_queue.clear();
                 self.verifying_pieces.clear();
                 self.writing_pieces.clear();
+                self.piece_manager.block_manager.pending_blocks.clear();
                 for peer in self.peers.values_mut() {
                     peer.pending_requests.clear();
                 }
@@ -5173,7 +5313,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reproduce_gap_duplicate_bug() {
+    fn test_assign_work_skips_already_pending_gap_block() {
         let mut state = super::tests::create_empty_state();
         let piece_len = 16384 * 3;
         let torrent = super::tests::create_dummy_torrent(1);
@@ -5202,7 +5342,11 @@ mod tests {
         // Block 1 is NOT requested yet.
         // Inflight = 2.
         peer.inflight_requests = 2;
+        peer.active_blocks.insert((0, 0, 16384));
+        peer.active_blocks.insert((0, 32768, 16384));
         state.peers.insert(peer_id.clone(), peer);
+        state.piece_manager.block_manager.mark_pending(0);
+        state.piece_manager.block_manager.mark_pending(2);
 
         let data = vec![0u8; 16384];
         let effects = state.update(Action::IncomingBlock {
@@ -5212,12 +5356,16 @@ mod tests {
             data,
         });
 
-        // Current Logic:
-        // - Inflight drops to 1.
-        // - AssignWork runs with skips=1.
-        // - It sees Block 1 is missing. It uses the skip on Block 1.
-        // - It sees Block 2 is missing (it's inflight, but not buffered). It has 0 skips left.
-        // - IT REQUESTS BLOCK 2 AGAIN.
+        let gap_request = effects.iter().any(|e| {
+            if let Effect::SendToPeer { cmd, .. } = e {
+                if let TorrentCommand::BulkRequest(ref reqs) = **cmd {
+                    return reqs
+                        .iter()
+                        .any(|(index, begin, _)| *index == 0 && *begin == 16384);
+                }
+            }
+            false
+        });
         let duplicate_request = effects.iter().any(|e| {
             if let Effect::SendToPeer { cmd, .. } = e {
                 if let TorrentCommand::BulkRequest(ref reqs) = **cmd {
@@ -5230,10 +5378,162 @@ mod tests {
         });
 
         assert!(
-            duplicate_request,
-            "Test Failed: The bug SHOULD exist, but we didn't send a duplicate."
+            gap_request,
+            "AssignWork should fill the unrequested block gap"
         );
-        println!("SUCCESS: Reproduced the GAP bug! Manager re-requested Block 2 because 'skips' logic is flawed.");
+        assert!(
+            !duplicate_request,
+            "AssignWork must not re-request a block that is already pending"
+        );
+    }
+
+    #[test]
+    fn test_assign_work_honors_high_priority_piece() {
+        let mut state = super::tests::create_empty_state();
+        let torrent = super::tests::create_dummy_torrent(2);
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(2, false);
+        state.piece_manager.block_manager.set_geometry(
+            16384,
+            32768,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+        state.piece_manager.need_queue = vec![0, 1];
+        state.piece_manager.piece_rarity.insert(0, 1);
+        state.piece_manager.piece_rarity.insert(1, 100);
+        state.piece_manager.apply_priorities(vec![
+            EffectivePiecePriority::Normal,
+            EffectivePiecePriority::High,
+        ]);
+
+        let peer_id = "priority_peer".to_string();
+        let (tx, _) = mpsc::channel(100);
+        let mut peer = PeerState::new(peer_id.clone(), tx, state.now);
+        peer.peer_id = peer_id.as_bytes().to_vec();
+        peer.bitfield = vec![true, true];
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.am_interested = true;
+        state.peers.insert(peer_id.clone(), peer);
+
+        let effects = state.update(Action::AssignWork {
+            peer_id: peer_id.clone(),
+        });
+
+        let first_requested_piece = effects.iter().find_map(|effect| {
+            if let Effect::SendToPeer { cmd, .. } = effect {
+                if let TorrentCommand::BulkRequest(ref reqs) = **cmd {
+                    return reqs.first().map(|(piece_index, _, _)| *piece_index);
+                }
+            }
+            None
+        });
+
+        assert_eq!(
+            first_requested_piece,
+            Some(1),
+            "high-priority pieces should outrank rarer normal-priority pieces"
+        );
+    }
+
+    #[test]
+    fn test_endgame_allows_duplicate_pending_block_request_from_another_peer() {
+        let mut state = super::tests::create_empty_state();
+        let torrent = super::tests::create_dummy_torrent(1);
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.block_manager.set_geometry(
+            16384,
+            16384,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Endgame;
+        state.piece_manager.need_queue.clear();
+        state
+            .piece_manager
+            .pending_queue
+            .insert(0, vec!["slow_peer".to_string()]);
+        state.piece_manager.block_manager.mark_pending(0);
+
+        let peer_id = "fast_peer".to_string();
+        let (tx, _) = mpsc::channel(100);
+        let mut peer = PeerState::new(peer_id.clone(), tx, state.now);
+        peer.peer_id = peer_id.as_bytes().to_vec();
+        peer.bitfield = vec![true];
+        peer.peer_choking = ChokeStatus::Unchoke;
+        peer.am_interested = true;
+        state.peers.insert(peer_id.clone(), peer);
+
+        let effects = state.update(Action::AssignWork {
+            peer_id: peer_id.clone(),
+        });
+
+        let duplicate_endgame_request = effects.iter().any(|effect| {
+            if let Effect::SendToPeer { cmd, .. } = effect {
+                if let TorrentCommand::BulkRequest(ref reqs) = **cmd {
+                    return reqs.contains(&(0, 0, 16384));
+                }
+            }
+            false
+        });
+
+        assert!(
+            duplicate_endgame_request,
+            "endgame should be able to race the same pending block with another peer"
+        );
+    }
+
+    #[test]
+    fn test_endgame_choke_releases_only_that_peer_pending_owner() {
+        let mut state = super::tests::create_empty_state();
+        let torrent = super::tests::create_dummy_torrent(1);
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.block_manager.set_geometry(
+            16384,
+            16384,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Endgame;
+        state.piece_manager.need_queue.clear();
+        state
+            .piece_manager
+            .pending_queue
+            .insert(0, vec!["slow_peer".to_string(), "fast_peer".to_string()]);
+
+        for peer_id in ["slow_peer", "fast_peer"] {
+            let (tx, _) = mpsc::channel(100);
+            let mut peer = PeerState::new(peer_id.to_string(), tx, state.now);
+            peer.peer_id = peer_id.as_bytes().to_vec();
+            peer.bitfield = vec![true];
+            peer.peer_choking = ChokeStatus::Unchoke;
+            peer.pending_requests.insert(0);
+            peer.active_blocks.insert((0, 0, 16384));
+            state.peers.insert(peer_id.to_string(), peer);
+        }
+
+        state.update(Action::PeerChoked {
+            peer_id: "slow_peer".to_string(),
+        });
+
+        assert_eq!(
+            state.piece_manager.pending_queue.get(&0),
+            Some(&vec!["fast_peer".to_string()]),
+            "endgame peer loss should not requeue a piece still owned by another peer"
+        );
+        assert!(
+            state.piece_manager.need_queue.is_empty(),
+            "piece should remain pending while another endgame owner is active"
+        );
     }
 
     #[test]

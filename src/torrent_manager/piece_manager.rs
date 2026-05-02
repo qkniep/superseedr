@@ -235,6 +235,17 @@ impl PieceManager {
         self.block_manager.revert_v1_piece_completion(piece_index);
     }
 
+    pub fn release_pending_peer_or_requeue(&mut self, piece_index: u32, peer_id: &str) {
+        if let Some(peers) = self.pending_queue.get_mut(&piece_index) {
+            peers.retain(|pending_peer| pending_peer != peer_id);
+            if !peers.is_empty() {
+                return;
+            }
+        }
+
+        self.requeue_pending_to_need(piece_index);
+    }
+
     pub fn update_rarity<'a, I>(&mut self, all_peer_bitfields: I)
     where
         I: Iterator<Item = &'a Vec<bool>> + Clone,
@@ -325,10 +336,6 @@ impl PieceManager {
 
     pub fn clear_assembly_buffers(&mut self) {
         self.block_manager.legacy_buffers.clear();
-    }
-
-    pub fn get_piece_availability(&self, piece_index: u32) -> u32 {
-        self.piece_rarity.get(&piece_index).copied().unwrap_or(0) as u32
     }
 
     pub fn requestable_block_addresses_for_piece(&self, piece_index: u32) -> Vec<BlockAddress> {
