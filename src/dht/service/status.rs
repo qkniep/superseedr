@@ -147,13 +147,12 @@ pub(super) fn build_status(
             .or(runtime_health.confirmed_public_addr_ipv6);
         health.server_mode = Some(health.bound_family_count > 0);
 
-        let responsive = runtime_health.bootstrap_responsive_count;
-        let responsive_ipv4 = responsive.min(active_runtime.bootstrap.ipv4);
-        let responsive_ipv6 = responsive
-            .saturating_sub(responsive_ipv4)
+        health.responsive_ipv4_bootstrap_nodes = runtime_health
+            .bootstrap_responsive_ipv4_count
+            .min(active_runtime.bootstrap.ipv4);
+        health.responsive_ipv6_bootstrap_nodes = runtime_health
+            .bootstrap_responsive_ipv6_count
             .min(active_runtime.bootstrap.ipv6);
-        health.responsive_ipv4_bootstrap_nodes = responsive_ipv4;
-        health.responsive_ipv6_bootstrap_nodes = responsive_ipv6;
     }
 
     DhtStatus {
