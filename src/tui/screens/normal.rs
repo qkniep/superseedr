@@ -1241,8 +1241,40 @@ pub(crate) fn compute_footer_status_width(client_port: u16, overall_port_status:
         + FOOTER_STATUS_GUTTER
 }
 
+fn format_measured_fps(fps: f64) -> String {
+    let fps = fps.max(0.0);
+    let precision = if fps >= 10.0 {
+        0
+    } else if fps >= 1.0 {
+        1
+    } else {
+        2
+    };
+
+    let mut label = match precision {
+        0 => format!("{fps:.0}"),
+        1 => format!("{fps:.1}"),
+        _ => format!("{fps:.2}"),
+    };
+    if label.contains('.') {
+        while label.ends_with('0') {
+            label.pop();
+        }
+        if label.ends_with('.') {
+            label.pop();
+        }
+    }
+    label
+}
+
 pub(crate) fn footer_fps_label(app_state: &AppState) -> String {
-    format!("{} fps", app_state.data_rate.fps_label())
+    let target_fps = app_state.data_rate.fps_label();
+    match app_state.ui.measured_fps {
+        Some(measured_fps) if measured_fps.is_finite() => {
+            format!("{}/{} fps", format_measured_fps(measured_fps), target_fps)
+        }
+        _ => format!("{target_fps} fps"),
+    }
 }
 
 fn estimate_footer_left_content_width(app_state: &AppState, ctx: &ThemeContext) -> u16 {
