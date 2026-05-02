@@ -14,7 +14,6 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-#[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 
 use crate::app::FilePriority;
@@ -501,6 +500,13 @@ struct SharedConfigBackend {
     paths: SharedConfigPaths,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LoggedSharedConfigRevision {
+    root_dir: PathBuf,
+    host_id: String,
+    revision: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SharedCatalogBackupPolicy {
     cadence_hours: i64,
@@ -512,6 +518,9 @@ enum ConfigBackend {
     Normal(NormalConfigBackend),
     Shared(SharedConfigBackend),
 }
+
+static LOGGED_SHARED_CONFIG_REVISION: OnceLock<Mutex<Option<LoggedSharedConfigRevision>>> =
+    OnceLock::new();
 
 #[cfg(test)]
 static APP_PATHS_OVERRIDE: OnceLock<Mutex<Option<(PathBuf, PathBuf)>>> = OnceLock::new();
@@ -527,6 +536,10 @@ fn app_paths_override() -> &'static Mutex<Option<(PathBuf, PathBuf)>> {
 #[cfg(test)]
 pub(crate) fn shared_env_guard_for_tests() -> &'static Mutex<()> {
     SHARED_ENV_TEST_GUARD.get_or_init(|| Mutex::new(()))
+}
+
+fn logged_shared_config_revision() -> &'static Mutex<Option<LoggedSharedConfigRevision>> {
+    LOGGED_SHARED_CONFIG_REVISION.get_or_init(|| Mutex::new(None))
 }
 
 impl LayeredConfig {
@@ -1450,6 +1463,38 @@ fn write_shared_cluster_revision_marker(root_dir: &Path) -> io::Result<()> {
     write_string_atomically(&revision_path, &revision)
 }
 
+fn log_shared_config_revision_if_changed(paths: &SharedConfigPaths) {
+    let revision_path = paths.root_dir.join("cluster.revision");
+    let Ok(revision) = fs::read_to_string(revision_path) else {
+        return;
+    };
+    let revision = revision.trim().to_string();
+    if revision.is_empty() {
+        return;
+    }
+
+    let next = LoggedSharedConfigRevision {
+        root_dir: paths.root_dir.clone(),
+        host_id: paths.host_id.clone(),
+        revision,
+    };
+    let mut logged = logged_shared_config_revision()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if logged.as_ref() == Some(&next) {
+        return;
+    }
+
+    tracing_event!(
+        Level::INFO,
+        root_dir = ?next.root_dir,
+        host_id = %next.host_id,
+        revision = %next.revision,
+        "Using shared config root at new cluster revision"
+    );
+    *logged = Some(next);
+}
+
 fn validate_shared_runtime_root(paths: &SharedConfigPaths) -> io::Result<()> {
     if !paths.mount_dir.exists() {
         return Err(io::Error::new(
@@ -1797,13 +1842,9 @@ impl ConfigBackend {
                 backend.load_settings()
             }
             ConfigBackend::Shared(backend) => {
-                tracing_event!(
-                    Level::INFO,
-                    "Using shared config root {:?} with host id {}",
-                    backend.paths.root_dir,
-                    backend.paths.host_id
-                );
-                backend.load_settings()
+                let settings = backend.load_settings()?;
+                log_shared_config_revision_if_changed(&backend.paths);
+                Ok(settings)
             }
         }
     }
@@ -1815,13 +1856,9 @@ impl ConfigBackend {
                 backend.load_settings_for_cli()
             }
             ConfigBackend::Shared(backend) => {
-                tracing_event!(
-                    Level::INFO,
-                    "Using shared config root {:?} with host id {}",
-                    backend.paths.root_dir,
-                    backend.paths.host_id
-                );
-                backend.load_settings_for_cli()
+                let settings = backend.load_settings_for_cli()?;
+                log_shared_config_revision_if_changed(&backend.paths);
+                Ok(settings)
             }
         }
     }

@@ -1071,7 +1071,7 @@ fn build_torrent_preview_tree_from_entries(
         .collect();
 
     let tree = RawNode::from_path_list(None, preview_payloads);
-    tracing::info!(
+    tracing::debug!(
         target: "superseedr",
         file_count,
         tree_roots = tree.len(),
@@ -1381,6 +1381,8 @@ pub struct App {
     pub leader_status_snapshot: Option<AppOutputState>,
     pub startup_completion_suppressed_hashes: HashSet<Vec<u8>>,
     pub startup_deferred_load_queue: VecDeque<Vec<u8>>,
+    pub startup_loaded_torrent_count: usize,
+    pub startup_load_summary_logged: bool,
     pub next_startup_load_at: Option<time::Instant>,
     pub last_dht_peer_slot_usage: Option<(usize, usize)>,
 }
@@ -1901,6 +1903,8 @@ impl App {
             leader_status_snapshot: None,
             startup_completion_suppressed_hashes: HashSet::new(),
             startup_deferred_load_queue: VecDeque::new(),
+            startup_loaded_torrent_count: 0,
+            startup_load_summary_logged: false,
             next_startup_load_at: None,
             last_dht_peer_slot_usage: None,
         };
@@ -1931,7 +1935,10 @@ impl App {
                         torrent = %torrent_config.torrent_or_magnet,
                         "Could not derive info hash for deferred startup torrent; restoring immediately"
                     );
-                    app.load_runtime_torrent_from_settings(torrent_config).await;
+                    if app.load_runtime_torrent_from_settings(torrent_config).await {
+                        app.startup_loaded_torrent_count =
+                            app.startup_loaded_torrent_count.saturating_add(1);
+                    }
                     startup_running_torrents_started =
                         startup_running_torrents_started.saturating_add(1);
                 }
@@ -1943,10 +1950,14 @@ impl App {
                     startup_running_torrents_started =
                         startup_running_torrents_started.saturating_add(1);
                 }
-                app.load_runtime_torrent_from_settings(torrent_config).await;
+                if app.load_runtime_torrent_from_settings(torrent_config).await {
+                    app.startup_loaded_torrent_count =
+                        app.startup_loaded_torrent_count.saturating_add(1);
+                }
             }
         }
         app.reschedule_startup_load_deadline();
+        app.maybe_log_startup_load_summary();
 
         if app.app_state.torrents.is_empty() && app.app_state.lifetime_downloaded_from_config == 0 {
             app.app_state.mode = AppMode::Welcome;
@@ -3415,7 +3426,7 @@ impl App {
         }
 
         tracing_event!(
-            Level::INFO,
+            Level::DEBUG,
             torrent = %torrent_config.torrent_or_magnet,
             torrent_name = %torrent_config.name,
             validation_status = torrent_config.validation_status,
@@ -4562,22 +4573,6 @@ impl App {
                             torrent.latest_state.torrent_name.clone(),
                         )
                     });
-                    if let Some(torrent) = self.app_state.torrents.get(info_hash) {
-                        let metrics = &torrent.latest_state;
-                        let info_hash_hex = hex::encode(info_hash.as_slice());
-                        tracing_event!(
-                            Level::INFO,
-                            info_hash = %info_hash_hex,
-                            torrent_name = %metrics.torrent_name,
-                            was_complete,
-                            is_complete = !torrent_is_effectively_incomplete(metrics),
-                            metrics_is_complete = metrics.is_complete,
-                            pieces_complete = metrics.number_of_pieces_completed,
-                            pieces_total = metrics.number_of_pieces_total,
-                            activity = %metrics.activity_message,
-                            "Processing torrent metrics update for completion journaling"
-                        );
-                    }
                     if let Some((is_complete, torrent_name)) = completion_record {
                         if !was_complete && is_complete {
                             completion_events.push((info_hash.clone(), torrent_name));
@@ -5195,7 +5190,6 @@ impl App {
         file_priorities: HashMap<usize, FilePriority>,
         container_name: Option<String>,
     ) -> CommandIngestResult {
-        tracing::info!(target: "magnet_flow", "Engine: add_magnet_torrent entry. Link: {}", magnet_link);
         let magnet = match Magnet::new(&magnet_link) {
             Ok(m) => m,
             Err(e) => {
@@ -6276,6 +6270,22 @@ impl App {
         };
     }
 
+    fn maybe_log_startup_load_summary(&mut self) {
+        if self.startup_load_summary_logged || !self.startup_deferred_load_queue.is_empty() {
+            return;
+        }
+        if self.startup_loaded_torrent_count == 0 && self.client_configs.torrents.is_empty() {
+            return;
+        }
+
+        tracing_event!(
+            Level::INFO,
+            count = self.startup_loaded_torrent_count,
+            "Loaded startup torrents"
+        );
+        self.startup_load_summary_logged = true;
+    }
+
     async fn load_next_startup_batch(&mut self) {
         let mut loaded_count = 0usize;
 
@@ -6332,11 +6342,14 @@ impl App {
             }
         }
 
+        self.startup_loaded_torrent_count = self
+            .startup_loaded_torrent_count
+            .saturating_add(loaded_count);
         self.reschedule_startup_load_deadline();
 
         if loaded_count > 0 {
             tracing_event!(
-                Level::INFO,
+                Level::DEBUG,
                 loaded = loaded_count,
                 remaining = self.startup_deferred_load_queue.len(),
                 "Loaded deferred startup torrent batch"
@@ -6344,6 +6357,7 @@ impl App {
             self.app_state.ui.needs_redraw = true;
             self.save_state_to_disk();
         }
+        self.maybe_log_startup_load_summary();
     }
 }
 
@@ -8726,7 +8740,60 @@ mod tests {
 
         assert_eq!(app.app_state.torrents.len(), 1);
         assert_eq!(app.startup_deferred_load_queue.len(), 5);
+        assert_eq!(app.startup_loaded_torrent_count, 1);
+        assert!(!app.startup_load_summary_logged);
         assert!(app.next_startup_load_at.is_some());
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn load_next_startup_batch_records_one_summary_after_queue_drains() {
+        let mut settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        for index in 0..2 {
+            let hash_digit = char::from_digit((index + 1) as u32, 16).expect("hex digit");
+            settings.torrents.push(TorrentSettings {
+                torrent_or_magnet: format!(
+                    "magnet:?xt=urn:btih:{}",
+                    hash_digit.to_string().repeat(40)
+                ),
+                name: format!("summary-start-{}", index),
+                torrent_control_state: TorrentControlState::Running,
+                ..Default::default()
+            });
+        }
+
+        let mut app = App::new(
+            crate::config::Settings {
+                client_port: 0,
+                ..Default::default()
+            },
+            AppRuntimeMode::Normal,
+        )
+        .await
+        .expect("build app");
+        app.client_configs.torrents = settings.torrents.clone();
+        app.startup_deferred_load_queue = settings
+            .torrents
+            .iter()
+            .filter_map(|torrent| info_hash_from_torrent_source(&torrent.torrent_or_magnet))
+            .collect();
+
+        app.load_next_startup_batch().await;
+        assert_eq!(app.startup_loaded_torrent_count, 1);
+        assert!(!app.startup_load_summary_logged);
+
+        app.load_next_startup_batch().await;
+        assert_eq!(app.startup_loaded_torrent_count, 2);
+        assert!(app.startup_deferred_load_queue.is_empty());
+        assert!(app.startup_load_summary_logged);
+
+        app.maybe_log_startup_load_summary();
+        assert_eq!(app.startup_loaded_torrent_count, 2);
+        assert!(app.startup_load_summary_logged);
 
         let _ = app.shutdown_tx.send(());
     }
