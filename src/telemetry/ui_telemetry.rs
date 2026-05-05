@@ -12,6 +12,8 @@ use tracing::{event as tracing_event, Level};
 pub const SECONDS_HISTORY_MAX: usize = 3600; // 1 hour of per-second data
 pub const MINUTES_HISTORY_MAX: usize = 48 * 60; // 48 hours of per-minute data
 const RECENT_FILE_ACTIVITY_RETENTION: Duration = Duration::from_secs(120);
+const RECEIVE_TO_WRITE_LATENCY_SAMPLES_MAX: usize = 1024;
+const PENDING_RECEIVE_TIMES_MAX: usize = 100_000;
 
 pub struct UiTelemetry;
 
@@ -56,6 +58,25 @@ impl UiTelemetry {
                     torrent.bytes_written_this_tick += op.length as u64;
                     torrent.disk_write_history_log.push_front(*op);
                     torrent.disk_write_history_log.truncate(50);
+                }
+                true
+            }
+            ManagerEvent::DiskWriteCompleted { info_hash, op } => {
+                app_state.bytes_written_completed_this_tick = app_state
+                    .bytes_written_completed_this_tick
+                    .saturating_add(op.length as u64);
+                if let Some(received_at) = app_state
+                    .pending_piece_receive_times
+                    .remove(&(info_hash.clone(), op.piece_index))
+                {
+                    app_state
+                        .recv_to_write_latency_samples
+                        .push_back(received_at.elapsed());
+                    while app_state.recv_to_write_latency_samples.len()
+                        > RECEIVE_TO_WRITE_LATENCY_SAMPLES_MAX
+                    {
+                        app_state.recv_to_write_latency_samples.pop_front();
+                    }
                 }
                 true
             }
@@ -107,7 +128,17 @@ impl UiTelemetry {
                 }
                 true
             }
-            ManagerEvent::BlockReceived { info_hash } => {
+            ManagerEvent::BlockReceived {
+                info_hash,
+                piece_index,
+            } => {
+                if app_state.pending_piece_receive_times.len() > PENDING_RECEIVE_TIMES_MAX {
+                    app_state.pending_piece_receive_times.clear();
+                }
+                app_state
+                    .pending_piece_receive_times
+                    .entry((info_hash.clone(), *piece_index))
+                    .or_insert_with(Instant::now);
                 if let Some(torrent) = app_state.torrents.get_mut(info_hash) {
                     torrent.latest_state.blocks_in_this_tick += 1;
                 }
@@ -327,6 +358,12 @@ impl UiTelemetry {
 
         app_state.avg_disk_read_bps = global_disk_read_bps;
         app_state.avg_disk_write_bps = global_disk_write_bps;
+        app_state.avg_disk_write_completed_bps = app_state
+            .bytes_written_completed_this_tick
+            .saturating_mul(8);
+        app_state.bytes_written_completed_this_tick = 0;
+        app_state.recv_to_write_p95 =
+            calculate_duration_p95(&app_state.recv_to_write_latency_samples);
 
         let mut total_dl = 0;
         let mut total_ul = 0;
@@ -574,6 +611,17 @@ fn calculate_thrash_score(history_log: &VecDeque<DiskIoOperation>) -> u64 {
     total_seek_distance / seek_count as u64
 }
 
+fn calculate_duration_p95(samples: &VecDeque<Duration>) -> Duration {
+    if samples.is_empty() {
+        return Duration::ZERO;
+    }
+
+    let mut sorted: Vec<Duration> = samples.iter().copied().collect();
+    sorted.sort();
+    let percentile_index = ((sorted.len() as f64 * 0.95) as usize).min(sorted.len() - 1);
+    sorted[percentile_index]
+}
+
 fn calculate_thrash_score_seek_cost_f64(history_log: &VecDeque<DiskIoOperation>) -> f64 {
     if history_log.len() < 2 {
         return 0.0;
@@ -622,7 +670,9 @@ mod tests {
     use crate::app::{AppState, PeerInfo, RecentFileActivity, TorrentDisplayState, TorrentMetrics};
     use crate::config::{PeerSortColumn, SortDirection, TorrentSortColumn};
     use crate::telemetry::manager_telemetry::ManagerTelemetry;
-    use crate::torrent_manager::{FileActivityDirection, FileActivityUpdate};
+    use crate::torrent_manager::{
+        DiskIoOperation, FileActivityDirection, FileActivityUpdate, ManagerEvent,
+    };
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
     use sysinfo::System;
@@ -768,7 +818,8 @@ mod tests {
         assert!(UiTelemetry::on_manager_event_metrics(
             &mut app_state,
             &ManagerEvent::BlockReceived {
-                info_hash: info_hash.clone()
+                info_hash: info_hash.clone(),
+                piece_index: 0,
             }
         ));
         assert!(UiTelemetry::on_manager_event_metrics(
@@ -859,6 +910,69 @@ mod tests {
 
         assert_eq!(app_state.avg_disk_read_bps, 0);
         assert_eq!(app_state.avg_disk_write_bps, 0);
+    }
+
+    #[test]
+    fn disk_write_completed_speed_uses_completed_write_events() {
+        let mut app_state = AppState::default();
+        let info_hash = vec![4; 20];
+        assert!(UiTelemetry::on_manager_event_metrics(
+            &mut app_state,
+            &ManagerEvent::DiskWriteCompleted {
+                info_hash: info_hash.clone(),
+                op: DiskIoOperation {
+                    piece_index: 0,
+                    offset: 0,
+                    length: 2_048,
+                }
+            }
+        ));
+
+        let mut sys = System::new();
+        UiTelemetry::on_second_tick(&mut app_state, &mut sys);
+
+        assert_eq!(app_state.avg_disk_write_completed_bps, 16_384);
+
+        UiTelemetry::on_second_tick(&mut app_state, &mut sys);
+
+        assert_eq!(app_state.avg_disk_write_completed_bps, 0);
+    }
+
+    #[test]
+    fn recv_to_write_p95_uses_piece_receive_to_completed_write_latency() {
+        let mut app_state = AppState::default();
+        let info_hash = vec![5; 20];
+
+        assert!(UiTelemetry::on_manager_event_metrics(
+            &mut app_state,
+            &ManagerEvent::BlockReceived {
+                info_hash: info_hash.clone(),
+                piece_index: 7,
+            }
+        ));
+        app_state.pending_piece_receive_times.insert(
+            (info_hash.clone(), 7),
+            Instant::now() - Duration::from_secs(2),
+        );
+
+        assert!(UiTelemetry::on_manager_event_metrics(
+            &mut app_state,
+            &ManagerEvent::DiskWriteCompleted {
+                info_hash,
+                op: DiskIoOperation {
+                    piece_index: 7,
+                    offset: 0,
+                    length: 1_024,
+                },
+            }
+        ));
+
+        let mut sys = System::new();
+        UiTelemetry::on_second_tick(&mut app_state, &mut sys);
+
+        assert!(app_state.pending_piece_receive_times.is_empty());
+        assert_eq!(app_state.recv_to_write_latency_samples.len(), 1);
+        assert!(app_state.recv_to_write_p95 >= Duration::from_secs(2));
     }
 
     #[test]

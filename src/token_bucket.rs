@@ -66,6 +66,30 @@ impl TokenBucket {
         guard.last_refill_time = Instant::now();
     }
 
+    pub fn set_rate_preserving_tokens(&self, new_fill_rate: f64) {
+        self.set_rate_with_capacity_preserving_tokens(new_fill_rate, new_fill_rate);
+    }
+
+    pub fn set_rate_with_capacity_preserving_tokens(&self, new_fill_rate: f64, new_capacity: f64) {
+        let rate = new_fill_rate.max(0.0);
+        let infinite = !rate.is_finite() || rate == 0.0;
+
+        self.is_infinite.store(infinite, Ordering::Relaxed);
+
+        let mut guard = self.inner.lock().unwrap();
+        guard.refill();
+        if infinite {
+            guard.fill_rate = 0.0;
+            guard.capacity = f64::INFINITY;
+            guard.tokens = f64::INFINITY;
+        } else {
+            guard.fill_rate = rate;
+            guard.capacity = new_capacity.max(rate.min(1.0)).max(0.0);
+            guard.tokens = guard.tokens.min(guard.capacity);
+        }
+        guard.last_refill_time = Instant::now();
+    }
+
     #[cfg(test)]
     pub fn get_tokens(&self) -> f64 {
         self.inner.lock().unwrap().tokens
@@ -91,7 +115,7 @@ impl TokenBucket {
     }
 
     #[cfg(test)]
-    fn get_fill_rate(&self) -> f64 {
+    pub fn get_fill_rate(&self) -> f64 {
         self.inner.lock().unwrap().fill_rate
     }
 }
@@ -246,6 +270,28 @@ mod tests {
         assert!(bucket.get_capacity().is_infinite());
         assert!(bucket.get_tokens().is_infinite());
         assert!(bucket.is_infinite.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_token_bucket_set_rate_preserving_tokens_does_not_refill_direct() {
+        let bucket = TokenBucket::new(100.0, 10.0);
+        bucket.set_tokens(50.0);
+        bucket.set_rate_preserving_tokens(200.0);
+        assert!((bucket.get_fill_rate() - 200.0).abs() < TOLERANCE);
+        assert!((bucket.get_capacity() - 200.0).abs() < TOLERANCE);
+        assert!((bucket.get_tokens() - 50.0).abs() < TOLERANCE);
+        assert!(!bucket.is_infinite.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_token_bucket_set_rate_with_capacity_preserving_tokens_direct() {
+        let bucket = TokenBucket::new(100.0, 10.0);
+        bucket.set_tokens(80.0);
+        bucket.set_rate_with_capacity_preserving_tokens(200.0, 40.0);
+        assert!((bucket.get_fill_rate() - 200.0).abs() < TOLERANCE);
+        assert!((bucket.get_capacity() - 40.0).abs() < TOLERANCE);
+        assert!((bucket.get_tokens() - 40.0).abs() < TOLERANCE);
+        assert!(!bucket.is_infinite.load(Ordering::Relaxed));
     }
 
     #[tokio::test]

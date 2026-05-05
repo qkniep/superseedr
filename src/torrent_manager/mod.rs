@@ -123,6 +123,10 @@ pub enum ManagerEvent {
         info_hash: Vec<u8>,
         op: DiskIoOperation,
     },
+    DiskWriteCompleted {
+        info_hash: Vec<u8>,
+        op: DiskIoOperation,
+    },
     DiskWriteFinished,
     DiskIoBackoff {
         duration: Duration,
@@ -149,6 +153,7 @@ pub enum ManagerEvent {
 
     BlockReceived {
         info_hash: Vec<u8>,
+        piece_index: u32,
     },
     BlockSent {
         info_hash: Vec<u8>,

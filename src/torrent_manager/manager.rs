@@ -1638,6 +1638,10 @@ impl TorrentManager {
 
                     match res {
                         Ok(_) => {
+                            let _ = event_tx.try_send(ManagerEvent::DiskWriteCompleted {
+                                info_hash: info_hash.to_vec(),
+                                op,
+                            });
                             let _ = event_tx.try_send(ManagerEvent::DiskWriteFinished);
                             return Ok(());
                         }

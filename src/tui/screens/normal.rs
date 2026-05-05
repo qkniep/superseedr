@@ -3070,7 +3070,7 @@ pub fn draw_stats_panel(
         .sum();
 
     let dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
-    let dl_limit = settings.global_download_limit_bps;
+    let dl_limit = app_state.effective_download_limit_bps;
 
     let mut dl_spans = vec![
         Span::styled(

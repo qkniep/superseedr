@@ -13,8 +13,9 @@ pub(crate) fn compute_effects_activity_speed_multiplier(
     let dl_bps = app_state.avg_download_history.last().copied().unwrap_or(0) as f64;
     let ul_bps = app_state.avg_upload_history.last().copied().unwrap_or(0) as f64;
 
-    let dl_ref = if settings.global_download_limit_bps > 0 {
-        settings.global_download_limit_bps as f64
+    let dl_limit = app_state.effective_download_limit_bps;
+    let dl_ref = if dl_limit > 0 {
+        dl_limit as f64
     } else {
         4_000_000.0
     };
