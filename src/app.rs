@@ -20,11 +20,10 @@ use strum_macros::EnumIter;
 use crate::torrent_manager::DiskIoOperation;
 
 use crate::config::{
-    classify_shared_mode_settings_change, resolve_host_watch_path, runtime_watch_paths,
-    save_settings, shared_host_id, shared_inbox_path, shared_root_path, upsert_torrent_metadata,
-    FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SettingsChangeScope,
-    SortDirection, TorrentMetadataEntry, TorrentMetadataFileEntry, TorrentSettings,
-    TorrentSortColumn,
+    classify_shared_mode_settings_change, host_watch_paths, runtime_watch_paths, save_settings,
+    shared_host_id, shared_inbox_path, shared_root_path, upsert_torrent_metadata, FeedSyncError,
+    PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SettingsChangeScope, SortDirection,
+    TorrentMetadataEntry, TorrentMetadataFileEntry, TorrentSettings, TorrentSortColumn,
 };
 use crate::control_service::{
     control_event_details, online_control_success_message, plan_control_request,
@@ -5828,10 +5827,9 @@ impl App {
     }
 
     fn is_host_watch_path(&self, path: &Path) -> bool {
-        let Some(host_watch) = resolve_host_watch_path(&self.client_configs) else {
-            return false;
-        };
-        watched_parent_matches(path, &host_watch)
+        host_watch_paths(&self.client_configs)
+            .iter()
+            .any(|host_watch| watched_parent_matches(path, host_watch))
     }
 
     fn is_shared_inbox_path(&self, path: &Path) -> bool {

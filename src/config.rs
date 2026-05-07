@@ -318,6 +318,7 @@ const LEGACY_SHARED_HOST_ID_ENV: &str = "SUPERSEEDR_HOST_ID";
 const CLIENT_PORT_ENV: &str = "SUPERSEEDR_CLIENT_PORT";
 const DEFAULT_DOWNLOAD_FOLDER_ENV: &str = "SUPERSEEDR_DEFAULT_DOWNLOAD_FOLDER";
 const OUTPUT_STATUS_INTERVAL_ENV: &str = "SUPERSEEDR_OUTPUT_STATUS_INTERVAL";
+const EXTRA_WATCH_PATH_PREFIX: &str = "SUPERSEEDR_WATCH_PATH_";
 const SHARED_TORRENT_SOURCE_PREFIX: &str = "shared:";
 const SHARED_CONFIG_SUBDIR: &str = "superseedr-config";
 const LAUNCHER_SHARED_CONFIG_FILE: &str = "launcher_shared_config.toml";
@@ -2521,8 +2522,60 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
+fn resolve_additional_watch_paths_from_sources<I, K, V>(vars: I) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<OsString>,
+    V: Into<OsString>,
+{
+    let mut indexed_paths = vars
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = key.into();
+            let value = value.into();
+            let key = key.to_string_lossy();
+            let key_upper = key.to_ascii_uppercase();
+            let suffix = key_upper.strip_prefix(EXTRA_WATCH_PATH_PREFIX)?;
+
+            if suffix.is_empty() || value.is_empty() {
+                return None;
+            }
+
+            let index = suffix.parse::<usize>().ok();
+            Some((index, suffix.to_string(), PathBuf::from(value)))
+        })
+        .collect::<Vec<_>>();
+
+    indexed_paths.sort_by(|left, right| {
+        left.0
+            .unwrap_or(usize::MAX)
+            .cmp(&right.0.unwrap_or(usize::MAX))
+            .then_with(|| left.1.cmp(&right.1))
+    });
+
+    let mut paths = Vec::new();
+    for (_, _, path) in indexed_paths {
+        push_unique_path(&mut paths, path);
+    }
+    paths
+}
+
 pub fn additional_watch_paths() -> Vec<PathBuf> {
-    Vec::new()
+    resolve_additional_watch_paths_from_sources(env::vars_os())
+}
+
+pub fn host_watch_paths(settings: &Settings) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(path) = resolve_host_watch_path(settings) {
+        push_unique_path(&mut paths, path);
+    }
+
+    for path in additional_watch_paths() {
+        push_unique_path(&mut paths, path);
+    }
+
+    paths
 }
 
 pub fn runtime_watch_paths(
@@ -3040,7 +3093,7 @@ mod tests {
         let _watch_path = EnvVarRestore::capture("SUPERSEEDR_WATCH_PATH_1");
 
         env::set_var("SUPERSEEDR_PRIVATE_CLIENT", "true");
-        env::set_var("SUPERSEEDR_WATCH_PATH_1", "/ignored-watch");
+        env::set_var("SUPERSEEDR_WATCH_PATH_1", "/extra-watch");
 
         let settings = Settings {
             private_client: false,
@@ -3049,7 +3102,33 @@ mod tests {
         let resolved = apply_env_overrides(&settings).expect("apply env overrides");
 
         assert!(!resolved.private_client);
-        assert!(additional_watch_paths().is_empty());
+        assert_eq!(
+            additional_watch_paths(),
+            vec![PathBuf::from("/extra-watch")]
+        );
+    }
+
+    #[test]
+    fn test_resolve_additional_watch_paths_from_sources_orders_and_deduplicates() {
+        let paths = resolve_additional_watch_paths_from_sources([
+            ("SUPERSEEDR_WATCH_PATH_2", "/watch-b"),
+            ("SUPERSEEDR_WATCH_PATH_10", "/watch-z"),
+            ("IGNORED", "/nope"),
+            ("SUPERSEEDR_WATCH_PATH_1", "/watch-a"),
+            ("SUPERSEEDR_WATCH_PATH_3", "/watch-b"),
+            ("superseedr_watch_path_alpha", "/watch-alpha"),
+            ("SUPERSEEDR_WATCH_PATH_4", ""),
+        ]);
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/watch-a"),
+                PathBuf::from("/watch-b"),
+                PathBuf::from("/watch-z"),
+                PathBuf::from("/watch-alpha"),
+            ]
+        );
     }
 
     #[test]
@@ -4711,11 +4790,13 @@ mod tests {
         let original_shared_dir = env::var_os(SHARED_CONFIG_DIR_ENV);
         let original_host_id = env::var_os(SHARED_HOST_ID_ENV);
         let original_legacy_host_id = env::var_os(LEGACY_SHARED_HOST_ID_ENV);
+        let _extra_watch = EnvVarRestore::capture("SUPERSEEDR_WATCH_PATH_1");
         let dir = tempdir().expect("create tempdir");
 
         env::set_var(SHARED_CONFIG_DIR_ENV, dir.path());
         env::set_var(SHARED_HOST_ID_ENV, "node-a");
         env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        env::set_var("SUPERSEEDR_WATCH_PATH_1", "/extra-watch");
         clear_shared_config_state();
 
         let explicit_watch = PathBuf::from("/host-watch");
@@ -4728,6 +4809,7 @@ mod tests {
 
         assert!(configured.contains(&effective_root.join("inbox")));
         assert!(configured.contains(&explicit_watch));
+        assert!(configured.contains(&PathBuf::from("/extra-watch")));
         assert_eq!(
             resolve_command_watch_path(&settings),
             Some(effective_root.join("inbox"))
@@ -4930,11 +5012,13 @@ mod tests {
         let original_shared_dir = env::var_os(SHARED_CONFIG_DIR_ENV);
         let original_host_id = env::var_os(SHARED_HOST_ID_ENV);
         let original_legacy_host_id = env::var_os(LEGACY_SHARED_HOST_ID_ENV);
+        let _extra_watch = EnvVarRestore::capture("SUPERSEEDR_WATCH_PATH_1");
         let dir = tempdir().expect("create tempdir");
 
         env::set_var(SHARED_CONFIG_DIR_ENV, dir.path());
         env::set_var(SHARED_HOST_ID_ENV, "node-a");
         env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        env::set_var("SUPERSEEDR_WATCH_PATH_1", "/extra-watch");
         clear_shared_config_state();
 
         let settings = Settings {
@@ -4945,11 +5029,13 @@ mod tests {
 
         let follower_paths = runtime_watch_paths(&settings, true, false);
         assert!(follower_paths.contains(&PathBuf::from("/host-watch")));
+        assert!(follower_paths.contains(&PathBuf::from("/extra-watch")));
         assert!(follower_paths.contains(&effective_root));
         assert!(!follower_paths.contains(&effective_root.join("inbox")));
 
         let leader_paths = runtime_watch_paths(&settings, true, true);
         assert!(leader_paths.contains(&effective_root.join("inbox")));
+        assert!(leader_paths.contains(&PathBuf::from("/extra-watch")));
 
         if let Some(value) = original_shared_dir {
             env::set_var(SHARED_CONFIG_DIR_ENV, value);
@@ -4986,11 +5072,13 @@ mod tests {
         let original_shared_dir = env::var_os(SHARED_CONFIG_DIR_ENV);
         let original_host_id = env::var_os(SHARED_HOST_ID_ENV);
         let original_legacy_host_id = env::var_os(LEGACY_SHARED_HOST_ID_ENV);
+        let _extra_watch = EnvVarRestore::capture("SUPERSEEDR_WATCH_PATH_1");
         let dir = tempdir().expect("create tempdir");
 
         env::set_var(SHARED_CONFIG_DIR_ENV, dir.path());
         env::set_var(SHARED_HOST_ID_ENV, "node-a");
         env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        env::set_var("SUPERSEEDR_WATCH_PATH_1", "/extra-watch");
         clear_shared_config_state();
 
         let settings = Settings::default();
@@ -4999,6 +5087,7 @@ mod tests {
 
         let follower_paths = runtime_watch_paths(&settings, true, false);
         assert!(follower_paths.contains(&effective_root));
+        assert!(follower_paths.contains(&PathBuf::from("/extra-watch")));
         assert!(!follower_paths.contains(&effective_root.join("inbox")));
         if let Some(local_watch) = &local_watch {
             assert!(follower_paths.contains(local_watch));
@@ -5006,6 +5095,7 @@ mod tests {
 
         let leader_paths = runtime_watch_paths(&settings, true, true);
         assert!(leader_paths.contains(&effective_root.join("inbox")));
+        assert!(leader_paths.contains(&PathBuf::from("/extra-watch")));
         if let Some(local_watch) = &local_watch {
             assert!(leader_paths.contains(local_watch));
         }
