@@ -55,7 +55,7 @@ class QBittorrentAdapter(ClientAdapter):
         try:
             with self._opener.open(request, timeout=5) as response:
                 body = response.read().decode("utf-8", errors="replace").strip()
-                return response.status == 200 and body == "Ok."
+                return response.status in (200, 204) and body in ("", "Ok.")
         except url_error.HTTPError as exc:
             if exc.code in (401, 403):
                 return False

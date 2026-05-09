@@ -24,6 +24,54 @@ def test_qbittorrent_temporary_password_extraction_missing() -> None:
     assert QBittorrentAdapter._extract_temporary_password(logs) is None
 
 
+class _QbittorrentLoginResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
+
+    def __enter__(self) -> "_QbittorrentLoginResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def test_qbittorrent_login_accepts_legacy_ok_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = QBittorrentAdapter()
+
+    def _open(_request: object, timeout: int = 5) -> _QbittorrentLoginResponse:
+        assert timeout == 5
+        return _QbittorrentLoginResponse(200, b"Ok.")
+
+    monkeypatch.setattr(adapter._opener, "open", _open)
+    assert adapter._login_once("password") is True
+
+
+def test_qbittorrent_login_accepts_empty_204(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = QBittorrentAdapter()
+
+    def _open(_request: object, timeout: int = 5) -> _QbittorrentLoginResponse:
+        assert timeout == 5
+        return _QbittorrentLoginResponse(204, b"")
+
+    monkeypatch.setattr(adapter._opener, "open", _open)
+    assert adapter._login_once("password") is True
+
+
+def test_qbittorrent_login_rejects_failed_200(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = QBittorrentAdapter()
+
+    def _open(_request: object, timeout: int = 5) -> _QbittorrentLoginResponse:
+        assert timeout == 5
+        return _QbittorrentLoginResponse(200, b"Fails.")
+
+    monkeypatch.setattr(adapter._opener, "open", _open)
+    assert adapter._login_once("password") is False
+
+
 def test_qbittorrent_authenticate_falls_back_to_temp_password(monkeypatch: pytest.MonkeyPatch) -> None:
     class _ComposeStub:
         def logs(self, _service: str, tail: int = 200) -> str:
