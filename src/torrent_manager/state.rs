@@ -1321,7 +1321,6 @@ impl TorrentState {
 
                 effects.push(Effect::EmitManagerEvent(ManagerEvent::BlockReceived {
                     info_hash: self.info_hash.clone(),
-                    piece_index,
                 }));
                 if !is_piece_unneeded {
                     self.record_pending_file_activity(

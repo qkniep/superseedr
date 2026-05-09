@@ -13,7 +13,7 @@ pub const SECONDS_HISTORY_MAX: usize = 3600; // 1 hour of per-second data
 pub const MINUTES_HISTORY_MAX: usize = 48 * 60; // 48 hours of per-minute data
 const RECENT_FILE_ACTIVITY_RETENTION: Duration = Duration::from_secs(120);
 const RECEIVE_TO_WRITE_LATENCY_SAMPLES_MAX: usize = 1024;
-const PENDING_RECEIVE_TIMES_MAX: usize = 100_000;
+const PENDING_WRITE_START_TIMES_MAX: usize = 100_000;
 
 pub struct UiTelemetry;
 
@@ -52,6 +52,12 @@ impl UiTelemetry {
             }
             ManagerEvent::DiskWriteStarted { info_hash, op } => {
                 app_state.write_op_start_times.push_front(Instant::now());
+                if app_state.pending_piece_write_start_times.len() > PENDING_WRITE_START_TIMES_MAX {
+                    app_state.pending_piece_write_start_times.clear();
+                }
+                app_state
+                    .pending_piece_write_start_times
+                    .insert((info_hash.clone(), op.piece_index), Instant::now());
                 app_state.global_disk_write_history_log.push_front(*op);
                 app_state.global_disk_write_history_log.truncate(100);
                 if let Some(torrent) = app_state.torrents.get_mut(info_hash) {
@@ -66,7 +72,7 @@ impl UiTelemetry {
                     .bytes_written_completed_this_tick
                     .saturating_add(op.length as u64);
                 if let Some(received_at) = app_state
-                    .pending_piece_receive_times
+                    .pending_piece_write_start_times
                     .remove(&(info_hash.clone(), op.piece_index))
                 {
                     app_state
@@ -128,17 +134,7 @@ impl UiTelemetry {
                 }
                 true
             }
-            ManagerEvent::BlockReceived {
-                info_hash,
-                piece_index,
-            } => {
-                if app_state.pending_piece_receive_times.len() > PENDING_RECEIVE_TIMES_MAX {
-                    app_state.pending_piece_receive_times.clear();
-                }
-                app_state
-                    .pending_piece_receive_times
-                    .entry((info_hash.clone(), *piece_index))
-                    .or_insert_with(Instant::now);
+            ManagerEvent::BlockReceived { info_hash } => {
                 if let Some(torrent) = app_state.torrents.get_mut(info_hash) {
                     torrent.latest_state.blocks_in_this_tick += 1;
                 }
@@ -830,7 +826,6 @@ mod tests {
             &mut app_state,
             &ManagerEvent::BlockReceived {
                 info_hash: info_hash.clone(),
-                piece_index: 0,
             }
         ));
         assert!(UiTelemetry::on_manager_event_metrics(
@@ -950,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn recv_to_write_p95_uses_piece_receive_to_completed_write_latency() {
+    fn recv_to_write_p95_uses_write_start_to_completed_write_latency() {
         let mut app_state = AppState::default();
         let info_hash = vec![5; 20];
 
@@ -958,10 +953,25 @@ mod tests {
             &mut app_state,
             &ManagerEvent::BlockReceived {
                 info_hash: info_hash.clone(),
-                piece_index: 7,
             }
         ));
-        app_state.pending_piece_receive_times.insert(
+        assert!(
+            app_state.pending_piece_write_start_times.is_empty(),
+            "receiving a block should not start disk backpressure timing"
+        );
+
+        assert!(UiTelemetry::on_manager_event_metrics(
+            &mut app_state,
+            &ManagerEvent::DiskWriteStarted {
+                info_hash: info_hash.clone(),
+                op: DiskIoOperation {
+                    piece_index: 7,
+                    offset: 0,
+                    length: 1_024,
+                },
+            }
+        ));
+        app_state.pending_piece_write_start_times.insert(
             (info_hash.clone(), 7),
             Instant::now() - Duration::from_secs(2),
         );
@@ -981,7 +991,7 @@ mod tests {
         let mut sys = System::new();
         UiTelemetry::on_second_tick(&mut app_state, &mut sys);
 
-        assert!(app_state.pending_piece_receive_times.is_empty());
+        assert!(app_state.pending_piece_write_start_times.is_empty());
         assert_eq!(app_state.recv_to_write_latency_samples.len(), 1);
         assert!(app_state.recv_to_write_p95 >= Duration::from_secs(2));
     }

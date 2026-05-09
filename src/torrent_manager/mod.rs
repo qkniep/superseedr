@@ -153,7 +153,6 @@ pub enum ManagerEvent {
 
     BlockReceived {
         info_hash: Vec<u8>,
-        piece_index: u32,
     },
     BlockSent {
         info_hash: Vec<u8>,

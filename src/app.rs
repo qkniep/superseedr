@@ -1545,7 +1545,7 @@ pub struct AppState {
     pub reads_completed_this_tick: u32,
     pub writes_completed_this_tick: u32,
     pub bytes_written_completed_this_tick: u64,
-    pub pending_piece_receive_times: HashMap<(Vec<u8>, u32), Instant>,
+    pub pending_piece_write_start_times: HashMap<(Vec<u8>, u32), Instant>,
     pub recv_to_write_latency_samples: VecDeque<Duration>,
     pub recv_to_write_p95: Duration,
     pub read_iops: u32,
