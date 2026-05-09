@@ -293,7 +293,8 @@ impl UiTelemetry {
         if app_state.global_seek_cost_per_byte_history.len() > MIN_SAMPLES_TO_LEARN {
             let mut sorted_history = app_state.global_seek_cost_per_byte_history.clone();
             sorted_history.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let percentile_index = (sorted_history.len() as f64 * 0.95) as usize;
+            let percentile_index = percentile_index_nearest_rank(sorted_history.len(), 95)
+                .expect("non-empty seek cost history");
             let new_scpb_max = sorted_history[percentile_index];
             app_state.adaptive_max_scpb = new_scpb_max.max(1.0);
         }
@@ -618,8 +619,18 @@ fn calculate_duration_p95(samples: &VecDeque<Duration>) -> Duration {
 
     let mut sorted: Vec<Duration> = samples.iter().copied().collect();
     sorted.sort();
-    let percentile_index = ((sorted.len() as f64 * 0.95) as usize).min(sorted.len() - 1);
+    let percentile_index =
+        percentile_index_nearest_rank(sorted.len(), 95).expect("non-empty samples");
     sorted[percentile_index]
+}
+
+fn percentile_index_nearest_rank(len: usize, percentile: usize) -> Option<usize> {
+    if len == 0 || percentile == 0 {
+        return None;
+    }
+
+    let rank = len.saturating_mul(percentile).saturating_add(99) / 100;
+    Some(rank.saturating_sub(1).min(len - 1))
 }
 
 fn calculate_thrash_score_seek_cost_f64(history_log: &VecDeque<DiskIoOperation>) -> f64 {
@@ -673,7 +684,7 @@ mod tests {
     use crate::torrent_manager::{
         DiskIoOperation, FileActivityDirection, FileActivityUpdate, ManagerEvent,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::time::{Duration, Instant};
     use sysinfo::System;
 
@@ -973,6 +984,24 @@ mod tests {
         assert!(app_state.pending_piece_receive_times.is_empty());
         assert_eq!(app_state.recv_to_write_latency_samples.len(), 1);
         assert!(app_state.recv_to_write_p95 >= Duration::from_secs(2));
+    }
+
+    #[test]
+    fn percentile_index_nearest_rank_uses_one_based_rank() {
+        assert_eq!(super::percentile_index_nearest_rank(0, 95), None);
+        assert_eq!(super::percentile_index_nearest_rank(1, 95), Some(0));
+        assert_eq!(super::percentile_index_nearest_rank(20, 95), Some(18));
+        assert_eq!(super::percentile_index_nearest_rank(100, 95), Some(94));
+    }
+
+    #[test]
+    fn recv_to_write_p95_does_not_select_max_for_twenty_samples() {
+        let samples = (1..=20).map(Duration::from_millis).collect::<VecDeque<_>>();
+
+        assert_eq!(
+            super::calculate_duration_p95(&samples),
+            Duration::from_millis(19)
+        );
     }
 
     #[test]

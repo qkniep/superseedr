@@ -57,7 +57,10 @@ impl Write for NonBlockingLogWriter {
                     "log worker stopped before flushing",
                 ))
             }),
-            Err(TrySendError::Full(_)) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "log queue is full; flush was not issued",
+            )),
             Err(TrySendError::Disconnected(_)) => Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "log worker is not available",
@@ -538,6 +541,18 @@ mod tests {
         let written = writer.write(b"dropped line").expect("full queue is lossy");
 
         assert_eq!(written, "dropped line".len());
+    }
+
+    #[test]
+    fn full_queue_flush_reports_would_block() {
+        let (sender, _receiver) = mpsc::sync_channel(0);
+        let mut writer = NonBlockingLogWriter { sender };
+
+        let error = writer
+            .flush()
+            .expect_err("full queue cannot confirm durability");
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
     }
 
     #[test]

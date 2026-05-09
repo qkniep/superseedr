@@ -3528,6 +3528,22 @@ mod tests {
 
     #[test]
     fn test_normal_backend_round_trips_settings() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let _client_port = EnvVarRestore::capture(CLIENT_PORT_ENV);
+        let _lower_client_port = EnvVarRestore::capture("superseedr_client_port");
+        let _default_download_folder = EnvVarRestore::capture(DEFAULT_DOWNLOAD_FOLDER_ENV);
+        let _lower_default_download_folder =
+            EnvVarRestore::capture("superseedr_default_download_folder");
+        let _output_status_interval = EnvVarRestore::capture(OUTPUT_STATUS_INTERVAL_ENV);
+        let _lower_output_status_interval =
+            EnvVarRestore::capture("superseedr_output_status_interval");
+        env::remove_var(CLIENT_PORT_ENV);
+        env::remove_var("superseedr_client_port");
+        env::remove_var(DEFAULT_DOWNLOAD_FOLDER_ENV);
+        env::remove_var("superseedr_default_download_folder");
+        env::remove_var(OUTPUT_STATUS_INTERVAL_ENV);
+        env::remove_var("superseedr_output_status_interval");
+
         let dir = tempdir().expect("create tempdir");
         let backend = NormalConfigBackend {
             paths: NormalConfigPaths {
