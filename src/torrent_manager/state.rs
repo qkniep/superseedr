@@ -1593,8 +1593,9 @@ impl TorrentState {
                         });
                     }
                 } else {
-                    self.writing_pieces.remove(&piece_index);
-                    self.piece_manager.reset_piece_assembly(piece_index);
+                    if !self.writing_pieces.contains(&piece_index) {
+                        self.piece_manager.reset_piece_assembly(piece_index);
+                    }
                     effects.push(Effect::DisconnectPeer { peer_id });
                 }
                 effects
@@ -3811,6 +3812,75 @@ mod tests {
         });
         assert!(!state.writing_pieces.contains(&0));
         assert_eq!(state.piece_manager.bitfield[0], PieceStatus::Done);
+    }
+
+    #[test]
+    fn failed_duplicate_verify_preserves_pending_disk_write_guard() {
+        let mut state = create_empty_state();
+        let piece_len = 16_384_u32 * 4;
+        let mut torrent = create_dummy_torrent(1);
+        torrent.info.piece_length = piece_len as i64;
+        torrent.info.length = piece_len as i64;
+        state.torrent = Some(torrent);
+        state.piece_manager.set_initial_fields(1, false);
+        state.piece_manager.block_manager.set_geometry(
+            piece_len,
+            piece_len as u64,
+            vec![],
+            vec![],
+            HashMap::new(),
+            false,
+        );
+        state.torrent_status = TorrentStatus::Standard;
+        state.piece_manager.need_queue = vec![0];
+
+        let writer_id = "writer_peer".to_string();
+        add_peer(&mut state, &writer_id);
+        let writer = state.peers.get_mut(&writer_id).unwrap();
+        writer.peer_choking = ChokeStatus::Unchoke;
+        writer.bitfield = vec![true];
+
+        let requester_id = "requester_peer".to_string();
+        add_peer(&mut state, &requester_id);
+        let requester = state.peers.get_mut(&requester_id).unwrap();
+        requester.peer_choking = ChokeStatus::Unchoke;
+        requester.bitfield = vec![true];
+
+        let effects = state.update(Action::PieceVerified {
+            peer_id: writer_id,
+            piece_index: 0,
+            valid: true,
+            data: vec![0u8; piece_len as usize],
+        });
+        assert!(state.writing_pieces.contains(&0));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::WriteToDisk { piece_index: 0, .. })));
+
+        let effects = state.update(Action::PieceVerified {
+            peer_id: "bad_peer".to_string(),
+            piece_index: 0,
+            valid: false,
+            data: Vec::new(),
+        });
+        assert!(state.writing_pieces.contains(&0));
+        assert!(effects.iter().any(|effect| {
+            matches!(effect, Effect::DisconnectPeer { peer_id } if peer_id == "bad_peer")
+        }));
+
+        let effects = state.update(Action::AssignWork {
+            peer_id: requester_id,
+        });
+        let duplicate_request = effects.iter().any(|effect| {
+            matches!(effect, Effect::SendToPeer { cmd, .. }
+                if matches!(**cmd, TorrentCommand::BulkRequest(_)))
+        });
+
+        assert!(
+            !duplicate_request,
+            "failed duplicate verification must not reopen a pending disk write for download"
+        );
+        assert_eq!(state.piece_manager.bitfield[0], PieceStatus::Need);
     }
 
     #[test]

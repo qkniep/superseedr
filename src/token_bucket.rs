@@ -5,6 +5,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+pub fn rate_limit_bps_to_bucket_bytes_per_sec(limit_bps: u64) -> f64 {
+    if limit_bps == 0 {
+        0.0
+    } else {
+        limit_bps as f64 / 8.0
+    }
+}
+
 /// The internal state of the bucket, protected by a Mutex.
 struct TokenBucketInner {
     last_refill_time: Instant,

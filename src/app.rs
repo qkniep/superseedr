@@ -45,7 +45,7 @@ use crate::persistence::network_history::{
 };
 use crate::persistence::rss::{load_rss_state, save_rss_state, RssPersistedState};
 
-use crate::token_bucket::TokenBucket;
+use crate::token_bucket::{rate_limit_bps_to_bucket_bytes_per_sec, TokenBucket};
 
 use crate::tui::effects::compute_effects_activity_speed_multiplier;
 use crate::tui::events;
@@ -1667,15 +1667,28 @@ impl DiskBackpressureDownloadThrottle {
             return DiskBackpressureDecision::Disabled;
         }
 
-        if !self.active {
-            self.active = true;
-        }
-
         let ceiling =
             configured_download_ceiling_bytes_per_sec(sample.configured_download_limit_bps);
         self.rate_bytes_per_sec = clamp_disk_throttle_rate(self.rate_bytes_per_sec, ceiling);
         self.accepted_rate_bytes_per_sec =
             clamp_disk_throttle_rate(self.accepted_rate_bytes_per_sec, ceiling);
+
+        if !disk_backpressure_has_signal(sample) {
+            self.window_score_total = 0.0;
+            self.window_ticks = 0;
+            return if self.active {
+                DiskBackpressureDecision::Limited {
+                    rate_bytes_per_sec: self.rate_bytes_per_sec,
+                    capacity_bytes: disk_throttle_capacity_for_rate(self.rate_bytes_per_sec),
+                }
+            } else {
+                DiskBackpressureDecision::Disabled
+            };
+        }
+
+        if !self.active {
+            self.active = true;
+        }
 
         self.window_score_total += disk_backpressure_score(sample);
         self.window_ticks = self.window_ticks.saturating_add(1);
@@ -1723,7 +1736,11 @@ fn configured_download_ceiling_bytes_per_sec(configured_download_limit_bps: u64)
 }
 
 fn configured_download_bucket_rate(configured_download_limit_bps: u64) -> f64 {
-    configured_download_limit_bps as f64
+    rate_limit_bps_to_bucket_bytes_per_sec(configured_download_limit_bps)
+}
+
+fn configured_upload_bucket_rate(configured_upload_limit_bps: u64) -> f64 {
+    rate_limit_bps_to_bucket_bytes_per_sec(configured_upload_limit_bps)
 }
 
 fn random_disk_throttle_step_factor() -> f64 {
@@ -1742,6 +1759,10 @@ fn disk_backpressure_score(sample: DiskBackpressureSample) -> f64 {
     let recv_to_write_seconds = sample.recv_to_write_p95.as_secs_f64();
     sample.disk_write_completed_bps as f64 * DISK_WRITE_THROTTLE_TARGET_LATENCY_SECS
         / recv_to_write_seconds.max(DISK_WRITE_THROTTLE_TARGET_LATENCY_SECS)
+}
+
+fn disk_backpressure_has_signal(sample: DiskBackpressureSample) -> bool {
+    sample.disk_write_completed_bps > 0 && sample.recv_to_write_p95 > Duration::ZERO
 }
 
 fn effective_download_limit_bps(
@@ -2243,8 +2264,8 @@ impl App {
         .map_err(io::Error::other)?;
         let dht_status_rx = dht_service.subscribe_status();
 
-        let dl_limit = client_configs.global_download_limit_bps as f64;
-        let ul_limit = client_configs.global_upload_limit_bps as f64;
+        let dl_limit = configured_download_bucket_rate(client_configs.global_download_limit_bps);
+        let ul_limit = configured_upload_bucket_rate(client_configs.global_upload_limit_bps);
         let global_dl_bucket = Arc::new(TokenBucket::new(dl_limit, dl_limit));
         let global_ul_bucket = Arc::new(TokenBucket::new(ul_limit, ul_limit));
         let _ = crate::config::ensure_watch_directories(&client_configs);
@@ -4325,11 +4346,15 @@ impl App {
                 .reset(new_settings.global_download_limit_bps);
             self.app_state.effective_download_limit_bps = new_settings.global_download_limit_bps;
             self.global_dl_bucket
-                .set_rate(new_settings.global_download_limit_bps as f64);
+                .set_rate(configured_download_bucket_rate(
+                    new_settings.global_download_limit_bps,
+                ));
         }
         if new_settings.global_upload_limit_bps != old_settings.global_upload_limit_bps {
             self.global_ul_bucket
-                .set_rate(new_settings.global_upload_limit_bps as f64);
+                .set_rate(configured_upload_bucket_rate(
+                    new_settings.global_upload_limit_bps,
+                ));
         }
 
         if self.status_dump_interval_override_secs.is_none() {
@@ -7737,9 +7762,11 @@ mod tests {
         advance_dht_wave_state, align_unpinned_sort_with_visible_activity,
         apply_network_history_persist_result, build_persist_payload, build_torrent_preview_tree,
         bytes_per_sec_to_bps, clamp_selected_indices_in_state, compose_system_warning,
-        dht_wave_targets, disk_backpressure_score, effective_download_limit_bps,
-        extract_magnet_display_name, flush_persistence_writer_parts, format_filesystem_path_error,
-        is_valid_incoming_bittorrent_handshake, move_file_with_fallback_impl, parse_hybrid_hashes,
+        configured_download_bucket_rate, configured_download_ceiling_bytes_per_sec,
+        configured_upload_bucket_rate, dht_wave_targets, disk_backpressure_score,
+        effective_download_limit_bps, extract_magnet_display_name, flush_persistence_writer_parts,
+        format_filesystem_path_error, is_valid_incoming_bittorrent_handshake,
+        move_file_with_fallback_impl, parse_hybrid_hashes,
         persisted_validation_status_from_metrics, prune_rss_feed_errors, queue_persistence_payload,
         refresh_autosort_after_stats, resolve_magnet_torrent_name, rss_settings_changed,
         should_load_persisted_torrent, should_persist_network_history_on_interval,
@@ -8056,6 +8083,33 @@ mod tests {
         assert_eq!(disk_backpressure_score(fast), 1_000_000_000.0);
         assert_eq!(disk_backpressure_score(target), 1_000_000_000.0);
         assert_eq!(disk_backpressure_score(slow), 500_000_000.0);
+    }
+
+    #[test]
+    fn disk_backpressure_throttle_waits_for_disk_write_signal() {
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        let mut sample = disk_backpressure_sample(100_000_000, 0);
+        sample.recv_to_write_p95 = Duration::ZERO;
+
+        for _ in 0..DISK_WRITE_THROTTLE_WINDOW_TICKS {
+            assert_eq!(
+                throttle.update_with_step_factor(sample, DISK_WRITE_THROTTLE_STEP_MIN),
+                DiskBackpressureDecision::Disabled
+            );
+        }
+
+        assert!(!throttle.active);
+        assert_eq!(throttle.window_ticks, 0);
+        assert_eq!(throttle.last_score, None);
+    }
+
+    #[test]
+    fn configured_rate_limit_buckets_use_bytes_per_second() {
+        assert_eq!(configured_download_bucket_rate(8_000), 1_000.0);
+        assert_eq!(configured_upload_bucket_rate(16_000), 2_000.0);
+        assert_eq!(configured_download_bucket_rate(0), 0.0);
+        assert_eq!(configured_upload_bucket_rate(0), 0.0);
+        assert!(configured_download_ceiling_bytes_per_sec(0).is_infinite());
     }
 
     #[test]

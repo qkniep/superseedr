@@ -2564,6 +2564,61 @@ pub fn additional_watch_paths() -> Vec<PathBuf> {
     resolve_additional_watch_paths_from_sources(env::vars_os())
 }
 
+fn normalized_watch_component(component: Component<'_>) -> String {
+    let value = component.as_os_str().to_string_lossy().into_owned();
+    #[cfg(windows)]
+    {
+        let mut value = value;
+        value.make_ascii_lowercase();
+        value
+    }
+    #[cfg(not(windows))]
+    value
+}
+
+fn normalized_watch_components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter(|component| *component != Component::CurDir)
+        .map(normalized_watch_component)
+        .collect()
+}
+
+fn component_prefix_matches(path: &[String], prefix: &[String]) -> bool {
+    !prefix.is_empty() && path.starts_with(prefix)
+}
+
+fn watch_paths_overlap(left: &Path, right: &Path) -> bool {
+    let left = normalized_watch_components(left);
+    let right = normalized_watch_components(right);
+
+    left == right
+        || component_prefix_matches(&left, &right)
+        || component_prefix_matches(&right, &left)
+}
+
+fn shared_watch_exclusion_paths() -> Vec<PathBuf> {
+    [
+        shared_root_path(),
+        shared_inbox_path(),
+        shared_processed_path(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn additional_host_watch_paths() -> Vec<PathBuf> {
+    let excluded_paths = shared_watch_exclusion_paths();
+    additional_watch_paths()
+        .into_iter()
+        .filter(|path| {
+            !excluded_paths
+                .iter()
+                .any(|excluded_path| watch_paths_overlap(path, excluded_path))
+        })
+        .collect()
+}
+
 pub fn host_watch_paths(settings: &Settings) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
@@ -2571,7 +2626,7 @@ pub fn host_watch_paths(settings: &Settings) -> Vec<PathBuf> {
         push_unique_path(&mut paths, path);
     }
 
-    for path in additional_watch_paths() {
+    for path in additional_host_watch_paths() {
         push_unique_path(&mut paths, path);
     }
 
@@ -2605,7 +2660,7 @@ pub fn runtime_watch_paths(
         }
     }
 
-    for path in additional_watch_paths() {
+    for path in additional_host_watch_paths() {
         push_unique_path(&mut paths, path);
     }
 
@@ -4846,6 +4901,50 @@ mod tests {
         } else {
             env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
         }
+        clear_shared_config_state();
+    }
+
+    #[test]
+    fn test_host_watch_paths_exclude_additional_shared_config_overlaps() {
+        let _guard = watch_env_guard().lock().unwrap();
+        let _shared_dir = EnvVarRestore::capture(SHARED_CONFIG_DIR_ENV);
+        let _host_id = EnvVarRestore::capture(SHARED_HOST_ID_ENV);
+        let _legacy_host_id = EnvVarRestore::capture(LEGACY_SHARED_HOST_ID_ENV);
+        let _extra_watch_1 = EnvVarRestore::capture("SUPERSEEDR_WATCH_PATH_1");
+        let _extra_watch_2 = EnvVarRestore::capture("SUPERSEEDR_WATCH_PATH_2");
+        let _extra_watch_3 = EnvVarRestore::capture("SUPERSEEDR_WATCH_PATH_3");
+        let dir = tempdir().expect("create tempdir");
+
+        env::set_var(SHARED_CONFIG_DIR_ENV, dir.path());
+        env::set_var(SHARED_HOST_ID_ENV, "node-a");
+        env::remove_var(LEGACY_SHARED_HOST_ID_ENV);
+        clear_shared_config_state();
+
+        let effective_root = dir.path().join(SHARED_CONFIG_SUBDIR);
+        let shared_inbox = effective_root.join("inbox");
+        let explicit_watch = dir.path().join("explicit-host-watch");
+        let local_extra_watch = dir.path().join("local-extra-watch");
+        env::set_var("SUPERSEEDR_WATCH_PATH_1", &shared_inbox);
+        env::set_var("SUPERSEEDR_WATCH_PATH_2", &effective_root);
+        env::set_var("SUPERSEEDR_WATCH_PATH_3", &local_extra_watch);
+
+        let settings = Settings {
+            watch_folder: Some(explicit_watch.clone()),
+            ..Settings::default()
+        };
+
+        let host_paths = host_watch_paths(&settings);
+        assert!(host_paths.contains(&explicit_watch));
+        assert!(host_paths.contains(&local_extra_watch));
+        assert!(!host_paths.contains(&shared_inbox));
+        assert!(!host_paths.contains(&effective_root));
+
+        let follower_paths = runtime_watch_paths(&settings, true, false);
+        assert!(follower_paths.contains(&effective_root));
+        assert!(follower_paths.contains(&explicit_watch));
+        assert!(follower_paths.contains(&local_extra_watch));
+        assert!(!follower_paths.contains(&shared_inbox));
+
         clear_shared_config_state();
     }
 
