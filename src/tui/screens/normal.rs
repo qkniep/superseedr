@@ -5161,29 +5161,20 @@ fn draw_torrent_files_panel_impl(
     }
 }
 
-fn draw_torrent_files_frame(f: &mut Frame, area: Rect, ctx: &ThemeContext) -> Rect {
+fn draw_torrent_files_frame(_f: &mut Frame, area: Rect, _ctx: &ThemeContext) -> Rect {
     if area.width == 0 || area.height == 0 {
         return area;
     }
 
-    let block = Block::default()
-        .title(Span::styled(
-            " Files",
-            ctx.apply(Style::default().fg(ctx.state_selected())),
-        ))
-        .borders(Borders::NONE)
-        .padding(Padding::new(1, 1, 0, 0))
-        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)));
-    f.render_widget(block, area);
     torrent_files_body_area(area)
 }
 
 fn torrent_files_body_area(area: Rect) -> Rect {
     Rect::new(
         area.x.saturating_add(1),
-        area.y.saturating_add(1),
+        area.y,
         area.width.saturating_sub(2),
-        area.height.saturating_sub(1),
+        area.height,
     )
 }
 
@@ -5193,15 +5184,15 @@ fn torrent_files_panel_height_needed(
     anonymize: bool,
     max_height: u16,
 ) -> Option<u16> {
-    if max_height < 2 {
+    if max_height == 0 {
         return None;
     }
 
     let body_width = width.saturating_sub(2);
-    let max_body_rows = max_height.saturating_sub(1) as usize;
+    let max_body_rows = max_height as usize;
     let body_rows =
         torrent_file_list_desired_row_count(torrent, body_width, anonymize, max_body_rows);
-    Some(usize_to_u16_saturating(body_rows.max(1) + 1).min(max_height))
+    Some(usize_to_u16_saturating(body_rows.max(1)).min(max_height))
 }
 
 fn usize_to_u16_saturating(value: usize) -> u16 {
@@ -7072,9 +7063,9 @@ mod tests {
             .expect("peers, files, and swarm should fit");
 
         assert_eq!(layout.peer_table.expect("peer table visible").height, 4);
-        assert_eq!(layout.files.height, 5);
+        assert_eq!(layout.files.height, 4);
         assert_eq!(layout.swarm.y, layout.files.y + layout.files.height + 1);
-        assert_eq!(layout.swarm.height, 10);
+        assert_eq!(layout.swarm.height, 11);
     }
 
     #[test]
@@ -7119,7 +7110,7 @@ mod tests {
         );
 
         assert_eq!(
-            torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 10)),
+            torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 9)),
             None
         );
     }
@@ -7143,15 +7134,15 @@ mod tests {
             .expect("files and swarm should fit without peer rows");
 
         assert_eq!(layout.peer_table, None);
-        assert_eq!(layout.files.height, 3);
-        assert_eq!(layout.swarm.height, 8);
+        assert_eq!(layout.files.height, 2);
+        assert_eq!(layout.swarm.height, 9);
     }
 
     #[test]
     fn torrent_files_body_area_uses_peer_table_horizontal_padding() {
         assert_eq!(
             torrent_files_body_area(Rect::new(10, 20, 80, 5)),
-            Rect::new(11, 21, 78, 4)
+            Rect::new(11, 20, 78, 5)
         );
     }
 
@@ -7169,7 +7160,7 @@ mod tests {
 
         assert_eq!(
             torrent_files_panel_height_needed(&torrent, 80, false, 11),
-            Some(5)
+            Some(4)
         );
         assert_eq!(
             torrent_files_panel_height_needed(&torrent, 80, false, 4),
@@ -7177,7 +7168,7 @@ mod tests {
         );
         assert_eq!(
             torrent_files_panel_height_needed(&torrent, 80, false, 1),
-            None
+            Some(1)
         );
     }
 
