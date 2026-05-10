@@ -1,5 +1,23 @@
 # Changelog
 
+## Release v1.0.7
+### New Features
+- **Synthetic Benchmark Harness**: Added feature-gated benchmark tooling for local download, upload, and swarm capacity testing, with adaptive step sizing, JSON summaries, ETA reporting, and generated run artifacts.
+- **Adaptive Disk Backpressure**: Added live download throttling that reacts to disk write pressure so high-throughput sessions can back off when storage latency becomes the bottleneck.
+- **Additional Watch Paths**: Restored support for additional watch folders so operators can ingest torrents from multiple configured locations.
+
+### Improvements
+- **TUI Swarm Visibility**: Refined the peer table, files panel, and swarm heatmap with inactive-peer summaries, saturated-peer file strips, more compact peer-action labels, and better behavior in short terminal layouts.
+- **Performance Diagnostics**: Added measured footer FPS, disk-queue write latency timing, clearer benchmark capacity reporting, and better synthetic peer ramping for load investigations.
+- **Docker and Client Interop**: Made the Docker Compose setup wait for Gluetun health, grouped interop lanes by client, and improved qBittorrent login and add-response compatibility.
+- **Dependency and Runtime Maintenance**: Removed config/logging helper dependencies, hardened the replacement config, logging, and atomic-write paths, refreshed dependency pins, and kept CI on the released Rust 1.95.0 toolchain.
+
+### Bug Fixes
+- **Piece Request Correctness**: Fixed duplicate requests during piece writes, adjusted endgame request scheduling, and removed defensive pending-block scheduling that could interfere with active work.
+- **Telemetry and Logging Accuracy**: Fixed logging flush behavior and telemetry percentile regressions so runtime diagnostics stay reliable under load.
+- **Layout Edge Cases**: Fixed files-panel and heatmap sizing edge cases in constrained terminal space while preserving useful peer and availability context.
+- **Synthetic Load Stability**: Fixed synthetic-load permit accounting and Windows clippy issues in the benchmark-only build path.
+
 ## Release v1.0.6
 ### 🚀 New Features
 - **Internal DHT Peer Discovery**: Added an internal DHT backend with routing-cache support, peer announce support, dual-stack discovery hints, and health data in status snapshots.

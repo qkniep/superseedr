@@ -2328,19 +2328,15 @@ impl TorrentManager {
                         TorrentCommand::SuccessfullyConnected(id) if id.is_empty() => {
                             "Connecting...".to_string()
                         }
-                        TorrentCommand::SuccessfullyConnected(_) => {
-                            "Exchanged Handshake".to_string()
-                        }
-                        TorrentCommand::PeerBitfield(_, _) => "Exchanged Bitfield".to_string(),
-                        TorrentCommand::Choke(_) => "Choked Us".to_string(),
-                        TorrentCommand::Unchoke(_) => "Unchoked Us".to_string(),
+                        TorrentCommand::SuccessfullyConnected(_) => "Handshake".to_string(),
+                        TorrentCommand::PeerBitfield(_, _) => "Bitfield".to_string(),
+                        TorrentCommand::Choke(_) => "Choked".to_string(),
+                        TorrentCommand::Unchoke(_) => "Unchoked".to_string(),
                         TorrentCommand::Disconnect(_) => "Disconnected".to_string(),
-                        TorrentCommand::Have(_, _) => "Peer Has New Piece".to_string(),
-                        TorrentCommand::Block(_, _, _, _) => "Receiving From Peer".to_string(),
-                        TorrentCommand::RequestUpload(_, _, _, _) => {
-                            "Peer is Requesting".to_string()
-                        }
-                        TorrentCommand::BulkCancel(_) => "Peer Canceling Request".to_string(),
+                        TorrentCommand::Have(_, _) => "Have".to_string(),
+                        TorrentCommand::Block(_, _, _, _) => "Receiving".to_string(),
+                        TorrentCommand::RequestUpload(_, _, _, _) => "Requesting".to_string(),
+                        TorrentCommand::BulkCancel(_) => "Canceling".to_string(),
                         _ => "Idle".to_string(),
                     };
                     let discriminant = std::mem::discriminant(&p.last_action);
