@@ -76,7 +76,7 @@ const FOOTER_STATUS_GUTTER: u16 = 2;
 const ASCII_TREE_DIR_ICON: &str = "> ";
 const ASCII_TREE_FILE_ICON: &str = "  ";
 const FILE_ACTIVITY_HIGHLIGHT_WINDOW: Duration = Duration::from_millis(1800);
-const MIN_SWARM_AVAILABILITY_HEIGHT: u16 = 4;
+const MIN_SWARM_AVAILABILITY_HEIGHT: u16 = 1;
 const FILES_SWARM_SPACER_HEIGHT: u16 = 1;
 const SATURATED_ACTIVE_PEER_FILE_ROWS: u16 = 5;
 const MIN_SATURATED_ACTIVE_PEER_TABLE_HEIGHT: u16 = 7;
@@ -7390,7 +7390,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_files_layout_keeps_minimum_heatmap_when_files_are_limited() {
+    fn peer_files_layout_keeps_adaptive_heatmap_when_files_are_limited() {
         let mut app_state = create_test_app_state();
         let torrent = app_state
             .torrents
@@ -7410,13 +7410,13 @@ mod tests {
         let swarm = layout.swarm.expect("swarm visible");
 
         assert_eq!(layout.peer_table.expect("peer table visible").height, 4);
-        assert_eq!(layout.files.height, 11);
+        assert_eq!(layout.files.height, 14);
         assert_eq!(swarm.y, layout.files.y + layout.files.height + 1);
         assert_eq!(swarm.height, MIN_SWARM_AVAILABILITY_HEIGHT);
     }
 
     #[test]
-    fn peer_files_layout_falls_back_when_swarm_would_not_fit() {
+    fn peer_files_layout_falls_back_when_files_would_not_fit() {
         let mut app_state = create_test_app_state();
         let torrent = app_state
             .torrents
@@ -7432,7 +7432,7 @@ mod tests {
         );
 
         assert_eq!(
-            torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 9)),
+            torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 6)),
             None
         );
     }
