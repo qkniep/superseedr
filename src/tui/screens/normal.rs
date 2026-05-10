@@ -79,7 +79,7 @@ const FILE_ACTIVITY_HIGHLIGHT_WINDOW: Duration = Duration::from_millis(1800);
 const MIN_SWARM_AVAILABILITY_HEIGHT: u16 = 4;
 const FILES_SWARM_SPACER_HEIGHT: u16 = 1;
 const SATURATED_ACTIVE_PEER_FILE_ROWS: u16 = 5;
-const MIN_SATURATED_ACTIVE_PEER_TABLE_HEIGHT: u16 = 2;
+const MIN_SATURATED_ACTIVE_PEER_TABLE_HEIGHT: u16 = 7;
 const MAX_INACTIVE_ONLY_PEERS_IN_TABLE: usize = 10;
 const DISK_HEALTH_ORB_SIZE_SCALE: f64 = 1.35;
 const DISK_HEALTH_ORB_CELL_Y_ASPECT: f64 = 2.0;
@@ -951,10 +951,11 @@ fn saturated_active_peer_files_layout(
         return None;
     }
 
-    let max_files_height = area
-        .height
-        .saturating_sub(MIN_SATURATED_ACTIVE_PEER_TABLE_HEIGHT);
-    let files_height = saturated_active_peer_files_height(torrent, max_files_height)?;
+    let files_height = saturated_active_peer_files_height(torrent)?;
+    if area.height < MIN_SATURATED_ACTIVE_PEER_TABLE_HEIGHT.saturating_add(files_height) {
+        return None;
+    }
+
     let peer_table_height_available = area.height.saturating_sub(files_height);
     if peer_table_height <= peer_table_height_available {
         return None;
@@ -984,23 +985,13 @@ fn peer_rows_are_all_active(rows: &[PeerTableRow]) -> bool {
         })
 }
 
-fn saturated_active_peer_files_height(
-    torrent: &TorrentDisplayState,
-    max_height: u16,
-) -> Option<u16> {
-    if max_height == 0 {
-        return None;
-    }
+fn saturated_active_peer_files_height(torrent: &TorrentDisplayState) -> Option<u16> {
     let file_count = activity_sorted_file_count(torrent);
     if file_count == 0 {
         return None;
     }
 
-    Some(
-        usize_to_u16_saturating(file_count)
-            .min(SATURATED_ACTIVE_PEER_FILE_ROWS)
-            .min(max_height),
-    )
+    Some(usize_to_u16_saturating(file_count).min(SATURATED_ACTIVE_PEER_FILE_ROWS))
 }
 
 fn selected_torrent(app_state: &AppState) -> Option<&TorrentDisplayState> {
@@ -7476,6 +7467,64 @@ mod tests {
         assert_eq!(layout.swarm, None);
         assert_eq!(layout.peer_table.expect("peer table visible").height, 7);
         assert_eq!(layout.files, Rect::new(0, 7, 80, 5));
+    }
+
+    #[test]
+    fn peer_files_layout_skips_reserved_files_when_area_is_too_short() {
+        let mut app_state = create_test_app_state();
+        let torrent = app_state
+            .torrents
+            .get_mut("hash_a".as_bytes())
+            .expect("mock torrent exists");
+        torrent.latest_state.peers = (0..20)
+            .map(|idx| PeerInfo {
+                address: format!("127.0.0.1:{}", 7000 + idx),
+                download_speed_bps: 1_000 + idx as u64,
+                ..Default::default()
+            })
+            .collect();
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..8)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+
+        assert_eq!(
+            torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 11)),
+            None
+        );
+    }
+
+    #[test]
+    fn peer_files_layout_reserves_only_existing_files_when_saturated() {
+        let mut app_state = create_test_app_state();
+        let torrent = app_state
+            .torrents
+            .get_mut("hash_a".as_bytes())
+            .expect("mock torrent exists");
+        torrent.latest_state.peers = (0..20)
+            .map(|idx| PeerInfo {
+                address: format!("127.0.0.1:{}", 7000 + idx),
+                download_speed_bps: 1_000 + idx as u64,
+                ..Default::default()
+            })
+            .collect();
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..2)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+
+        let layout = torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 9))
+            .expect("active peers should reserve only existing files");
+
+        assert_eq!(layout.files_mode, TorrentFilesRenderMode::ActivitySorted);
+        assert_eq!(layout.peer_table.expect("peer table visible").height, 7);
+        assert_eq!(layout.files, Rect::new(0, 7, 80, 2));
     }
 
     #[test]
