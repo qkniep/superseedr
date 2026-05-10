@@ -1713,16 +1713,8 @@ impl DiskBackpressureDownloadThrottle {
             clamp_disk_throttle_rate(self.accepted_rate_bytes_per_sec, ceiling);
 
         if !disk_backpressure_has_signal(sample) {
-            self.window_score_total = 0.0;
-            self.window_ticks = 0;
-            return if self.active {
-                DiskBackpressureDecision::Limited {
-                    rate_bytes_per_sec: self.rate_bytes_per_sec,
-                    capacity_bytes: disk_throttle_capacity_for_rate(self.rate_bytes_per_sec),
-                }
-            } else {
-                DiskBackpressureDecision::Disabled
-            };
+            self.reset(sample.configured_download_limit_bps);
+            return DiskBackpressureDecision::Disabled;
         }
 
         if !self.active {
@@ -7804,8 +7796,8 @@ mod tests {
         configured_download_bucket_rate, configured_download_ceiling_bytes_per_sec,
         configured_upload_bucket_rate, dht_wave_targets, disk_backpressure_score,
         effective_download_limit_bps, extract_magnet_display_name, flush_persistence_writer_parts,
-        format_filesystem_path_error, is_valid_incoming_bittorrent_handshake,
-        move_file_with_fallback_impl, parse_hybrid_hashes,
+        format_filesystem_path_error, initial_disk_throttle_rate,
+        is_valid_incoming_bittorrent_handshake, move_file_with_fallback_impl, parse_hybrid_hashes,
         persisted_validation_status_from_metrics, prune_rss_feed_errors, queue_persistence_payload,
         refresh_autosort_after_stats, resolve_magnet_torrent_name, rss_settings_changed,
         should_load_persisted_torrent, should_persist_network_history_on_interval,
@@ -8138,6 +8130,27 @@ mod tests {
         }
 
         assert!(!throttle.active);
+        assert_eq!(throttle.window_ticks, 0);
+        assert_eq!(throttle.last_score, None);
+    }
+
+    #[test]
+    fn disk_backpressure_throttle_disables_when_signal_disappears() {
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        set_disk_throttle_rate(&mut throttle, 30_000_000);
+
+        let mut sample = disk_backpressure_sample(100_000_000, 0);
+        sample.recv_to_write_p95 = Duration::ZERO;
+
+        assert_eq!(
+            throttle.update_with_step_factor(sample, DISK_WRITE_THROTTLE_STEP_MIN),
+            DiskBackpressureDecision::Disabled
+        );
+        assert!(!throttle.active);
+        assert_eq!(
+            throttle.rate_bytes_per_sec,
+            initial_disk_throttle_rate(sample.configured_download_limit_bps)
+        );
         assert_eq!(throttle.window_ticks, 0);
         assert_eq!(throttle.last_score, None);
     }
