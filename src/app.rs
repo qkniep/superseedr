@@ -13,16 +13,17 @@ use magnet_url::Magnet;
 
 use fuzzy_matcher::FuzzyMatcher;
 
+use rand::RngExt;
+
 use strum_macros::EnumIter;
 
 use crate::torrent_manager::DiskIoOperation;
 
 use crate::config::{
-    classify_shared_mode_settings_change, resolve_host_watch_path, runtime_watch_paths,
-    save_settings, shared_host_id, shared_inbox_path, shared_root_path, upsert_torrent_metadata,
-    FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SettingsChangeScope,
-    SortDirection, TorrentMetadataEntry, TorrentMetadataFileEntry, TorrentSettings,
-    TorrentSortColumn,
+    classify_shared_mode_settings_change, host_watch_paths, runtime_watch_paths, save_settings,
+    shared_host_id, shared_inbox_path, shared_root_path, upsert_torrent_metadata, FeedSyncError,
+    PeerSortColumn, RssFilterMode, RssHistoryEntry, Settings, SettingsChangeScope, SortDirection,
+    TorrentMetadataEntry, TorrentMetadataFileEntry, TorrentSettings, TorrentSortColumn,
 };
 use crate::control_service::{
     control_event_details, online_control_success_message, plan_control_request,
@@ -44,7 +45,7 @@ use crate::persistence::network_history::{
 };
 use crate::persistence::rss::{load_rss_state, save_rss_state, RssPersistedState};
 
-use crate::token_bucket::TokenBucket;
+use crate::token_bucket::{rate_limit_bps_to_bucket_bytes_per_sec, TokenBucket};
 
 use crate::tui::effects::compute_effects_activity_speed_multiplier;
 use crate::tui::events;
@@ -158,6 +159,22 @@ const STARTUP_ROLLING_LOADS_PER_INTERVAL: usize = 1;
 const SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 const INCOMING_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 const PORT_FAMILY_HIGHLIGHT_DURATION: Duration = Duration::from_secs(2);
+const UI_FPS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const NORMAL_IDLE_FRAME_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+const NORMAL_ANIMATION_RECENT_BLOCK_ROWS: usize = 64;
+const NORMAL_ANIMATION_RECENT_PEER_EVENTS: usize = 120;
+const NORMAL_ANIMATION_FILE_ACTIVITY_WINDOW: Duration = Duration::from_secs(4);
+const SWARM_AVAILABILITY_FLASH_DURATION: Duration = Duration::from_millis(350);
+const DISK_IDLE_WOBBLE_PHASE_SPEED: f64 = 0.45;
+const DISK_MIN_TRANSFER_PHASE_SPEED: f64 = 0.80;
+const DISK_MAX_TRANSFER_PHASE_SPEED: f64 = 5.20;
+const DISK_WRITE_THROTTLE_START_BYTES_PER_SEC: f64 = 1_000_000_000.0 / 8.0;
+const DISK_WRITE_THROTTLE_MIN_BYTES_PER_SEC: f64 = 1_000_000.0 / 8.0;
+const DISK_WRITE_THROTTLE_WINDOW_TICKS: u8 = 5;
+const DISK_WRITE_THROTTLE_STEP_MIN: f64 = 0.80;
+const DISK_WRITE_THROTTLE_STEP_MAX: f64 = 1.20;
+const DISK_WRITE_THROTTLE_BURST_SECS: f64 = 1.0;
+const DISK_WRITE_THROTTLE_TARGET_LATENCY_SECS: f64 = 2.0;
 const BITTORRENT_PROTOCOL_STR: &[u8] = b"BitTorrent protocol";
 
 pub struct ListenerSet {
@@ -377,6 +394,24 @@ impl DataRate {
             DataRate::Rate30s => "30",
             DataRate::Rate60s => "60",
         }
+    }
+
+    pub fn target_fps(self) -> f64 {
+        match self {
+            DataRate::RateQuarter => 0.25,
+            DataRate::RateHalf => 0.5,
+            DataRate::Rate1s => 1.0,
+            DataRate::Rate2s => 2.0,
+            DataRate::Rate4s => 4.0,
+            DataRate::Rate10s => 10.0,
+            DataRate::Rate20s => 20.0,
+            DataRate::Rate30s => 30.0,
+            DataRate::Rate60s => 60.0,
+        }
+    }
+
+    pub fn frame_interval(self) -> Duration {
+        Duration::from_secs_f64(1.0 / self.target_fps())
     }
 
     /// Cycles to the next (slower) data rate (lower FPS).
@@ -844,6 +879,21 @@ pub struct PeerInfo {
     pub last_action: String,
 }
 
+pub fn swarm_availability_counts(peers: &[PeerInfo], total_pieces: u32) -> Vec<u32> {
+    let total_pieces_usize = total_pieces as usize;
+    let mut availability = vec![0; total_pieces_usize];
+
+    for peer in peers {
+        for (i, has_piece) in peer.bitfield.iter().enumerate().take(total_pieces_usize) {
+            if *has_piece {
+                availability[i] += 1;
+            }
+        }
+    }
+
+    availability
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TorrentMetrics {
     pub torrent_control_state: TorrentControlState,
@@ -970,6 +1020,233 @@ pub struct RecentFileActivity {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct SwarmAvailabilityFlashState {
+    pub info_hash: Vec<u8>,
+    pub previous_availability: Vec<u32>,
+    pub flash_start: Vec<Option<Instant>>,
+    pub flash_until: Vec<Option<Instant>>,
+    previous_peer_bitfields: HashMap<String, Vec<bool>>,
+}
+
+impl SwarmAvailabilityFlashState {
+    #[cfg(test)]
+    pub fn update(
+        &mut self,
+        info_hash: &[u8],
+        current_availability: Vec<u32>,
+        now: Instant,
+        flash_duration: Duration,
+    ) {
+        self.previous_peer_bitfields.clear();
+        self.update_from_availability(
+            info_hash,
+            current_availability.clone(),
+            current_availability,
+            now,
+            flash_duration,
+        );
+    }
+
+    #[cfg(test)]
+    pub fn update_from_peers(
+        &mut self,
+        info_hash: &[u8],
+        peers: &[PeerInfo],
+        total_pieces: u32,
+        now: Instant,
+        flash_duration: Duration,
+    ) {
+        let current_availability = swarm_availability_counts(peers, total_pieces);
+        let current_peer_bitfields =
+            swarm_availability_peer_bitfields(peers, current_availability.len());
+        self.update_from_peer_availability(
+            info_hash,
+            current_availability,
+            current_peer_bitfields,
+            now,
+            flash_duration,
+        );
+    }
+
+    fn update_from_peer_availability(
+        &mut self,
+        info_hash: &[u8],
+        current_availability: Vec<u32>,
+        current_peer_bitfields: HashMap<String, Vec<bool>>,
+        now: Instant,
+        flash_duration: Duration,
+    ) {
+        if self.info_hash.as_slice() != info_hash
+            || self.previous_availability.len() != current_availability.len()
+        {
+            self.info_hash = info_hash.to_vec();
+            self.previous_availability = current_availability;
+            self.flash_start = vec![None; self.previous_availability.len()];
+            self.flash_until = vec![None; self.previous_availability.len()];
+            self.previous_peer_bitfields = current_peer_bitfields;
+            return;
+        }
+
+        let mut known_peer_availability = vec![0; current_availability.len()];
+        for (peer_key, bitfield) in &current_peer_bitfields {
+            if !self.previous_peer_bitfields.contains_key(peer_key) {
+                continue;
+            }
+
+            for (idx, has_piece) in bitfield.iter().enumerate() {
+                if *has_piece {
+                    known_peer_availability[idx] += 1;
+                }
+            }
+        }
+
+        self.update_from_availability(
+            info_hash,
+            current_availability,
+            known_peer_availability,
+            now,
+            flash_duration,
+        );
+        self.previous_peer_bitfields = current_peer_bitfields;
+    }
+
+    fn update_from_availability(
+        &mut self,
+        info_hash: &[u8],
+        current_availability: Vec<u32>,
+        flashable_availability: Vec<u32>,
+        now: Instant,
+        flash_duration: Duration,
+    ) {
+        if self.info_hash.as_slice() != info_hash
+            || self.previous_availability.len() != current_availability.len()
+        {
+            self.info_hash = info_hash.to_vec();
+            self.previous_availability = current_availability;
+            self.flash_start = vec![None; self.previous_availability.len()];
+            self.flash_until = vec![None; self.previous_availability.len()];
+            self.previous_peer_bitfields.clear();
+            return;
+        }
+
+        if self.flash_start.len() != current_availability.len() {
+            self.flash_start.resize(current_availability.len(), None);
+        }
+        if self.flash_until.len() != current_availability.len() {
+            self.flash_until.resize(current_availability.len(), None);
+        }
+
+        let increased_count = self
+            .previous_availability
+            .iter()
+            .zip(flashable_availability.iter())
+            .filter(|&(&previous, &current)| current > previous)
+            .count();
+        let suppress_full_map_flash =
+            !flashable_availability.is_empty() && increased_count == flashable_availability.len();
+
+        let mut rank = 0usize;
+        for (idx, (&previous, &current)) in self
+            .previous_availability
+            .iter()
+            .zip(flashable_availability.iter())
+            .enumerate()
+        {
+            if current > previous && !suppress_full_map_flash {
+                let delay =
+                    swarm_availability_flash_rollout_delay(rank, increased_count, flash_duration);
+                let start = now + delay;
+                self.flash_start[idx] = Some(start);
+                self.flash_until[idx] = Some(start + flash_duration);
+                rank += 1;
+            }
+        }
+
+        self.previous_availability = current_availability;
+        self.clear_expired(now);
+    }
+
+    pub fn is_piece_flashing(&self, info_hash: &[u8], piece_index: usize, now: Instant) -> bool {
+        self.info_hash.as_slice() == info_hash
+            && self
+                .flash_start
+                .get(piece_index)
+                .copied()
+                .flatten()
+                .is_some_and(|start| start <= now)
+            && self
+                .flash_until
+                .get(piece_index)
+                .copied()
+                .flatten()
+                .is_some_and(|deadline| deadline > now)
+    }
+
+    pub fn has_active_flash(&self, now: Instant) -> bool {
+        self.flash_until
+            .iter()
+            .flatten()
+            .any(|&deadline| deadline > now)
+    }
+
+    fn clear_expired(&mut self, now: Instant) {
+        for idx in 0..self.flash_until.len() {
+            if self.flash_until[idx].is_some_and(|deadline| deadline <= now) {
+                self.flash_until[idx] = None;
+                if let Some(start) = self.flash_start.get_mut(idx) {
+                    *start = None;
+                }
+            }
+        }
+    }
+}
+
+fn swarm_availability_flash_rollout_delay(
+    rank: usize,
+    flash_count: usize,
+    flash_duration: Duration,
+) -> Duration {
+    if rank == 0 || flash_count <= 1 || flash_duration.is_zero() {
+        return Duration::ZERO;
+    }
+
+    let steps = flash_count.saturating_sub(1) as u128;
+    let delay_nanos = flash_duration
+        .as_nanos()
+        .saturating_mul(rank as u128)
+        .checked_div(steps)
+        .unwrap_or(0);
+    Duration::from_nanos(delay_nanos.min(u64::MAX as u128) as u64)
+}
+
+fn swarm_availability_peer_bitfields(
+    peers: &[PeerInfo],
+    total_pieces: usize,
+) -> HashMap<String, Vec<bool>> {
+    let mut bitfields = HashMap::with_capacity(peers.len());
+    for (idx, peer) in peers.iter().enumerate() {
+        let mut bitfield = vec![false; total_pieces];
+        for (piece_idx, has_piece) in peer.bitfield.iter().enumerate().take(total_pieces) {
+            bitfield[piece_idx] = *has_piece;
+        }
+        bitfields.insert(swarm_availability_peer_key(peer, idx), bitfield);
+    }
+    bitfields
+}
+
+fn swarm_availability_peer_key(peer: &PeerInfo, fallback_index: usize) -> String {
+    if !peer.address.is_empty() {
+        return format!("addr:{}", peer.address);
+    }
+
+    if !peer.peer_id.is_empty() {
+        return format!("peer:{}", hex::encode(&peer.peer_id));
+    }
+
+    format!("slot:{fallback_index}")
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct DhtWaveUiState {
     pub phase: f64,
     pub amplitude: f64,
@@ -990,8 +1267,12 @@ pub struct UiState {
     pub effects_phase_time: f64,
     pub effects_last_wall_time: f64,
     pub effects_speed_multiplier: f64,
+    pub measured_fps: Option<f64>,
+    pub fps_sample_started_at: Option<Instant>,
+    pub fps_sample_frames: u32,
     pub file_activity_download_phase: f64,
     pub file_activity_upload_phase: f64,
+    pub swarm_availability_flash: SwarmAvailabilityFlashState,
     pub dht_wave: DhtWaveUiState,
     pub selected_header: SelectedHeader,
     pub selected_torrent_index: usize,
@@ -1006,6 +1287,29 @@ pub struct UiState {
     pub normal_paste_burst: PasteBurst,
     #[allow(dead_code)]
     pub rss: RssUiState,
+}
+
+impl UiState {
+    fn record_drawn_frame(&mut self, now: Instant) {
+        let Some(sample_started_at) = self.fps_sample_started_at else {
+            self.fps_sample_started_at = Some(now);
+            self.fps_sample_frames = 0;
+            return;
+        };
+
+        self.fps_sample_frames = self.fps_sample_frames.saturating_add(1);
+        let elapsed = now.saturating_duration_since(sample_started_at);
+        if elapsed < UI_FPS_SAMPLE_INTERVAL {
+            return;
+        }
+
+        let elapsed_secs = elapsed.as_secs_f64();
+        if elapsed_secs > 0.0 {
+            self.measured_fps = Some(self.fps_sample_frames as f64 / elapsed_secs);
+        }
+        self.fps_sample_started_at = Some(now);
+        self.fps_sample_frames = 0;
+    }
 }
 
 #[derive(Default)]
@@ -1257,6 +1561,8 @@ pub struct AppState {
     pub ram_usage_percent: f32,
     pub avg_disk_read_bps: u64,
     pub avg_disk_write_bps: u64,
+    pub avg_disk_write_completed_bps: u64,
+    pub effective_download_limit_bps: u64,
 
     pub disk_read_history: Vec<u64>,
     pub disk_write_history: Vec<u64>,
@@ -1277,6 +1583,10 @@ pub struct AppState {
     pub avg_disk_write_latency: Duration,
     pub reads_completed_this_tick: u32,
     pub writes_completed_this_tick: u32,
+    pub bytes_written_completed_this_tick: u64,
+    pub pending_piece_write_start_times: HashMap<(Vec<u8>, u32), Instant>,
+    pub recv_to_write_latency_samples: VecDeque<Duration>,
+    pub recv_to_write_p95: Duration,
     pub read_iops: u32,
     pub write_iops: u32,
 
@@ -1331,6 +1641,204 @@ pub struct AppState {
     pub cluster_runtime_label: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct DiskBackpressureDownloadThrottle {
+    active: bool,
+    rate_bytes_per_sec: f64,
+    accepted_rate_bytes_per_sec: f64,
+    last_score: Option<f64>,
+    window_score_total: f64,
+    window_ticks: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DiskBackpressureSample {
+    is_leeching: bool,
+    configured_download_limit_bps: u64,
+    download_bps: u64,
+    disk_write_completed_bps: u64,
+    recv_to_write_p95: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DiskBackpressureDecision {
+    Disabled,
+    Limited {
+        rate_bytes_per_sec: f64,
+        capacity_bytes: f64,
+    },
+}
+
+impl DiskBackpressureDownloadThrottle {
+    fn new(configured_download_limit_bps: u64) -> Self {
+        let initial_rate = initial_disk_throttle_rate(configured_download_limit_bps);
+        Self {
+            active: false,
+            rate_bytes_per_sec: initial_rate,
+            accepted_rate_bytes_per_sec: initial_rate,
+            last_score: None,
+            window_score_total: 0.0,
+            window_ticks: 0,
+        }
+    }
+
+    fn reset(&mut self, configured_download_limit_bps: u64) {
+        let initial_rate = initial_disk_throttle_rate(configured_download_limit_bps);
+        self.active = false;
+        self.rate_bytes_per_sec = initial_rate;
+        self.accepted_rate_bytes_per_sec = initial_rate;
+        self.last_score = None;
+        self.window_score_total = 0.0;
+        self.window_ticks = 0;
+    }
+
+    fn update(&mut self, sample: DiskBackpressureSample) -> DiskBackpressureDecision {
+        self.update_with_step_factor(sample, random_disk_throttle_step_factor())
+    }
+
+    fn update_with_step_factor(
+        &mut self,
+        sample: DiskBackpressureSample,
+        step_factor: f64,
+    ) -> DiskBackpressureDecision {
+        if !sample.is_leeching || sample.download_bps == 0 {
+            self.reset(sample.configured_download_limit_bps);
+            return DiskBackpressureDecision::Disabled;
+        }
+
+        let ceiling =
+            configured_download_ceiling_bytes_per_sec(sample.configured_download_limit_bps);
+        self.rate_bytes_per_sec = clamp_disk_throttle_rate(self.rate_bytes_per_sec, ceiling);
+        self.accepted_rate_bytes_per_sec =
+            clamp_disk_throttle_rate(self.accepted_rate_bytes_per_sec, ceiling);
+
+        if !disk_backpressure_has_signal(sample) {
+            self.reset(sample.configured_download_limit_bps);
+            return DiskBackpressureDecision::Disabled;
+        }
+
+        if !self.active {
+            self.active = true;
+        }
+
+        self.window_score_total += disk_backpressure_score(sample);
+        self.window_ticks = self.window_ticks.saturating_add(1);
+        if self.window_ticks >= DISK_WRITE_THROTTLE_WINDOW_TICKS {
+            let score = self.window_score_total / f64::from(self.window_ticks);
+            self.finish_score_window(score, step_factor, ceiling);
+        }
+
+        DiskBackpressureDecision::Limited {
+            rate_bytes_per_sec: self.rate_bytes_per_sec,
+            capacity_bytes: disk_throttle_capacity_for_rate(self.rate_bytes_per_sec),
+        }
+    }
+
+    fn finish_score_window(&mut self, score: f64, step_factor: f64, ceiling: f64) {
+        match self.last_score {
+            Some(last_score) if score < last_score => {
+                self.rate_bytes_per_sec = self.accepted_rate_bytes_per_sec;
+            }
+            _ => {
+                self.accepted_rate_bytes_per_sec = self.rate_bytes_per_sec;
+                self.last_score = Some(score);
+            }
+        }
+
+        let next_rate =
+            self.accepted_rate_bytes_per_sec * normalize_disk_throttle_step(step_factor);
+        self.rate_bytes_per_sec = clamp_disk_throttle_rate(next_rate, ceiling);
+        self.window_score_total = 0.0;
+        self.window_ticks = 0;
+    }
+}
+
+fn initial_disk_throttle_rate(configured_download_limit_bps: u64) -> f64 {
+    let ceiling = configured_download_ceiling_bytes_per_sec(configured_download_limit_bps);
+    clamp_disk_throttle_rate(DISK_WRITE_THROTTLE_START_BYTES_PER_SEC, ceiling)
+}
+
+fn configured_download_ceiling_bytes_per_sec(configured_download_limit_bps: u64) -> f64 {
+    if configured_download_limit_bps == 0 {
+        f64::INFINITY
+    } else {
+        configured_download_limit_bps as f64 / 8.0
+    }
+}
+
+fn configured_download_bucket_rate(configured_download_limit_bps: u64) -> f64 {
+    rate_limit_bps_to_bucket_bytes_per_sec(configured_download_limit_bps)
+}
+
+fn configured_upload_bucket_rate(configured_upload_limit_bps: u64) -> f64 {
+    rate_limit_bps_to_bucket_bytes_per_sec(configured_upload_limit_bps)
+}
+
+fn random_disk_throttle_step_factor() -> f64 {
+    rand::rng().random_range(DISK_WRITE_THROTTLE_STEP_MIN..=DISK_WRITE_THROTTLE_STEP_MAX)
+}
+
+fn normalize_disk_throttle_step(step_factor: f64) -> f64 {
+    if step_factor.is_finite() && step_factor > 0.0 {
+        step_factor.clamp(DISK_WRITE_THROTTLE_STEP_MIN, DISK_WRITE_THROTTLE_STEP_MAX)
+    } else {
+        1.0
+    }
+}
+
+fn disk_backpressure_score(sample: DiskBackpressureSample) -> f64 {
+    let recv_to_write_seconds = sample.recv_to_write_p95.as_secs_f64();
+    sample.disk_write_completed_bps as f64 * DISK_WRITE_THROTTLE_TARGET_LATENCY_SECS
+        / recv_to_write_seconds.max(DISK_WRITE_THROTTLE_TARGET_LATENCY_SECS)
+}
+
+fn disk_backpressure_has_signal(sample: DiskBackpressureSample) -> bool {
+    sample.disk_write_completed_bps > 0 && sample.recv_to_write_p95 > Duration::ZERO
+}
+
+fn effective_download_limit_bps(
+    configured_download_limit_bps: u64,
+    adaptive_bps: Option<u64>,
+) -> u64 {
+    match adaptive_bps.filter(|bps| *bps > 0) {
+        Some(adaptive_bps) if configured_download_limit_bps > 0 => {
+            configured_download_limit_bps.min(adaptive_bps)
+        }
+        Some(adaptive_bps) => adaptive_bps,
+        None => configured_download_limit_bps,
+    }
+}
+
+fn bytes_per_sec_to_bps(bytes_per_sec: f64) -> u64 {
+    if !bytes_per_sec.is_finite() || bytes_per_sec <= 0.0 {
+        return 0;
+    }
+
+    (bytes_per_sec * 8.0).round().min(u64::MAX as f64) as u64
+}
+
+fn clamp_disk_throttle_rate(rate_bytes_per_sec: f64, ceiling_bytes_per_sec: f64) -> f64 {
+    let minimum = if ceiling_bytes_per_sec.is_finite() {
+        DISK_WRITE_THROTTLE_MIN_BYTES_PER_SEC.min(ceiling_bytes_per_sec)
+    } else {
+        DISK_WRITE_THROTTLE_MIN_BYTES_PER_SEC
+    };
+    let clamped = rate_bytes_per_sec.max(minimum);
+    if ceiling_bytes_per_sec.is_finite() {
+        clamped.min(ceiling_bytes_per_sec)
+    } else {
+        clamped
+    }
+}
+
+fn disk_throttle_capacity_for_rate(rate_bytes_per_sec: f64) -> f64 {
+    if rate_bytes_per_sec > 0.0 && rate_bytes_per_sec.is_finite() {
+        (rate_bytes_per_sec * DISK_WRITE_THROTTLE_BURST_SECS).max(1.0)
+    } else {
+        rate_bytes_per_sec
+    }
+}
+
 pub struct App {
     pub app_state: AppState,
     pub client_configs: Settings,
@@ -1349,6 +1857,7 @@ pub struct App {
     pub resource_manager: ResourceManagerClient,
     pub global_dl_bucket: Arc<TokenBucket>,
     pub global_ul_bucket: Arc<TokenBucket>,
+    disk_write_download_throttle: DiskBackpressureDownloadThrottle,
 
     pub torrent_metric_watch_rxs: HashMap<Vec<u8>, watch::Receiver<TorrentMetrics>>,
     pub manager_event_tx: mpsc::Sender<ManagerEvent>,
@@ -1786,8 +2295,8 @@ impl App {
         .map_err(io::Error::other)?;
         let dht_status_rx = dht_service.subscribe_status();
 
-        let dl_limit = client_configs.global_download_limit_bps as f64;
-        let ul_limit = client_configs.global_upload_limit_bps as f64;
+        let dl_limit = configured_download_bucket_rate(client_configs.global_download_limit_bps);
+        let ul_limit = configured_upload_bucket_rate(client_configs.global_upload_limit_bps);
         let global_dl_bucket = Arc::new(TokenBucket::new(dl_limit, dl_limit));
         let global_ul_bucket = Arc::new(TokenBucket::new(ul_limit, ul_limit));
         let _ = crate::config::ensure_watch_directories(&client_configs);
@@ -1834,6 +2343,7 @@ impl App {
             event_journal_state: persisted_event_journal_state,
             lifetime_downloaded_from_config: client_configs.lifetime_downloaded,
             lifetime_uploaded_from_config: client_configs.lifetime_uploaded,
+            effective_download_limit_bps: client_configs.global_download_limit_bps,
             minute_disk_backoff_history_ms: VecDeque::with_capacity(24 * 60),
             max_disk_backoff_this_tick_ms: 0,
             last_tuning_score: tuning_state.last_tuning_score,
@@ -1872,6 +2382,9 @@ impl App {
             resource_manager: resource_manager_client,
             global_dl_bucket,
             global_ul_bucket,
+            disk_write_download_throttle: DiskBackpressureDownloadThrottle::new(
+                client_configs.global_download_limit_bps,
+            ),
             torrent_metric_watch_rxs: HashMap::new(),
             manager_event_tx,
             manager_event_rx,
@@ -2913,9 +3426,9 @@ impl App {
             self.flush_pending_watch_commands();
 
             let current_target_framerate = match self.app_state.mode {
-                AppMode::Welcome => Duration::from_millis(16), // Force 60 FPS for animation
-                AppMode::PowerSaving => Duration::from_secs(1), // Force 1 FPS for Zen mode
-                _ => Duration::from_millis(self.app_state.data_rate.as_ms()), // User-defined FPS
+                AppMode::Welcome => DataRate::Rate60s.frame_interval(), // Force 60 FPS for animation
+                AppMode::PowerSaving => Duration::from_secs(1),         // Force 1 FPS for Zen mode
+                _ => self.app_state.data_rate.frame_interval(),         // User-defined FPS
             };
             let next_tuning_at = self.next_tuning_at;
             let next_paste_flush_at = self.app_state.ui.normal_paste_burst.next_deadline();
@@ -3017,10 +3530,32 @@ impl App {
                 }
 
                 _ = time::sleep_until(next_draw_time.into()) => {
-                    next_draw_time = Instant::now() + current_target_framerate;
+                    let frame_started_at = Instant::now();
+                    Self::advance_next_draw_time(
+                        &mut next_draw_time,
+                        frame_started_at,
+                        current_target_framerate,
+                    );
                     self.drain_latest_torrent_metrics();
                     self.sync_dht_peer_slot_usage();
-                    if Self::should_draw_this_frame(&self.app_state.mode, self.app_state.ui.needs_redraw) {
+                    let normal_animation_active = if matches!(self.app_state.mode, AppMode::Normal)
+                    {
+                        let dht_wave_telemetry = self.dht_service.current_wave_telemetry();
+                        Self::normal_mode_animation_active(
+                            &self.app_state,
+                            Some(&dht_wave_telemetry),
+                            frame_started_at,
+                        )
+                    } else {
+                        false
+                    };
+                    let should_draw = Self::should_draw_this_frame(
+                        &self.app_state.mode,
+                        self.app_state.ui.needs_redraw,
+                        normal_animation_active,
+                    );
+                    if should_draw {
+                        self.app_state.ui.record_drawn_frame(frame_started_at);
                         self.tick_ui_effects_clock();
                         let dht_status = self.dht_service.current_status();
                         let dht_wave_telemetry = self.dht_service.current_wave_telemetry();
@@ -3034,6 +3569,9 @@ impl App {
                             );
                         })?;
                         self.app_state.ui.needs_redraw = false;
+                    } else if matches!(self.app_state.mode, AppMode::Normal) {
+                        next_draw_time = frame_started_at
+                            + Self::normal_idle_frame_check_interval(current_target_framerate);
                     }
                 }
                 _ = version_interval.tick() => {
@@ -3071,11 +3609,166 @@ impl App {
         Ok(())
     }
 
-    fn should_draw_this_frame(mode: &AppMode, ui_needs_redraw: bool) -> bool {
-        if matches!(mode, AppMode::PowerSaving) {
-            ui_needs_redraw
-        } else {
-            true
+    fn should_draw_this_frame(
+        mode: &AppMode,
+        ui_needs_redraw: bool,
+        normal_animation_active: bool,
+    ) -> bool {
+        match mode {
+            AppMode::PowerSaving => ui_needs_redraw,
+            AppMode::Normal => ui_needs_redraw || normal_animation_active,
+            _ => true,
+        }
+    }
+
+    fn normal_mode_animation_active(
+        app_state: &AppState,
+        dht_wave_telemetry: Option<&DhtWaveTelemetry>,
+        now: Instant,
+    ) -> bool {
+        if app_state.theme.effects.enabled() {
+            return true;
+        }
+
+        if Self::disk_health_has_current_signal(app_state) {
+            return true;
+        }
+
+        if Self::dht_wave_animation_active(&app_state.ui.dht_wave, dht_wave_telemetry) {
+            return true;
+        }
+
+        if app_state.ui.swarm_availability_flash.has_active_flash(now) {
+            return true;
+        }
+
+        app_state
+            .torrent_list_order
+            .get(app_state.ui.selected_torrent_index)
+            .and_then(|info_hash| app_state.torrents.get(info_hash))
+            .is_some_and(|torrent| Self::selected_torrent_animation_active(torrent, now))
+    }
+
+    fn disk_health_has_current_signal(app_state: &AppState) -> bool {
+        app_state.avg_disk_read_bps > 0
+            || app_state.avg_disk_write_bps > 0
+            || app_state.read_iops > 0
+            || app_state.write_iops > 0
+            || app_state.max_disk_backoff_this_tick_ms > 0
+    }
+
+    fn disk_health_phase_speed(app_state: &AppState) -> f64 {
+        let download_bps = app_state.avg_download_history.last().copied().unwrap_or(0) as f64;
+        let upload_bps = app_state.avg_upload_history.last().copied().unwrap_or(0) as f64;
+        let total_bps = download_bps + upload_bps;
+
+        if total_bps <= 0.0 {
+            return DISK_IDLE_WOBBLE_PHASE_SPEED;
+        }
+
+        let transfer_signal = (total_bps / 50_000_000.0).clamp(0.0, 1.0).sqrt();
+        let balance = ((download_bps - upload_bps) / total_bps).clamp(-1.0, 1.0);
+        let direction = if balance < -0.05 { -1.0 } else { 1.0 };
+        let dominance = balance.abs();
+        let disk_pressure = app_state
+            .disk_health_ema
+            .max(app_state.disk_health_peak_hold)
+            .clamp(0.0, 1.0);
+        let speed = (DISK_MIN_TRANSFER_PHASE_SPEED
+            + 1.60 * transfer_signal
+            + 1.40 * dominance
+            + 1.40 * disk_pressure)
+            .min(DISK_MAX_TRANSFER_PHASE_SPEED);
+
+        direction * speed
+    }
+
+    fn dht_wave_animation_active(
+        wave: &DhtWaveUiState,
+        telemetry: Option<&DhtWaveTelemetry>,
+    ) -> bool {
+        if telemetry.is_some_and(|telemetry| {
+            telemetry.active_lookups > 0
+                || telemetry.active_user_lookups > 0
+                || telemetry.inflight_ipv4_queries > 0
+                || telemetry.inflight_ipv6_queries > 0
+                || telemetry.unique_peers_found_last_10s > 0
+        }) {
+            return true;
+        }
+
+        wave.query_load > 0.01
+            || wave.discovery_boost > 0.01
+            || wave.query_surge > 0.01
+            || (wave.phase_speed > 0.05
+                && (wave.amplitude > 0.02 || wave.harmonic_amplitude > 0.01))
+    }
+
+    fn selected_torrent_animation_active(torrent: &TorrentDisplayState, now: Instant) -> bool {
+        if torrent.smoothed_download_speed_bps > 0
+            || torrent.smoothed_upload_speed_bps > 0
+            || torrent.disk_read_speed_bps > 0
+            || torrent.disk_write_speed_bps > 0
+            || torrent.peers_discovered_this_tick > 0
+            || torrent.peers_connected_this_tick > 0
+            || torrent.peers_disconnected_this_tick > 0
+        {
+            return true;
+        }
+
+        let metrics = &torrent.latest_state;
+        if metrics.blocks_in_this_tick > 0
+            || metrics.blocks_out_this_tick > 0
+            || metrics
+                .blocks_in_history
+                .iter()
+                .rev()
+                .take(NORMAL_ANIMATION_RECENT_BLOCK_ROWS)
+                .any(|&blocks| blocks > 0)
+            || metrics
+                .blocks_out_history
+                .iter()
+                .rev()
+                .take(NORMAL_ANIMATION_RECENT_BLOCK_ROWS)
+                .any(|&blocks| blocks > 0)
+        {
+            return true;
+        }
+
+        if torrent
+            .peer_discovery_history
+            .iter()
+            .chain(torrent.peer_connection_history.iter())
+            .chain(torrent.peer_disconnect_history.iter())
+            .rev()
+            .take(NORMAL_ANIMATION_RECENT_PEER_EVENTS)
+            .any(|&events| events > 0)
+        {
+            return true;
+        }
+
+        torrent.recent_file_activity.values().any(|activity| {
+            [activity.download_at, activity.upload_at]
+                .into_iter()
+                .flatten()
+                .any(|seen_at| {
+                    now.saturating_duration_since(seen_at) <= NORMAL_ANIMATION_FILE_ACTIVITY_WINDOW
+                })
+        })
+    }
+
+    fn normal_idle_frame_check_interval(target_frame_interval: Duration) -> Duration {
+        target_frame_interval.max(NORMAL_IDLE_FRAME_CHECK_INTERVAL)
+    }
+
+    fn advance_next_draw_time(
+        next_draw_time: &mut Instant,
+        frame_started_at: Instant,
+        target_frame_interval: Duration,
+    ) {
+        *next_draw_time += target_frame_interval;
+        while *next_draw_time <= frame_started_at {
+            *next_draw_time += target_frame_interval;
         }
     }
 
@@ -3142,16 +3835,52 @@ impl App {
             .unwrap_or_else(|| file_activity_wave_steps_per_second(0));
         self.app_state.ui.file_activity_download_phase += frame_dt * download_steps_per_second;
         self.app_state.ui.file_activity_upload_phase += frame_dt * upload_steps_per_second;
+        self.update_swarm_availability_flash(now);
 
-        let disk_activity = self
-            .app_state
-            .disk_health_ema
-            .max(self.app_state.disk_health_peak_hold)
-            .clamp(0.0, 1.0);
-        let disk_phase_speed = 1.6 + 5.0 * disk_activity;
+        let disk_phase_speed = Self::disk_health_phase_speed(&self.app_state);
         self.app_state.disk_health_phase = (self.app_state.disk_health_phase
             + frame_dt * disk_phase_speed)
             .rem_euclid(std::f64::consts::TAU);
+    }
+
+    fn update_swarm_availability_flash(&mut self, now: Instant) {
+        let selected = self
+            .app_state
+            .torrent_list_order
+            .get(self.app_state.ui.selected_torrent_index)
+            .and_then(|info_hash| {
+                self.app_state.torrents.get(info_hash).map(|torrent| {
+                    let current_availability = swarm_availability_counts(
+                        &torrent.latest_state.peers,
+                        torrent.latest_state.number_of_pieces_total,
+                    );
+                    let current_peer_bitfields = swarm_availability_peer_bitfields(
+                        &torrent.latest_state.peers,
+                        current_availability.len(),
+                    );
+                    (
+                        info_hash.clone(),
+                        current_availability,
+                        current_peer_bitfields,
+                    )
+                })
+            });
+
+        let Some((info_hash, current_availability, current_peer_bitfields)) = selected else {
+            self.app_state.ui.swarm_availability_flash = SwarmAvailabilityFlashState::default();
+            return;
+        };
+
+        self.app_state
+            .ui
+            .swarm_availability_flash
+            .update_from_peer_availability(
+                &info_hash,
+                current_availability,
+                current_peer_bitfields,
+                now,
+                SWARM_AVAILABILITY_FLASH_DURATION,
+            );
     }
 
     fn refresh_system_warning(&mut self) {
@@ -3644,12 +4373,19 @@ impl App {
         }
 
         if new_settings.global_download_limit_bps != old_settings.global_download_limit_bps {
+            self.disk_write_download_throttle
+                .reset(new_settings.global_download_limit_bps);
+            self.app_state.effective_download_limit_bps = new_settings.global_download_limit_bps;
             self.global_dl_bucket
-                .set_rate(new_settings.global_download_limit_bps as f64);
+                .set_rate(configured_download_bucket_rate(
+                    new_settings.global_download_limit_bps,
+                ));
         }
         if new_settings.global_upload_limit_bps != old_settings.global_upload_limit_bps {
             self.global_ul_bucket
-                .set_rate(new_settings.global_upload_limit_bps as f64);
+                .set_rate(configured_upload_bucket_rate(
+                    new_settings.global_upload_limit_bps,
+                ));
         }
 
         if self.status_dump_interval_override_secs.is_none() {
@@ -4347,13 +5083,19 @@ impl App {
             ManagerEvent::DiskReadStarted { .. }
             | ManagerEvent::DiskReadFinished
             | ManagerEvent::DiskWriteStarted { .. }
-            | ManagerEvent::DiskWriteFinished
+            | ManagerEvent::DiskWriteCompleted { .. }
+            | ManagerEvent::DiskWriteFinished { .. }
             | ManagerEvent::DiskIoBackoff { .. }
             | ManagerEvent::PeerDiscovered { .. }
             | ManagerEvent::PeerConnected { .. }
             | ManagerEvent::PeerDisconnected { .. }
             | ManagerEvent::BlockReceived { .. }
             | ManagerEvent::BlockSent { .. } => {}
+            #[cfg(feature = "synthetic-load")]
+            ManagerEvent::PeerConnectAttempted
+            | ManagerEvent::PeerConnectEstablished
+            | ManagerEvent::PeerConnectFailed { .. }
+            | ManagerEvent::PeerSessionFailed => {}
         }
     }
 
@@ -4463,6 +5205,7 @@ impl App {
         let previous_torrent_sort = self.app_state.torrent_sort;
         let previous_peer_sort = self.app_state.peer_sort;
         UiTelemetry::on_second_tick(&mut self.app_state, sys);
+        self.update_disk_backpressure_download_throttle();
         align_unpinned_sort_with_visible_activity(&mut self.app_state);
         if refresh_autosort_after_stats(
             &mut self.app_state,
@@ -4498,6 +5241,46 @@ impl App {
         );
         self.sync_tuning_state_from_controller();
         ActivityHistoryTelemetry::on_second_tick(&mut self.app_state);
+    }
+
+    fn update_disk_backpressure_download_throttle(&mut self) {
+        let sample = DiskBackpressureSample {
+            is_leeching: !self.app_state.is_seeding,
+            configured_download_limit_bps: self.client_configs.global_download_limit_bps,
+            download_bps: self
+                .app_state
+                .avg_download_history
+                .last()
+                .copied()
+                .unwrap_or(0),
+            disk_write_completed_bps: self.app_state.avg_disk_write_completed_bps,
+            recv_to_write_p95: self.app_state.recv_to_write_p95,
+        };
+
+        match self.disk_write_download_throttle.update(sample) {
+            DiskBackpressureDecision::Disabled => {
+                self.app_state.effective_download_limit_bps = effective_download_limit_bps(
+                    self.client_configs.global_download_limit_bps,
+                    None,
+                );
+                self.global_dl_bucket
+                    .set_rate_preserving_tokens(configured_download_bucket_rate(
+                        self.client_configs.global_download_limit_bps,
+                    ));
+            }
+            DiskBackpressureDecision::Limited {
+                rate_bytes_per_sec,
+                capacity_bytes,
+            } => {
+                let adaptive_limit_bps = bytes_per_sec_to_bps(rate_bytes_per_sec);
+                self.app_state.effective_download_limit_bps = effective_download_limit_bps(
+                    self.client_configs.global_download_limit_bps,
+                    Some(adaptive_limit_bps),
+                );
+                self.global_dl_bucket
+                    .set_rate_with_capacity_preserving_tokens(rate_bytes_per_sec, capacity_bytes);
+            }
+        }
     }
 
     fn startup_network_history_restore(&mut self) {
@@ -5350,10 +6133,9 @@ impl App {
     }
 
     fn is_host_watch_path(&self, path: &Path) -> bool {
-        let Some(host_watch) = resolve_host_watch_path(&self.client_configs) else {
-            return false;
-        };
-        watched_parent_matches(path, &host_watch)
+        host_watch_paths(&self.client_configs)
+            .iter()
+            .any(|host_watch| watched_parent_matches(path, host_watch))
     }
 
     fn is_shared_inbox_path(&self, path: &Path) -> bool {
@@ -7010,19 +7792,27 @@ mod tests {
     use super::{
         advance_dht_wave_state, align_unpinned_sort_with_visible_activity,
         apply_network_history_persist_result, build_persist_payload, build_torrent_preview_tree,
-        clamp_selected_indices_in_state, compose_system_warning, dht_wave_targets,
-        extract_magnet_display_name, flush_persistence_writer_parts, format_filesystem_path_error,
+        bytes_per_sec_to_bps, clamp_selected_indices_in_state, compose_system_warning,
+        configured_download_bucket_rate, configured_download_ceiling_bytes_per_sec,
+        configured_upload_bucket_rate, dht_wave_targets, disk_backpressure_score,
+        effective_download_limit_bps, extract_magnet_display_name, flush_persistence_writer_parts,
+        format_filesystem_path_error, initial_disk_throttle_rate,
         is_valid_incoming_bittorrent_handshake, move_file_with_fallback_impl, parse_hybrid_hashes,
         persisted_validation_status_from_metrics, prune_rss_feed_errors, queue_persistence_payload,
         refresh_autosort_after_stats, resolve_magnet_torrent_name, rss_settings_changed,
         should_load_persisted_torrent, should_persist_network_history_on_interval,
-        sort_and_filter_torrent_list_state, torrent_completion_percent,
+        sort_and_filter_torrent_list_state, swarm_availability_counts, torrent_completion_percent,
         torrent_is_effectively_incomplete, App, AppClusterRole, AppCommand, AppMode,
-        AppRuntimeMode, AppState, ColumnId, CommandIngestResult, DhtWaveTargets, DhtWaveUiState,
-        FilePriority, IngestSource, ListenerSet, PeerInfo, PeerSortColumn, PersistPayload,
-        SelectedHeader, SortDirection, TorrentControlState, TorrentDisplayState, TorrentMetrics,
-        TorrentPreviewPayload, TorrentSortColumn, UiState, BITTORRENT_PROTOCOL_STR,
-        DHT_WAVE_PHASE_WRAP_PERIOD,
+        AppRuntimeMode, AppState, ColumnId, CommandIngestResult, DataRate, DhtWaveTargets,
+        DhtWaveUiState, DiskBackpressureDecision, DiskBackpressureDownloadThrottle,
+        DiskBackpressureSample, FilePriority, IngestSource, ListenerSet, PeerInfo, PeerSortColumn,
+        PersistPayload, SelectedHeader, SortDirection, SwarmAvailabilityFlashState,
+        TorrentControlState, TorrentDisplayState, TorrentMetrics, TorrentPreviewPayload,
+        TorrentSortColumn, UiState, BITTORRENT_PROTOCOL_STR, DHT_WAVE_PHASE_WRAP_PERIOD,
+        DISK_WRITE_THROTTLE_MIN_BYTES_PER_SEC, DISK_WRITE_THROTTLE_START_BYTES_PER_SEC,
+        DISK_WRITE_THROTTLE_STEP_MAX, DISK_WRITE_THROTTLE_STEP_MIN,
+        DISK_WRITE_THROTTLE_TARGET_LATENCY_SECS, DISK_WRITE_THROTTLE_WINDOW_TICKS,
+        SWARM_AVAILABILITY_FLASH_DURATION,
     };
     use crate::config::{
         clear_shared_config_state_for_tests, set_app_paths_override_for_tests, TorrentSettings,
@@ -7046,7 +7836,7 @@ mod tests {
     use std::io;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::PathBuf;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio::sync::watch;
@@ -7072,6 +7862,388 @@ mod tests {
         shared_env_guard()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn disk_backpressure_sample(
+        download_bps: u64,
+        disk_write_completed_bps: u64,
+    ) -> DiskBackpressureSample {
+        DiskBackpressureSample {
+            is_leeching: true,
+            configured_download_limit_bps: 0,
+            download_bps,
+            disk_write_completed_bps,
+            recv_to_write_p95: Duration::from_secs(1),
+        }
+    }
+
+    fn set_disk_throttle_rate(throttle: &mut DiskBackpressureDownloadThrottle, rate_bps: u64) {
+        let rate_bytes_per_sec = rate_bps as f64 / 8.0;
+        throttle.active = true;
+        throttle.rate_bytes_per_sec = rate_bytes_per_sec;
+        throttle.accepted_rate_bytes_per_sec = rate_bytes_per_sec;
+        throttle.last_score = None;
+        throttle.window_score_total = 0.0;
+        throttle.window_ticks = 0;
+    }
+
+    fn completed_bps_for_cap(rate_bytes_per_sec: f64, disk_capacity_bps: u64) -> u64 {
+        bytes_per_sec_to_bps(rate_bytes_per_sec).min(disk_capacity_bps)
+    }
+
+    fn run_disk_throttle_window(
+        throttle: &mut DiskBackpressureDownloadThrottle,
+        disk_capacity_bps: u64,
+        step_factor: f64,
+    ) {
+        let completed_bps = completed_bps_for_cap(throttle.rate_bytes_per_sec, disk_capacity_bps);
+        let download_bps = bytes_per_sec_to_bps(throttle.rate_bytes_per_sec).max(1);
+        let sample = disk_backpressure_sample(download_bps, completed_bps);
+        for _ in 0..DISK_WRITE_THROTTLE_WINDOW_TICKS {
+            throttle.update_with_step_factor(sample, step_factor);
+        }
+    }
+
+    fn latency_limited_disk_sample(
+        rate_bytes_per_sec: f64,
+        disk_capacity_bps: u64,
+    ) -> DiskBackpressureSample {
+        let attempted_bps = bytes_per_sec_to_bps(rate_bytes_per_sec).max(1);
+        let completed_bps = attempted_bps.min(disk_capacity_bps);
+        let latency_seconds = if attempted_bps <= disk_capacity_bps {
+            DISK_WRITE_THROTTLE_TARGET_LATENCY_SECS
+        } else {
+            DISK_WRITE_THROTTLE_TARGET_LATENCY_SECS * attempted_bps as f64
+                / disk_capacity_bps as f64
+        };
+
+        DiskBackpressureSample {
+            recv_to_write_p95: Duration::from_secs_f64(latency_seconds),
+            ..disk_backpressure_sample(attempted_bps, completed_bps)
+        }
+    }
+
+    fn run_latency_limited_disk_window(
+        throttle: &mut DiskBackpressureDownloadThrottle,
+        disk_capacity_bps: u64,
+        step_factor: f64,
+    ) {
+        let sample = latency_limited_disk_sample(throttle.rate_bytes_per_sec, disk_capacity_bps);
+        for _ in 0..DISK_WRITE_THROTTLE_WINDOW_TICKS {
+            throttle.update_with_step_factor(sample, step_factor);
+        }
+    }
+
+    #[test]
+    fn disk_backpressure_hill_climber_converges_up_from_low_cap() {
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        set_disk_throttle_rate(&mut throttle, 100_000_000);
+
+        for _ in 0..8 {
+            run_disk_throttle_window(&mut throttle, 1_000_000_000, DISK_WRITE_THROTTLE_STEP_MAX);
+        }
+
+        assert!(bytes_per_sec_to_bps(throttle.accepted_rate_bytes_per_sec) > 300_000_000);
+        assert!(throttle.last_score.unwrap_or_default() > 250_000_000.0);
+    }
+
+    #[test]
+    fn disk_backpressure_hill_climber_converges_down_from_high_cap() {
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        set_disk_throttle_rate(&mut throttle, 2_000_000_000);
+
+        for _ in 0..8 {
+            run_disk_throttle_window(&mut throttle, 500_000_000, DISK_WRITE_THROTTLE_STEP_MIN);
+        }
+
+        let accepted_bps = bytes_per_sec_to_bps(throttle.accepted_rate_bytes_per_sec);
+        assert!(accepted_bps >= 500_000_000);
+        assert!(accepted_bps <= 700_000_000);
+        assert_eq!(throttle.last_score, Some(500_000_000.0));
+    }
+
+    #[test]
+    fn disk_backpressure_hill_climber_rejects_candidate_that_lowers_completed_speed() {
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        set_disk_throttle_rate(&mut throttle, 600_000_000);
+
+        run_disk_throttle_window(&mut throttle, 500_000_000, DISK_WRITE_THROTTLE_STEP_MIN);
+        run_disk_throttle_window(&mut throttle, 500_000_000, DISK_WRITE_THROTTLE_STEP_MIN);
+
+        assert_eq!(
+            bytes_per_sec_to_bps(throttle.accepted_rate_bytes_per_sec),
+            600_000_000
+        );
+        assert_eq!(throttle.last_score, Some(500_000_000.0));
+    }
+
+    #[test]
+    fn disk_backpressure_hill_climber_converges_up_to_latency_limited_disk() {
+        let disk_capacity_bps = 500_000_000;
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        set_disk_throttle_rate(&mut throttle, 100_000_000);
+
+        let steps = [1.18, 0.93, 1.14, 1.09, 0.86, 1.20, 0.91, 1.11];
+        for step in steps.into_iter().cycle().take(80) {
+            run_latency_limited_disk_window(&mut throttle, disk_capacity_bps, step);
+        }
+
+        let accepted_bps = bytes_per_sec_to_bps(throttle.accepted_rate_bytes_per_sec);
+        let accepted_score = disk_backpressure_score(latency_limited_disk_sample(
+            throttle.accepted_rate_bytes_per_sec,
+            disk_capacity_bps,
+        ));
+
+        assert!(
+            (350_000_000..=650_000_000).contains(&accepted_bps),
+            "accepted_bps={accepted_bps}"
+        );
+        assert!(
+            accepted_score >= disk_capacity_bps as f64 * 0.90,
+            "accepted_score={accepted_score}"
+        );
+    }
+
+    #[test]
+    fn disk_backpressure_hill_climber_converges_down_to_latency_limited_disk() {
+        let disk_capacity_bps = 500_000_000;
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        set_disk_throttle_rate(&mut throttle, 2_000_000_000);
+
+        let steps = [0.82, 1.12, 0.88, 0.91, 1.19, 0.84, 1.08, 0.90];
+        for step in steps.into_iter().cycle().take(80) {
+            run_latency_limited_disk_window(&mut throttle, disk_capacity_bps, step);
+        }
+
+        let accepted_bps = bytes_per_sec_to_bps(throttle.accepted_rate_bytes_per_sec);
+        let accepted_score = disk_backpressure_score(latency_limited_disk_sample(
+            throttle.accepted_rate_bytes_per_sec,
+            disk_capacity_bps,
+        ));
+
+        assert!(
+            (350_000_000..=650_000_000).contains(&accepted_bps),
+            "accepted_bps={accepted_bps}"
+        );
+        assert!(
+            accepted_score >= disk_capacity_bps as f64 * 0.90,
+            "accepted_score={accepted_score}"
+        );
+    }
+
+    #[test]
+    fn disk_backpressure_hill_climber_converges_down_from_100mbps_to_30mbps_disk() {
+        let disk_capacity_bps = 30_000_000;
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        set_disk_throttle_rate(&mut throttle, 100_000_000);
+
+        let steps = [0.82, 1.14, 0.88, 0.91, 1.18, 0.84, 1.08, 0.90];
+        for step in steps.into_iter().cycle().take(120) {
+            run_latency_limited_disk_window(&mut throttle, disk_capacity_bps, step);
+        }
+
+        let accepted_bps = bytes_per_sec_to_bps(throttle.accepted_rate_bytes_per_sec);
+        let accepted_score = disk_backpressure_score(latency_limited_disk_sample(
+            throttle.accepted_rate_bytes_per_sec,
+            disk_capacity_bps,
+        ));
+
+        assert!(
+            (25_000_000..=40_000_000).contains(&accepted_bps),
+            "accepted_bps={accepted_bps}"
+        );
+        assert!(
+            accepted_score >= disk_capacity_bps as f64 * 0.85,
+            "accepted_score={accepted_score}"
+        );
+    }
+
+    #[test]
+    fn disk_backpressure_hill_climber_climbs_after_disk_capacity_recovers() {
+        let slow_disk_capacity_bps = 30_000_000;
+        let recovered_disk_capacity_bps = 120_000_000;
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        set_disk_throttle_rate(&mut throttle, 100_000_000);
+
+        let steps = [0.82, 1.14, 0.88, 0.91, 1.18, 0.84, 1.08, 0.90];
+        for step in steps.into_iter().cycle().take(120) {
+            run_latency_limited_disk_window(&mut throttle, slow_disk_capacity_bps, step);
+        }
+
+        let slow_accepted_bps = bytes_per_sec_to_bps(throttle.accepted_rate_bytes_per_sec);
+        assert!(
+            (25_000_000..=40_000_000).contains(&slow_accepted_bps),
+            "slow_accepted_bps={slow_accepted_bps}"
+        );
+
+        for step in steps.into_iter().cycle().take(120) {
+            run_latency_limited_disk_window(&mut throttle, recovered_disk_capacity_bps, step);
+        }
+
+        let recovered_accepted_bps = bytes_per_sec_to_bps(throttle.accepted_rate_bytes_per_sec);
+        let recovered_score = disk_backpressure_score(latency_limited_disk_sample(
+            throttle.accepted_rate_bytes_per_sec,
+            recovered_disk_capacity_bps,
+        ));
+
+        assert!(
+            (90_000_000..=150_000_000).contains(&recovered_accepted_bps),
+            "recovered_accepted_bps={recovered_accepted_bps}"
+        );
+        assert!(
+            recovered_score >= recovered_disk_capacity_bps as f64 * 0.90,
+            "recovered_score={recovered_score}"
+        );
+    }
+
+    #[test]
+    fn disk_backpressure_score_penalizes_only_above_target_receive_to_write_latency() {
+        let fast = DiskBackpressureSample {
+            recv_to_write_p95: Duration::from_millis(500),
+            ..disk_backpressure_sample(1_000_000_000, 1_000_000_000)
+        };
+        let target = DiskBackpressureSample {
+            recv_to_write_p95: Duration::from_secs(2),
+            ..disk_backpressure_sample(1_000_000_000, 1_000_000_000)
+        };
+        let slow = DiskBackpressureSample {
+            recv_to_write_p95: Duration::from_secs(4),
+            ..disk_backpressure_sample(1_000_000_000, 1_000_000_000)
+        };
+
+        assert_eq!(disk_backpressure_score(fast), 1_000_000_000.0);
+        assert_eq!(disk_backpressure_score(target), 1_000_000_000.0);
+        assert_eq!(disk_backpressure_score(slow), 500_000_000.0);
+    }
+
+    #[test]
+    fn disk_backpressure_throttle_waits_for_disk_write_signal() {
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        let mut sample = disk_backpressure_sample(100_000_000, 0);
+        sample.recv_to_write_p95 = Duration::ZERO;
+
+        for _ in 0..DISK_WRITE_THROTTLE_WINDOW_TICKS {
+            assert_eq!(
+                throttle.update_with_step_factor(sample, DISK_WRITE_THROTTLE_STEP_MIN),
+                DiskBackpressureDecision::Disabled
+            );
+        }
+
+        assert!(!throttle.active);
+        assert_eq!(throttle.window_ticks, 0);
+        assert_eq!(throttle.last_score, None);
+    }
+
+    #[test]
+    fn disk_backpressure_throttle_disables_when_signal_disappears() {
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        set_disk_throttle_rate(&mut throttle, 30_000_000);
+
+        let mut sample = disk_backpressure_sample(100_000_000, 0);
+        sample.recv_to_write_p95 = Duration::ZERO;
+
+        assert_eq!(
+            throttle.update_with_step_factor(sample, DISK_WRITE_THROTTLE_STEP_MIN),
+            DiskBackpressureDecision::Disabled
+        );
+        assert!(!throttle.active);
+        assert_eq!(
+            throttle.rate_bytes_per_sec,
+            initial_disk_throttle_rate(sample.configured_download_limit_bps)
+        );
+        assert_eq!(throttle.window_ticks, 0);
+        assert_eq!(throttle.last_score, None);
+    }
+
+    #[test]
+    fn configured_rate_limit_buckets_use_bytes_per_second() {
+        assert_eq!(configured_download_bucket_rate(8_000), 1_000.0);
+        assert_eq!(configured_upload_bucket_rate(16_000), 2_000.0);
+        assert_eq!(configured_download_bucket_rate(0), 0.0);
+        assert_eq!(configured_upload_bucket_rate(0), 0.0);
+        assert!(configured_download_ceiling_bytes_per_sec(0).is_infinite());
+    }
+
+    #[test]
+    fn disk_backpressure_throttle_clamps_to_one_mbps_floor() {
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        set_disk_throttle_rate(&mut throttle, 1_100_000);
+
+        run_disk_throttle_window(&mut throttle, 10_000_000, DISK_WRITE_THROTTLE_STEP_MIN);
+
+        assert_eq!(
+            throttle.rate_bytes_per_sec,
+            DISK_WRITE_THROTTLE_MIN_BYTES_PER_SEC
+        );
+    }
+
+    #[test]
+    fn disk_backpressure_throttle_disables_when_seeding() {
+        let mut throttle = DiskBackpressureDownloadThrottle::new(0);
+        let mut sample = disk_backpressure_sample(1_000_000_000, 100_000_000);
+        sample.is_leeching = false;
+        assert_eq!(throttle.update(sample), DiskBackpressureDecision::Disabled);
+    }
+
+    #[test]
+    fn effective_download_limit_uses_lower_configured_or_adaptive_limit() {
+        assert_eq!(effective_download_limit_bps(0, None), 0);
+        assert_eq!(effective_download_limit_bps(800_000_000, None), 800_000_000);
+        assert_eq!(
+            effective_download_limit_bps(0, Some(500_000_000)),
+            500_000_000
+        );
+        assert_eq!(
+            effective_download_limit_bps(800_000_000, Some(500_000_000)),
+            500_000_000
+        );
+        assert_eq!(
+            effective_download_limit_bps(300_000_000, Some(500_000_000)),
+            300_000_000
+        );
+    }
+
+    #[tokio::test]
+    async fn app_disk_backpressure_update_changes_live_download_bucket() {
+        let _guard = lock_shared_env();
+        let _temp_paths = configure_temp_app_paths_for_test();
+        let settings = crate::config::Settings {
+            client_port: 0,
+            global_download_limit_bps: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+
+        app.app_state.is_seeding = false;
+        app.app_state.avg_download_history.push(1_000_000_000);
+        app.app_state.avg_disk_write_bps = 1_000_000_000;
+        app.app_state.avg_disk_write_completed_bps = 400_000_000;
+        app.app_state.avg_disk_write_latency = Duration::from_millis(1);
+        app.app_state.recv_to_write_p95 = Duration::from_secs(1);
+
+        assert_eq!(app.global_dl_bucket.get_fill_rate(), 0.0);
+
+        for _ in 0..DISK_WRITE_THROTTLE_WINDOW_TICKS {
+            app.update_disk_backpressure_download_throttle();
+        }
+
+        let fill_rate = app.global_dl_bucket.get_fill_rate();
+        assert!(
+            fill_rate >= DISK_WRITE_THROTTLE_START_BYTES_PER_SEC * DISK_WRITE_THROTTLE_STEP_MIN
+        );
+        assert!(
+            fill_rate <= DISK_WRITE_THROTTLE_START_BYTES_PER_SEC * DISK_WRITE_THROTTLE_STEP_MAX
+        );
+        assert_eq!(app.global_dl_bucket.get_capacity(), fill_rate);
+        assert_eq!(
+            app.app_state.effective_download_limit_bps,
+            (fill_rate * 8.0).round() as u64
+        );
+
+        let _ = app.shutdown_tx.send(());
+        set_app_paths_override_for_tests(None);
     }
 
     fn configure_temp_app_paths_for_test() -> tempfile::TempDir {
@@ -7262,21 +8434,404 @@ mod tests {
     }
 
     #[test]
-    fn should_draw_every_frame_in_normal_mode() {
-        assert!(App::should_draw_this_frame(&AppMode::Normal, false));
-        assert!(App::should_draw_this_frame(&AppMode::Normal, true));
+    fn should_draw_normal_mode_when_dirty_or_animating() {
+        assert!(!App::should_draw_this_frame(&AppMode::Normal, false, false));
+        assert!(App::should_draw_this_frame(&AppMode::Normal, true, false));
+        assert!(App::should_draw_this_frame(&AppMode::Normal, false, true));
+    }
+
+    #[test]
+    fn swarm_availability_counts_pieces_across_peers() {
+        let peers = vec![
+            PeerInfo {
+                bitfield: vec![true, false, true],
+                ..Default::default()
+            },
+            PeerInfo {
+                bitfield: vec![false, true, true, true],
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(swarm_availability_counts(&peers, 3), vec![1, 1, 2]);
+    }
+
+    #[test]
+    fn swarm_availability_flash_tracks_newly_added_pieces() {
+        let now = Instant::now();
+        let duration = Duration::from_millis(350);
+        let mut state = SwarmAvailabilityFlashState::default();
+
+        state.update(b"torrent-a", vec![0, 1, 0], now, duration);
+
+        assert!(!state.is_piece_flashing(b"torrent-a", 1, now));
+        assert!(!state.has_active_flash(now));
+
+        let next = now + Duration::from_millis(10);
+        state.update(b"torrent-a", vec![1, 1, 2], next, duration);
+
+        assert!(state.is_piece_flashing(b"torrent-a", 0, next));
+        assert!(!state.is_piece_flashing(b"torrent-a", 1, next));
+        assert!(!state.is_piece_flashing(b"torrent-a", 2, next));
+        assert!(state.has_active_flash(next));
+        assert!(!state.is_piece_flashing(b"torrent-a", 0, next + duration));
+        assert!(state.is_piece_flashing(b"torrent-a", 2, next + duration));
+        assert!(!state.has_active_flash(next + duration * 2 + Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn swarm_availability_flash_rolls_batch_by_piece_index() {
+        let now = Instant::now();
+        let duration = Duration::from_millis(300);
+        let mut state = SwarmAvailabilityFlashState::default();
+
+        state.update(b"torrent-a", vec![0, 0, 0, 0], now, duration);
+
+        let next = now + Duration::from_millis(10);
+        state.update(b"torrent-a", vec![1, 1, 0, 1], next, duration);
+
+        assert!(state.is_piece_flashing(b"torrent-a", 0, next));
+        assert!(!state.is_piece_flashing(b"torrent-a", 1, next));
+        assert!(!state.is_piece_flashing(b"torrent-a", 3, next));
+
+        let second_start = next + Duration::from_millis(150);
+        assert!(state.is_piece_flashing(b"torrent-a", 1, second_start));
+        assert!(!state.is_piece_flashing(b"torrent-a", 3, second_start));
+
+        let third_start = next + duration;
+        assert!(!state.is_piece_flashing(b"torrent-a", 0, third_start));
+        assert!(state.is_piece_flashing(b"torrent-a", 3, third_start));
+    }
+
+    #[test]
+    fn swarm_availability_flash_suppresses_full_map_increase() {
+        let now = Instant::now();
+        let duration = Duration::from_millis(350);
+        let mut state = SwarmAvailabilityFlashState::default();
+
+        state.update(b"torrent-a", vec![0, 0, 0], now, duration);
+        state.update(
+            b"torrent-a",
+            vec![1, 1, 1],
+            now + Duration::from_millis(10),
+            duration,
+        );
+
+        assert!(!state.has_active_flash(now + Duration::from_millis(10)));
+        assert!(!state.is_piece_flashing(b"torrent-a", 0, now + Duration::from_millis(10)));
+        assert!(!state.is_piece_flashing(b"torrent-a", 1, now + Duration::from_millis(10)));
+        assert!(!state.is_piece_flashing(b"torrent-a", 2, now + Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn swarm_availability_flash_keeps_partial_increase_after_complete_baseline() {
+        let now = Instant::now();
+        let duration = Duration::from_millis(350);
+        let mut state = SwarmAvailabilityFlashState::default();
+
+        state.update(b"torrent-a", vec![4, 4, 4], now, duration);
+        state.update(
+            b"torrent-a",
+            vec![5, 4, 4],
+            now + Duration::from_millis(10),
+            duration,
+        );
+
+        assert!(state.is_piece_flashing(b"torrent-a", 0, now + Duration::from_millis(10)));
+        assert!(!state.is_piece_flashing(b"torrent-a", 1, now + Duration::from_millis(10)));
+        assert!(!state.is_piece_flashing(b"torrent-a", 2, now + Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn swarm_availability_flash_suppresses_new_peer_initial_bitfield() {
+        let now = Instant::now();
+        let duration = Duration::from_millis(350);
+        let mut state = SwarmAvailabilityFlashState::default();
+
+        state.update_from_peers(b"torrent-a", &[], 3, now, duration);
+
+        let peers = vec![PeerInfo {
+            address: "127.0.0.1:7001".to_string(),
+            bitfield: vec![true, false, true],
+            ..Default::default()
+        }];
+        let next = now + Duration::from_millis(10);
+        state.update_from_peers(b"torrent-a", &peers, 3, next, duration);
+
+        assert!(!state.has_active_flash(next));
+        assert!(!state.is_piece_flashing(b"torrent-a", 0, next));
+        assert!(!state.is_piece_flashing(b"torrent-a", 2, next));
+    }
+
+    #[test]
+    fn swarm_availability_flash_tracks_known_peer_new_piece() {
+        let now = Instant::now();
+        let duration = Duration::from_millis(350);
+        let mut state = SwarmAvailabilityFlashState::default();
+
+        let peers = vec![PeerInfo {
+            address: "127.0.0.1:7001".to_string(),
+            bitfield: vec![true, false, false],
+            ..Default::default()
+        }];
+        state.update_from_peers(b"torrent-a", &peers, 3, now, duration);
+
+        let peers = vec![PeerInfo {
+            address: "127.0.0.1:7001".to_string(),
+            bitfield: vec![true, true, false],
+            ..Default::default()
+        }];
+        let next = now + Duration::from_millis(10);
+        state.update_from_peers(b"torrent-a", &peers, 3, next, duration);
+
+        assert!(!state.is_piece_flashing(b"torrent-a", 0, next));
+        assert!(state.is_piece_flashing(b"torrent-a", 1, next));
+        assert!(!state.is_piece_flashing(b"torrent-a", 2, next));
+    }
+
+    #[test]
+    fn swarm_availability_flash_ignores_later_new_peer_bitfield() {
+        let now = Instant::now();
+        let duration = Duration::from_millis(350);
+        let mut state = SwarmAvailabilityFlashState::default();
+
+        let peers = vec![PeerInfo {
+            address: "127.0.0.1:7001".to_string(),
+            bitfield: vec![false, false, false],
+            ..Default::default()
+        }];
+        state.update_from_peers(b"torrent-a", &peers, 3, now, duration);
+
+        let peers = vec![
+            PeerInfo {
+                address: "127.0.0.1:7001".to_string(),
+                bitfield: vec![false, false, false],
+                ..Default::default()
+            },
+            PeerInfo {
+                address: "127.0.0.1:7002".to_string(),
+                bitfield: vec![true, true, false],
+                ..Default::default()
+            },
+        ];
+        let next = now + Duration::from_millis(10);
+        state.update_from_peers(b"torrent-a", &peers, 3, next, duration);
+
+        assert!(!state.has_active_flash(next));
     }
 
     #[test]
     fn should_draw_every_frame_in_welcome_mode() {
-        assert!(App::should_draw_this_frame(&AppMode::Welcome, false));
-        assert!(App::should_draw_this_frame(&AppMode::Welcome, true));
+        assert!(App::should_draw_this_frame(&AppMode::Welcome, false, false));
+        assert!(App::should_draw_this_frame(&AppMode::Welcome, true, false));
     }
 
     #[test]
     fn should_only_draw_dirty_in_power_saving_mode() {
-        assert!(!App::should_draw_this_frame(&AppMode::PowerSaving, false));
-        assert!(App::should_draw_this_frame(&AppMode::PowerSaving, true));
+        assert!(!App::should_draw_this_frame(
+            &AppMode::PowerSaving,
+            false,
+            true
+        ));
+        assert!(App::should_draw_this_frame(
+            &AppMode::PowerSaving,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn normal_animation_gate_is_idle_for_static_state() {
+        let app_state = AppState::default();
+
+        assert!(!App::normal_mode_animation_active(
+            &app_state,
+            None,
+            Instant::now()
+        ));
+    }
+
+    #[test]
+    fn normal_animation_gate_detects_active_swarm_availability_flash() {
+        let now = Instant::now();
+        let mut app_state = AppState::default();
+        app_state.ui.swarm_availability_flash.update(
+            b"torrent-a",
+            vec![0, 0],
+            now,
+            SWARM_AVAILABILITY_FLASH_DURATION,
+        );
+        app_state.ui.swarm_availability_flash.update(
+            b"torrent-a",
+            vec![1, 0],
+            now + Duration::from_millis(1),
+            SWARM_AVAILABILITY_FLASH_DURATION,
+        );
+
+        assert!(App::normal_mode_animation_active(
+            &app_state,
+            None,
+            now + Duration::from_millis(2)
+        ));
+    }
+
+    #[test]
+    fn normal_animation_gate_ignores_held_disk_health_when_disk_is_idle() {
+        let app_state = AppState {
+            disk_health_state_level: 1,
+            disk_health_ema: 0.55,
+            disk_health_peak_hold: 0.70,
+            ..Default::default()
+        };
+
+        assert!(!App::normal_mode_animation_active(
+            &app_state,
+            None,
+            Instant::now()
+        ));
+    }
+
+    #[test]
+    fn normal_animation_gate_detects_current_disk_activity() {
+        let app_state = AppState {
+            avg_disk_read_bps: 1,
+            ..Default::default()
+        };
+
+        assert!(App::normal_mode_animation_active(
+            &app_state,
+            None,
+            Instant::now()
+        ));
+    }
+
+    #[test]
+    fn disk_health_phase_speed_keeps_idle_wobble_without_transfers() {
+        let app_state = AppState::default();
+
+        assert_eq!(
+            App::disk_health_phase_speed(&app_state),
+            super::DISK_IDLE_WOBBLE_PHASE_SPEED
+        );
+    }
+
+    #[test]
+    fn disk_health_phase_speed_uses_download_upload_direction() {
+        let download_dominant = AppState {
+            avg_download_history: vec![90_000_000],
+            avg_upload_history: vec![10_000_000],
+            ..Default::default()
+        };
+        let upload_dominant = AppState {
+            avg_download_history: vec![10_000_000],
+            avg_upload_history: vec![90_000_000],
+            ..Default::default()
+        };
+
+        assert!(App::disk_health_phase_speed(&download_dominant) > 0.0);
+        assert!(App::disk_health_phase_speed(&upload_dominant) < 0.0);
+    }
+
+    #[test]
+    fn disk_health_phase_speed_increases_with_pressure() {
+        let calm = AppState {
+            avg_download_history: vec![40_000_000],
+            avg_upload_history: vec![0],
+            disk_health_ema: 0.0,
+            disk_health_peak_hold: 0.0,
+            ..Default::default()
+        };
+        let pressured = AppState {
+            avg_download_history: vec![40_000_000],
+            avg_upload_history: vec![0],
+            disk_health_ema: 0.8,
+            disk_health_peak_hold: 0.0,
+            ..Default::default()
+        };
+
+        assert!(App::disk_health_phase_speed(&pressured) > App::disk_health_phase_speed(&calm));
+    }
+
+    #[test]
+    fn normal_animation_gate_detects_selected_torrent_activity() {
+        let mut app_state = AppState::default();
+        let info_hash = b"active_hash".to_vec();
+        let mut torrent = TorrentDisplayState::default();
+        torrent.latest_state.blocks_in_history = vec![0, 0, 1];
+        app_state.torrents.insert(info_hash.clone(), torrent);
+        app_state.torrent_list_order.push(info_hash);
+
+        assert!(App::normal_mode_animation_active(
+            &app_state,
+            None,
+            Instant::now()
+        ));
+    }
+
+    #[test]
+    fn normal_animation_gate_detects_dht_query_activity() {
+        let app_state = AppState::default();
+        let telemetry = DhtWaveTelemetry {
+            inflight_ipv4_queries: 1,
+            ..Default::default()
+        };
+
+        assert!(App::normal_mode_animation_active(
+            &app_state,
+            Some(&telemetry),
+            Instant::now()
+        ));
+    }
+
+    #[test]
+    fn normal_idle_check_uses_light_polling_cadence_for_fast_targets() {
+        assert_eq!(
+            App::normal_idle_frame_check_interval(DataRate::Rate60s.frame_interval()),
+            super::NORMAL_IDLE_FRAME_CHECK_INTERVAL
+        );
+    }
+
+    #[test]
+    fn normal_idle_check_preserves_slower_targets() {
+        assert_eq!(
+            App::normal_idle_frame_check_interval(DataRate::Rate1s.frame_interval()),
+            DataRate::Rate1s.frame_interval()
+        );
+    }
+
+    #[test]
+    fn data_rate_sixty_uses_precise_frame_interval() {
+        assert!(
+            (DataRate::Rate60s.frame_interval().as_secs_f64() - (1.0 / 60.0)).abs() < 0.000_001
+        );
+    }
+
+    #[test]
+    fn draw_scheduler_recovers_from_late_timer_wakeups() {
+        let start = Instant::now();
+        let interval = DataRate::Rate60s.frame_interval();
+        let mut next_draw_time = start;
+
+        App::advance_next_draw_time(
+            &mut next_draw_time,
+            start + Duration::from_millis(2),
+            interval,
+        );
+
+        assert!(next_draw_time < start + interval + Duration::from_millis(1));
+    }
+
+    #[test]
+    fn ui_fps_counter_measures_drawn_frames_per_second() {
+        let mut ui = UiState::default();
+        let start = Instant::now();
+
+        ui.record_drawn_frame(start);
+        for frame in 1..=44 {
+            ui.record_drawn_frame(start + Duration::from_secs_f64(frame as f64 / 44.0));
+        }
+
+        assert_eq!(ui.measured_fps, Some(44.0));
     }
 
     fn test_dht_wave_targets(

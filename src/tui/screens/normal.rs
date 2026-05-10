@@ -4,6 +4,7 @@
 use crate::app::align_unpinned_sort_with_visible_activity;
 use crate::app::file_activity_wave_steps_per_second;
 use crate::app::sort_and_filter_torrent_list_state;
+use crate::app::swarm_availability_counts;
 use crate::app::torrent_completion_percent;
 use crate::app::torrent_is_effectively_incomplete;
 use crate::app::AppCommand;
@@ -13,6 +14,7 @@ use crate::app::FileBrowserMode;
 use crate::app::FilePriority;
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
+use crate::app::SwarmAvailabilityFlashState;
 use crate::app::{
     App, AppMode, AppState, ConfigItem, RssScreen, SelectedHeader, TorrentControlState,
     TorrentDisplayState,
@@ -44,7 +46,7 @@ use crate::tui::screen_context::ScreenContext;
 use crate::tui::tree::{TreeFilter, TreeMathHelper, TreeViewState};
 use chrono::{DateTime, Utc};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -74,6 +76,15 @@ const FOOTER_STATUS_GUTTER: u16 = 2;
 const ASCII_TREE_DIR_ICON: &str = "> ";
 const ASCII_TREE_FILE_ICON: &str = "  ";
 const FILE_ACTIVITY_HIGHLIGHT_WINDOW: Duration = Duration::from_millis(1800);
+const MIN_SWARM_AVAILABILITY_HEIGHT: u16 = 1;
+const FILES_SWARM_SPACER_HEIGHT: u16 = 1;
+const SATURATED_ACTIVE_PEER_FILE_ROWS: u16 = 5;
+const MIN_SATURATED_ACTIVE_PEER_TABLE_HEIGHT: u16 = 7;
+const MAX_INACTIVE_ONLY_PEERS_IN_TABLE: usize = 10;
+const DISK_HEALTH_ORB_SIZE_SCALE: f64 = 1.35;
+const DISK_HEALTH_ORB_CELL_Y_ASPECT: f64 = 2.0;
+const DISK_HEALTH_ORB_BRAILLE_BITS: [[u8; 2]; 4] =
+    [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
 
 fn build_time_aligned_window(
     points: &[NetworkHistoryPoint],
@@ -772,11 +783,7 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
     draw_torrent_list(f, app_state, plan.list, ctx);
     draw_footer(f, app_state, settings, plan.footer, ctx);
     draw_details_panel(f, app_state, plan.details, ctx);
-    if app_state.ui.show_torrent_files {
-        draw_torrent_files_panel(f, app_state, plan.peers, ctx);
-    } else {
-        draw_peers_table(f, app_state, plan.peers, ctx);
-    }
+    draw_peer_files_area(f, app_state, plan.peers, ctx);
 
     if let Some(r) = plan.chart {
         draw_network_chart(f, app_state, r, ctx);
@@ -796,6 +803,218 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>, plan: &LayoutPlan) {
     }
     if let Some(r) = plan.stats {
         draw_stats_panel(f, app_state, settings, r, ctx);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PeerFilesAreaLayout {
+    peer_table: Option<Rect>,
+    files: Rect,
+    swarm: Option<Rect>,
+    files_mode: TorrentFilesRenderMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TorrentFilesRenderMode {
+    Tree,
+    ActivitySorted,
+}
+
+#[derive(Clone, Copy)]
+struct SwarmHeatmapFlash<'a> {
+    info_hash: &'a [u8],
+    state: &'a SwarmAvailabilityFlashState,
+    now: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwarmHeatmapLevel {
+    Empty,
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwarmHeatmapFlashTone {
+    Regular,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PeerTableRow {
+    Peer(PeerInfo),
+    InactiveSummary { count: usize },
+}
+
+fn draw_peer_files_area(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
+    if app_state.ui.show_torrent_files {
+        draw_torrent_files_panel(f, app_state, area, ctx);
+        return;
+    }
+
+    let Some(layout) = torrent_peer_files_layout(app_state, area) else {
+        draw_peers_table(f, app_state, area, ctx);
+        return;
+    };
+
+    if let Some(peer_table) = layout.peer_table {
+        draw_peers_table_without_swarm(f, app_state, peer_table, ctx);
+    }
+    draw_torrent_files_panel_without_swarm(f, app_state, layout.files, ctx, layout.files_mode);
+
+    if let Some(swarm) = layout.swarm {
+        if let Some((info_hash, torrent)) = selected_torrent_entry(app_state) {
+            draw_swarm_heatmap(
+                f,
+                ctx,
+                &torrent.latest_state.peers,
+                torrent.latest_state.number_of_pieces_total,
+                swarm,
+                Some(swarm_heatmap_flash(app_state, info_hash)),
+            );
+        } else {
+            draw_swarm_heatmap(f, ctx, &[], 0, swarm, None);
+        }
+    }
+}
+
+fn torrent_peer_files_layout(app_state: &AppState, area: Rect) -> Option<PeerFilesAreaLayout> {
+    if area.height < 2 || area.width < 2 {
+        return None;
+    }
+
+    let torrent = selected_torrent(app_state)?;
+    let (sort_by, sort_direction) = app_state.peer_sort;
+    let peer_rows = displayed_peers_for_table(&torrent.latest_state, sort_by, sort_direction);
+    let peer_table_height = peer_table_height_for_row_count(peer_rows.len());
+
+    if area.height >= MIN_SWARM_AVAILABILITY_HEIGHT {
+        let max_files_height = area
+            .height
+            .saturating_sub(peer_table_height)
+            .saturating_sub(FILES_SWARM_SPACER_HEIGHT)
+            .saturating_sub(MIN_SWARM_AVAILABILITY_HEIGHT);
+        if let Some(files_height) = torrent_files_panel_height_needed(
+            torrent,
+            area.width,
+            app_state.anonymize_torrent_names,
+            max_files_height,
+        ) {
+            return Some(peer_files_layout_with_swarm(
+                area,
+                peer_table_height,
+                files_height,
+            ));
+        }
+    }
+
+    saturated_active_peer_files_layout(torrent, &peer_rows, peer_table_height, area)
+}
+
+fn peer_files_layout_with_swarm(
+    area: Rect,
+    peer_table_height: u16,
+    files_height: u16,
+) -> PeerFilesAreaLayout {
+    let mut y = area.y;
+    let peer_table = if peer_table_height > 0 {
+        let rect = Rect::new(area.x, y, area.width, peer_table_height);
+        y = y.saturating_add(peer_table_height);
+        Some(rect)
+    } else {
+        None
+    };
+
+    let files = Rect::new(area.x, y, area.width, files_height);
+    y = y.saturating_add(files_height);
+    y = y.saturating_add(FILES_SWARM_SPACER_HEIGHT);
+
+    let used_height = y.saturating_sub(area.y);
+    let swarm_height = area.height.saturating_sub(used_height);
+    let swarm = Rect::new(area.x, y, area.width, swarm_height);
+
+    PeerFilesAreaLayout {
+        peer_table,
+        files,
+        swarm: Some(swarm),
+        files_mode: TorrentFilesRenderMode::Tree,
+    }
+}
+
+fn saturated_active_peer_files_layout(
+    torrent: &TorrentDisplayState,
+    peer_rows: &[PeerTableRow],
+    peer_table_height: u16,
+    area: Rect,
+) -> Option<PeerFilesAreaLayout> {
+    if !peer_rows_are_all_active(peer_rows) {
+        return None;
+    }
+
+    let files_height = saturated_active_peer_files_height(torrent)?;
+    if area.height < MIN_SATURATED_ACTIVE_PEER_TABLE_HEIGHT.saturating_add(files_height) {
+        return None;
+    }
+
+    let peer_table_height_available = area.height.saturating_sub(files_height);
+    if peer_table_height <= peer_table_height_available {
+        return None;
+    }
+
+    let peer_table = Rect::new(area.x, area.y, area.width, peer_table_height_available);
+    let files = Rect::new(
+        area.x,
+        area.y.saturating_add(peer_table_height_available),
+        area.width,
+        files_height,
+    );
+
+    Some(PeerFilesAreaLayout {
+        peer_table: Some(peer_table),
+        files,
+        swarm: None,
+        files_mode: TorrentFilesRenderMode::ActivitySorted,
+    })
+}
+
+fn peer_rows_are_all_active(rows: &[PeerTableRow]) -> bool {
+    !rows.is_empty()
+        && rows.iter().all(|row| match row {
+            PeerTableRow::Peer(peer) => !peer_is_inactive_for_table(peer),
+            PeerTableRow::InactiveSummary { .. } => false,
+        })
+}
+
+fn saturated_active_peer_files_height(torrent: &TorrentDisplayState) -> Option<u16> {
+    let file_count = activity_sorted_file_count(torrent);
+    if file_count == 0 {
+        return None;
+    }
+
+    Some(usize_to_u16_saturating(file_count).min(SATURATED_ACTIVE_PEER_FILE_ROWS))
+}
+
+fn selected_torrent(app_state: &AppState) -> Option<&TorrentDisplayState> {
+    selected_torrent_entry(app_state).map(|(_, torrent)| torrent)
+}
+
+fn selected_torrent_entry(app_state: &AppState) -> Option<(&[u8], &TorrentDisplayState)> {
+    app_state
+        .torrent_list_order
+        .get(app_state.ui.selected_torrent_index)
+        .and_then(|info_hash| {
+            app_state
+                .torrents
+                .get(info_hash)
+                .map(|torrent| (info_hash.as_slice(), torrent))
+        })
+}
+
+fn swarm_heatmap_flash<'a>(app_state: &'a AppState, info_hash: &'a [u8]) -> SwarmHeatmapFlash<'a> {
+    SwarmHeatmapFlash {
+        info_hash,
+        state: &app_state.ui.swarm_availability_flash,
+        now: Instant::now(),
     }
 }
 
@@ -1241,8 +1460,46 @@ pub(crate) fn compute_footer_status_width(client_port: u16, overall_port_status:
         + FOOTER_STATUS_GUTTER
 }
 
+fn format_measured_fps(fps: f64) -> String {
+    let fps = fps.max(0.0);
+    let precision = if fps >= 10.0 {
+        0
+    } else if fps >= 1.0 {
+        1
+    } else {
+        2
+    };
+
+    let mut label = match precision {
+        0 => format!("{fps:.0}"),
+        1 => format!("{fps:.1}"),
+        _ => format!("{fps:.2}"),
+    };
+    if label.contains('.') {
+        while label.ends_with('0') {
+            label.pop();
+        }
+        if label.ends_with('.') {
+            label.pop();
+        }
+    }
+    label
+}
+
 pub(crate) fn footer_fps_label(app_state: &AppState) -> String {
-    format!("{} fps", app_state.data_rate.fps_label())
+    let target_fps = app_state.data_rate.target_fps();
+    let target_label = app_state.data_rate.fps_label();
+    match app_state.ui.measured_fps {
+        Some(measured_fps) if measured_fps.is_finite() => {
+            let measured_label = format_measured_fps(measured_fps);
+            if measured_fps >= target_fps || measured_label == target_label {
+                format!("{target_label} fps")
+            } else {
+                format!("{measured_label}/{target_label} fps")
+            }
+        }
+        _ => format!("{target_label} fps"),
+    }
 }
 
 fn estimate_footer_left_content_width(app_state: &AppState, ctx: &ThemeContext) -> u16 {
@@ -3028,7 +3285,7 @@ pub fn draw_stats_panel(
         .sum();
 
     let dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
-    let dl_limit = settings.global_download_limit_bps;
+    let dl_limit = app_state.effective_download_limit_bps;
 
     let mut dl_spans = vec![
         Span::styled(
@@ -3525,10 +3782,7 @@ pub fn draw_peer_stream(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
         return;
     }
 
-    let selected_torrent = app_state
-        .torrent_list_order
-        .get(app_state.ui.selected_torrent_index)
-        .and_then(|info_hash| app_state.torrents.get(info_hash));
+    let selected_torrent = selected_torrent(app_state);
 
     let color_discovered = ctx.peer_discovered();
     let color_connected = ctx.peer_connected();
@@ -3989,64 +4243,105 @@ fn compute_throughput_gap(app_state: &AppState) -> f64 {
     (net_total_bps.saturating_sub(disk_total_bps) as f64 / net_total_bps as f64).clamp(0.0, 1.0)
 }
 
-fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
-    if area.width < 2 || area.height < 2 {
-        return;
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DiskHealthOrbLayout {
+    area: Rect,
+    visual_radius: f64,
+    center_y_offset_rows: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DiskHealthOrbGeometry {
+    visual_width: f64,
+    visual_height: f64,
+    visual_radius: f64,
+    visual_center_x: f64,
+    visual_center_y: f64,
+}
+
+fn disk_health_orb_layout(area: Rect) -> Option<DiskHealthOrbLayout> {
+    if area.width < 3 || area.height < 3 {
+        return None;
     }
 
-    let health = app_state
-        .disk_health_ema
-        .max(app_state.disk_health_peak_hold)
-        .clamp(0.0, 1.0);
-    let deform_profile = disk_health_deform_profile(app_state.disk_health_state_level);
-    let gap = compute_throughput_gap(app_state);
-    let phase = app_state.disk_health_phase;
-
-    let orb_color = disk_health_status_color(ctx, app_state.disk_health_state_level);
-    let has_disk_speed_activity =
-        app_state.avg_disk_read_bps > 0 || app_state.avg_disk_write_bps > 0;
-    let orb_style = if has_disk_speed_activity {
-        ctx.apply(Style::default().fg(orb_color))
-    } else {
-        ctx.apply(Style::default().fg(orb_color).dim())
-    };
-
-    let max_square = area.width.min(area.height);
-    if max_square < 3 {
-        return;
+    let visual_diameter = (area.width.min(area.height) as f64 * DISK_HEALTH_ORB_SIZE_SCALE)
+        .min(area.width as f64)
+        .min(area.height as f64 * DISK_HEALTH_ORB_CELL_Y_ASPECT);
+    let base_width = (visual_diameter.ceil() as u16).clamp(3, area.width);
+    let base_height =
+        ((visual_diameter / DISK_HEALTH_ORB_CELL_Y_ASPECT).ceil() as u16).clamp(3, area.height);
+    let base_x_slack = area.width.saturating_sub(base_width);
+    let base_y_slack = area.height.saturating_sub(base_height);
+    let mut width = base_width
+        .saturating_add(2.min(base_x_slack))
+        .min(area.width);
+    if width % 2 != area.width % 2 && width < area.width {
+        width += 1;
     }
-    let side = ((max_square as f32) * 1.0).round() as u16;
-    let side = side.clamp(3, max_square);
-    let orb_area = Rect::new(
-        area.x + (area.width.saturating_sub(side)) / 2,
-        area.y + (area.height.saturating_sub(side)) / 2,
-        side,
-        side,
-    );
+    let height = base_height
+        .saturating_add(base_y_slack % 2)
+        .min(area.height);
 
-    let cells_w = orb_area.width as usize;
-    let cells_h = orb_area.height as usize;
-    let mut lines: Vec<Line> = Vec::with_capacity(cells_h);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y_slack = area.height.saturating_sub(height);
+    let ideal_y_padding = f64::from(y_slack) / 2.0;
+    let y_padding = ideal_y_padding.floor() as u16;
+    let center_y_offset_rows = ideal_y_padding - f64::from(y_padding);
+    let y = area.y + y_padding;
 
-    const BRAILLE_BITS: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+    Some(DiskHealthOrbLayout {
+        area: Rect::new(x, y, width, height),
+        visual_radius: (visual_diameter * 0.5).max(1.0),
+        center_y_offset_rows,
+    })
+}
+
+fn disk_health_orb_geometry(layout: DiskHealthOrbLayout) -> DiskHealthOrbGeometry {
+    let visual_width = layout.area.width as f64;
+    let visual_height = layout.area.height as f64 * DISK_HEALTH_ORB_CELL_Y_ASPECT;
+    let visual_radius = layout.visual_radius;
+    let visual_center_x = visual_width * 0.5;
+    let visual_center_y =
+        visual_height * 0.5 + layout.center_y_offset_rows * DISK_HEALTH_ORB_CELL_Y_ASPECT;
+
+    DiskHealthOrbGeometry {
+        visual_width,
+        visual_height,
+        visual_radius,
+        visual_center_x,
+        visual_center_y,
+    }
+}
+
+fn build_disk_health_orb_rows(
+    layout: DiskHealthOrbLayout,
+    health: f64,
+    deform_profile: DiskDeformProfile,
+    gap: f64,
+    phase: f64,
+) -> Vec<String> {
+    let cells_w = layout.area.width as usize;
+    let cells_h = layout.area.height as usize;
+    let mut rows: Vec<String> = Vec::with_capacity(cells_h);
+    let geometry = disk_health_orb_geometry(layout);
 
     for cy in 0..cells_h {
         let mut row = String::with_capacity(cells_w);
         for cx in 0..cells_w {
             let mut bits: u8 = 0;
-            for (sy, braille_row) in BRAILLE_BITS.iter().enumerate() {
+            for (sy, braille_row) in DISK_HEALTH_ORB_BRAILLE_BITS.iter().enumerate() {
                 for (sx, &bit) in braille_row.iter().enumerate() {
                     let px = cx as f64 + (sx as f64 + 0.5) / 2.0;
                     let py = cy as f64 + (sy as f64 + 0.5) / 4.0;
 
-                    let nx = ((px / cells_w as f64) - 0.5) * 2.0;
-                    let ny = ((py / cells_h as f64) - 0.5) * 2.0;
+                    let nx = (px - geometry.visual_center_x) / geometry.visual_radius;
+                    let ny = ((py * DISK_HEALTH_ORB_CELL_Y_ASPECT) - geometry.visual_center_y)
+                        / geometry.visual_radius;
 
                     // Keep gap-driven deformation centered by applying horizontal squeeze symmetrically.
                     let squeeze = (1.0 - (0.22 * gap)).max(0.35);
                     let x = nx / squeeze;
-                    // Terminal cells are usually taller than they are wide; compensate to keep a round shape.
-                    let y = ny * (cells_w as f64 / cells_h as f64).clamp(0.6, 1.8) * 2.0;
+                    let y = ny;
                     let theta = y.atan2(x);
                     let dist = (x * x + y * y).sqrt();
 
@@ -4078,8 +4373,43 @@ fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &T
                 char::from_u32(0x2800 + bits as u32).unwrap_or(' ')
             });
         }
-        lines.push(Line::from(Span::styled(row, orb_style)));
+        rows.push(row);
     }
+
+    rows
+}
+
+fn draw_disk_health_orb(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+
+    let health = app_state
+        .disk_health_ema
+        .max(app_state.disk_health_peak_hold)
+        .clamp(0.0, 1.0);
+    let deform_profile = disk_health_deform_profile(app_state.disk_health_state_level);
+    let gap = compute_throughput_gap(app_state);
+    let phase = app_state.disk_health_phase;
+
+    let orb_color = disk_health_status_color(ctx, app_state.disk_health_state_level);
+    let has_disk_speed_activity =
+        app_state.avg_disk_read_bps > 0 || app_state.avg_disk_write_bps > 0;
+    let orb_style = if has_disk_speed_activity {
+        ctx.apply(Style::default().fg(orb_color))
+    } else {
+        ctx.apply(Style::default().fg(orb_color).dim())
+    };
+
+    let Some(orb_layout) = disk_health_orb_layout(area) else {
+        return;
+    };
+    let orb_area = orb_layout.area;
+
+    let lines = build_disk_health_orb_rows(orb_layout, health, deform_profile, gap, phase)
+        .into_iter()
+        .map(|row| Line::from(Span::styled(row, orb_style)))
+        .collect::<Vec<_>>();
 
     f.render_widget(Paragraph::new(lines), orb_area);
 }
@@ -4399,6 +4729,25 @@ pub fn draw_peers_table(
     peers_chunk: Rect,
     ctx: &ThemeContext,
 ) {
+    draw_peers_table_impl(f, app_state, peers_chunk, ctx, true);
+}
+
+fn draw_peers_table_without_swarm(
+    f: &mut Frame,
+    app_state: &AppState,
+    peers_chunk: Rect,
+    ctx: &ThemeContext,
+) {
+    draw_peers_table_impl(f, app_state, peers_chunk, ctx, false);
+}
+
+fn draw_peers_table_impl(
+    f: &mut Frame,
+    app_state: &AppState,
+    peers_chunk: Rect,
+    ctx: &ThemeContext,
+    include_swarm: bool,
+) {
     if peers_chunk.height < 2 || peers_chunk.width < 2 {
         return;
     }
@@ -4411,47 +4760,9 @@ pub fn draw_peers_table(
             let state = &torrent.latest_state;
 
             if peers_chunk.height > 0 {
-                let has_established_peers =
-                    state.peers.iter().any(|p| p.last_action != "Connecting...");
-
-                let mut peers_to_display: Vec<PeerInfo> = if has_established_peers {
-                    state
-                        .peers
-                        .iter()
-                        .filter(|p| p.last_action != "Connecting...")
-                        .cloned()
-                        .collect()
-                } else {
-                    state.peers.clone()
-                };
-
                 let (sort_by, sort_direction) = app_state.peer_sort;
-                peers_to_display.sort_by(|a, b| {
-                    use crate::config::PeerSortColumn::*;
-                    let ordering = match sort_by {
-                        Flags => a.peer_choking.cmp(&b.peer_choking),
-                        Completed => {
-                            let total = state.number_of_pieces_total as usize;
-                            if total == 0 {
-                                std::cmp::Ordering::Equal
-                            } else {
-                                let a_c = a.bitfield.iter().take(total).filter(|&&h| h).count();
-                                let b_c = b.bitfield.iter().take(total).filter(|&&h| h).count();
-                                a_c.cmp(&b_c)
-                            }
-                        }
-                        Address => a.address.cmp(&b.address),
-                        Client => a.peer_id.cmp(&b.peer_id),
-                        Action => a.last_action.cmp(&b.last_action),
-                        DL => a.download_speed_bps.cmp(&b.download_speed_bps),
-                        UL => a.upload_speed_bps.cmp(&b.upload_speed_bps),
-                    };
-                    if sort_direction == SortDirection::Ascending {
-                        ordering
-                    } else {
-                        ordering.reverse()
-                    }
-                });
+                let peer_rows_to_display =
+                    displayed_peers_for_table(state, sort_by, sort_direction);
 
                 let all_peer_cols = get_peer_columns();
                 let (constraints, visible_indices) =
@@ -4464,13 +4775,17 @@ pub fn draw_peers_table(
                         ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))
                     };
 
-                if peers_to_display.is_empty() {
+                if peer_rows_to_display.is_empty() {
+                    if !include_swarm {
+                        return;
+                    }
                     draw_swarm_heatmap(
                         f,
                         ctx,
                         &state.peers,
                         state.number_of_pieces_total,
                         peers_chunk,
+                        Some(swarm_heatmap_flash(app_state, info_hash)),
                     );
                 } else {
                     let header_cells: Vec<Cell> = visible_indices
@@ -4507,127 +4822,158 @@ pub fn draw_peers_table(
 
                     let peer_header = Row::new(header_cells).height(1);
 
-                    let peer_rows = peers_to_display.iter().map(|peer| {
-                        let row_color =
-                            if peer.download_speed_bps == 0 && peer.upload_speed_bps == 0 {
-                                ctx.theme.semantic.surface1
-                            } else {
-                                ip_to_color(ctx, &peer.address)
-                            };
+                    let peer_rows: Vec<Row<'_>> = peer_rows_to_display
+                        .iter()
+                        .map(|row| {
+                            let (cells, row_style) = match row {
+                                PeerTableRow::Peer(peer) => {
+                                    let row_color = if peer_is_inactive_for_table(peer) {
+                                        ctx.theme.semantic.surface1
+                                    } else {
+                                        ip_to_color(ctx, &peer.address)
+                                    };
 
-                        let cells: Vec<Cell> = visible_indices
-                            .iter()
-                            .map(|&real_idx| {
-                                let def = &all_peer_cols[real_idx];
-                                match def.id {
-                                    PeerColumnId::Flags => Line::from(vec![
-                                        Span::styled(
-                                            "■",
-                                            ctx.apply(Style::default().fg(if peer.am_interested {
-                                                ctx.accent_sapphire()
-                                            } else {
-                                                ctx.theme.semantic.surface1
-                                            })),
-                                        ),
-                                        Span::styled(
-                                            "■",
-                                            ctx.apply(Style::default().fg(if peer.peer_choking {
-                                                ctx.accent_maroon()
-                                            } else {
-                                                ctx.theme.semantic.surface1
-                                            })),
-                                        ),
-                                        Span::styled(
-                                            "■",
-                                            ctx.apply(Style::default().fg(
-                                                if peer.peer_interested {
-                                                    ctx.accent_teal()
-                                                } else {
-                                                    ctx.theme.semantic.surface1
-                                                },
-                                            )),
-                                        ),
-                                        Span::styled(
-                                            "■",
-                                            ctx.apply(Style::default().fg(if peer.am_choking {
-                                                ctx.accent_peach()
-                                            } else {
-                                                ctx.theme.semantic.surface1
-                                            })),
-                                        ),
-                                    ])
-                                    .into(),
-                                    PeerColumnId::Address => {
-                                        let display = if app_state.anonymize_torrent_names {
-                                            "xxx.xxx.xxx".to_string()
-                                        } else {
-                                            format_peer_address_for_table(&peer.address)
-                                        };
-                                        Cell::from(display)
-                                    }
-                                    PeerColumnId::Client => {
-                                        let raw_client = parse_peer_id(&peer.peer_id);
-                                        Cell::from(sanitize_text(&raw_client))
-                                    }
-                                    PeerColumnId::Action => Cell::from(peer.last_action.clone()),
-                                    PeerColumnId::Progress => {
-                                        let total = state.number_of_pieces_total as usize;
-                                        let pct = if total > 0 {
-                                            let c = peer
-                                                .bitfield
-                                                .iter()
-                                                .take(total)
-                                                .filter(|&&b| b)
-                                                .count();
-                                            (c as f64 / total as f64) * 100.0
-                                        } else {
-                                            0.0
-                                        };
-                                        Cell::from(format!("{:.0}%", pct))
-                                    }
-                                    PeerColumnId::DownSpeed => {
-                                        if peers_chunk.width > 120 {
-                                            Cell::from(format!(
-                                                "{} ({})",
-                                                format_speed(peer.download_speed_bps),
-                                                format_bytes(peer.total_downloaded)
-                                            ))
-                                        } else {
-                                            Cell::from(format_speed(peer.download_speed_bps))
-                                        }
-                                    }
-                                    PeerColumnId::UpSpeed => {
-                                        if peers_chunk.width > 120 {
-                                            Cell::from(format!(
-                                                "{} ({})",
-                                                format_speed(peer.upload_speed_bps),
-                                                format_bytes(peer.total_uploaded)
-                                            ))
-                                        } else {
-                                            Cell::from(format_speed(peer.upload_speed_bps))
-                                        }
-                                    }
+                                    let cells: Vec<Cell> = visible_indices
+                                        .iter()
+                                        .map(|&real_idx| {
+                                            let def = &all_peer_cols[real_idx];
+                                            match def.id {
+                                                PeerColumnId::Flags => Line::from(vec![
+                                                    Span::styled(
+                                                        "■",
+                                                        ctx.apply(Style::default().fg(
+                                                            if peer.am_interested {
+                                                                ctx.accent_sapphire()
+                                                            } else {
+                                                                ctx.theme.semantic.surface1
+                                                            },
+                                                        )),
+                                                    ),
+                                                    Span::styled(
+                                                        "■",
+                                                        ctx.apply(Style::default().fg(
+                                                            if peer.peer_choking {
+                                                                ctx.accent_maroon()
+                                                            } else {
+                                                                ctx.theme.semantic.surface1
+                                                            },
+                                                        )),
+                                                    ),
+                                                    Span::styled(
+                                                        "■",
+                                                        ctx.apply(Style::default().fg(
+                                                            if peer.peer_interested {
+                                                                ctx.accent_teal()
+                                                            } else {
+                                                                ctx.theme.semantic.surface1
+                                                            },
+                                                        )),
+                                                    ),
+                                                    Span::styled(
+                                                        "■",
+                                                        ctx.apply(Style::default().fg(
+                                                            if peer.am_choking {
+                                                                ctx.accent_peach()
+                                                            } else {
+                                                                ctx.theme.semantic.surface1
+                                                            },
+                                                        )),
+                                                    ),
+                                                ])
+                                                .into(),
+                                                PeerColumnId::Address => {
+                                                    let display = if app_state
+                                                        .anonymize_torrent_names
+                                                    {
+                                                        "xxx.xxx.xxx".to_string()
+                                                    } else {
+                                                        format_peer_address_for_table(&peer.address)
+                                                    };
+                                                    Cell::from(display)
+                                                }
+                                                PeerColumnId::Client => {
+                                                    let raw_client = parse_peer_id(&peer.peer_id);
+                                                    Cell::from(sanitize_text(&raw_client))
+                                                }
+                                                PeerColumnId::Action => {
+                                                    Cell::from(peer.last_action.clone())
+                                                }
+                                                PeerColumnId::Progress => {
+                                                    let total =
+                                                        state.number_of_pieces_total as usize;
+                                                    let pct = if total > 0 {
+                                                        let c = peer
+                                                            .bitfield
+                                                            .iter()
+                                                            .take(total)
+                                                            .filter(|&&b| b)
+                                                            .count();
+                                                        (c as f64 / total as f64) * 100.0
+                                                    } else {
+                                                        0.0
+                                                    };
+                                                    Cell::from(format!("{pct:.0}%"))
+                                                }
+                                                PeerColumnId::DownSpeed => {
+                                                    if peers_chunk.width > 120 {
+                                                        Cell::from(format!(
+                                                            "{} ({})",
+                                                            format_speed(peer.download_speed_bps),
+                                                            format_bytes(peer.total_downloaded)
+                                                        ))
+                                                    } else {
+                                                        Cell::from(format_speed(
+                                                            peer.download_speed_bps,
+                                                        ))
+                                                    }
+                                                }
+                                                PeerColumnId::UpSpeed => {
+                                                    if peers_chunk.width > 120 {
+                                                        Cell::from(format!(
+                                                            "{} ({})",
+                                                            format_speed(peer.upload_speed_bps),
+                                                            format_bytes(peer.total_uploaded)
+                                                        ))
+                                                    } else {
+                                                        Cell::from(format_speed(
+                                                            peer.upload_speed_bps,
+                                                        ))
+                                                    }
+                                                }
+                                            }
+                                        })
+                                        .collect();
+                                    (cells, Style::default().fg(row_color))
                                 }
-                            })
-                            .collect();
-                        Row::new(cells).style(ctx.apply(Style::default().fg(row_color)))
-                    });
+                                PeerTableRow::InactiveSummary { count } => (
+                                    inactive_peer_summary_cells(
+                                        *count,
+                                        &all_peer_cols,
+                                        &visible_indices,
+                                    ),
+                                    Style::default()
+                                        .fg(ctx.theme.semantic.surface1)
+                                        .add_modifier(Modifier::ITALIC),
+                                ),
+                            };
+                            Row::new(cells).style(ctx.apply(row_style))
+                        })
+                        .collect();
 
                     let peers_table = Table::new(peer_rows, constraints)
                         .header(peer_header)
                         .block(Block::default());
 
-                    let table_rows_needed: u16 = 1 + peers_to_display.len() as u16;
+                    let table_rows_needed: u16 = 1 + peer_rows_to_display.len() as u16;
                     let peer_block_height_needed: u16 = table_rows_needed + 1;
                     let remaining_height =
                         peers_chunk.height.saturating_sub(peer_block_height_needed);
-                    const MIN_HEATMAP_HEIGHT: u16 = 4;
 
                     let peers_block = Block::default()
                         .padding(Padding::new(1, 1, 0, 0))
                         .border_style(peer_border_style);
 
-                    if remaining_height >= MIN_HEATMAP_HEIGHT {
+                    if include_swarm && remaining_height >= MIN_SWARM_AVAILABILITY_HEIGHT {
                         let layout_chunks = Layout::vertical([
                             Constraint::Length(peer_block_height_needed),
                             Constraint::Min(0),
@@ -4642,6 +4988,7 @@ pub fn draw_peers_table(
                             &state.peers,
                             state.number_of_pieces_total,
                             layout_chunks[1],
+                            Some(swarm_heatmap_flash(app_state, info_hash)),
                         );
                     } else {
                         let inner_peers_area = peers_block.inner(peers_chunk);
@@ -4651,9 +4998,147 @@ pub fn draw_peers_table(
                 }
             }
         }
-    } else {
-        draw_swarm_heatmap(f, ctx, &[], 0, peers_chunk);
+    } else if include_swarm {
+        draw_swarm_heatmap(f, ctx, &[], 0, peers_chunk, None);
     }
+}
+
+fn peer_table_height_for_row_count(row_count: usize) -> u16 {
+    if row_count == 0 {
+        0
+    } else {
+        usize_to_u16_saturating(row_count).saturating_add(2)
+    }
+}
+
+fn displayed_peers_for_table(
+    state: &crate::app::TorrentMetrics,
+    sort_by: PeerSortColumn,
+    sort_direction: SortDirection,
+) -> Vec<PeerTableRow> {
+    let has_established_peers = state.peers.iter().any(|p| p.last_action != "Connecting...");
+    let mut peers_to_display: Vec<PeerInfo> = if has_established_peers {
+        state
+            .peers
+            .iter()
+            .filter(|p| p.last_action != "Connecting...")
+            .cloned()
+            .collect()
+    } else {
+        state.peers.clone()
+    };
+
+    peers_to_display.sort_by(|a, b| compare_peer_table_rows(a, b, state, sort_by, sort_direction));
+
+    let active_count = peers_to_display
+        .iter()
+        .filter(|peer| !peer_is_inactive_for_table(peer))
+        .count();
+    let inactive_count = peers_to_display.len().saturating_sub(active_count);
+
+    if active_count > 0 {
+        let mut rows: Vec<PeerTableRow> = peers_to_display
+            .into_iter()
+            .filter(|peer| !peer_is_inactive_for_table(peer))
+            .map(PeerTableRow::Peer)
+            .collect();
+        if inactive_count > 0 {
+            rows.push(PeerTableRow::InactiveSummary {
+                count: inactive_count,
+            });
+        }
+        return rows;
+    }
+
+    if inactive_count <= MAX_INACTIVE_ONLY_PEERS_IN_TABLE {
+        return peers_to_display
+            .into_iter()
+            .map(PeerTableRow::Peer)
+            .collect();
+    }
+
+    let mut retained_inactive = 0usize;
+    peers_to_display
+        .into_iter()
+        .filter(|peer| {
+            if !peer_is_inactive_for_table(peer) {
+                return true;
+            }
+
+            if retained_inactive < MAX_INACTIVE_ONLY_PEERS_IN_TABLE {
+                retained_inactive += 1;
+                true
+            } else {
+                false
+            }
+        })
+        .map(PeerTableRow::Peer)
+        .collect()
+}
+
+fn inactive_peer_summary_cells(
+    count: usize,
+    all_peer_cols: &[crate::tui::layout::common::PeerColumnDefinition],
+    visible_indices: &[usize],
+) -> Vec<Cell<'static>> {
+    let summary_column = visible_indices
+        .iter()
+        .copied()
+        .find(|&real_idx| all_peer_cols[real_idx].id == PeerColumnId::Address)
+        .or_else(|| visible_indices.first().copied());
+    let summary_label = format!(
+        "{} inactive peer{}",
+        count,
+        if count == 1 { "" } else { "s" }
+    );
+
+    visible_indices
+        .iter()
+        .map(|&real_idx| {
+            if Some(real_idx) == summary_column {
+                Cell::from(summary_label.clone())
+            } else {
+                Cell::from("")
+            }
+        })
+        .collect()
+}
+
+fn compare_peer_table_rows(
+    a: &PeerInfo,
+    b: &PeerInfo,
+    state: &crate::app::TorrentMetrics,
+    sort_by: PeerSortColumn,
+    sort_direction: SortDirection,
+) -> std::cmp::Ordering {
+    use crate::config::PeerSortColumn::*;
+    let ordering = match sort_by {
+        Flags => a.peer_choking.cmp(&b.peer_choking),
+        Completed => {
+            let total = state.number_of_pieces_total as usize;
+            if total == 0 {
+                std::cmp::Ordering::Equal
+            } else {
+                let a_c = a.bitfield.iter().take(total).filter(|&&h| h).count();
+                let b_c = b.bitfield.iter().take(total).filter(|&&h| h).count();
+                a_c.cmp(&b_c)
+            }
+        }
+        Address => a.address.cmp(&b.address),
+        Client => a.peer_id.cmp(&b.peer_id),
+        Action => a.last_action.cmp(&b.last_action),
+        DL => a.download_speed_bps.cmp(&b.download_speed_bps),
+        UL => a.upload_speed_bps.cmp(&b.upload_speed_bps),
+    };
+    if sort_direction == SortDirection::Ascending {
+        ordering
+    } else {
+        ordering.reverse()
+    }
+}
+
+fn peer_is_inactive_for_table(peer: &PeerInfo) -> bool {
+    peer.download_speed_bps == 0 && peer.upload_speed_bps == 0
 }
 
 pub fn draw_torrent_files_panel(
@@ -4662,72 +5147,219 @@ pub fn draw_torrent_files_panel(
     area: Rect,
     ctx: &ThemeContext,
 ) {
-    const MIN_HEATMAP_HEIGHT: u16 = 4;
+    draw_torrent_files_panel_impl(f, app_state, area, ctx, true, TorrentFilesRenderMode::Tree);
+}
 
+fn draw_torrent_files_panel_without_swarm(
+    f: &mut Frame,
+    app_state: &AppState,
+    area: Rect,
+    ctx: &ThemeContext,
+    files_mode: TorrentFilesRenderMode,
+) {
+    draw_torrent_files_panel_impl(f, app_state, area, ctx, false, files_mode);
+}
+
+fn draw_torrent_files_panel_impl(
+    f: &mut Frame,
+    app_state: &AppState,
+    area: Rect,
+    ctx: &ThemeContext,
+    include_swarm: bool,
+    files_mode: TorrentFilesRenderMode,
+) {
     if area.height < 2 || area.width < 2 {
         return;
     }
 
-    let selected_torrent = app_state
-        .torrent_list_order
-        .get(app_state.ui.selected_torrent_index)
-        .and_then(|info_hash| app_state.torrents.get(info_hash));
-
-    let block = Block::default()
-        .title(Span::styled(
-            "Files",
-            ctx.apply(Style::default().fg(ctx.state_selected())),
-        ))
-        .borders(Borders::ALL)
-        .padding(Padding::new(1, 1, 0, 0))
-        .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)));
-
-    let Some(torrent) = selected_torrent else {
-        let inner_area = block.inner(area);
-        f.render_widget(block, area);
+    let Some((info_hash, torrent)) = selected_torrent_entry(app_state) else {
+        let body_area = draw_torrent_files_frame(f, area, ctx);
         let empty = Paragraph::new("No torrent selected")
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true });
-        f.render_widget(empty, inner_area);
+        f.render_widget(empty, body_area);
         return;
     };
 
-    let list_items = build_torrent_file_list_items(
+    let max_files_height_with_swarm = area
+        .height
+        .saturating_sub(MIN_SWARM_AVAILABILITY_HEIGHT)
+        .saturating_sub(FILES_SWARM_SPACER_HEIGHT);
+    let file_block_height_with_swarm = torrent_files_panel_height_needed(
         torrent,
         area.width,
-        area.height.saturating_sub(2),
         app_state.anonymize_torrent_names,
-        app_state.ui.file_activity_download_phase,
-        app_state.ui.file_activity_upload_phase,
-        ctx,
+        max_files_height_with_swarm,
     );
-    let file_block_height_needed = (list_items.len() as u16).saturating_add(2);
-    let remaining_height = area.height.saturating_sub(file_block_height_needed);
+    let file_block_height_needed = file_block_height_with_swarm.unwrap_or(area.height);
+    let remaining_height = area
+        .height
+        .saturating_sub(file_block_height_needed)
+        .saturating_sub(FILES_SWARM_SPACER_HEIGHT);
 
-    if remaining_height >= MIN_HEATMAP_HEIGHT {
+    if include_swarm
+        && file_block_height_with_swarm.is_some()
+        && remaining_height >= MIN_SWARM_AVAILABILITY_HEIGHT
+    {
         let layout_chunks = Layout::vertical([
             Constraint::Length(file_block_height_needed),
+            Constraint::Length(FILES_SWARM_SPACER_HEIGHT),
             Constraint::Min(0),
         ])
         .split(area);
-        let inner_area = block.inner(layout_chunks[0]);
-        f.render_widget(block, layout_chunks[0]);
+        let inner_area = draw_torrent_files_frame(f, layout_chunks[0], ctx);
+        let list_items = build_torrent_file_list_items(
+            torrent,
+            TorrentFilesListRenderOptions {
+                width: inner_area.width,
+                height: inner_area.height,
+                anonymize: app_state.anonymize_torrent_names,
+                download_phase: app_state.ui.file_activity_download_phase,
+                upload_phase: app_state.ui.file_activity_upload_phase,
+                mode: files_mode,
+            },
+            ctx,
+        );
         f.render_widget(List::new(list_items), inner_area);
         draw_swarm_heatmap(
             f,
             ctx,
             &torrent.latest_state.peers,
             torrent.latest_state.number_of_pieces_total,
-            layout_chunks[1],
+            layout_chunks[2],
+            Some(swarm_heatmap_flash(app_state, info_hash)),
         );
     } else {
-        let inner_area = block.inner(area);
-        f.render_widget(block, area);
-        f.render_widget(List::new(list_items), inner_area);
+        let body_area = draw_torrent_files_frame(f, area, ctx);
+        let list_items = build_torrent_file_list_items(
+            torrent,
+            TorrentFilesListRenderOptions {
+                width: body_area.width,
+                height: body_area.height,
+                anonymize: app_state.anonymize_torrent_names,
+                download_phase: app_state.ui.file_activity_download_phase,
+                upload_phase: app_state.ui.file_activity_upload_phase,
+                mode: files_mode,
+            },
+            ctx,
+        );
+        f.render_widget(List::new(list_items), body_area);
     }
 }
 
+fn draw_torrent_files_frame(_f: &mut Frame, area: Rect, _ctx: &ThemeContext) -> Rect {
+    if area.width == 0 || area.height == 0 {
+        return area;
+    }
+
+    torrent_files_body_area(area)
+}
+
+fn torrent_files_body_area(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y,
+        area.width.saturating_sub(2),
+        area.height,
+    )
+}
+
+fn torrent_files_panel_height_needed(
+    torrent: &TorrentDisplayState,
+    width: u16,
+    anonymize: bool,
+    max_height: u16,
+) -> Option<u16> {
+    if max_height == 0 {
+        return None;
+    }
+
+    let body_width = width.saturating_sub(2);
+    let max_body_rows = max_height as usize;
+    let body_rows =
+        torrent_file_list_desired_row_count(torrent, body_width, anonymize, max_body_rows);
+    Some(usize_to_u16_saturating(body_rows.max(1)).min(max_height))
+}
+
+fn usize_to_u16_saturating(value: usize) -> u16 {
+    value.min(u16::MAX as usize) as u16
+}
+
+fn torrent_file_list_desired_row_count(
+    torrent: &TorrentDisplayState,
+    width: u16,
+    anonymize: bool,
+    max_rows: usize,
+) -> usize {
+    if max_rows == 0 {
+        return 0;
+    }
+
+    let root_path = torrent_root_path_label(&torrent.latest_state, anonymize);
+    let root_width = width.saturating_sub(4) as usize;
+    let root_rows = shape_root_path_for_viewport(&root_path, root_width.max(1), max_rows).len();
+    if root_rows >= max_rows {
+        return root_rows;
+    }
+
+    let remaining_rows = max_rows.saturating_sub(root_rows);
+    if torrent.file_preview_tree.is_empty() {
+        return root_rows
+            + usize::from(!torrent.latest_state.torrent_name.is_empty()).min(remaining_rows);
+    }
+
+    let mut expanded_state = TreeViewState::default();
+    for node in &torrent.file_preview_tree {
+        node.expand_all(&mut expanded_state);
+    }
+    let visible_rows = TreeMathHelper::get_visible_slice(
+        &torrent.file_preview_tree,
+        &expanded_state,
+        TreeFilter::default(),
+        usize::MAX,
+    )
+    .len();
+
+    root_rows + visible_rows.min(remaining_rows)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TorrentFilesListRenderOptions {
+    width: u16,
+    height: u16,
+    anonymize: bool,
+    download_phase: f64,
+    upload_phase: f64,
+    mode: TorrentFilesRenderMode,
+}
+
 fn build_torrent_file_list_items(
+    torrent: &TorrentDisplayState,
+    options: TorrentFilesListRenderOptions,
+    ctx: &ThemeContext,
+) -> Vec<ListItem<'static>> {
+    match options.mode {
+        TorrentFilesRenderMode::Tree => build_torrent_file_tree_list_items(
+            torrent,
+            options.width,
+            options.height,
+            options.anonymize,
+            options.download_phase,
+            options.upload_phase,
+            ctx,
+        ),
+        TorrentFilesRenderMode::ActivitySorted => build_activity_sorted_torrent_file_list_items(
+            torrent,
+            options.height,
+            options.anonymize,
+            options.download_phase,
+            options.upload_phase,
+            ctx,
+        ),
+    }
+}
+
+fn build_torrent_file_tree_list_items(
     torrent: &TorrentDisplayState,
     width: u16,
     height: u16,
@@ -4821,13 +5453,29 @@ fn build_torrent_file_list_items(
         node.expand_all(&mut expanded_state);
     }
     let visible_tree_height = (height as usize).saturating_sub(root_depth);
+    if visible_tree_height == 0 {
+        return list_items;
+    }
 
-    let visible_rows = TreeMathHelper::get_visible_slice(
+    let mut visible_rows = TreeMathHelper::get_visible_slice(
         &torrent.file_preview_tree,
         &expanded_state,
         TreeFilter::default(),
-        visible_tree_height,
+        usize::MAX,
     );
+    if visible_rows.len() > visible_tree_height {
+        visible_rows.sort_by_cached_key(|item| {
+            let relative_path = normalize_tree_relative_path(item.path.as_path());
+            let display_name = anonymize_tree_name(&item.node.name, item.node.is_dir, anonymize);
+            file_tree_activity_sort_rank(
+                torrent,
+                &relative_path,
+                item.node.is_dir,
+                display_name.chars().count(),
+            )
+        });
+        visible_rows.truncate(visible_tree_height);
+    }
 
     list_items.extend(visible_rows.iter().map(|item| {
         let indent = "  ".repeat(item.depth + root_depth);
@@ -4838,40 +5486,8 @@ fn build_torrent_file_list_items(
         };
         let relative_path = normalize_tree_relative_path(item.path.as_path());
 
-        let (name_style, suffix) = match item.node.payload.priority {
-            FilePriority::Skip => (
-                ctx.apply(
-                    Style::default()
-                        .fg(ctx.theme.semantic.surface1)
-                        .add_modifier(Modifier::CROSSED_OUT),
-                ),
-                Some(" [S]".to_string()),
-            ),
-            FilePriority::High => (
-                ctx.apply(
-                    Style::default()
-                        .fg(ctx.state_success())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Some(" [H]".to_string()),
-            ),
-            FilePriority::Mixed => (
-                ctx.apply(
-                    Style::default()
-                        .fg(ctx.state_warning())
-                        .add_modifier(Modifier::ITALIC),
-                ),
-                Some(" [*]".to_string()),
-            ),
-            FilePriority::Normal => (
-                ctx.apply(Style::default().fg(if item.node.is_dir {
-                    ctx.state_info()
-                } else {
-                    ctx.theme.semantic.text
-                })),
-                None,
-            ),
-        };
+        let (name_style, suffix) =
+            file_priority_style(item.node.payload.priority, item.node.is_dir, ctx);
         let mut spans = vec![
             Span::styled(
                 indent,
@@ -4915,6 +5531,266 @@ fn build_torrent_file_list_items(
     }));
 
     list_items
+}
+
+#[derive(Debug, Clone)]
+struct ActivitySortedFileRow {
+    relative_path: String,
+    size: u64,
+    priority: FilePriority,
+}
+
+fn build_activity_sorted_torrent_file_list_items(
+    torrent: &TorrentDisplayState,
+    height: u16,
+    anonymize: bool,
+    download_phase: f64,
+    upload_phase: f64,
+    ctx: &ThemeContext,
+) -> Vec<ListItem<'static>> {
+    let mut rows = activity_sorted_file_rows(torrent);
+    let height = height as usize;
+    if height == 0 || rows.is_empty() {
+        return Vec::new();
+    }
+
+    rows.sort_by(|a, b| compare_activity_sorted_file_rows(torrent, a, b));
+
+    let total_rows = rows.len();
+    let visible_file_rows = if total_rows > height {
+        height.saturating_sub(1)
+    } else {
+        height
+    };
+
+    let mut items = rows
+        .into_iter()
+        .take(visible_file_rows)
+        .map(|row| {
+            render_activity_sorted_file_row(
+                torrent,
+                row,
+                anonymize,
+                download_phase,
+                upload_phase,
+                ctx,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if total_rows > height {
+        let hidden_count = total_rows.saturating_sub(visible_file_rows);
+        items.push(render_activity_sorted_overflow_row(hidden_count, ctx));
+    }
+
+    items
+}
+
+fn activity_sorted_file_count(torrent: &TorrentDisplayState) -> usize {
+    activity_sorted_file_rows(torrent).len()
+}
+
+fn activity_sorted_file_rows(torrent: &TorrentDisplayState) -> Vec<ActivitySortedFileRow> {
+    let mut rows = Vec::new();
+    for node in &torrent.file_preview_tree {
+        collect_activity_sorted_file_rows(node, &mut rows);
+    }
+
+    if rows.is_empty() && !torrent.latest_state.torrent_name.is_empty() {
+        rows.push(ActivitySortedFileRow {
+            relative_path: torrent.latest_state.torrent_name.clone(),
+            size: torrent.latest_state.total_size,
+            priority: FilePriority::Normal,
+        });
+    }
+
+    rows
+}
+
+fn collect_activity_sorted_file_rows(
+    node: &crate::tui::tree::RawNode<crate::app::TorrentPreviewPayload>,
+    rows: &mut Vec<ActivitySortedFileRow>,
+) {
+    if node.is_dir {
+        for child in &node.children {
+            collect_activity_sorted_file_rows(child, rows);
+        }
+        return;
+    }
+
+    rows.push(ActivitySortedFileRow {
+        relative_path: normalize_tree_relative_path(node.full_path.as_path()),
+        size: node.payload.size,
+        priority: node.payload.priority,
+    });
+}
+
+fn compare_activity_sorted_file_rows(
+    torrent: &TorrentDisplayState,
+    a: &ActivitySortedFileRow,
+    b: &ActivitySortedFileRow,
+) -> std::cmp::Ordering {
+    let a_activity = file_activity_last_seen(torrent, &a.relative_path);
+    let b_activity = file_activity_last_seen(torrent, &b.relative_path);
+
+    b_activity
+        .cmp(&a_activity)
+        .then_with(|| a.relative_path.cmp(&b.relative_path))
+}
+
+fn file_activity_last_seen(torrent: &TorrentDisplayState, relative_path: &str) -> Option<Instant> {
+    torrent
+        .recent_file_activity
+        .get(relative_path)
+        .and_then(
+            |activity| match (activity.download_at, activity.upload_at) {
+                (Some(download_at), Some(upload_at)) => Some(download_at.max(upload_at)),
+                (Some(download_at), None) => Some(download_at),
+                (None, Some(upload_at)) => Some(upload_at),
+                (None, None) => None,
+            },
+        )
+}
+
+fn render_activity_sorted_file_row(
+    torrent: &TorrentDisplayState,
+    row: ActivitySortedFileRow,
+    anonymize: bool,
+    download_phase: f64,
+    upload_phase: f64,
+    ctx: &ThemeContext,
+) -> ListItem<'static> {
+    let (name_style, suffix) = file_priority_style(row.priority, false, ctx);
+    let display_name = anonymize_tree_name(&row.relative_path, false, anonymize);
+    let mut spans = vec![Span::styled(
+        ASCII_TREE_FILE_ICON,
+        ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+    )];
+    spans.extend(render_file_tree_name_spans(
+        torrent,
+        &row.relative_path,
+        &display_name,
+        false,
+        FileTreeNameRenderContext {
+            download_phase,
+            upload_phase,
+            row_start_offset: torrent_root_logical_len(torrent).saturating_add(1),
+            base_style: name_style,
+            ctx,
+        },
+    ));
+
+    if row.size > 0 {
+        spans.push(Span::styled(
+            format!(" ({})", format_bytes(row.size)),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+        ));
+    }
+
+    if let Some(suffix) = suffix {
+        spans.push(Span::styled(
+            suffix,
+            ctx.apply(Style::default().fg(ctx.theme.semantic.surface1)),
+        ));
+    }
+
+    ListItem::new(Line::from(spans))
+}
+
+fn render_activity_sorted_overflow_row(
+    hidden_count: usize,
+    ctx: &ThemeContext,
+) -> ListItem<'static> {
+    let label = format!(
+        "+ {} more file{}",
+        hidden_count,
+        if hidden_count == 1 { "" } else { "s" }
+    );
+    ListItem::new(Line::from(vec![
+        Span::styled(
+            ASCII_TREE_FILE_ICON,
+            ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
+        ),
+        Span::styled(
+            label,
+            ctx.apply(
+                Style::default()
+                    .fg(ctx.theme.semantic.surface1)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ),
+    ]))
+}
+
+fn file_priority_style(
+    priority: FilePriority,
+    is_dir: bool,
+    ctx: &ThemeContext,
+) -> (Style, Option<String>) {
+    match priority {
+        FilePriority::Skip => (
+            ctx.apply(
+                Style::default()
+                    .fg(ctx.theme.semantic.surface1)
+                    .add_modifier(Modifier::CROSSED_OUT),
+            ),
+            Some(" [S]".to_string()),
+        ),
+        FilePriority::High => (
+            ctx.apply(
+                Style::default()
+                    .fg(ctx.state_success())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Some(" [H]".to_string()),
+        ),
+        FilePriority::Mixed => (
+            ctx.apply(
+                Style::default()
+                    .fg(ctx.state_warning())
+                    .add_modifier(Modifier::ITALIC),
+            ),
+            Some(" [*]".to_string()),
+        ),
+        FilePriority::Normal => (
+            ctx.apply(Style::default().fg(if is_dir {
+                ctx.state_info()
+            } else {
+                ctx.theme.semantic.text
+            })),
+            None,
+        ),
+    }
+}
+
+fn file_tree_activity_sort_rank(
+    torrent: &TorrentDisplayState,
+    relative_path: &str,
+    is_dir: bool,
+    text_len: usize,
+) -> u8 {
+    if !file_tree_row_has_visible_activity(torrent, relative_path, is_dir, text_len) {
+        return 2;
+    }
+
+    if is_dir {
+        1
+    } else {
+        0
+    }
+}
+
+fn file_tree_row_has_visible_activity(
+    torrent: &TorrentDisplayState,
+    relative_path: &str,
+    is_dir: bool,
+    text_len: usize,
+) -> bool {
+    let download_wave = file_activity_wave_profile(torrent.smoothed_download_speed_bps, text_len);
+    let upload_wave = file_activity_wave_profile(torrent.smoothed_upload_speed_bps, text_len);
+    let (download_paths, upload_paths) =
+        file_tree_activity_paths(torrent, relative_path, is_dir, download_wave, upload_wave);
+    !download_paths.is_empty() || !upload_paths.is_empty()
 }
 
 fn normalize_tree_relative_path(path: &Path) -> String {
@@ -5432,12 +6308,120 @@ fn anonymized_shape_char(seed: u64, idx: usize, ch: char) -> char {
     }
 }
 
+fn peer_has_all_pieces(peer: &PeerInfo, total_pieces: usize) -> bool {
+    total_pieces > 0
+        && peer
+            .bitfield
+            .iter()
+            .take(total_pieces)
+            .filter(|&&has| has)
+            .count()
+            == total_pieces
+}
+
+fn peer_has_piece(peer: &PeerInfo, piece_index: usize) -> bool {
+    peer.bitfield.get(piece_index).copied().unwrap_or(false)
+}
+
+fn swarm_heatmap_display_availability_counts(
+    peers: &[PeerInfo],
+    total_pieces: usize,
+) -> (Vec<u32>, bool) {
+    let mut availability = vec![0; total_pieces];
+    let mut has_complete_peer = false;
+
+    for peer in peers {
+        if peer_has_all_pieces(peer, total_pieces) {
+            has_complete_peer = true;
+            continue;
+        }
+
+        for (idx, has_piece) in peer.bitfield.iter().enumerate().take(total_pieces) {
+            if *has_piece {
+                availability[idx] += 1;
+            }
+        }
+    }
+
+    (availability, has_complete_peer)
+}
+
+fn swarm_heatmap_level(count: u32, max_avail: u32) -> SwarmHeatmapLevel {
+    if count == 0 {
+        return SwarmHeatmapLevel::Empty;
+    }
+
+    let max_avail = max_avail.max(1);
+    if count >= max_avail {
+        return SwarmHeatmapLevel::High;
+    }
+
+    let low_cutoff = (max_avail as f64 / 3.0).ceil() as u32;
+    let medium_cutoff = (max_avail as f64 * 2.0 / 3.0).ceil() as u32;
+
+    if count <= low_cutoff {
+        SwarmHeatmapLevel::Low
+    } else if count <= medium_cutoff {
+        SwarmHeatmapLevel::Medium
+    } else {
+        SwarmHeatmapLevel::High
+    }
+}
+
+fn swarm_heatmap_flash_peer(
+    peers: &[PeerInfo],
+    total_pieces: usize,
+    piece_index: usize,
+) -> Option<&PeerInfo> {
+    peers
+        .iter()
+        .filter(|peer| {
+            !peer_has_all_pieces(peer, total_pieces) && peer_has_piece(peer, piece_index)
+        })
+        .min_by(|a, b| {
+            let a_inactive = peer_is_inactive_for_table(a);
+            let b_inactive = peer_is_inactive_for_table(b);
+            a_inactive
+                .cmp(&b_inactive)
+                .then_with(|| a.address.cmp(&b.address))
+        })
+}
+
+fn swarm_heatmap_flash_color(
+    ctx: &ThemeContext,
+    peers: &[PeerInfo],
+    total_pieces: usize,
+    piece_index: usize,
+) -> Color {
+    let Some(peer) = swarm_heatmap_flash_peer(peers, total_pieces, piece_index) else {
+        return ctx.theme.semantic.white;
+    };
+
+    if peer_is_inactive_for_table(peer) {
+        ctx.theme.semantic.white
+    } else {
+        ip_to_color(ctx, &peer.address)
+    }
+}
+
+fn swarm_heatmap_flash_tone(
+    level: SwarmHeatmapLevel,
+    flash_new: bool,
+) -> Option<SwarmHeatmapFlashTone> {
+    if !flash_new || matches!(level, SwarmHeatmapLevel::Empty) {
+        return None;
+    }
+
+    Some(SwarmHeatmapFlashTone::Regular)
+}
+
 fn draw_swarm_heatmap(
     f: &mut Frame,
     ctx: &ThemeContext,
     peers: &[PeerInfo],
     total_pieces: u32,
     area: Rect,
+    flash: Option<SwarmHeatmapFlash<'_>>,
 ) {
     let color_status_low = ctx.apply(
         Style::default()
@@ -5471,19 +6455,13 @@ fn draw_swarm_heatmap(
     let shade_medium = symbols::shade::MEDIUM;
     let shade_dark = symbols::shade::DARK;
 
-    let total_pieces_usize = total_pieces as usize;
-    let mut availability: Vec<u32> = vec![0; total_pieces_usize];
-    if total_pieces_usize > 0 {
-        for peer in peers {
-            for (i, has_piece) in peer.bitfield.iter().enumerate().take(total_pieces_usize) {
-                if *has_piece {
-                    availability[i] += 1;
-                }
-            }
-        }
-    }
+    let availability = swarm_availability_counts(peers, total_pieces);
+    let total_pieces_usize = availability.len();
+    let (display_availability, _has_complete_peer) =
+        swarm_heatmap_display_availability_counts(peers, total_pieces_usize);
 
     let max_avail = availability.iter().max().copied().unwrap_or(0);
+    let display_max_avail = display_availability.iter().max().copied().unwrap_or(0);
     let pieces_available_in_swarm = availability.iter().filter(|&&count| count > 0).count();
     let is_swarm_complete =
         total_pieces_usize > 0 && pieces_available_in_swarm == total_pieces_usize;
@@ -5551,7 +6529,6 @@ fn draw_swarm_heatmap(
         return;
     }
 
-    let max_avail_f64 = max_avail.max(5) as f64;
     let available_width = inner_area.width as usize;
     let available_height = inner_area.height as usize;
     let total_cells = (available_width * available_height) as u64;
@@ -5572,23 +6549,37 @@ fn draw_swarm_heatmap(
                 spans.push(Span::raw(" "));
                 continue;
             }
-            let count = availability[piece_index];
-            let (piece_char, color) = if count == 0 {
-                (shade_light, color_heatmap_empty)
+            let display_count = display_availability[piece_index];
+            let (piece_char, style) = if display_count == 0 {
+                (
+                    shade_light,
+                    ctx.apply(Style::default().fg(color_heatmap_empty)),
+                )
             } else {
-                let norm_val = count as f64 / max_avail_f64;
-                if norm_val < 0.20 {
-                    (shade_light, color_heatmap_low)
-                } else if norm_val < 0.80 {
-                    (shade_medium, color_heatmap_medium)
+                let level = swarm_heatmap_level(display_count, display_max_avail);
+                let flash_new = flash.is_some_and(|flash| {
+                    flash
+                        .state
+                        .is_piece_flashing(flash.info_hash, piece_index, flash.now)
+                });
+                if let Some(tone) = swarm_heatmap_flash_tone(level, flash_new) {
+                    let flash_color =
+                        swarm_heatmap_flash_color(ctx, peers, total_pieces_usize, piece_index);
+                    let style = match tone {
+                        SwarmHeatmapFlashTone::Regular => Style::default().fg(flash_color),
+                    };
+                    (shade_dark, ctx.apply(style))
                 } else {
-                    (shade_dark, color_heatmap_high)
+                    let (piece_char, color) = match level {
+                        SwarmHeatmapLevel::Empty => (shade_light, color_heatmap_empty),
+                        SwarmHeatmapLevel::Low => (shade_light, color_heatmap_low),
+                        SwarmHeatmapLevel::Medium => (shade_medium, color_heatmap_medium),
+                        SwarmHeatmapLevel::High => (shade_dark, color_heatmap_high),
+                    };
+                    (piece_char, ctx.apply(Style::default().fg(color)))
                 }
             };
-            spans.push(Span::styled(
-                piece_char.to_string(),
-                ctx.apply(Style::default().fg(color)),
-            ));
+            spans.push(Span::styled(piece_char.to_string(), style));
         }
         lines.push(Line::from(spans));
     }
@@ -6175,6 +7166,465 @@ mod tests {
 
         reduce_ui_action(&mut app_state, UiAction::ToggleTorrentFiles);
         assert!(!app_state.ui.show_torrent_files);
+    }
+
+    #[test]
+    fn peer_table_shows_more_inactive_peers_when_no_active_peers_exist() {
+        let mut state = create_mock_metrics(12);
+        for (idx, peer) in state.peers.iter_mut().enumerate() {
+            peer.address = format!("127.0.0.1:{}", 7000 + idx);
+            peer.download_speed_bps = 0;
+            peer.upload_speed_bps = 0;
+        }
+
+        let peers =
+            displayed_peers_for_table(&state, PeerSortColumn::Address, SortDirection::Ascending);
+
+        assert_eq!(peers.len(), MAX_INACTIVE_ONLY_PEERS_IN_TABLE);
+        assert!(peers.iter().all(|row| match row {
+            PeerTableRow::Peer(peer) => peer_is_inactive_for_table(peer),
+            PeerTableRow::InactiveSummary { .. } => false,
+        }));
+    }
+
+    #[test]
+    fn peer_table_keeps_active_peers_and_summarizes_inactive() {
+        let mut state = create_mock_metrics(10);
+        for (idx, peer) in state.peers.iter_mut().enumerate() {
+            peer.address = format!("127.0.0.1:{}", 7000 + idx);
+            if idx < 5 {
+                peer.download_speed_bps = 1_000 + idx as u64;
+            }
+        }
+
+        let peers =
+            displayed_peers_for_table(&state, PeerSortColumn::DL, SortDirection::Descending);
+        let active_count = peers
+            .iter()
+            .filter(|row| match row {
+                PeerTableRow::Peer(peer) => !peer_is_inactive_for_table(peer),
+                PeerTableRow::InactiveSummary { .. } => false,
+            })
+            .count();
+        let inactive_peer_rows = peers
+            .iter()
+            .filter(|row| match row {
+                PeerTableRow::Peer(peer) => peer_is_inactive_for_table(peer),
+                PeerTableRow::InactiveSummary { .. } => false,
+            })
+            .count();
+        let summary_count = peers.iter().find_map(|row| match row {
+            PeerTableRow::InactiveSummary { count } => Some(*count),
+            PeerTableRow::Peer(_) => None,
+        });
+
+        assert_eq!(active_count, 5);
+        assert_eq!(inactive_peer_rows, 0);
+        assert_eq!(summary_count, Some(5));
+        assert_eq!(peers.len(), active_count + 1);
+    }
+
+    #[test]
+    fn swarm_heatmap_uses_empty_and_scaled_levels() {
+        assert_eq!(swarm_heatmap_level(0, 3), SwarmHeatmapLevel::Empty);
+        assert_eq!(swarm_heatmap_level(1, 1), SwarmHeatmapLevel::High);
+        assert_eq!(swarm_heatmap_level(1, 3), SwarmHeatmapLevel::Low);
+        assert_eq!(swarm_heatmap_level(2, 3), SwarmHeatmapLevel::Medium);
+        assert_eq!(swarm_heatmap_level(3, 3), SwarmHeatmapLevel::High);
+    }
+
+    #[test]
+    fn swarm_heatmap_flash_tone_uses_regular_flash_for_non_empty_cells() {
+        assert_eq!(
+            swarm_heatmap_flash_tone(SwarmHeatmapLevel::Low, true),
+            Some(SwarmHeatmapFlashTone::Regular)
+        );
+        assert_eq!(
+            swarm_heatmap_flash_tone(SwarmHeatmapLevel::Medium, true),
+            Some(SwarmHeatmapFlashTone::Regular)
+        );
+        assert_eq!(
+            swarm_heatmap_flash_tone(SwarmHeatmapLevel::High, true),
+            Some(SwarmHeatmapFlashTone::Regular)
+        );
+        assert_eq!(
+            swarm_heatmap_flash_tone(SwarmHeatmapLevel::Low, false),
+            None
+        );
+        assert_eq!(
+            swarm_heatmap_flash_tone(SwarmHeatmapLevel::Empty, true),
+            None
+        );
+    }
+
+    #[test]
+    fn swarm_heatmap_flash_peer_prefers_active_non_complete_peer_with_piece() {
+        let peers = vec![
+            PeerInfo {
+                address: "127.0.0.1:7002".to_string(),
+                bitfield: vec![true, true, true],
+                upload_speed_bps: 8,
+                ..Default::default()
+            },
+            PeerInfo {
+                address: "127.0.0.1:7001".to_string(),
+                bitfield: vec![false, true, false],
+                ..Default::default()
+            },
+            PeerInfo {
+                address: "127.0.0.1:7003".to_string(),
+                bitfield: vec![false, true, false],
+                download_speed_bps: 16,
+                ..Default::default()
+            },
+        ];
+
+        let peer = swarm_heatmap_flash_peer(&peers, 3, 1).expect("piece source");
+
+        assert_eq!(peer.address, "127.0.0.1:7003");
+    }
+
+    #[test]
+    fn swarm_heatmap_flash_peer_falls_back_to_stable_address_order() {
+        let peers = vec![
+            PeerInfo {
+                address: "127.0.0.1:7002".to_string(),
+                bitfield: vec![true, false],
+                ..Default::default()
+            },
+            PeerInfo {
+                address: "127.0.0.1:7001".to_string(),
+                bitfield: vec![true, false],
+                ..Default::default()
+            },
+        ];
+
+        let peer = swarm_heatmap_flash_peer(&peers, 2, 0).expect("piece source");
+
+        assert_eq!(peer.address, "127.0.0.1:7001");
+    }
+
+    #[test]
+    fn swarm_heatmap_flash_color_uses_white_for_inactive_peer() {
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let peers = vec![PeerInfo {
+            address: "127.0.0.1:7001".to_string(),
+            bitfield: vec![true, false],
+            ..Default::default()
+        }];
+
+        let color = swarm_heatmap_flash_color(&ctx, &peers, 2, 0);
+
+        assert_eq!(color, ctx.theme.semantic.white);
+    }
+
+    #[test]
+    fn swarm_heatmap_flash_color_uses_ip_color_for_active_peer() {
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let peers = vec![PeerInfo {
+            address: "127.0.0.1:7001".to_string(),
+            bitfield: vec![true, false],
+            download_speed_bps: 1,
+            ..Default::default()
+        }];
+
+        let color = swarm_heatmap_flash_color(&ctx, &peers, 2, 0);
+
+        assert_eq!(color, ip_to_color(&ctx, "127.0.0.1:7001"));
+    }
+
+    #[test]
+    fn swarm_heatmap_ignores_complete_peers_for_display_levels() {
+        let peers = vec![
+            PeerInfo {
+                bitfield: vec![true, true, true, true],
+                ..Default::default()
+            },
+            PeerInfo {
+                bitfield: vec![true, true, true, true],
+                ..Default::default()
+            },
+            PeerInfo {
+                bitfield: vec![true, true, true, false],
+                ..Default::default()
+            },
+            PeerInfo {
+                bitfield: vec![true, true, false, false],
+                ..Default::default()
+            },
+            PeerInfo {
+                bitfield: vec![true, false, false, false],
+                ..Default::default()
+            },
+        ];
+
+        let (availability, has_complete_peer) =
+            swarm_heatmap_display_availability_counts(&peers, 4);
+        let max_avail = availability.iter().max().copied().unwrap_or(0);
+
+        assert!(has_complete_peer);
+        assert_eq!(availability, vec![3, 2, 1, 0]);
+        assert_eq!(
+            swarm_heatmap_level(availability[0], max_avail),
+            SwarmHeatmapLevel::High
+        );
+        assert_eq!(
+            swarm_heatmap_level(availability[1], max_avail),
+            SwarmHeatmapLevel::Medium
+        );
+        assert_eq!(
+            swarm_heatmap_level(availability[2], max_avail),
+            SwarmHeatmapLevel::Low
+        );
+        assert_eq!(
+            swarm_heatmap_level(availability[3], max_avail),
+            SwarmHeatmapLevel::Empty
+        );
+    }
+
+    #[test]
+    fn swarm_heatmap_only_complete_peers_stays_empty_for_display_levels() {
+        let peers = vec![
+            PeerInfo {
+                bitfield: vec![true, true, true],
+                ..Default::default()
+            },
+            PeerInfo {
+                bitfield: vec![true, true, true],
+                ..Default::default()
+            },
+        ];
+
+        let (availability, has_complete_peer) =
+            swarm_heatmap_display_availability_counts(&peers, 3);
+        let max_avail = availability.iter().max().copied().unwrap_or(0);
+
+        assert!(has_complete_peer);
+        assert_eq!(availability, vec![0, 0, 0]);
+        assert!(availability
+            .iter()
+            .all(|&count| swarm_heatmap_level(count, max_avail) == SwarmHeatmapLevel::Empty));
+    }
+
+    #[test]
+    fn peer_files_layout_gives_extra_space_to_swarm_when_files_fit() {
+        let mut app_state = create_test_app_state();
+        let torrent = app_state
+            .torrents
+            .get_mut("hash_a".as_bytes())
+            .expect("mock torrent exists");
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.latest_state.download_path = Some(PathBuf::from(r"C:\data\sample-tree"));
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..3)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+
+        let layout = torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 20))
+            .expect("peers, files, and swarm should fit");
+        let swarm = layout.swarm.expect("swarm visible");
+
+        assert_eq!(layout.peer_table.expect("peer table visible").height, 4);
+        assert_eq!(layout.files.height, 4);
+        assert_eq!(swarm.y, layout.files.y + layout.files.height + 1);
+        assert_eq!(swarm.height, 11);
+    }
+
+    #[test]
+    fn peer_files_layout_keeps_adaptive_heatmap_when_files_are_limited() {
+        let mut app_state = create_test_app_state();
+        let torrent = app_state
+            .torrents
+            .get_mut("hash_a".as_bytes())
+            .expect("mock torrent exists");
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.latest_state.download_path = Some(PathBuf::from(r"C:\data\sample-tree"));
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..30)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+
+        let layout = torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 20))
+            .expect("peers, files, and swarm should fit");
+        let swarm = layout.swarm.expect("swarm visible");
+
+        assert_eq!(layout.peer_table.expect("peer table visible").height, 4);
+        assert_eq!(layout.files.height, 14);
+        assert_eq!(swarm.y, layout.files.y + layout.files.height + 1);
+        assert_eq!(swarm.height, MIN_SWARM_AVAILABILITY_HEIGHT);
+    }
+
+    #[test]
+    fn peer_files_layout_falls_back_when_files_would_not_fit() {
+        let mut app_state = create_test_app_state();
+        let torrent = app_state
+            .torrents
+            .get_mut("hash_a".as_bytes())
+            .expect("mock torrent exists");
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.latest_state.download_path = Some(PathBuf::from(r"C:\data\sample-tree"));
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..3)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+
+        assert_eq!(
+            torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 6)),
+            None
+        );
+    }
+
+    #[test]
+    fn peer_files_layout_reserves_files_when_active_peers_fill_area() {
+        let mut app_state = create_test_app_state();
+        let torrent = app_state
+            .torrents
+            .get_mut("hash_a".as_bytes())
+            .expect("mock torrent exists");
+        torrent.latest_state.peers = (0..20)
+            .map(|idx| PeerInfo {
+                address: format!("127.0.0.1:{}", 7000 + idx),
+                download_speed_bps: 1_000 + idx as u64,
+                ..Default::default()
+            })
+            .collect();
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.latest_state.download_path = Some(PathBuf::from(r"C:\data\sample-tree"));
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..8)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+
+        let layout = torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 12))
+            .expect("active peers should reserve a files strip");
+
+        assert_eq!(layout.files_mode, TorrentFilesRenderMode::ActivitySorted);
+        assert_eq!(layout.swarm, None);
+        assert_eq!(layout.peer_table.expect("peer table visible").height, 7);
+        assert_eq!(layout.files, Rect::new(0, 7, 80, 5));
+    }
+
+    #[test]
+    fn peer_files_layout_skips_reserved_files_when_area_is_too_short() {
+        let mut app_state = create_test_app_state();
+        let torrent = app_state
+            .torrents
+            .get_mut("hash_a".as_bytes())
+            .expect("mock torrent exists");
+        torrent.latest_state.peers = (0..20)
+            .map(|idx| PeerInfo {
+                address: format!("127.0.0.1:{}", 7000 + idx),
+                download_speed_bps: 1_000 + idx as u64,
+                ..Default::default()
+            })
+            .collect();
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..8)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+
+        assert_eq!(
+            torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 11)),
+            None
+        );
+    }
+
+    #[test]
+    fn peer_files_layout_reserves_only_existing_files_when_saturated() {
+        let mut app_state = create_test_app_state();
+        let torrent = app_state
+            .torrents
+            .get_mut("hash_a".as_bytes())
+            .expect("mock torrent exists");
+        torrent.latest_state.peers = (0..20)
+            .map(|idx| PeerInfo {
+                address: format!("127.0.0.1:{}", 7000 + idx),
+                download_speed_bps: 1_000 + idx as u64,
+                ..Default::default()
+            })
+            .collect();
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..2)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+
+        let layout = torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 9))
+            .expect("active peers should reserve only existing files");
+
+        assert_eq!(layout.files_mode, TorrentFilesRenderMode::ActivitySorted);
+        assert_eq!(layout.peer_table.expect("peer table visible").height, 7);
+        assert_eq!(layout.files, Rect::new(0, 7, 80, 2));
+    }
+
+    #[test]
+    fn peer_files_layout_can_show_files_without_peer_rows() {
+        let mut app_state = create_test_app_state();
+        app_state.ui.selected_torrent_index = 1;
+        let torrent = app_state
+            .torrents
+            .get_mut("hash_b".as_bytes())
+            .expect("mock torrent exists");
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.latest_state.download_path = Some(PathBuf::from(r"C:\data\sample-tree"));
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            vec![(vec!["single.bin".to_string()], 1_u64)],
+            &Default::default(),
+        );
+
+        let layout = torrent_peer_files_layout(&app_state, Rect::new(0, 0, 80, 12))
+            .expect("files and swarm should fit without peer rows");
+
+        assert_eq!(layout.peer_table, None);
+        assert_eq!(layout.files.height, 2);
+        assert_eq!(layout.swarm.expect("swarm visible").height, 9);
+    }
+
+    #[test]
+    fn torrent_files_body_area_uses_peer_table_horizontal_padding() {
+        assert_eq!(
+            torrent_files_body_area(Rect::new(10, 20, 80, 5)),
+            Rect::new(11, 20, 78, 5)
+        );
+    }
+
+    #[test]
+    fn torrent_files_panel_height_uses_needed_rows_until_limited() {
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.latest_state.download_path = Some(PathBuf::from(r"C:\data\sample-tree"));
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..3)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+
+        assert_eq!(
+            torrent_files_panel_height_needed(&torrent, 80, false, 11),
+            Some(4)
+        );
+        assert_eq!(
+            torrent_files_panel_height_needed(&torrent, 80, false, 4),
+            Some(4)
+        );
+        assert_eq!(
+            torrent_files_panel_height_needed(&torrent, 80, false, 1),
+            Some(1)
+        );
     }
 
     #[test]
@@ -7641,6 +9091,26 @@ mod tests {
         assert_eq!(spans[0].style, ctx.apply(base_style));
     }
 
+    fn render_list_item_plain_lines(items: Vec<ListItem<'static>>, width: u16) -> Vec<String> {
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::Widget;
+
+        let height = items.len() as u16;
+        let area = Rect::new(0, 0, width, height);
+        let mut buffer = Buffer::empty(area);
+        List::new(items).render(area, &mut buffer);
+
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol()))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
     #[test]
     fn build_torrent_file_list_items_limits_tree_rows_to_viewport_height() {
         let mut torrent = create_mock_display_state(0);
@@ -7653,9 +9123,141 @@ mod tests {
         );
 
         let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
-        let items = build_torrent_file_list_items(&torrent, 40, 3, false, 0.0, 0.0, &ctx);
+        let items = build_torrent_file_list_items(
+            &torrent,
+            TorrentFilesListRenderOptions {
+                width: 40,
+                height: 3,
+                anonymize: false,
+                download_phase: 0.0,
+                upload_phase: 0.0,
+                mode: TorrentFilesRenderMode::Tree,
+            },
+            &ctx,
+        );
 
         assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn build_torrent_file_list_items_promotes_active_files_when_limited() {
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..8)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+        torrent.recent_file_activity.insert(
+            "file_06.bin".to_string(),
+            crate::app::RecentFileActivity {
+                download_at: Some(Instant::now()),
+                upload_at: None,
+            },
+        );
+
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let items = build_torrent_file_list_items(
+            &torrent,
+            TorrentFilesListRenderOptions {
+                width: 40,
+                height: 3,
+                anonymize: false,
+                download_phase: 0.0,
+                upload_phase: 0.0,
+                mode: TorrentFilesRenderMode::Tree,
+            },
+            &ctx,
+        );
+        let lines = render_list_item_plain_lines(items, 40);
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].contains("file_06.bin"));
+    }
+
+    #[test]
+    fn activity_sorted_file_list_orders_by_recent_activity_and_adds_overflow_row() {
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..8)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+        let now = Instant::now();
+        torrent.recent_file_activity.insert(
+            "file_03.bin".to_string(),
+            crate::app::RecentFileActivity {
+                download_at: Some(now - Duration::from_secs(10)),
+                upload_at: None,
+            },
+        );
+        torrent.recent_file_activity.insert(
+            "file_06.bin".to_string(),
+            crate::app::RecentFileActivity {
+                download_at: Some(now),
+                upload_at: None,
+            },
+        );
+
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let items = build_torrent_file_list_items(
+            &torrent,
+            TorrentFilesListRenderOptions {
+                width: 40,
+                height: 5,
+                anonymize: false,
+                download_phase: 0.0,
+                upload_phase: 0.0,
+                mode: TorrentFilesRenderMode::ActivitySorted,
+            },
+            &ctx,
+        );
+        let lines = render_list_item_plain_lines(items, 40);
+
+        assert_eq!(lines.len(), 5);
+        assert!(lines[0].contains("file_06.bin"));
+        assert!(lines[1].contains("file_03.bin"));
+        assert!(lines[4].contains("+ 4 more files"));
+    }
+
+    #[test]
+    fn build_torrent_file_list_items_keeps_tree_order_when_not_limited() {
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            (0..3)
+                .map(|idx| (vec![format!("file_{idx:02}.bin")], 1_u64))
+                .collect(),
+            &Default::default(),
+        );
+        torrent.recent_file_activity.insert(
+            "file_02.bin".to_string(),
+            crate::app::RecentFileActivity {
+                download_at: Some(Instant::now()),
+                upload_at: None,
+            },
+        );
+
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let items = build_torrent_file_list_items(
+            &torrent,
+            TorrentFilesListRenderOptions {
+                width: 40,
+                height: 5,
+                anonymize: false,
+                download_phase: 0.0,
+                upload_phase: 0.0,
+                mode: TorrentFilesRenderMode::Tree,
+            },
+            &ctx,
+        );
+        let lines = render_list_item_plain_lines(items, 40);
+
+        assert!(lines[1].contains("file_00.bin"));
+        assert!(lines[3].contains("file_02.bin"));
     }
 
     #[test]
@@ -7840,6 +9442,107 @@ mod tests {
         assert_eq!(disk_health_state_word(2), "Strain");
         assert_eq!(disk_health_state_word(3), "Chaos");
         assert_eq!(disk_health_state_word(9), "Chaos");
+    }
+
+    #[test]
+    fn disk_health_orb_layout_scales_box_without_exceeding_panel() {
+        let layout =
+            disk_health_orb_layout(Rect::new(10, 20, 28, 12)).expect("panel should fit the orb");
+
+        assert_eq!(layout.area, Rect::new(14, 21, 20, 10));
+        assert!((layout.visual_radius - 8.1).abs() < 0.000_001);
+        assert_eq!(layout.center_y_offset_rows, 0.0);
+    }
+
+    #[test]
+    fn disk_health_orb_layout_skips_tiny_panels() {
+        assert_eq!(disk_health_orb_layout(Rect::new(0, 0, 2, 8)), None);
+        assert_eq!(disk_health_orb_layout(Rect::new(0, 0, 8, 2)), None);
+    }
+
+    fn disk_health_orb_dot_points(rows: &[String]) -> Vec<(usize, usize)> {
+        let mut points = Vec::new();
+
+        for (cell_y, row) in rows.iter().enumerate() {
+            for (cell_x, ch) in row.chars().enumerate() {
+                let code = ch as u32;
+                if !(0x2801..=0x28ff).contains(&code) {
+                    continue;
+                }
+
+                let cell_bits = (code - 0x2800) as u8;
+                for (dot_y, braille_row) in DISK_HEALTH_ORB_BRAILLE_BITS.iter().enumerate() {
+                    for (dot_x, &bit) in braille_row.iter().enumerate() {
+                        if cell_bits & bit != 0 {
+                            points.push((cell_x * 2 + dot_x, cell_y * 4 + dot_y));
+                        }
+                    }
+                }
+            }
+        }
+
+        points
+    }
+
+    fn disk_health_orb_dot_bounds(points: &[(usize, usize)]) -> (usize, usize, usize, usize) {
+        points.iter().fold(
+            (usize::MAX, 0usize, usize::MAX, 0usize),
+            |(min_x, max_x, min_y, max_y), &(x, y)| {
+                (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
+            },
+        )
+    }
+
+    #[test]
+    fn disk_health_orb_layout_center_matches_panel_center() {
+        let panel = Rect::new(10, 20, 28, 12);
+        let layout = disk_health_orb_layout(panel).expect("panel should fit the orb");
+        let geometry = disk_health_orb_geometry(layout);
+
+        let absolute_center_x = f64::from(layout.area.x - panel.x) + geometry.visual_center_x;
+        let absolute_center_y = f64::from(layout.area.y - panel.y) * DISK_HEALTH_ORB_CELL_Y_ASPECT
+            + geometry.visual_center_y;
+
+        assert_eq!(absolute_center_x, f64::from(panel.width) * 0.5);
+        assert_eq!(
+            absolute_center_y,
+            f64::from(panel.height) * DISK_HEALTH_ORB_CELL_Y_ASPECT * 0.5
+        );
+    }
+
+    #[test]
+    fn disk_health_orb_stable_points_are_centered_and_not_clipped() {
+        let panel = Rect::new(10, 20, 28, 12);
+        let layout = disk_health_orb_layout(panel).expect("panel should fit the orb");
+        let rows = build_disk_health_orb_rows(layout, 0.0, disk_health_deform_profile(0), 0.0, 0.0);
+        let points = disk_health_orb_dot_points(&rows);
+        assert!(!points.is_empty(), "stable orb should render dots");
+
+        let (min_x, max_x, min_y, max_y) = disk_health_orb_dot_bounds(&points);
+        assert!(min_x > 0, "left edge should have breathing room");
+        assert!(min_y > 0, "top edge should have breathing room");
+        assert!(
+            max_x < layout.area.width as usize * 2 - 1,
+            "right edge should not be clipped"
+        );
+        assert!(
+            max_y < layout.area.height as usize * 4 - 1,
+            "bottom edge should not be clipped"
+        );
+
+        let absolute_center_x_twice = (layout.area.x - panel.x) as usize * 4 + min_x + max_x + 1;
+        let target_center_x_twice = panel.width as usize * 2;
+        let absolute_center_y_twice = (layout.area.y - panel.y) as usize * 8 + min_y + max_y + 1;
+        let target_center_y_twice = panel.height as usize * 4;
+
+        assert!(
+            absolute_center_x_twice.abs_diff(target_center_x_twice) <= 1,
+            "horizontal dot bounds should center on calculated panel center"
+        );
+        assert!(
+            absolute_center_y_twice.abs_diff(target_center_y_twice) <= 1,
+            "vertical dot bounds should center on calculated panel center"
+        );
     }
 
     #[test]

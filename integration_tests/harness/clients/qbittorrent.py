@@ -55,7 +55,7 @@ class QBittorrentAdapter(ClientAdapter):
         try:
             with self._opener.open(request, timeout=5) as response:
                 body = response.read().decode("utf-8", errors="replace").strip()
-                return response.status == 200 and body == "Ok."
+                return response.status in (200, 204) and body in ("", "Ok.")
         except url_error.HTTPError as exc:
             if exc.code in (401, 403):
                 return False
@@ -161,6 +161,29 @@ class QBittorrentAdapter(ClientAdapter):
         content_type = f"multipart/form-data; boundary={boundary}"
         return b"".join(parts), content_type
 
+    @staticmethod
+    def _torrent_add_succeeded(status: int, response_text: str) -> bool:
+        if status != 200:
+            return False
+        if response_text in ("", "Ok."):
+            return True
+
+        try:
+            payload = json.loads(response_text)
+        except json.JSONDecodeError:
+            return False
+
+        if not isinstance(payload, dict):
+            return False
+
+        try:
+            failure_count = int(payload.get("failure_count", 1))
+            success_count = int(payload.get("success_count", 0))
+        except (TypeError, ValueError):
+            return False
+
+        return failure_count == 0 and success_count > 0
+
     def _list_torrents(self) -> list[dict[str, Any]]:
         status, body = self._request("/api/v2/torrents/info", method="GET")
         if status != 200:
@@ -196,7 +219,7 @@ class QBittorrentAdapter(ClientAdapter):
             headers={"Content-Type": content_type},
         )
         response_text = body.decode("utf-8", errors="replace").strip()
-        if status != 200 or (response_text and response_text != "Ok."):
+        if not self._torrent_add_succeeded(status, response_text):
             raise RuntimeError(
                 f"Failed to add torrent to qBittorrent: status={status} body={response_text!r}"
             )

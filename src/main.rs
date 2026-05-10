@@ -15,10 +15,13 @@ mod errors;
 mod fs_atomic;
 mod integrations;
 mod integrity_scheduler;
+mod logging;
 mod networking;
 mod persistence;
 mod resource_manager;
 mod storage;
+#[cfg(feature = "synthetic-load")]
+mod synthetic_load;
 mod telemetry;
 mod theme;
 mod token_bucket;
@@ -31,7 +34,7 @@ mod tuning;
 mod watch_inbox;
 
 use app::{App, AppRuntimeMode};
-use rand::Rng;
+use rand::RngExt;
 
 use std::fs;
 use std::fs::File;
@@ -73,9 +76,6 @@ use crate::persistence::event_journal::{
 };
 use crate::torrent_identity::{info_hash_from_torrent_bytes, info_hash_from_torrent_source};
 use serde_json::{json, Value};
-
-use tracing_appender::rolling::RollingFileAppender;
-use tracing_appender::rolling::Rotation;
 
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::env;
@@ -582,7 +582,7 @@ fn init_tracing(
     log_dirs: Vec<PathBuf>,
     filename_prefix: &str,
     emit_stderr: bool,
-) -> Vec<tracing_appender::non_blocking::WorkerGuard> {
+) -> Vec<logging::LogWorkerGuard> {
     let quiet_filter = Targets::new()
         .with_default(DEFAULT_LOG_FILTER)
         .with_target("mainline::rpc::socket", LevelFilter::ERROR);
@@ -604,16 +604,8 @@ fn init_tracing(
                 suppressed_failures.push(message);
             }
         } else {
-            match RollingFileAppender::builder()
-                .rotation(Rotation::DAILY)
-                .max_log_files(31)
-                .filename_prefix(filename_prefix)
-                .filename_suffix("log")
-                .build(&log_dir)
-            {
-                Ok(general_log) => {
-                    let (non_blocking_general, guard_general) =
-                        tracing_appender::non_blocking(general_log);
+            match logging::non_blocking_daily_file_writer(&log_dir, filename_prefix, 31) {
+                Ok((non_blocking_general, guard_general)) => {
                     let general_layer = fmt::layer()
                         .with_writer(non_blocking_general)
                         .with_ansi(false)
@@ -750,6 +742,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
         tracing::info!("Show configs command processed, exiting temporary instance.");
+        return Ok(());
+    }
+
+    #[cfg(feature = "synthetic-load")]
+    if let Some(Commands::Benchmark(args)) = cli.command.as_ref() {
+        if let Err(error) = synthetic_load::run_benchmark(args, cli.json).await {
+            if output_mode == OutputMode::Json {
+                print_json_error(cli_command_name(cli.command.as_ref()), &error.to_string());
+            } else {
+                eprintln!("[Error] Benchmark failed: {}", error);
+            }
+            std::process::exit(1);
+        }
+        tracing::info!("Benchmark command processed, exiting temporary instance.");
+        return Ok(());
+    }
+
+    #[cfg(feature = "synthetic-load")]
+    if let Some(Commands::SyntheticLoad(args)) = cli.command.as_ref() {
+        if let Err(error) = synthetic_load::run(args, cli.json).await {
+            if output_mode == OutputMode::Json {
+                print_json_error(cli_command_name(cli.command.as_ref()), &error.to_string());
+            } else {
+                eprintln!("[Error] Synthetic load failed: {}", error);
+            }
+            std::process::exit(1);
+        }
+        tracing::info!("Synthetic load command processed, exiting temporary instance.");
         return Ok(());
     }
 
@@ -3046,6 +3066,10 @@ fn cli_command_name(command: Option<&Commands>) -> Option<&'static str> {
         Some(Commands::Purge { .. }) => Some("purge"),
         Some(Commands::Files { .. }) => Some("files"),
         Some(Commands::Priority { .. }) => Some("priority"),
+        #[cfg(feature = "synthetic-load")]
+        Some(Commands::Benchmark(_)) => Some("benchmark"),
+        #[cfg(feature = "synthetic-load")]
+        Some(Commands::SyntheticLoad(_)) => Some("synthetic-load"),
         None => None,
     }
 }

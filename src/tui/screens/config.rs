@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::app::{AppCommand, AppMode, ConfigItem, FileBrowserMode};
 use crate::config::Settings;
-use crate::token_bucket::TokenBucket;
+use crate::token_bucket::{rate_limit_bps_to_bucket_bytes_per_sec, TokenBucket};
 use crate::tui::formatters::{format_limit_bps, path_to_string};
 use crate::tui::screen_context::ScreenContext;
 use directories::UserDirs;
@@ -446,13 +446,13 @@ pub fn handle_event(event: CrosstermEvent, ctx: ConfigHandleContext<'_>) -> bool
                     ConfigEffect::SetDownloadRate(new_rate) => {
                         let bucket = ctx.global_dl_bucket.clone();
                         tokio::spawn(async move {
-                            bucket.set_rate(new_rate as f64);
+                            bucket.set_rate(rate_limit_bps_to_bucket_bytes_per_sec(new_rate));
                         });
                     }
                     ConfigEffect::SetUploadRate(new_rate) => {
                         let bucket = ctx.global_ul_bucket.clone();
                         tokio::spawn(async move {
-                            bucket.set_rate(new_rate as f64);
+                            bucket.set_rate(rate_limit_bps_to_bucket_bytes_per_sec(new_rate));
                         });
                     }
                     ConfigEffect::ToNormal => {

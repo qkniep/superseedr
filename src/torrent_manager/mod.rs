@@ -24,6 +24,8 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::watch;
 use tokio::time::Duration;
 
+#[cfg(feature = "synthetic-load")]
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -121,7 +123,14 @@ pub enum ManagerEvent {
         info_hash: Vec<u8>,
         op: DiskIoOperation,
     },
-    DiskWriteFinished,
+    DiskWriteCompleted {
+        info_hash: Vec<u8>,
+        op: DiskIoOperation,
+    },
+    DiskWriteFinished {
+        info_hash: Vec<u8>,
+        piece_index: u32,
+    },
     DiskIoBackoff {
         duration: Duration,
     },
@@ -134,6 +143,16 @@ pub enum ManagerEvent {
     PeerDisconnected {
         info_hash: Vec<u8>,
     },
+    #[cfg(feature = "synthetic-load")]
+    PeerConnectAttempted,
+    #[cfg(feature = "synthetic-load")]
+    PeerConnectEstablished,
+    #[cfg(feature = "synthetic-load")]
+    PeerConnectFailed {
+        reason: SyntheticPeerConnectFailure,
+    },
+    #[cfg(feature = "synthetic-load")]
+    PeerSessionFailed,
 
     BlockReceived {
         info_hash: Vec<u8>,
@@ -151,8 +170,26 @@ pub enum ManagerEvent {
     },
 }
 
+#[cfg(feature = "synthetic-load")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyntheticPeerConnectFailure {
+    PermitTimeout,
+    PermitManagerShutdown,
+    PermitQueueFull,
+    ConnectTimeout,
+    ConnectionRefused,
+    ConnectionReset,
+    ConnectionAborted,
+    AddrInUse,
+    AddrNotAvailable,
+    TimedOut,
+    OtherIo,
+}
+
 #[derive(Debug, Clone)]
 pub enum ManagerCommand {
+    #[cfg(feature = "synthetic-load")]
+    ConnectToPeer(SocketAddr),
     ProbeFileBatch {
         epoch: u64,
         start_file_index: usize,

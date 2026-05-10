@@ -12,6 +12,8 @@ use tracing::{event as tracing_event, Level};
 pub const SECONDS_HISTORY_MAX: usize = 3600; // 1 hour of per-second data
 pub const MINUTES_HISTORY_MAX: usize = 48 * 60; // 48 hours of per-minute data
 const RECENT_FILE_ACTIVITY_RETENTION: Duration = Duration::from_secs(120);
+const RECEIVE_TO_WRITE_LATENCY_SAMPLES_MAX: usize = 1024;
+const PENDING_WRITE_START_TIMES_MAX: usize = 100_000;
 
 pub struct UiTelemetry;
 
@@ -50,6 +52,12 @@ impl UiTelemetry {
             }
             ManagerEvent::DiskWriteStarted { info_hash, op } => {
                 app_state.write_op_start_times.push_front(Instant::now());
+                if app_state.pending_piece_write_start_times.len() > PENDING_WRITE_START_TIMES_MAX {
+                    app_state.pending_piece_write_start_times.clear();
+                }
+                app_state
+                    .pending_piece_write_start_times
+                    .insert((info_hash.clone(), op.piece_index), Instant::now());
                 app_state.global_disk_write_history_log.push_front(*op);
                 app_state.global_disk_write_history_log.truncate(100);
                 if let Some(torrent) = app_state.torrents.get_mut(info_hash) {
@@ -59,7 +67,32 @@ impl UiTelemetry {
                 }
                 true
             }
-            ManagerEvent::DiskWriteFinished => {
+            ManagerEvent::DiskWriteCompleted { info_hash, op } => {
+                app_state.bytes_written_completed_this_tick = app_state
+                    .bytes_written_completed_this_tick
+                    .saturating_add(op.length as u64);
+                if let Some(received_at) = app_state
+                    .pending_piece_write_start_times
+                    .remove(&(info_hash.clone(), op.piece_index))
+                {
+                    app_state
+                        .recv_to_write_latency_samples
+                        .push_back(received_at.elapsed());
+                    while app_state.recv_to_write_latency_samples.len()
+                        > RECEIVE_TO_WRITE_LATENCY_SAMPLES_MAX
+                    {
+                        app_state.recv_to_write_latency_samples.pop_front();
+                    }
+                }
+                true
+            }
+            ManagerEvent::DiskWriteFinished {
+                info_hash,
+                piece_index,
+            } => {
+                app_state
+                    .pending_piece_write_start_times
+                    .remove(&(info_hash.clone(), *piece_index));
                 if let Some(start_time) = app_state.write_op_start_times.pop_front() {
                     let duration = start_time.elapsed();
                     const LATENCY_EMA_PERIOD: f64 = 10.0;
@@ -262,7 +295,8 @@ impl UiTelemetry {
         if app_state.global_seek_cost_per_byte_history.len() > MIN_SAMPLES_TO_LEARN {
             let mut sorted_history = app_state.global_seek_cost_per_byte_history.clone();
             sorted_history.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let percentile_index = (sorted_history.len() as f64 * 0.95) as usize;
+            let percentile_index = percentile_index_nearest_rank(sorted_history.len(), 95)
+                .expect("non-empty seek cost history");
             let new_scpb_max = sorted_history[percentile_index];
             app_state.adaptive_max_scpb = new_scpb_max.max(1.0);
         }
@@ -327,6 +361,12 @@ impl UiTelemetry {
 
         app_state.avg_disk_read_bps = global_disk_read_bps;
         app_state.avg_disk_write_bps = global_disk_write_bps;
+        app_state.avg_disk_write_completed_bps = app_state
+            .bytes_written_completed_this_tick
+            .saturating_mul(8);
+        app_state.bytes_written_completed_this_tick = 0;
+        app_state.recv_to_write_p95 =
+            calculate_duration_p95(&app_state.recv_to_write_latency_samples);
 
         let mut total_dl = 0;
         let mut total_ul = 0;
@@ -448,6 +488,10 @@ fn prune_stale_recent_file_activity(
 }
 
 fn compute_disk_health_raw(app_state: &AppState) -> f64 {
+    if !has_current_disk_health_signal(app_state) {
+        return 0.0;
+    }
+
     let net_total_bps = app_state.avg_download_history.last().copied().unwrap_or(0)
         + app_state.avg_upload_history.last().copied().unwrap_or(0);
     let disk_total_bps = app_state.avg_disk_read_bps + app_state.avg_disk_write_bps;
@@ -474,6 +518,10 @@ fn compute_disk_health_raw(app_state: &AppState) -> f64 {
 }
 
 fn compute_disk_state_score(app_state: &AppState) -> f64 {
+    if !has_current_disk_health_signal(app_state) {
+        return 0.0;
+    }
+
     let net_total_bps = app_state.avg_download_history.last().copied().unwrap_or(0)
         + app_state.avg_upload_history.last().copied().unwrap_or(0);
     let disk_total_bps = app_state.avg_disk_read_bps + app_state.avg_disk_write_bps;
@@ -505,6 +553,14 @@ fn compute_disk_state_score(app_state: &AppState) -> f64 {
         score = score.max(0.80);
     }
     score
+}
+
+fn has_current_disk_health_signal(app_state: &AppState) -> bool {
+    app_state.avg_disk_read_bps > 0
+        || app_state.avg_disk_write_bps > 0
+        || app_state.read_iops > 0
+        || app_state.write_iops > 0
+        || app_state.max_disk_backoff_this_tick_ms > 0
 }
 
 fn update_disk_health_state_level(app_state: &mut AppState) {
@@ -558,6 +614,27 @@ fn calculate_thrash_score(history_log: &VecDeque<DiskIoOperation>) -> u64 {
     total_seek_distance / seek_count as u64
 }
 
+fn calculate_duration_p95(samples: &VecDeque<Duration>) -> Duration {
+    if samples.is_empty() {
+        return Duration::ZERO;
+    }
+
+    let mut sorted: Vec<Duration> = samples.iter().copied().collect();
+    sorted.sort();
+    let percentile_index =
+        percentile_index_nearest_rank(sorted.len(), 95).expect("non-empty samples");
+    sorted[percentile_index]
+}
+
+fn percentile_index_nearest_rank(len: usize, percentile: usize) -> Option<usize> {
+    if len == 0 || percentile == 0 {
+        return None;
+    }
+
+    let rank = len.saturating_mul(percentile).saturating_add(99) / 100;
+    Some(rank.saturating_sub(1).min(len - 1))
+}
+
 fn calculate_thrash_score_seek_cost_f64(history_log: &VecDeque<DiskIoOperation>) -> f64 {
     if history_log.len() < 2 {
         return 0.0;
@@ -606,8 +683,10 @@ mod tests {
     use crate::app::{AppState, PeerInfo, RecentFileActivity, TorrentDisplayState, TorrentMetrics};
     use crate::config::{PeerSortColumn, SortDirection, TorrentSortColumn};
     use crate::telemetry::manager_telemetry::ManagerTelemetry;
-    use crate::torrent_manager::{FileActivityDirection, FileActivityUpdate};
-    use std::collections::HashMap;
+    use crate::torrent_manager::{
+        DiskIoOperation, FileActivityDirection, FileActivityUpdate, ManagerEvent,
+    };
+    use std::collections::{HashMap, VecDeque};
     use std::time::{Duration, Instant};
     use sysinfo::System;
 
@@ -752,7 +831,7 @@ mod tests {
         assert!(UiTelemetry::on_manager_event_metrics(
             &mut app_state,
             &ManagerEvent::BlockReceived {
-                info_hash: info_hash.clone()
+                info_hash: info_hash.clone(),
             }
         ));
         assert!(UiTelemetry::on_manager_event_metrics(
@@ -846,6 +925,136 @@ mod tests {
     }
 
     #[test]
+    fn disk_write_completed_speed_uses_completed_write_events() {
+        let mut app_state = AppState::default();
+        let info_hash = vec![4; 20];
+        assert!(UiTelemetry::on_manager_event_metrics(
+            &mut app_state,
+            &ManagerEvent::DiskWriteCompleted {
+                info_hash: info_hash.clone(),
+                op: DiskIoOperation {
+                    piece_index: 0,
+                    offset: 0,
+                    length: 2_048,
+                }
+            }
+        ));
+
+        let mut sys = System::new();
+        UiTelemetry::on_second_tick(&mut app_state, &mut sys);
+
+        assert_eq!(app_state.avg_disk_write_completed_bps, 16_384);
+
+        UiTelemetry::on_second_tick(&mut app_state, &mut sys);
+
+        assert_eq!(app_state.avg_disk_write_completed_bps, 0);
+    }
+
+    #[test]
+    fn recv_to_write_p95_uses_write_start_to_completed_write_latency() {
+        let mut app_state = AppState::default();
+        let info_hash = vec![5; 20];
+
+        assert!(UiTelemetry::on_manager_event_metrics(
+            &mut app_state,
+            &ManagerEvent::BlockReceived {
+                info_hash: info_hash.clone(),
+            }
+        ));
+        assert!(
+            app_state.pending_piece_write_start_times.is_empty(),
+            "receiving a block should not start disk backpressure timing"
+        );
+
+        assert!(UiTelemetry::on_manager_event_metrics(
+            &mut app_state,
+            &ManagerEvent::DiskWriteStarted {
+                info_hash: info_hash.clone(),
+                op: DiskIoOperation {
+                    piece_index: 7,
+                    offset: 0,
+                    length: 1_024,
+                },
+            }
+        ));
+        app_state.pending_piece_write_start_times.insert(
+            (info_hash.clone(), 7),
+            Instant::now() - Duration::from_secs(2),
+        );
+
+        assert!(UiTelemetry::on_manager_event_metrics(
+            &mut app_state,
+            &ManagerEvent::DiskWriteCompleted {
+                info_hash,
+                op: DiskIoOperation {
+                    piece_index: 7,
+                    offset: 0,
+                    length: 1_024,
+                },
+            }
+        ));
+
+        let mut sys = System::new();
+        UiTelemetry::on_second_tick(&mut app_state, &mut sys);
+
+        assert!(app_state.pending_piece_write_start_times.is_empty());
+        assert_eq!(app_state.recv_to_write_latency_samples.len(), 1);
+        assert!(app_state.recv_to_write_p95 >= Duration::from_secs(2));
+    }
+
+    #[test]
+    fn disk_write_finished_clears_pending_latency_start_without_completion() {
+        let mut app_state = AppState::default();
+        let info_hash = vec![6; 20];
+
+        assert!(UiTelemetry::on_manager_event_metrics(
+            &mut app_state,
+            &ManagerEvent::DiskWriteStarted {
+                info_hash: info_hash.clone(),
+                op: DiskIoOperation {
+                    piece_index: 9,
+                    offset: 0,
+                    length: 1_024,
+                },
+            }
+        ));
+        assert!(app_state
+            .pending_piece_write_start_times
+            .contains_key(&(info_hash.clone(), 9)));
+
+        assert!(UiTelemetry::on_manager_event_metrics(
+            &mut app_state,
+            &ManagerEvent::DiskWriteFinished {
+                info_hash: info_hash.clone(),
+                piece_index: 9,
+            }
+        ));
+
+        assert!(!app_state
+            .pending_piece_write_start_times
+            .contains_key(&(info_hash, 9)));
+        assert!(app_state.recv_to_write_latency_samples.is_empty());
+    }
+
+    #[test]
+    fn percentile_index_nearest_rank_uses_one_based_rank() {
+        assert_eq!(super::percentile_index_nearest_rank(0, 95), None);
+        assert_eq!(super::percentile_index_nearest_rank(1, 95), Some(0));
+        assert_eq!(super::percentile_index_nearest_rank(20, 95), Some(18));
+        assert_eq!(super::percentile_index_nearest_rank(100, 95), Some(94));
+    }
+
+    #[test]
+    fn recv_to_write_p95_does_not_select_max_for_twenty_samples() {
+        let samples = (1..=20).map(Duration::from_millis).collect::<VecDeque<_>>();
+
+        assert_eq!(
+            super::calculate_duration_p95(&samples),
+            Duration::from_millis(19)
+        );
+    }
+
+    #[test]
     fn disk_health_raw_is_near_zero_when_balanced_and_calm() {
         let app_state = AppState {
             avg_download_history: vec![40_000_000],
@@ -923,6 +1132,30 @@ mod tests {
             app_state.disk_health_ema
         );
         assert!(app_state.disk_health_peak_hold >= app_state.disk_health_ema);
+    }
+
+    #[test]
+    fn disk_health_state_ignores_stale_pressure_when_disk_is_idle() {
+        let mut app_state = AppState {
+            disk_health_state_level: 1,
+            disk_health_ema: 0.55,
+            disk_health_peak_hold: 0.70,
+            avg_download_history: vec![100_000_000],
+            avg_upload_history: vec![20_000_000],
+            avg_disk_read_bps: 0,
+            avg_disk_write_bps: 0,
+            global_disk_thrash_score: 18.0,
+            adaptive_max_scpb: 10.0,
+            avg_disk_write_latency: Duration::from_millis(20),
+            max_disk_backoff_this_tick_ms: 0,
+            ..Default::default()
+        };
+
+        assert_eq!(compute_disk_health_raw(&app_state), 0.0);
+        update_disk_health_state(&mut app_state);
+
+        assert_eq!(app_state.disk_health_state_level, 0);
+        assert!(app_state.disk_health_ema < 0.55);
     }
 
     #[test]

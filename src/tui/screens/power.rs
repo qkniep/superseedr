@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use ratatui::{prelude::*, widgets::*};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -95,7 +95,7 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
 
     let dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
     let ul_speed = *app_state.avg_upload_history.last().unwrap_or(&0);
-    let dl_limit = settings.global_download_limit_bps;
+    let dl_limit = app_state.effective_download_limit_bps;
     let ul_limit = settings.global_upload_limit_bps;
     let (level, level_progress) = calculate_player_stats(app_state);
     let level_filled_len = (level_progress * LEVEL_GAUGE_WIDTH as f64).round() as usize;
