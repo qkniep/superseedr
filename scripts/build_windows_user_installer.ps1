@@ -141,7 +141,7 @@ function Add-UserPath {
     }
 }
 
-$OpenCommand = "`"$ExePath`" --launch-tui `"%1`""
+$OpenCommand = "`"$ExePath`" `"%1`""
 Set-RegistryDefault "Software\Classes\magnet" "URL:Magnet Protocol"
 Set-RegistryValue "Software\Classes\magnet" "URL Protocol" ""
 Set-RegistryDefault "Software\Classes\magnet\DefaultIcon" "`"$IconPath`",0"
@@ -334,7 +334,7 @@ static class Program
             ExtractResource("superseedr.exe", exePath);
             ExtractResource("app_icon.ico", iconPath);
 
-            string openCommand = $"\"{exePath}\" --launch-tui \"%1\"";
+            string openCommand = $"\"{exePath}\" \"%1\"";
             SetDefault(@"Software\Classes\magnet", "URL:Magnet Protocol");
             SetValue(@"Software\Classes\magnet", "URL Protocol", "");
             SetDefault(@"Software\Classes\magnet\DefaultIcon", $"\"{iconPath}\",0");

@@ -67,17 +67,17 @@ Name: "{autodesktop}\superseedr"; Filename: "{app}\{#AppExeName}"; WorkingDir: "
 Root: HKCU; Subkey: "Software\Classes\magnet"; ValueType: string; ValueName: ""; ValueData: "URL:Magnet Protocol"; Flags: uninsdeletekey; Tasks: associations
 Root: HKCU; Subkey: "Software\Classes\magnet"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Flags: uninsdeletevalue; Tasks: associations
 Root: HKCU; Subkey: "Software\Classes\magnet\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\app_icon.ico"",0"; Flags: uninsdeletekey; Tasks: associations
-Root: HKCU; Subkey: "Software\Classes\magnet\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" --launch-tui ""%1"""; Flags: uninsdeletekey; Tasks: associations
+Root: HKCU; Subkey: "Software\Classes\magnet\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; Flags: uninsdeletekey; Tasks: associations
 
 Root: HKCU; Subkey: "Software\Classes\.torrent"; ValueType: string; ValueName: ""; ValueData: "superseedr.torrent"; Flags: uninsdeletevalue; Tasks: associations
 Root: HKCU; Subkey: "Software\Classes\.torrent"; ValueType: string; ValueName: "Content Type"; ValueData: "application/x-bittorrent"; Flags: uninsdeletevalue; Tasks: associations
 Root: HKCU; Subkey: "Software\Classes\superseedr.torrent"; ValueType: string; ValueName: ""; ValueData: "Torrent File (superseedr)"; Flags: uninsdeletekey; Tasks: associations
 Root: HKCU; Subkey: "Software\Classes\superseedr.torrent\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\app_icon.ico"",0"; Flags: uninsdeletekey; Tasks: associations
-Root: HKCU; Subkey: "Software\Classes\superseedr.torrent\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" --launch-tui ""%1"""; Flags: uninsdeletekey; Tasks: associations
+Root: HKCU; Subkey: "Software\Classes\superseedr.torrent\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; Flags: uninsdeletekey; Tasks: associations
 
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "superseedr"; Flags: uninsdeletekey; Tasks: associations
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}\SupportedTypes"; ValueType: string; ValueName: ".torrent"; ValueData: ""; Flags: uninsdeletekey; Tasks: associations
-Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" --launch-tui ""%1"""; Flags: uninsdeletekey; Tasks: associations
+Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""; Flags: uninsdeletekey; Tasks: associations
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch superseedr"; Flags: nowait postinstall skipifsilent unchecked
