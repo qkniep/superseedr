@@ -9,15 +9,11 @@
 #define AppOutputVersion "dev"
 #endif
 
-#ifndef PrivateBuild
-#define PrivateBuild 0
-#endif
-
 #ifndef OutputDir
 #define OutputDir "..\..\target\installer\windows"
 #endif
 
-#if PrivateBuild
+#ifdef PrivateBuild
 #define AppName "superseedr private"
 #define AppId "superseedr-private-user"
 #else
@@ -42,7 +38,7 @@ DefaultDirName={localappdata}\Programs\superseedr
 DefaultGroupName=superseedr
 DisableProgramGroupPage=yes
 OutputDir={#OutputDir}
-#if PrivateBuild
+#ifdef PrivateBuild
 OutputBaseFilename=superseedr-private-{#AppOutputVersion}-x64-setup
 #else
 OutputBaseFilename=superseedr-{#AppOutputVersion}-x64-setup

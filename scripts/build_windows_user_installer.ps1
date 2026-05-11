@@ -70,10 +70,14 @@ function Build-WithInno {
         [Parameter(Mandatory = $true)][string]$Iscc
     )
 
-    $privateBuild = if ($Flavor -eq "private") { "1" } else { "0" }
     $outputVersion = Get-InnoOutputVersion -RawVersion $Version
-    Write-Host "Running: $Iscc /DAppVersion=`"$Version`" /DAppOutputVersion=$outputVersion /DPrivateBuild=$privateBuild $InstallerScript"
-    & $Iscc "/DAppVersion=`"$Version`"" "/DAppOutputVersion=$outputVersion" "/DPrivateBuild=$privateBuild" $InstallerScript
+    $innoArgs = @("/DAppVersion=`"$Version`"", "/DAppOutputVersion=$outputVersion")
+    if ($Flavor -eq "private") {
+        $innoArgs += "/DPrivateBuild"
+    }
+
+    Write-Host "Running: $Iscc $($innoArgs -join ' ') $InstallerScript"
+    & $Iscc @innoArgs $InstallerScript
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
