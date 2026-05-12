@@ -113,6 +113,55 @@ verify_code_signature() {
     codesign -dv --verbose=4 "${path}"
 }
 
+sign_app_bundle() {
+    local app_path="$1"
+    local binary_path="${app_path}/Contents/Resources/${BINARY_NAME}"
+
+    echo "Signing bundled binary with Developer ID and Hardened Runtime: ${binary_path}"
+    codesign -s "${APP_CERT_NAME}" \
+      -v --force \
+      --options runtime \
+      "${CODESIGN_TIMESTAMP_ARGS[@]}" \
+      --entitlements "${ENTITLEMENTS_PATH}" \
+      "${binary_path}"
+    verify_code_signature "${binary_path}"
+
+    echo "Signing ${HANDLER_APP_NAME}.app with Developer ID and Hardened Runtime: ${app_path}"
+    codesign -s "${APP_CERT_NAME}" \
+      -v --force --deep \
+      --options runtime \
+      "${CODESIGN_TIMESTAMP_ARGS[@]}" \
+      --entitlements "${ENTITLEMENTS_PATH}" \
+      "${app_path}"
+    verify_code_signature "${app_path}" --deep
+}
+
+sign_app_inside_readwrite_dmg() {
+    local dmg_path="$1"
+    local mount_dir="$2"
+    local mounted_app_path="${mount_dir}/${HANDLER_APP_NAME}.app"
+    local sign_status=0
+
+    echo "Signing app inside finalized read-write DMG..."
+    rm -rf "${mount_dir}"
+    mkdir -p "${mount_dir}"
+    hdiutil attach \
+      -readwrite \
+      -nobrowse \
+      -noautoopen \
+      -mountpoint "${mount_dir}" \
+      "${dmg_path}"
+
+    sign_app_bundle "${mounted_app_path}" || sign_status=$?
+    hdiutil detach "${mount_dir}" >/dev/null || true
+    rm -rf "${mount_dir}"
+
+    if [ "${sign_status}" -ne 0 ]; then
+        echo "::error:: App signing inside DMG failed."
+        exit "${sign_status}"
+    fi
+}
+
 verify_dmg_app_signature() {
     local dmg_path="$1"
     local mount_dir="$2"
@@ -272,23 +321,7 @@ touch "${HANDLER_APP_PATH}"
 if [ "${UNSIGNED_BUILD}" = true ]; then
     echo "Skipping app signing for local unsigned build."
 else
-    echo "Signing bundled binary with Developer ID and Hardened Runtime..."
-    codesign -s "${APP_CERT_NAME}" \
-      -v --force \
-      --options runtime \
-      "${CODESIGN_TIMESTAMP_ARGS[@]}" \
-      --entitlements "${ENTITLEMENTS_PATH}" \
-      "${BUNDLED_BINARY_PATH}"
-    verify_code_signature "${BUNDLED_BINARY_PATH}"
-
-    echo "Signing ${HANDLER_APP_NAME}.app with Developer ID and Hardened Runtime..."
-    codesign -s "${APP_CERT_NAME}" \
-      -v --force --deep \
-      --options runtime \
-      "${CODESIGN_TIMESTAMP_ARGS[@]}" \
-      --entitlements "${ENTITLEMENTS_PATH}" \
-      "${HANDLER_APP_PATH}"
-    verify_code_signature "${HANDLER_APP_PATH}" --deep
+    sign_app_bundle "${HANDLER_APP_PATH}"
 fi
 
 echo "Creating DMG staging folder..."
@@ -349,6 +382,13 @@ rm -rf "${DMG_MOUNT_DIR}"
 
 if command -v create-dmg >/dev/null 2>&1; then
     echo "Creating drag-to-Applications DMG with create-dmg..."
+    CREATE_DMG_OUTPUT_PATH="${DMG_OUTPUT_PATH}"
+    CREATE_DMG_FORMAT="UDZO"
+    if [ "${UNSIGNED_BUILD}" = false ]; then
+        CREATE_DMG_OUTPUT_PATH="${DMG_TEMP_PATH}"
+        CREATE_DMG_FORMAT="UDRW"
+    fi
+
     create-dmg \
       --volname "${APP_NAME}" \
       --volicon "${ICON_FILE_PATH}" \
@@ -360,9 +400,22 @@ if command -v create-dmg >/dev/null 2>&1; then
       --icon "${HANDLER_APP_NAME}.app" 160 225 \
       --icon "Applications" 610 225 \
       --no-internet-enable \
-      --format UDZO \
-      "${DMG_OUTPUT_PATH}" \
+      --format "${CREATE_DMG_FORMAT}" \
+      "${CREATE_DMG_OUTPUT_PATH}" \
       "${DMG_STAGING_DIR}"
+
+    if [ "${UNSIGNED_BUILD}" = false ]; then
+        sign_app_inside_readwrite_dmg "${DMG_TEMP_PATH}" "${DMG_MOUNT_DIR}"
+
+        echo "Compressing signed read-write DMG at ${DMG_OUTPUT_PATH}..."
+        hdiutil convert \
+          "${DMG_TEMP_PATH}" \
+          -format UDZO \
+          -imagekey zlib-level=9 \
+          -ov \
+          -o "${DMG_OUTPUT_PATH}"
+        rm -f "${DMG_TEMP_PATH}"
+    fi
 else
     echo "create-dmg is unavailable; falling back to a plain hdiutil DMG."
     if [ ! -e "${DMG_STAGING_DIR}/Applications" ]; then
