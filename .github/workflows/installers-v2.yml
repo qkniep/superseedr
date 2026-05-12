@@ -274,14 +274,18 @@ jobs:
             dmg_name="${{ env.APP_NAME }}-$version-$suffix-universal-macos.dmg"
           fi
 
-          cp "${{ steps.build_dmg.outputs.dmg_path }}" "staging/$dmg_name"
+          dmg_zip_name="$dmg_name.zip"
+          ditto -c -k --sequesterRsrc --keepParent "${{ steps.build_dmg.outputs.dmg_path }}" "staging/$dmg_zip_name"
+          shasum -a 256 "staging/$dmg_zip_name"
           ls -lh staging
+          echo "artifact_path=staging/$dmg_zip_name" >> "$GITHUB_OUTPUT"
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v7
         with:
           name: superseedr-installers-v2-macos-${{ matrix.suffix }}-${{ github.run_number }}
-          path: staging/*
+          path: ${{ steps.stage.outputs.artifact_path }}
+          archive: false
 
       - name: Cleanup Keychain
         if: always()
