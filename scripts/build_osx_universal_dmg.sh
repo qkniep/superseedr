@@ -77,7 +77,7 @@ TUI_BINARY_SOURCE_X86_64="target/x86_64-apple-darwin/release/${BINARY_NAME}"
 
 HANDLER_STAGING_DIR="target/handler_staging_${NAME_SUFFIX}"
 HANDLER_APP_PATH="${HANDLER_STAGING_DIR}/${HANDLER_APP_NAME}.app"
-HANDLER_SCRIPT_PATH="${HANDLER_STAGING_DIR}/main.applescript"
+HANDLER_SOURCE_PATH="${HANDLER_STAGING_DIR}/main.m"
 BUNDLED_BINARY_PATH="${HANDLER_APP_PATH}/Contents/Resources/${BINARY_NAME}"
 
 UNIVERSAL_STAGING_DIR="target/universal_staging_${NAME_SUFFIX}"
@@ -126,46 +126,192 @@ echo "Building ${HANDLER_APP_NAME}.app programmatically..."
 rm -rf "${HANDLER_STAGING_DIR}"
 mkdir -p "${HANDLER_STAGING_DIR}"
 
-echo "Creating AppleScript file: ${HANDLER_SCRIPT_PATH}"
-cat > "${HANDLER_SCRIPT_PATH}" << EOF
-use scripting additions
+echo "Creating native launcher source: ${HANDLER_SOURCE_PATH}"
+cat > "${HANDLER_SOURCE_PATH}" << EOF
+#import <Cocoa/Cocoa.h>
 
-on run
-    display alert "${HANDLER_APP_NAME} runs in Terminal." message ("Open Terminal and type:" & return & return & "superseedr") buttons {"OK"} default button "OK" as informational
-    quit
-end run
+@interface AppDelegate : NSObject <NSApplicationDelegate>
+@property(nonatomic) BOOL handledOpenEvent;
+@property(nonatomic, strong) NSWindow *launchWindow;
+@end
 
-on open location thisURL
-    processLink(thisURL)
-end open location
+@implementation AppDelegate
 
-on open these_files
-    repeat with thisFile in these_files
-        processLink(POSIX path of thisFile)
-    end repeat
-end open
+- (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!self.handledOpenEvent) {
+            [self showLaunchAlert];
+        }
+    });
+}
 
-on processLink(theLink)
-    set linkToProcess to theLink as text
-    if linkToProcess is not "" then
-        try
-            set binaryPathPosix to bundledBinaryPath()
-            set fullCommand to (quoted form of binaryPathPosix) & " " & (quoted form of linkToProcess)
-            do shell script (fullCommand & " > /dev/null 2>&1 &")
-        on error errMsg
-            display alert "${HANDLER_APP_NAME} Error" message errMsg buttons {"OK"} default button "OK" as warning
-        end try
-    end if
-end processLink
+- (void)application:(NSApplication *)application openURLs:(NSArray<NSURL *> *)urls {
+    self.handledOpenEvent = YES;
+    for (NSURL *url in urls) {
+        [self processLink:url.absoluteString];
+    }
+    [application terminate:nil];
+}
 
-on bundledBinaryPath()
-    set appPathPosix to POSIX path of (path to me)
-    return appPathPosix & "Contents/Resources/${BINARY_NAME}"
-end bundledBinaryPath
+- (void)application:(NSApplication *)application openFiles:(NSArray<NSString *> *)filenames {
+    self.handledOpenEvent = YES;
+    for (NSString *path in filenames) {
+        [self processLink:path];
+    }
+    [application replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
+    [application terminate:nil];
+}
+
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
+    return NO;
+}
+
+- (void)showLaunchAlert {
+    NSRect frame = NSMakeRect(0, 0, 430, 318);
+    self.launchWindow = [[NSWindow alloc] initWithContentRect:frame
+                                                    styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskFullSizeContentView)
+                                                      backing:NSBackingStoreBuffered
+                                                        defer:NO];
+    self.launchWindow.title = @"";
+    self.launchWindow.titleVisibility = NSWindowTitleHidden;
+    self.launchWindow.titlebarAppearsTransparent = YES;
+    self.launchWindow.movableByWindowBackground = YES;
+    self.launchWindow.releasedWhenClosed = NO;
+    self.launchWindow.backgroundColor = NSColor.windowBackgroundColor;
+
+    NSView *contentView = self.launchWindow.contentView;
+
+    NSImageView *iconView = [[NSImageView alloc] initWithFrame:NSMakeRect(34, 206, 82, 82)];
+    iconView.image = NSApp.applicationIconImage;
+    iconView.imageScaling = NSImageScaleProportionallyUpOrDown;
+    [contentView addSubview:iconView];
+
+    NSTextField *titleField = [NSTextField labelWithString:@"${HANDLER_APP_NAME} runs in Terminal."];
+    titleField.frame = NSMakeRect(34, 156, 362, 32);
+    titleField.font = [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold];
+    titleField.textColor = NSColor.labelColor;
+    [contentView addSubview:titleField];
+
+    NSTextField *messageField = [NSTextField labelWithString:@"Open Terminal and type:"];
+    messageField.frame = NSMakeRect(34, 112, 362, 30);
+    messageField.font = [NSFont systemFontOfSize:18 weight:NSFontWeightRegular];
+    messageField.textColor = NSColor.labelColor;
+    [contentView addSubview:messageField];
+
+    NSTextField *commandField = [NSTextField labelWithString:@"superseedr"];
+    commandField.frame = NSMakeRect(34, 76, 362, 30);
+    commandField.font = [NSFont systemFontOfSize:18 weight:NSFontWeightSemibold];
+    commandField.textColor = NSColor.labelColor;
+    [contentView addSubview:commandField];
+
+    NSButton *okButton = [NSButton buttonWithTitle:@"OK" target:self action:@selector(closeLaunchWindow:)];
+    okButton.frame = NSMakeRect(34, 26, 362, 40);
+    okButton.bezelStyle = NSBezelStyleRounded;
+    okButton.keyEquivalent = @"\r";
+    [contentView addSubview:okButton];
+    self.launchWindow.defaultButtonCell = okButton.cell;
+
+    [self.launchWindow center];
+    [NSApp activateIgnoringOtherApps:YES];
+    [self.launchWindow makeKeyAndOrderFront:nil];
+}
+
+- (void)closeLaunchWindow:(id)sender {
+    [self.launchWindow close];
+    self.launchWindow = nil;
+    [self terminateSoon];
+}
+
+- (void)showError:(NSString *)message {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"${HANDLER_APP_NAME} Error";
+    alert.informativeText = message ?: @"Unknown error";
+    alert.alertStyle = NSAlertStyleWarning;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (void)terminateSoon {
+    [self performSelector:@selector(terminateApp) withObject:nil afterDelay:1.0];
+}
+
+- (void)terminateApp {
+    [NSApp terminate:nil];
+}
+
+- (void)processLink:(NSString *)link {
+    if (link.length == 0) {
+        return;
+    }
+
+    NSString *binaryPath = [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"${BINARY_NAME}"];
+    if (![[NSFileManager defaultManager] isExecutableFileAtPath:binaryPath]) {
+        [self showError:[NSString stringWithFormat:@"Bundled binary not found at %@", binaryPath]];
+        return;
+    }
+
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:binaryPath];
+    task.arguments = @[link];
+
+    NSFileHandle *nullHandle = [NSFileHandle fileHandleForWritingAtPath:@"/dev/null"];
+    if (nullHandle != nil) {
+        task.standardOutput = nullHandle;
+        task.standardError = nullHandle;
+    }
+
+    NSError *error = nil;
+    if (![task launchAndReturnError:&error]) {
+        [self showError:error.localizedDescription];
+    }
+}
+
+@end
+
+int main(int argc, const char *argv[]) {
+    @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        AppDelegate *delegate = [[AppDelegate alloc] init];
+        app.delegate = delegate;
+        [app run];
+    }
+    return 0;
+}
 EOF
 
-echo "Compiling AppleScript into app bundle: ${HANDLER_APP_PATH}"
-osacompile -x -o "${HANDLER_APP_PATH}" "${HANDLER_SCRIPT_PATH}"
+echo "Creating app bundle: ${HANDLER_APP_PATH}"
+mkdir -p "${HANDLER_APP_PATH}/Contents/MacOS"
+mkdir -p "${HANDLER_APP_PATH}/Contents/Resources"
+cat > "${HANDLER_APP_PATH}/Contents/Info.plist" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>${HANDLER_APP_NAME}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
+EOF
+echo "APPL????" > "${HANDLER_APP_PATH}/Contents/PkgInfo"
+
+echo "Compiling native launcher..."
+clang \
+  -fobjc-arc \
+  -framework Cocoa \
+  -mmacosx-version-min=11.0 \
+  -arch arm64 \
+  -arch x86_64 \
+  -o "${HANDLER_APP_PATH}/Contents/MacOS/${HANDLER_APP_NAME}" \
+  "${HANDLER_SOURCE_PATH}"
 
 echo "Adding app resources..."
 RESOURCES_PATH="${HANDLER_APP_PATH}/Contents/Resources"
