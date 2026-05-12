@@ -131,7 +131,8 @@ cat > "${HANDLER_SCRIPT_PATH}" << EOF
 use scripting additions
 
 on run
-    display dialog ("${HANDLER_APP_NAME} runs in Terminal." & return & return & "Open Terminal and type:" & return & return & "superseedr") buttons {"OK"} default button "OK" with title "${HANDLER_APP_NAME}"
+    display alert "${HANDLER_APP_NAME} runs in Terminal." message ("Open Terminal and type:" & return & return & "superseedr") buttons {"OK"} default button "OK" as informational
+    quit
 end run
 
 on open location thisURL
@@ -152,7 +153,7 @@ on processLink(theLink)
             set fullCommand to (quoted form of binaryPathPosix) & " " & (quoted form of linkToProcess)
             do shell script (fullCommand & " > /dev/null 2>&1 &")
         on error errMsg
-            display dialog ("${HANDLER_APP_NAME} Error: " & errMsg)
+            display alert "${HANDLER_APP_NAME} Error" message errMsg buttons {"OK"} default button "OK" as warning
         end try
     end if
 end processLink
