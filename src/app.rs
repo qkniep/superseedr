@@ -76,6 +76,7 @@ use crate::integrity_scheduler::{
     IntegrityScheduler, ProbeBatchOutcome, TorrentIntegritySnapshot,
     INTEGRITY_SCHEDULER_TICK_INTERVAL,
 };
+use crate::networking::{PeerConnection, TcpPeerTransport};
 use crate::torrent_file::parser::from_bytes;
 use crate::torrent_identity::info_hash_from_torrent_source;
 use crate::torrent_manager::data_availability_from_file_probe_result;
@@ -113,7 +114,7 @@ use sysinfo::System;
 use tracing::{event as tracing_event, Level};
 
 use crate::resource_manager::{ResourceManager, ResourceManagerClient};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 use tokio::time;
@@ -232,8 +233,8 @@ impl ListenerSet {
         Ok(Self { ipv4, ipv6 })
     }
 
-    async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
-        match (&self.ipv4, &self.ipv6) {
+    async fn accept(&self) -> io::Result<PeerConnection> {
+        let (stream, remote_addr) = match (&self.ipv4, &self.ipv6) {
             (Some(ipv4), Some(ipv6)) => {
                 tokio::select! {
                     res = ipv4.accept() => res,
@@ -246,7 +247,9 @@ impl ListenerSet {
                 io::ErrorKind::AddrNotAvailable,
                 "no listener is currently bound",
             )),
-        }
+        }?;
+
+        Ok(TcpPeerTransport::incoming(stream, remote_addr))
     }
 
     fn local_port(&self) -> Option<u16> {
@@ -1850,7 +1853,7 @@ pub struct App {
 
     pub listener: Option<ListenerSet>,
 
-    pub torrent_manager_incoming_peer_txs: HashMap<Vec<u8>, Sender<(TcpStream, Vec<u8>)>>,
+    pub torrent_manager_incoming_peer_txs: HashMap<Vec<u8>, Sender<(PeerConnection, Vec<u8>)>>,
     pub torrent_manager_command_txs: HashMap<Vec<u8>, Sender<ManagerCommand>>,
     pub dht_service: DhtService,
     pub dht_status_rx: watch::Receiver<DhtStatus>,
@@ -3439,13 +3442,13 @@ impl App {
                 _ = signal::ctrl_c() => {
                     self.app_state.should_quit = true;
                 }
-                Ok(Ok((stream, _addr))) = async {
+                Ok(Ok(connection)) = async {
                     match &self.listener {
                         Some(listener) => tokio::time::timeout(Duration::from_secs(2), listener.accept()).await,
                         None => std::future::pending().await,
                     }
                 } => {
-                    self.handle_incoming_peer(stream).await;
+                    self.handle_incoming_peer(connection).await;
 
                 }
                 Some(event) = self.manager_event_rx.recv() => {
@@ -4017,14 +4020,14 @@ impl App {
         }
     }
 
-    async fn handle_incoming_peer(&mut self, mut stream: TcpStream) {
+    async fn handle_incoming_peer(&mut self, mut connection: PeerConnection) {
         let torrent_manager_incoming_peer_txs_clone =
             self.torrent_manager_incoming_peer_txs.clone();
         let resource_manager_clone = self.resource_manager.clone();
         let app_command_tx = self.app_command_tx.clone();
         let mut permit_shutdown_rx = self.shutdown_tx.subscribe();
         tokio::spawn(async move {
-            let peer_addr = stream.peer_addr().ok();
+            let peer_addr = connection.remote_addr;
             let Some(_session_permit) = (tokio::select! {
                 permit_result = resource_manager_clone.acquire_peer_connection() => {
                     match permit_result {
@@ -4045,7 +4048,7 @@ impl App {
             if matches!(
                 time::timeout(
                     Duration::from_secs(INCOMING_HANDSHAKE_TIMEOUT_SECS),
-                    stream.read_exact(&mut buffer)
+                    connection.stream.read_exact(&mut buffer)
                 )
                 .await,
                 Ok(Ok(_))
@@ -4064,13 +4067,11 @@ impl App {
                 {
                     let torrent_manager_tx_clone = torrent_manager_tx.clone();
                     if torrent_manager_tx_clone
-                        .send((stream, buffer))
+                        .send((connection, buffer))
                         .await
                         .is_ok()
                     {
-                        if let Some(peer_addr) = peer_addr {
-                            let _ = app_command_tx.try_send(AppCommand::MarkPortOpen(peer_addr));
-                        }
+                        let _ = app_command_tx.try_send(AppCommand::MarkPortOpen(peer_addr));
                     }
                 } else {
                     tracing::trace!(
@@ -5092,8 +5093,8 @@ impl App {
             | ManagerEvent::BlockReceived { .. }
             | ManagerEvent::BlockSent { .. } => {}
             #[cfg(feature = "synthetic-load")]
-            ManagerEvent::PeerConnectAttempted
-            | ManagerEvent::PeerConnectEstablished
+            ManagerEvent::PeerConnectAttempted { .. }
+            | ManagerEvent::PeerConnectEstablished { .. }
             | ManagerEvent::PeerConnectFailed { .. }
             | ManagerEvent::PeerSessionFailed => {}
         }
@@ -5885,7 +5886,7 @@ impl App {
             self.app_state.mode = AppMode::Normal;
         }
 
-        let (incoming_peer_tx, incoming_peer_rx) = mpsc::channel::<(TcpStream, Vec<u8>)>(100);
+        let (incoming_peer_tx, incoming_peer_rx) = mpsc::channel::<(PeerConnection, Vec<u8>)>(100);
         self.torrent_manager_incoming_peer_txs
             .insert(info_hash.clone(), incoming_peer_tx);
         let (manager_command_tx, manager_command_rx) = mpsc::channel::<ManagerCommand>(100);
@@ -6046,7 +6047,7 @@ impl App {
             self.app_state.mode = AppMode::Normal;
         }
 
-        let (incoming_peer_tx, incoming_peer_rx) = mpsc::channel::<(TcpStream, Vec<u8>)>(100);
+        let (incoming_peer_tx, incoming_peer_rx) = mpsc::channel::<(PeerConnection, Vec<u8>)>(100);
         self.torrent_manager_incoming_peer_txs
             .insert(info_hash.clone(), incoming_peer_tx);
         let (manager_command_tx, manager_command_rx) = mpsc::channel::<ManagerCommand>(100);

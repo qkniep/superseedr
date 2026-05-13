@@ -7,6 +7,8 @@ use crate::integrations::cli::{
     SyntheticBenchmarkArgs, SyntheticLoadAddMode, SyntheticLoadArgs, SyntheticLoadMode,
 };
 use crate::networking::protocol::{generate_message, Message};
+use crate::networking::transport::PeerTransportKind;
+use crate::networking::{PeerConnection, TcpPeerTransport};
 use crate::resource_manager::{
     ResourceManager, ResourceManagerClient, ResourceManagerSnapshot, ResourceType, ResourceUsage,
 };
@@ -52,7 +54,7 @@ const SYNTHETIC_LOCAL_PORT_SPAN: usize = 30_000;
 const BENCHMARK_INTERRUPT_ISSUE: &str = "interrupted by Ctrl+C";
 
 type DynError = Box<dyn Error + Send + Sync>;
-type IncomingPeerTx = mpsc::Sender<(TcpStream, Vec<u8>)>;
+type IncomingPeerTx = mpsc::Sender<(PeerConnection, Vec<u8>)>;
 type IncomingRoutes = Arc<Mutex<HashMap<Vec<u8>, IncomingPeerTx>>>;
 
 #[derive(Default)]
@@ -81,6 +83,15 @@ struct SyntheticCounters {
     outbound_connect_attempts: AtomicU64,
     outbound_connect_established: AtomicU64,
     outbound_connect_failed: AtomicU64,
+    outbound_connect_tcp_attempts: AtomicU64,
+    outbound_connect_tcp_established: AtomicU64,
+    outbound_connect_tcp_failed: AtomicU64,
+    outbound_connect_utp_attempts: AtomicU64,
+    outbound_connect_utp_established: AtomicU64,
+    outbound_connect_utp_failed: AtomicU64,
+    outbound_connect_quic_attempts: AtomicU64,
+    outbound_connect_quic_established: AtomicU64,
+    outbound_connect_quic_failed: AtomicU64,
     outbound_permit_timeout: AtomicU64,
     outbound_permit_manager_shutdown: AtomicU64,
     outbound_permit_queue_full: AtomicU64,
@@ -827,6 +838,7 @@ struct OutboundConnectSample {
     attempts: u64,
     established: u64,
     failed: u64,
+    by_transport: Vec<OutboundConnectTransportSample>,
     permit_timeout: u64,
     permit_manager_shutdown: u64,
     permit_queue_full: u64,
@@ -839,6 +851,14 @@ struct OutboundConnectSample {
     timed_out: u64,
     other_io: u64,
     session_failed: u64,
+}
+
+#[derive(Clone, Default, Serialize)]
+struct OutboundConnectTransportSample {
+    transport: &'static str,
+    attempts: u64,
+    established: u64,
+    failed: u64,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -1739,7 +1759,7 @@ fn build_manager_with_incoming(
     spec: &SyntheticTorrentSpec,
     torrent_data_path: PathBuf,
     validated: bool,
-    incoming_rx: mpsc::Receiver<(TcpStream, Vec<u8>)>,
+    incoming_rx: mpsc::Receiver<(PeerConnection, Vec<u8>)>,
     harness: &HarnessContext,
 ) -> Result<
     (
@@ -1756,7 +1776,7 @@ fn build_manager_with_rx(
     spec: &SyntheticTorrentSpec,
     torrent_data_path: PathBuf,
     validated: bool,
-    incoming_rx: mpsc::Receiver<(TcpStream, Vec<u8>)>,
+    incoming_rx: mpsc::Receiver<(PeerConnection, Vec<u8>)>,
     harness: &HarnessContext,
 ) -> Result<
     (
@@ -2169,7 +2189,7 @@ async fn spawn_incoming_hub(
             tokio::select! {
                 _ = shutdown_rx.recv() => break,
                 accepted = listener.accept() => {
-                    let Ok((mut stream, _)) = accepted else {
+                    let Ok((mut stream, remote_addr)) = accepted else {
                         break;
                     };
                     counters.connections.fetch_add(1, Ordering::Relaxed);
@@ -2189,7 +2209,9 @@ async fn spawn_incoming_hub(
                                     });
                                 match tx {
                                     Some(tx) => {
-                                        if tx.send((stream, handshake)).await.is_err() {
+                                        let connection =
+                                            TcpPeerTransport::incoming(stream, remote_addr);
+                                        if tx.send((connection, handshake)).await.is_err() {
                                             counters
                                                 .incoming_hub_route_send_errors
                                                 .fetch_add(1, Ordering::Relaxed);
@@ -2734,20 +2756,23 @@ async fn collect_manager_events(
                     .manager_peer_disconnected
                     .fetch_add(1, Ordering::Relaxed);
             }
-            ManagerEvent::PeerConnectAttempted => {
+            ManagerEvent::PeerConnectAttempted { transport } => {
                 counters
                     .outbound_connect_attempts
                     .fetch_add(1, Ordering::Relaxed);
+                increment_outbound_connect_attempt(&counters, transport);
             }
-            ManagerEvent::PeerConnectEstablished => {
+            ManagerEvent::PeerConnectEstablished { transport } => {
                 counters
                     .outbound_connect_established
                     .fetch_add(1, Ordering::Relaxed);
+                increment_outbound_connect_established(&counters, transport);
             }
-            ManagerEvent::PeerConnectFailed { reason } => {
+            ManagerEvent::PeerConnectFailed { transport, reason } => {
                 counters
                     .outbound_connect_failed
                     .fetch_add(1, Ordering::Relaxed);
+                increment_outbound_connect_failed(&counters, transport);
                 match reason {
                     SyntheticPeerConnectFailure::PermitTimeout => {
                         counters
@@ -3489,6 +3514,9 @@ fn add_outbound_connect_sample(total: &mut OutboundConnectSample, sample: &Outbo
     total.attempts = total.attempts.saturating_add(sample.attempts);
     total.established = total.established.saturating_add(sample.established);
     total.failed = total.failed.saturating_add(sample.failed);
+    for transport in &sample.by_transport {
+        add_outbound_connect_transport_sample(&mut total.by_transport, transport);
+    }
     total.permit_timeout = total.permit_timeout.saturating_add(sample.permit_timeout);
     total.permit_manager_shutdown = total
         .permit_manager_shutdown
@@ -3513,6 +3541,23 @@ fn add_outbound_connect_sample(total: &mut OutboundConnectSample, sample: &Outbo
     total.timed_out = total.timed_out.saturating_add(sample.timed_out);
     total.other_io = total.other_io.saturating_add(sample.other_io);
     total.session_failed = total.session_failed.saturating_add(sample.session_failed);
+}
+
+fn add_outbound_connect_transport_sample(
+    total: &mut Vec<OutboundConnectTransportSample>,
+    sample: &OutboundConnectTransportSample,
+) {
+    if let Some(existing) = total
+        .iter_mut()
+        .find(|existing| existing.transport == sample.transport)
+    {
+        existing.attempts = existing.attempts.saturating_add(sample.attempts);
+        existing.established = existing.established.saturating_add(sample.established);
+        existing.failed = existing.failed.saturating_add(sample.failed);
+        return;
+    }
+
+    total.push(sample.clone());
 }
 
 fn benchmark_report(
@@ -4277,6 +4322,7 @@ fn outbound_connect_sample(counters: &SyntheticCounters) -> OutboundConnectSampl
             .outbound_connect_established
             .load(Ordering::Relaxed),
         failed: counters.outbound_connect_failed.load(Ordering::Relaxed),
+        by_transport: outbound_connect_transport_samples(counters),
         permit_timeout: counters.outbound_permit_timeout.load(Ordering::Relaxed),
         permit_manager_shutdown: counters
             .outbound_permit_manager_shutdown
@@ -4292,6 +4338,86 @@ fn outbound_connect_sample(counters: &SyntheticCounters) -> OutboundConnectSampl
         other_io: counters.outbound_other_io.load(Ordering::Relaxed),
         session_failed: counters.outbound_session_failed.load(Ordering::Relaxed),
     }
+}
+
+fn outbound_connect_transport_samples(
+    counters: &SyntheticCounters,
+) -> Vec<OutboundConnectTransportSample> {
+    [
+        (
+            PeerTransportKind::Tcp,
+            counters
+                .outbound_connect_tcp_attempts
+                .load(Ordering::Relaxed),
+            counters
+                .outbound_connect_tcp_established
+                .load(Ordering::Relaxed),
+            counters.outbound_connect_tcp_failed.load(Ordering::Relaxed),
+        ),
+        (
+            PeerTransportKind::Utp,
+            counters
+                .outbound_connect_utp_attempts
+                .load(Ordering::Relaxed),
+            counters
+                .outbound_connect_utp_established
+                .load(Ordering::Relaxed),
+            counters.outbound_connect_utp_failed.load(Ordering::Relaxed),
+        ),
+        (
+            PeerTransportKind::Quic,
+            counters
+                .outbound_connect_quic_attempts
+                .load(Ordering::Relaxed),
+            counters
+                .outbound_connect_quic_established
+                .load(Ordering::Relaxed),
+            counters
+                .outbound_connect_quic_failed
+                .load(Ordering::Relaxed),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, attempts, established, failed)| *attempts > 0 || *established > 0 || *failed > 0)
+    .map(
+        |(transport, attempts, established, failed)| OutboundConnectTransportSample {
+            transport: transport.as_scheme(),
+            attempts,
+            established,
+            failed,
+        },
+    )
+    .collect()
+}
+
+fn increment_outbound_connect_attempt(counters: &SyntheticCounters, transport: PeerTransportKind) {
+    match transport {
+        PeerTransportKind::Tcp => &counters.outbound_connect_tcp_attempts,
+        PeerTransportKind::Utp => &counters.outbound_connect_utp_attempts,
+        PeerTransportKind::Quic => &counters.outbound_connect_quic_attempts,
+    }
+    .fetch_add(1, Ordering::Relaxed);
+}
+
+fn increment_outbound_connect_established(
+    counters: &SyntheticCounters,
+    transport: PeerTransportKind,
+) {
+    match transport {
+        PeerTransportKind::Tcp => &counters.outbound_connect_tcp_established,
+        PeerTransportKind::Utp => &counters.outbound_connect_utp_established,
+        PeerTransportKind::Quic => &counters.outbound_connect_quic_established,
+    }
+    .fetch_add(1, Ordering::Relaxed);
+}
+
+fn increment_outbound_connect_failed(counters: &SyntheticCounters, transport: PeerTransportKind) {
+    match transport {
+        PeerTransportKind::Tcp => &counters.outbound_connect_tcp_failed,
+        PeerTransportKind::Utp => &counters.outbound_connect_utp_failed,
+        PeerTransportKind::Quic => &counters.outbound_connect_quic_failed,
+    }
+    .fetch_add(1, Ordering::Relaxed);
 }
 
 fn protocol_error_sample(counters: &SyntheticCounters) -> ProtocolErrorSample {
@@ -4558,6 +4684,49 @@ mod tests {
 
         let semantic_error: DynError = "mismatched synthetic info hash".into();
         assert!(!is_expected_connection_close(semantic_error.as_ref()));
+    }
+
+    #[test]
+    fn outbound_connect_sample_tracks_transport_breakdown() {
+        let counters = SyntheticCounters::default();
+        counters
+            .outbound_connect_attempts
+            .fetch_add(2, Ordering::Relaxed);
+        counters
+            .outbound_connect_established
+            .fetch_add(1, Ordering::Relaxed);
+        counters
+            .outbound_connect_failed
+            .fetch_add(1, Ordering::Relaxed);
+        increment_outbound_connect_attempt(&counters, PeerTransportKind::Tcp);
+        increment_outbound_connect_attempt(&counters, PeerTransportKind::Quic);
+        increment_outbound_connect_established(&counters, PeerTransportKind::Tcp);
+        increment_outbound_connect_failed(&counters, PeerTransportKind::Quic);
+
+        let sample = outbound_connect_sample(&counters);
+
+        assert_eq!(sample.attempts, 2);
+        assert_eq!(sample.established, 1);
+        assert_eq!(sample.failed, 1);
+        assert_eq!(sample.by_transport.len(), 2);
+
+        let tcp = sample
+            .by_transport
+            .iter()
+            .find(|transport| transport.transport == "tcp")
+            .expect("tcp transport sample");
+        assert_eq!(tcp.attempts, 1);
+        assert_eq!(tcp.established, 1);
+        assert_eq!(tcp.failed, 0);
+
+        let quic = sample
+            .by_transport
+            .iter()
+            .find(|transport| transport.transport == "quic")
+            .expect("quic transport sample");
+        assert_eq!(quic.attempts, 1);
+        assert_eq!(quic.established, 0);
+        assert_eq!(quic.failed, 1);
     }
 
     fn benchmark_args() -> SyntheticBenchmarkArgs {

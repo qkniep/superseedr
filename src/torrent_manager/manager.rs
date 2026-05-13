@@ -9,8 +9,10 @@ use crate::torrent_manager::merkle;
 use crate::resource_manager::ResourceManagerClient;
 use crate::resource_manager::ResourceManagerError;
 
+#[cfg(feature = "synthetic-load")]
+use crate::networking::transport::PeerTransportKind;
 use crate::networking::web_seed_worker::web_seed_worker;
-use crate::networking::ConnectionType;
+use crate::networking::{ConnectionType, PeerConnection, TcpPeerTransport};
 
 use crate::token_bucket::TokenBucket;
 
@@ -74,7 +76,6 @@ use urlencoding::decode;
 
 use sha1::Digest;
 use tokio::fs;
-use tokio::net::TcpStream;
 use tokio::signal;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -154,7 +155,7 @@ pub struct TorrentManager {
     #[allow(dead_code)]
     dht_rx: Receiver<()>,
 
-    incoming_peer_rx: Receiver<(TcpStream, Vec<u8>)>,
+    incoming_peer_rx: Receiver<(PeerConnection, Vec<u8>)>,
     manager_command_rx: Receiver<ManagerCommand>,
 
     in_flight_uploads: HashMap<String, HashMap<BlockInfo, JoinHandle<()>>>,
@@ -1950,7 +1951,9 @@ impl TorrentManager {
         #[cfg(feature = "synthetic-load")]
         let _ = self
             .manager_event_tx
-            .try_send(ManagerEvent::PeerConnectAttempted);
+            .try_send(ManagerEvent::PeerConnectAttempted {
+                transport: PeerTransportKind::Tcp,
+            });
 
         let bitfield = match self.state.torrent {
             None => None,
@@ -1966,6 +1969,7 @@ impl TorrentManager {
                         Ok(Err(ResourceManagerError::ManagerShutdown)) => {
                             #[cfg(feature = "synthetic-load")]
                             let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
+                                transport: PeerTransportKind::Tcp,
                                 reason: SyntheticPeerConnectFailure::PermitManagerShutdown,
                             });
                             None
@@ -1973,6 +1977,7 @@ impl TorrentManager {
                         Ok(Err(ResourceManagerError::QueueFull)) => {
                             #[cfg(feature = "synthetic-load")]
                             let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
+                                transport: PeerTransportKind::Tcp,
                                 reason: SyntheticPeerConnectFailure::PermitQueueFull,
                             });
                             None
@@ -1980,6 +1985,7 @@ impl TorrentManager {
                         Err(_) => {
                             #[cfg(feature = "synthetic-load")]
                             let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
+                                transport: PeerTransportKind::Tcp,
                                 reason: SyntheticPeerConnectFailure::PermitTimeout,
                             });
                             None
@@ -1989,6 +1995,7 @@ impl TorrentManager {
                 _ = shutdown_rx_permit.recv() => {
                     #[cfg(feature = "synthetic-load")]
                     let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
+                        transport: PeerTransportKind::Tcp,
                         reason: SyntheticPeerConnectFailure::PermitManagerShutdown,
                     });
                     None
@@ -1997,13 +2004,22 @@ impl TorrentManager {
 
             if let Some(session_permit) = session_permit {
                 let connection_result =
-                    timeout(Duration::from_secs(2), TcpStream::connect(peer_addr)).await;
+                    timeout(Duration::from_secs(2), TcpPeerTransport::connect(peer_addr)).await;
 
                 match connection_result {
-                    Ok(Ok(stream)) => {
+                    Ok(Ok(connection)) => {
                         #[cfg(feature = "synthetic-load")]
                         let _ =
-                            manager_event_tx_clone.try_send(ManagerEvent::PeerConnectEstablished);
+                            manager_event_tx_clone.try_send(ManagerEvent::PeerConnectEstablished {
+                                transport: connection.endpoint.kind,
+                            });
+                        event!(
+                            Level::TRACE,
+                            peer = %peer_ip_port_clone,
+                            transport = %connection.transport_key(),
+                            direction = ?connection.direction,
+                            "peer transport connection established"
+                        );
                         let _held_session_permit = session_permit;
                         let session = PeerSession::new(PeerSessionParameters {
                             info_hash: info_hash_clone.clone(),
@@ -2019,7 +2035,7 @@ impl TorrentManager {
                         });
 
                         tokio::select! {
-                            session_result = session.run(stream, Vec::new(), bitfield) => {
+                            session_result = session.run(connection.stream, Vec::new(), bitfield) => {
                                 if let Err(e) = session_result {
                                     #[cfg(feature = "synthetic-load")]
                                     let _ = manager_event_tx_clone
@@ -2044,6 +2060,7 @@ impl TorrentManager {
                     Ok(Err(error)) => {
                         #[cfg(feature = "synthetic-load")]
                         let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
+                            transport: PeerTransportKind::Tcp,
                             reason: synthetic_peer_connect_failure(&error),
                         });
                         let _ = torrent_manager_tx_clone
@@ -2054,6 +2071,7 @@ impl TorrentManager {
                     Err(_) => {
                         #[cfg(feature = "synthetic-load")]
                         let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
+                            transport: PeerTransportKind::Tcp,
                             reason: SyntheticPeerConnectFailure::ConnectTimeout,
                         });
                         let _ = torrent_manager_tx_clone
@@ -2796,14 +2814,13 @@ impl TorrentManager {
                     }
                 }
 
-                Some((stream, handshake_response)) = self.incoming_peer_rx.recv(), if !self.state.is_paused => {
+                Some((connection, handshake_response)) = self.incoming_peer_rx.recv(), if !self.state.is_paused => {
                     if !self.should_accept_new_peers() {
                         continue;
                     }
                     let _ = self.manager_event_tx.try_send(ManagerEvent::PeerDiscovered { info_hash: self.state.info_hash.clone() });
-                    if let Ok(peer_addr) = stream.peer_addr() {
-
-                        let peer_ip_port = peer_addr.to_string();
+                    {
+                        let peer_ip_port = connection.peer_id();
                         let incoming_hash = &handshake_response[28..48];
 
                         let matches_primary = self.state.info_hash == incoming_hash;
@@ -2868,6 +2885,13 @@ impl TorrentManager {
                         let client_id_clone = self.settings.client_id.clone();
 
                         let _ = self.manager_event_tx.try_send(ManagerEvent::PeerConnected { info_hash: self.state.info_hash.clone() });
+                        event!(
+                            Level::TRACE,
+                            peer = %peer_ip_port,
+                            transport = %connection.transport_key(),
+                            direction = ?connection.direction,
+                            "incoming peer transport routed to torrent manager"
+                        );
                         tokio::spawn(async move {
                             let session = PeerSession::new(PeerSessionParameters {
                                 info_hash: session_info_hash, // <--- Corrected Hash passed here
@@ -2883,7 +2907,7 @@ impl TorrentManager {
                             });
 
                             tokio::select! {
-                                session_result = session.run(stream, handshake_response, bitfield) => {
+                                session_result = session.run(connection.stream, handshake_response, bitfield) => {
                                     if let Err(e) = session_result {
                                         event!(Level::ERROR, peer_ip = %peer_ip_port, error = %e, "Incoming peer session ended with error.");
                                     }
@@ -2897,8 +2921,6 @@ impl TorrentManager {
                                 }
                             }
                         });
-                    } else {
-                        event!(Level::DEBUG, "ERROR GETTING PEER ADDRESS FROM STREAM");
                     }
                 }
 
