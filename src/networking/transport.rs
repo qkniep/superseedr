@@ -53,6 +53,10 @@ impl PeerEndpoint {
         Self::new(PeerTransportKind::Tcp, addr)
     }
 
+    pub const fn utp(addr: SocketAddr) -> Self {
+        Self::new(PeerTransportKind::Utp, addr)
+    }
+
     pub fn key(&self) -> String {
         format!("{}://{}", self.kind, self.addr)
     }

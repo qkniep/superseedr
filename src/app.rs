@@ -913,6 +913,14 @@ pub struct TorrentMetrics {
     pub data_available: bool,
     pub is_complete: bool,
     pub number_of_successfully_connected_peers: usize,
+    #[serde(default)]
+    pub tcp_peer_count: usize,
+    #[serde(default)]
+    pub utp_peer_count: usize,
+    #[serde(default)]
+    pub beneficial_tcp_peer_count: usize,
+    #[serde(default)]
+    pub beneficial_utp_peer_count: usize,
     pub number_of_pieces_total: u32,
     pub number_of_pieces_completed: u32,
     pub download_speed_bps: u64,
@@ -959,6 +967,10 @@ impl Default for TorrentMetrics {
             data_available: true,
             is_complete: false,
             number_of_successfully_connected_peers: 0,
+            tcp_peer_count: 0,
+            utp_peer_count: 0,
+            beneficial_tcp_peer_count: 0,
+            beneficial_utp_peer_count: 0,
             number_of_pieces_total: 0,
             number_of_pieces_completed: 0,
             download_speed_bps: 0,

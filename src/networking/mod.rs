@@ -4,9 +4,11 @@
 pub mod protocol;
 pub mod session;
 pub mod transport;
+pub mod utp;
 pub mod web_seed_worker;
 
 // Re-export key types for easier access.
 pub use protocol::BlockInfo;
 pub use session::{ConnectionType, PeerSession};
 pub use transport::{PeerConnection, TcpPeerTransport};
+pub use utp::UtpPeerTransport;

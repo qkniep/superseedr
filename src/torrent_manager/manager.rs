@@ -9,10 +9,9 @@ use crate::torrent_manager::merkle;
 use crate::resource_manager::ResourceManagerClient;
 use crate::resource_manager::ResourceManagerError;
 
-#[cfg(feature = "synthetic-load")]
 use crate::networking::transport::PeerTransportKind;
 use crate::networking::web_seed_worker::web_seed_worker;
-use crate::networking::{ConnectionType, PeerConnection, TcpPeerTransport};
+use crate::networking::{ConnectionType, PeerConnection, TcpPeerTransport, UtpPeerTransport};
 
 use crate::token_bucket::TokenBucket;
 
@@ -27,6 +26,7 @@ use crate::torrent_manager::piece_manager::PieceStatus;
 use crate::torrent_manager::state::Action;
 use crate::torrent_manager::state::ChokeStatus;
 use crate::torrent_manager::state::Effect;
+use crate::torrent_manager::state::PeerState;
 use crate::torrent_manager::state::TorrentActivity;
 use crate::torrent_manager::state::TorrentState;
 
@@ -97,9 +97,56 @@ const HASH_LENGTH: usize = 20;
 const MAX_UPLOAD_REQUEST_ATTEMPTS: u32 = 7;
 const MAX_PIECE_WRITE_ATTEMPTS: u32 = 12;
 const ACTIVITY_MESSAGE_MAX_LEN: usize = 28;
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const UTP_CONNECT_TIMEOUT: Duration = Duration::from_millis(900);
 
 const BASE_BACKOFF_MS: u64 = 1000;
 const JITTER_MS: u64 = 100;
+const ENABLE_UTP_ENV: &str = "SUPERSEEDR_ENABLE_UTP";
+
+fn outbound_utp_enabled() -> bool {
+    std::env::var(ENABLE_UTP_ENV)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct TransportPeerCounts {
+    tcp_peer_count: usize,
+    utp_peer_count: usize,
+    beneficial_tcp_peer_count: usize,
+    beneficial_utp_peer_count: usize,
+}
+
+fn count_peers_by_transport<'a>(peers: impl Iterator<Item = &'a PeerState>) -> TransportPeerCounts {
+    let mut counts = TransportPeerCounts::default();
+
+    for peer in peers {
+        let has_moved_payload = peer.total_bytes_downloaded > 0 || peer.total_bytes_uploaded > 0;
+        match peer.transport_kind {
+            PeerTransportKind::Tcp => {
+                counts.tcp_peer_count += 1;
+                if has_moved_payload {
+                    counts.beneficial_tcp_peer_count += 1;
+                }
+            }
+            PeerTransportKind::Utp => {
+                counts.utp_peer_count += 1;
+                if has_moved_payload {
+                    counts.beneficial_utp_peer_count += 1;
+                }
+            }
+            PeerTransportKind::Quic => {}
+        }
+    }
+
+    counts
+}
 
 #[cfg(feature = "synthetic-load")]
 fn synthetic_peer_connect_failure(error: &std::io::Error) -> SyntheticPeerConnectFailure {
@@ -1948,12 +1995,21 @@ impl TorrentManager {
             peer_id: peer_ip_port.clone(),
             tx: peer_session_tx,
         });
+        let use_utp_outbound = outbound_utp_enabled();
         #[cfg(feature = "synthetic-load")]
-        let _ = self
-            .manager_event_tx
-            .try_send(ManagerEvent::PeerConnectAttempted {
-                transport: PeerTransportKind::Tcp,
-            });
+        let first_transport = if use_utp_outbound {
+            PeerTransportKind::Utp
+        } else {
+            PeerTransportKind::Tcp
+        };
+        #[cfg(feature = "synthetic-load")]
+        if !use_utp_outbound {
+            let _ = self
+                .manager_event_tx
+                .try_send(ManagerEvent::PeerConnectAttempted {
+                    transport: PeerTransportKind::Tcp,
+                });
+        }
 
         let bitfield = match self.state.torrent {
             None => None,
@@ -1969,7 +2025,7 @@ impl TorrentManager {
                         Ok(Err(ResourceManagerError::ManagerShutdown)) => {
                             #[cfg(feature = "synthetic-load")]
                             let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
-                                transport: PeerTransportKind::Tcp,
+                                transport: first_transport,
                                 reason: SyntheticPeerConnectFailure::PermitManagerShutdown,
                             });
                             None
@@ -1977,7 +2033,7 @@ impl TorrentManager {
                         Ok(Err(ResourceManagerError::QueueFull)) => {
                             #[cfg(feature = "synthetic-load")]
                             let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
-                                transport: PeerTransportKind::Tcp,
+                                transport: first_transport,
                                 reason: SyntheticPeerConnectFailure::PermitQueueFull,
                             });
                             None
@@ -1985,7 +2041,7 @@ impl TorrentManager {
                         Err(_) => {
                             #[cfg(feature = "synthetic-load")]
                             let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
-                                transport: PeerTransportKind::Tcp,
+                                transport: first_transport,
                                 reason: SyntheticPeerConnectFailure::PermitTimeout,
                             });
                             None
@@ -1995,7 +2051,7 @@ impl TorrentManager {
                 _ = shutdown_rx_permit.recv() => {
                     #[cfg(feature = "synthetic-load")]
                     let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
-                        transport: PeerTransportKind::Tcp,
+                        transport: first_transport,
                         reason: SyntheticPeerConnectFailure::PermitManagerShutdown,
                     });
                     None
@@ -2003,16 +2059,80 @@ impl TorrentManager {
             };
 
             if let Some(session_permit) = session_permit {
-                let connection_result =
-                    timeout(Duration::from_secs(2), TcpPeerTransport::connect(peer_addr)).await;
+                let utp_connection = if use_utp_outbound {
+                    #[cfg(feature = "synthetic-load")]
+                    let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectAttempted {
+                        transport: PeerTransportKind::Utp,
+                    });
+
+                    match timeout(UTP_CONNECT_TIMEOUT, UtpPeerTransport::connect(peer_addr)).await {
+                        Ok(Ok(connection)) => Some(connection),
+                        Ok(Err(error)) => {
+                            #[cfg(feature = "synthetic-load")]
+                            let _ =
+                                manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
+                                    transport: PeerTransportKind::Utp,
+                                    reason: synthetic_peer_connect_failure(&error),
+                                });
+                            event!(
+                                Level::TRACE,
+                                peer = %peer_ip_port_clone,
+                                error = %error,
+                                "uTP outbound connect failed; falling back to TCP"
+                            );
+                            None
+                        }
+                        Err(_) => {
+                            #[cfg(feature = "synthetic-load")]
+                            let _ =
+                                manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
+                                    transport: PeerTransportKind::Utp,
+                                    reason: SyntheticPeerConnectFailure::ConnectTimeout,
+                                });
+                            event!(
+                                Level::TRACE,
+                                peer = %peer_ip_port_clone,
+                                "uTP outbound connect timed out; falling back to TCP"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let connection_result = if let Some(connection) = utp_connection {
+                    Ok(connection)
+                } else {
+                    #[cfg(feature = "synthetic-load")]
+                    if use_utp_outbound {
+                        let _ =
+                            manager_event_tx_clone.try_send(ManagerEvent::PeerConnectAttempted {
+                                transport: PeerTransportKind::Tcp,
+                            });
+                    }
+
+                    match timeout(TCP_CONNECT_TIMEOUT, TcpPeerTransport::connect(peer_addr)).await {
+                        Ok(Ok(connection)) => Ok(connection),
+                        Ok(Err(error)) => Err((PeerTransportKind::Tcp, Some(error))),
+                        Err(_) => Err((PeerTransportKind::Tcp, None)),
+                    }
+                };
 
                 match connection_result {
-                    Ok(Ok(connection)) => {
+                    Ok(connection) => {
                         #[cfg(feature = "synthetic-load")]
                         let _ =
                             manager_event_tx_clone.try_send(ManagerEvent::PeerConnectEstablished {
                                 transport: connection.endpoint.kind,
                             });
+                        let selected_transport = connection.endpoint.kind;
+                        let _ = torrent_manager_tx_clone
+                            .send(TorrentCommand::PeerTransportSelected {
+                                peer_id: peer_ip_port_clone.clone(),
+                                transport: selected_transport,
+                            })
+                            .await;
                         event!(
                             Level::TRACE,
                             peer = %peer_ip_port_clone,
@@ -2057,27 +2177,27 @@ impl TorrentManager {
                             }
                         }
                     }
-                    Ok(Err(error)) => {
+                    Err((transport, Some(error))) => {
                         #[cfg(feature = "synthetic-load")]
                         let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
-                            transport: PeerTransportKind::Tcp,
+                            transport,
                             reason: synthetic_peer_connect_failure(&error),
                         });
                         let _ = torrent_manager_tx_clone
                             .send(TorrentCommand::UnresponsivePeer(peer_ip_port))
                             .await;
-                        event!(Level::DEBUG, peer = %peer_ip_port_clone, error = %error, "PEER connection failed");
+                        event!(Level::DEBUG, peer = %peer_ip_port_clone, %transport, error = %error, "PEER connection failed");
                     }
-                    Err(_) => {
+                    Err((transport, None)) => {
                         #[cfg(feature = "synthetic-load")]
                         let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
-                            transport: PeerTransportKind::Tcp,
+                            transport,
                             reason: SyntheticPeerConnectFailure::ConnectTimeout,
                         });
                         let _ = torrent_manager_tx_clone
                             .send(TorrentCommand::UnresponsivePeer(peer_ip_port))
                             .await;
-                        event!(Level::DEBUG, peer = %peer_ip_port_clone, "PEER connection timed out");
+                        event!(Level::DEBUG, peer = %peer_ip_port_clone, %transport, "PEER connection timed out");
                     }
                 }
             }
@@ -2321,6 +2441,7 @@ impl TorrentManager {
                 };
 
             let number_of_successfully_connected_peers = self.state.peers.len();
+            let transport_counts = count_peers_by_transport(self.state.peers.values());
 
             let eta = if self.state.piece_manager.pieces_remaining == 0 {
                 Duration::from_secs(0)
@@ -2405,6 +2526,10 @@ impl TorrentManager {
                 data_available: self.state.data_available,
                 is_complete: self.state.torrent_status == TorrentStatus::Done,
                 number_of_successfully_connected_peers,
+                tcp_peer_count: transport_counts.tcp_peer_count,
+                utp_peer_count: transport_counts.utp_peer_count,
+                beneficial_tcp_peer_count: transport_counts.beneficial_tcp_peer_count,
+                beneficial_utp_peer_count: transport_counts.beneficial_utp_peer_count,
                 number_of_pieces_total,
                 number_of_pieces_completed,
                 download_speed_bps: smoothed_total_dl_speed,
@@ -2952,6 +3077,9 @@ impl TorrentManager {
 
                         TorrentCommand::SuccessfullyConnected(peer_id) => self.apply_action(Action::PeerSuccessfullyConnected { peer_id }),
                         TorrentCommand::PeerId(addr, id) => self.apply_action(Action::UpdatePeerId { peer_addr: addr, new_id: id }),
+                        TorrentCommand::PeerTransportSelected { peer_id, transport } => {
+                            self.apply_action(Action::PeerTransportSelected { peer_id, transport })
+                        },
 
                         TorrentCommand::MerkleHashData { peer_id, root, piece_index, proof, .. } => {
                             if let Some(torrent) = &self.state.torrent {
@@ -3224,6 +3352,35 @@ mod tests {
     use std::time::SystemTime;
     use std::time::{Duration, Instant};
     use tokio::sync::{broadcast, mpsc, watch};
+
+    #[test]
+    fn counts_transport_peers_and_payload_movers() {
+        let (tx, _rx) = mpsc::channel(1);
+        let now = Instant::now();
+
+        let mut useful_tcp = PeerState::new("127.0.0.1:6881".to_string(), tx.clone(), now);
+        useful_tcp.total_bytes_downloaded = 16;
+
+        let mut useful_utp = PeerState::new("127.0.0.1:6882".to_string(), tx.clone(), now);
+        useful_utp.transport_kind = PeerTransportKind::Utp;
+        useful_utp.total_bytes_uploaded = 16;
+
+        let mut idle_utp = PeerState::new("127.0.0.1:6883".to_string(), tx, now);
+        idle_utp.transport_kind = PeerTransportKind::Utp;
+
+        let peers = [&useful_tcp, &useful_utp, &idle_utp];
+        let counts = count_peers_by_transport(peers.into_iter());
+
+        assert_eq!(
+            counts,
+            TransportPeerCounts {
+                tcp_peer_count: 1,
+                utp_peer_count: 2,
+                beneficial_tcp_peer_count: 1,
+                beneficial_utp_peer_count: 1,
+            }
+        );
+    }
 
     #[tokio::test]
     async fn test_manager_event_loop_throughput() {

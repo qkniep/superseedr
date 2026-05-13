@@ -5,6 +5,7 @@ use tracing::event;
 use tracing::Level;
 
 use crate::command::TorrentCommand;
+use crate::networking::transport::PeerTransportKind;
 use crate::networking::BlockInfo;
 use crate::storage::MultiFileInfo;
 use crate::torrent_manager::FileActivityDirection;
@@ -67,6 +68,10 @@ pub enum Action {
     RegisterPeer {
         peer_id: String,
         tx: Sender<TorrentCommand>,
+    },
+    PeerTransportSelected {
+        peer_id: String,
+        transport: PeerTransportKind,
     },
     PeerSuccessfullyConnected {
         peer_id: String,
@@ -1110,6 +1115,13 @@ impl TorrentState {
                     // not only after handshake success.
                     self.number_of_successfully_connected_peers = self.peers.len();
                     self.refresh_peer_admission_guard();
+                }
+                vec![Effect::DoNothing]
+            }
+
+            Action::PeerTransportSelected { peer_id, transport } => {
+                if let Some(peer) = self.peers.get_mut(&peer_id) {
+                    peer.transport_kind = transport;
                 }
                 vec![Effect::DoNothing]
             }
@@ -2728,6 +2740,7 @@ pub fn calculate_deletion_lists(
 #[derive(Debug, Clone)]
 pub struct PeerState {
     pub ip_port: String,
+    pub transport_kind: PeerTransportKind,
     pub peer_id: Vec<u8>,
     pub bitfield: Vec<bool>,
     pub am_choking: ChokeStatus,
@@ -2758,6 +2771,7 @@ impl PeerState {
     pub fn new(ip_port: String, peer_tx: Sender<TorrentCommand>, created_at: Instant) -> Self {
         Self {
             ip_port,
+            transport_kind: PeerTransportKind::Tcp,
             peer_id: Vec::new(),
             bitfield: Vec::new(),
             am_choking: ChokeStatus::Choke,
