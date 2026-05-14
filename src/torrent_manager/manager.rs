@@ -98,14 +98,37 @@ const MAX_UPLOAD_REQUEST_ATTEMPTS: u32 = 7;
 const MAX_PIECE_WRITE_ATTEMPTS: u32 = 12;
 const ACTIVITY_MESSAGE_MAX_LEN: usize = 28;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const UTP_CONNECT_TIMEOUT: Duration = Duration::from_millis(900);
+const UTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 const BASE_BACKOFF_MS: u64 = 1000;
 const JITTER_MS: u64 = 100;
 const ENABLE_UTP_ENV: &str = "SUPERSEEDR_ENABLE_UTP";
+const UTP_ONLY_ENV: &str = "SUPERSEEDR_UTP_ONLY";
+const UTP_CONNECT_LOG_ENV: &str = "SUPERSEEDR_LOG_UTP_CONNECT";
 
-fn outbound_utp_enabled() -> bool {
-    std::env::var(ENABLE_UTP_ENV)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutboundTransportMode {
+    try_utp: bool,
+    allow_tcp: bool,
+}
+
+fn outbound_transport_mode_from_env() -> OutboundTransportMode {
+    outbound_transport_mode(env_flag(ENABLE_UTP_ENV), env_flag(UTP_ONLY_ENV))
+}
+
+fn utp_connect_log_enabled() -> bool {
+    env_flag(UTP_CONNECT_LOG_ENV)
+}
+
+fn outbound_transport_mode(enable_utp: bool, utp_only: bool) -> OutboundTransportMode {
+    OutboundTransportMode {
+        try_utp: enable_utp || utp_only,
+        allow_tcp: !utp_only,
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
         .map(|value| {
             matches!(
                 value.to_ascii_lowercase().as_str(),
@@ -1995,15 +2018,15 @@ impl TorrentManager {
             peer_id: peer_ip_port.clone(),
             tx: peer_session_tx,
         });
-        let use_utp_outbound = outbound_utp_enabled();
+        let outbound_transport_mode = outbound_transport_mode_from_env();
         #[cfg(feature = "synthetic-load")]
-        let first_transport = if use_utp_outbound {
+        let first_transport = if outbound_transport_mode.try_utp {
             PeerTransportKind::Utp
         } else {
             PeerTransportKind::Tcp
         };
         #[cfg(feature = "synthetic-load")]
-        if !use_utp_outbound {
+        if !outbound_transport_mode.try_utp {
             let _ = self
                 .manager_event_tx
                 .try_send(ManagerEvent::PeerConnectAttempted {
@@ -2059,41 +2082,98 @@ impl TorrentManager {
             };
 
             if let Some(session_permit) = session_permit {
-                let utp_connection = if use_utp_outbound {
+                let mut utp_failure = None;
+                let utp_connection = if outbound_transport_mode.try_utp {
                     #[cfg(feature = "synthetic-load")]
                     let _ = manager_event_tx_clone.try_send(ManagerEvent::PeerConnectAttempted {
                         transport: PeerTransportKind::Utp,
                     });
 
                     match timeout(UTP_CONNECT_TIMEOUT, UtpPeerTransport::connect(peer_addr)).await {
-                        Ok(Ok(connection)) => Some(connection),
+                        Ok(Ok(connection)) => {
+                            if utp_connect_log_enabled() {
+                                event!(
+                                    Level::INFO,
+                                    peer = %peer_ip_port_clone,
+                                    "uTP outbound connect established"
+                                );
+                            }
+                            Some(connection)
+                        }
                         Ok(Err(error)) => {
                             #[cfg(feature = "synthetic-load")]
-                            let _ =
-                                manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
-                                    transport: PeerTransportKind::Utp,
-                                    reason: synthetic_peer_connect_failure(&error),
-                                });
-                            event!(
-                                Level::TRACE,
-                                peer = %peer_ip_port_clone,
-                                error = %error,
-                                "uTP outbound connect failed; falling back to TCP"
-                            );
+                            if outbound_transport_mode.allow_tcp {
+                                let _ = manager_event_tx_clone.try_send(
+                                    ManagerEvent::PeerConnectFailed {
+                                        transport: PeerTransportKind::Utp,
+                                        reason: synthetic_peer_connect_failure(&error),
+                                    },
+                                );
+                            }
+                            if !outbound_transport_mode.allow_tcp {
+                                if utp_connect_log_enabled() {
+                                    event!(
+                                        Level::INFO,
+                                        peer = %peer_ip_port_clone,
+                                        error = %error,
+                                        "uTP outbound connect failed in uTP-only mode"
+                                    );
+                                }
+                                utp_failure = Some(error);
+                            } else {
+                                if utp_connect_log_enabled() {
+                                    event!(
+                                        Level::INFO,
+                                        peer = %peer_ip_port_clone,
+                                        error = %error,
+                                        "uTP outbound connect failed; falling back to TCP"
+                                    );
+                                }
+                                event!(
+                                    Level::TRACE,
+                                    peer = %peer_ip_port_clone,
+                                    error = %error,
+                                    "uTP outbound connect failed; falling back to TCP"
+                                );
+                            }
                             None
                         }
                         Err(_) => {
                             #[cfg(feature = "synthetic-load")]
-                            let _ =
-                                manager_event_tx_clone.try_send(ManagerEvent::PeerConnectFailed {
-                                    transport: PeerTransportKind::Utp,
-                                    reason: SyntheticPeerConnectFailure::ConnectTimeout,
-                                });
-                            event!(
-                                Level::TRACE,
-                                peer = %peer_ip_port_clone,
-                                "uTP outbound connect timed out; falling back to TCP"
-                            );
+                            if outbound_transport_mode.allow_tcp {
+                                let _ = manager_event_tx_clone.try_send(
+                                    ManagerEvent::PeerConnectFailed {
+                                        transport: PeerTransportKind::Utp,
+                                        reason: SyntheticPeerConnectFailure::ConnectTimeout,
+                                    },
+                                );
+                            }
+                            if !outbound_transport_mode.allow_tcp {
+                                if utp_connect_log_enabled() {
+                                    event!(
+                                        Level::INFO,
+                                        peer = %peer_ip_port_clone,
+                                        "uTP outbound connect timed out in uTP-only mode"
+                                    );
+                                }
+                                utp_failure = Some(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "uTP connect timed out",
+                                ));
+                            } else {
+                                if utp_connect_log_enabled() {
+                                    event!(
+                                        Level::INFO,
+                                        peer = %peer_ip_port_clone,
+                                        "uTP outbound connect timed out; falling back to TCP"
+                                    );
+                                }
+                                event!(
+                                    Level::TRACE,
+                                    peer = %peer_ip_port_clone,
+                                    "uTP outbound connect timed out; falling back to TCP"
+                                );
+                            }
                             None
                         }
                     }
@@ -2103,9 +2183,14 @@ impl TorrentManager {
 
                 let connection_result = if let Some(connection) = utp_connection {
                     Ok(connection)
+                } else if !outbound_transport_mode.allow_tcp {
+                    let error = utp_failure.unwrap_or_else(|| {
+                        std::io::Error::other("uTP-only mode did not produce a uTP connection")
+                    });
+                    Err((PeerTransportKind::Utp, Some(error)))
                 } else {
                     #[cfg(feature = "synthetic-load")]
-                    if use_utp_outbound {
+                    if outbound_transport_mode.try_utp {
                         let _ =
                             manager_event_tx_clone.try_send(ManagerEvent::PeerConnectAttempted {
                                 transport: PeerTransportKind::Tcp,
@@ -2160,6 +2245,15 @@ impl TorrentManager {
                                     #[cfg(feature = "synthetic-load")]
                                     let _ = manager_event_tx_clone
                                         .try_send(ManagerEvent::PeerSessionFailed);
+                                    if utp_connect_log_enabled() {
+                                        event!(
+                                            Level::INFO,
+                                            peer = %peer_ip_port_clone,
+                                            transport = %selected_transport,
+                                            error = %e,
+                                            "peer session ended with error over selected transport"
+                                        );
+                                    }
                                     event!(
                                         Level::DEBUG,
                                         "PEER SESSION {}: ENDED IN ERROR: {}",
@@ -3075,7 +3169,25 @@ impl TorrentManager {
 
                     match command {
 
-                        TorrentCommand::SuccessfullyConnected(peer_id) => self.apply_action(Action::PeerSuccessfullyConnected { peer_id }),
+                        TorrentCommand::SuccessfullyConnected(peer_id) => {
+                            if utp_connect_log_enabled() {
+                                if let Some(peer) = self.state.peers.get(&peer_id) {
+                                    event!(
+                                        Level::INFO,
+                                        peer = %peer_id,
+                                        transport = %peer.transport_kind,
+                                        "BitTorrent peer session established over selected transport"
+                                    );
+                                } else {
+                                    event!(
+                                        Level::INFO,
+                                        peer = %peer_id,
+                                        "BitTorrent peer session established before peer state was registered"
+                                    );
+                                }
+                            }
+                            self.apply_action(Action::PeerSuccessfullyConnected { peer_id })
+                        },
                         TorrentCommand::PeerId(addr, id) => self.apply_action(Action::UpdatePeerId { peer_addr: addr, new_id: id }),
                         TorrentCommand::PeerTransportSelected { peer_id, transport } => {
                             self.apply_action(Action::PeerTransportSelected { peer_id, transport })
@@ -3352,6 +3464,28 @@ mod tests {
     use std::time::SystemTime;
     use std::time::{Duration, Instant};
     use tokio::sync::{broadcast, mpsc, watch};
+
+    #[test]
+    fn utp_only_mode_disables_tcp_fallback() {
+        assert_eq!(
+            outbound_transport_mode(false, true),
+            OutboundTransportMode {
+                try_utp: true,
+                allow_tcp: false,
+            }
+        );
+    }
+
+    #[test]
+    fn enabled_utp_mode_keeps_tcp_fallback() {
+        assert_eq!(
+            outbound_transport_mode(true, false),
+            OutboundTransportMode {
+                try_utp: true,
+                allow_tcp: true,
+            }
+        );
+    }
 
     #[test]
     fn counts_transport_peers_and_payload_movers() {

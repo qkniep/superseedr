@@ -183,6 +183,39 @@ pub struct ListenerSet {
     ipv6: Option<TcpListener>,
 }
 
+const UTP_ONLY_ENV: &str = "SUPERSEEDR_UTP_ONLY";
+
+fn tcp_peer_listener_enabled_from_env() -> bool {
+    tcp_peer_listener_enabled(app_env_flag(UTP_ONLY_ENV))
+}
+
+fn tcp_peer_listener_enabled(utp_only: bool) -> bool {
+    !utp_only
+}
+
+fn app_env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+async fn bind_peer_listener(port: u16) -> io::Result<Option<ListenerSet>> {
+    if !tcp_peer_listener_enabled_from_env() {
+        tracing_event!(
+            Level::INFO,
+            "TCP peer listener disabled by SUPERSEEDR_UTP_ONLY"
+        );
+        return Ok(None);
+    }
+
+    ListenerSet::bind(port).await.map(Some)
+}
+
 impl ListenerSet {
     async fn bind(port: u16) -> io::Result<Self> {
         let ipv6 = match TcpListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port))
@@ -2249,7 +2282,7 @@ impl App {
         runtime_mode: AppRuntimeMode,
         app_lock_handle: Option<File>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let listener = Some(ListenerSet::bind(client_configs.client_port).await?);
+        let listener = bind_peer_listener(client_configs.client_port).await?;
         if client_configs.client_port == 0 {
             if let Some(bound_port) = listener.as_ref().and_then(ListenerSet::local_port) {
                 client_configs.client_port = bound_port;
@@ -5153,9 +5186,9 @@ impl App {
                         new_port
                     );
 
-                    match ListenerSet::bind(new_port).await {
+                    match bind_peer_listener(new_port).await {
                         Ok(new_listener) => {
-                            self.listener = Some(new_listener);
+                            self.listener = new_listener;
                             let bound_port = self
                                 .listener
                                 .as_ref()
@@ -6742,9 +6775,9 @@ impl App {
     }
 
     async fn rebind_listener(&mut self, new_port: u16) -> bool {
-        match ListenerSet::bind(new_port).await {
+        match bind_peer_listener(new_port).await {
             Ok(new_listener) => {
-                self.listener = Some(new_listener);
+                self.listener = new_listener;
                 // Note: client_configs.client_port is likely already updated by the caller (UpdateConfig)
                 // but we ensure consistency here just in case.
                 let bound_port = self
@@ -7814,10 +7847,10 @@ mod tests {
         persisted_validation_status_from_metrics, prune_rss_feed_errors, queue_persistence_payload,
         refresh_autosort_after_stats, resolve_magnet_torrent_name, rss_settings_changed,
         should_load_persisted_torrent, should_persist_network_history_on_interval,
-        sort_and_filter_torrent_list_state, swarm_availability_counts, torrent_completion_percent,
-        torrent_is_effectively_incomplete, App, AppClusterRole, AppCommand, AppMode,
-        AppRuntimeMode, AppState, ColumnId, CommandIngestResult, DataRate, DhtWaveTargets,
-        DhtWaveUiState, DiskBackpressureDecision, DiskBackpressureDownloadThrottle,
+        sort_and_filter_torrent_list_state, swarm_availability_counts, tcp_peer_listener_enabled,
+        torrent_completion_percent, torrent_is_effectively_incomplete, App, AppClusterRole,
+        AppCommand, AppMode, AppRuntimeMode, AppState, ColumnId, CommandIngestResult, DataRate,
+        DhtWaveTargets, DhtWaveUiState, DiskBackpressureDecision, DiskBackpressureDownloadThrottle,
         DiskBackpressureSample, FilePriority, IngestSource, ListenerSet, PeerInfo, PeerSortColumn,
         PersistPayload, SelectedHeader, SortDirection, SwarmAvailabilityFlashState,
         TorrentControlState, TorrentDisplayState, TorrentMetrics, TorrentPreviewPayload,
@@ -7854,6 +7887,12 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::sync::watch;
     use tokio::time;
+
+    #[test]
+    fn utp_only_mode_disables_tcp_peer_listener() {
+        assert!(!tcp_peer_listener_enabled(true));
+        assert!(tcp_peer_listener_enabled(false));
+    }
 
     fn mock_display(name: &str, peer_count: usize) -> TorrentDisplayState {
         let mut display = TorrentDisplayState::default();

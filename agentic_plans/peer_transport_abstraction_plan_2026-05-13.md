@@ -63,6 +63,8 @@ Status: implemented as an experimental outbound path behind `SUPERSEEDR_ENABLE_U
 - Added `UtpPeerTransport::connect` returning the same `PeerConnection` abstraction used by TCP.
 - Kept default production behavior TCP-only. Outbound uTP is attempted only when `SUPERSEEDR_ENABLE_UTP` is truthy (`1`, `true`, `yes`, or `on`).
 - If the uTP probe fails or times out, the manager falls back to TCP for the same peer.
+- Added `SUPERSEEDR_UTP_ONLY`, which implies uTP is enabled and disables outbound TCP fallback plus the inbound TCP peer listener for isolated uTP testing.
+- Added `SUPERSEEDR_LOG_UTP_CONNECT` as an opt-in diagnostic switch for distinguishing uTP transport connects, BitTorrent session success, and selected-transport session failures.
 - Added peer transport selection to manager state so metrics can distinguish TCP and uTP peers.
 - Added status metrics:
   - `tcp_peer_count`
@@ -77,6 +79,8 @@ Status: implemented as an experimental outbound path behind `SUPERSEEDR_ENABLE_U
 - Do not add external transport dependencies for this pass.
 - Use an outbound ephemeral UDP socket for the first implementation. This avoids interfering with the DHT-owned client UDP port, but it does not solve inbound reachability.
 - Keep TCP fallback mandatory while uTP is experimental.
+- Allow `SUPERSEEDR_UTP_ONLY=1` only as a test switch; it is expected to fail against peers that do not answer uTP, and it does not add inbound uTP support.
+- Treat BitTorrent session success over the selected transport as the proof point, not just a uTP SYN/STATE transport connect.
 - Keep `ip:port` peer state keys for this pass because only one transport is selected per outbound peer attempt. A future simultaneous TCP/uTP identity migration still needs transport-qualified peer keys.
 
 ### Remaining Work

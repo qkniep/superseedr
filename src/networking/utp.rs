@@ -33,6 +33,7 @@ const CONNECT_RETRIES: usize = 4;
 const CONNECT_RETRY_TIMEOUT: Duration = Duration::from_millis(400);
 const RETRANSMIT_AFTER: Duration = Duration::from_millis(500);
 const MAX_RETRANSMITS: u8 = 8;
+const UTP_CONNECT_LOG_ENV: &str = "SUPERSEEDR_LOG_UTP_CONNECT";
 
 /// Minimal homegrown BEP 29/uTP outbound transport.
 ///
@@ -49,7 +50,7 @@ impl UtpPeerTransport {
         let start = Instant::now();
         let receive_connection_id = random_connection_id();
         let send_connection_id = receive_connection_id.wrapping_add(1);
-        let initial_seq_nr = rand::random::<u16>();
+        let initial_seq_nr = 1;
 
         let syn = UtpPacket {
             packet_type: TYPE_SYN,
@@ -84,7 +85,7 @@ impl UtpPeerTransport {
                             send_connection_id,
                             receive_connection_id,
                             next_send_seq_nr: initial_seq_nr.wrapping_add(1),
-                            last_remote_seq_nr: packet.seq_nr,
+                            last_remote_seq_nr: packet.seq_nr.wrapping_sub(1),
                             last_remote_timestamp_microseconds: packet.timestamp_microseconds,
                             start,
                         };
@@ -105,6 +106,9 @@ impl UtpPeerTransport {
         let (client_stream, driver_stream) = tokio_io::duplex(STREAM_BUFFER);
         tokio::spawn(async move {
             if let Err(error) = run_utp_driver(socket, driver_stream, state).await {
+                if utp_transport_log_enabled() {
+                    tracing::info!(%remote_addr, %error, "uTP driver stopped");
+                }
                 tracing::debug!(%remote_addr, %error, "uTP driver stopped");
             }
         });
@@ -492,6 +496,17 @@ fn elapsed_connect_attempts(start: Instant) -> usize {
     (elapsed / retry_ms) as usize
 }
 
+fn utp_transport_log_enabled() -> bool {
+    std::env::var(UTP_CONNECT_LOG_ENV)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 async fn bind_outbound_socket(remote_addr: SocketAddr) -> io::Result<UdpSocket> {
     let bind_addr = match remote_addr.ip() {
         IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
@@ -563,6 +578,7 @@ mod tests {
             let (n, client_addr) = server.recv_from(&mut buf).await.unwrap();
             let syn = UtpPacket::decode(&buf[..n]).unwrap();
             assert_eq!(syn.packet_type, TYPE_SYN);
+            assert_eq!(syn.seq_nr, 1);
 
             let server_seq_nr = 77;
             let state = UtpPacket {
@@ -581,6 +597,8 @@ mod tests {
             let data = UtpPacket::decode(&buf[..n]).unwrap();
             assert_eq!(data.packet_type, TYPE_DATA);
             assert_eq!(data.connection_id, syn.connection_id.wrapping_add(1));
+            assert_eq!(data.seq_nr, syn.seq_nr.wrapping_add(1));
+            assert_eq!(data.ack_nr, server_seq_nr.wrapping_sub(1));
             assert_eq!(data.payload, b"ping");
 
             let ack = UtpPacket {
@@ -601,7 +619,7 @@ mod tests {
                 timestamp_microseconds: 3,
                 timestamp_difference_microseconds: 0,
                 wnd_size: RECEIVE_WINDOW,
-                seq_nr: server_seq_nr + 1,
+                seq_nr: server_seq_nr,
                 ack_nr: data.seq_nr,
                 payload: data.payload,
             };
