@@ -604,7 +604,12 @@ fn init_tracing(
                 suppressed_failures.push(message);
             }
         } else {
-            match logging::non_blocking_daily_file_writer(&log_dir, filename_prefix, 31) {
+            match logging::non_blocking_daily_file_writer_with_stderr_reporting(
+                &log_dir,
+                filename_prefix,
+                31,
+                emit_stderr,
+            ) {
                 Ok((non_blocking_general, guard_general)) => {
                     let general_layer = fmt::layer()
                         .with_writer(non_blocking_general)
@@ -646,7 +651,7 @@ fn init_tracing(
 
     if !emit_stderr && !suppressed_failures.is_empty() {
         eprintln!(
-            "[Warn] File logging unavailable; falling back to stderr logging. {}",
+            "[Warn] File logging unavailable; runtime log output will be suppressed. {}",
             suppressed_failures[0]
         );
         if suppressed_failures.len() > 1 {
@@ -660,7 +665,10 @@ fn init_tracing(
     let fallback_layer = if emit_stderr {
         fmt::layer().with_filter(quiet_filter).boxed()
     } else {
-        fmt::layer().with_filter(stderr_fallback_filter).boxed()
+        fmt::layer()
+            .with_writer(io::sink)
+            .with_filter(stderr_fallback_filter)
+            .boxed()
     };
     let _ = tracing_subscriber::registry()
         .with(fallback_layer)

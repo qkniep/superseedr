@@ -766,6 +766,7 @@ pub enum AppMode {
     Normal,
     Help,
     Journal,
+    TorrentManagement,
     PowerSaving,
     DeleteConfirm,
     Config,
@@ -855,7 +856,7 @@ pub enum RssSectionFocus {
     Explorer,
 }
 
-#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum TorrentControlState {
     #[default]
     Running,
@@ -1284,6 +1285,7 @@ pub struct UiState {
     pub delete_confirm: DeleteConfirmUiState,
     pub file_browser: FileBrowserUiState,
     pub journal: JournalUiState,
+    pub torrent_management: TorrentManagementUiState,
     pub normal_paste_burst: PasteBurst,
     #[allow(dead_code)]
     pub rss: RssUiState,
@@ -1459,6 +1461,44 @@ pub struct JournalUiState {
     pub filter: JournalFilter,
     pub selected_index: usize,
     pub status_message: Option<String>,
+}
+
+pub struct TorrentManagementUiState {
+    pub selected_index: usize,
+    pub selected_hashes: HashSet<Vec<u8>>,
+    pub expanded_groups: HashSet<String>,
+    pub grouping_enabled: bool,
+    pub is_searching: bool,
+    pub search_query: String,
+    pub selected_column_index: usize,
+    pub sort_column_index: Option<usize>,
+    pub sort_direction: SortDirection,
+    pub status_message: Option<String>,
+    pub confirm_delete: Option<TorrentManagementDeleteConfirm>,
+}
+
+impl Default for TorrentManagementUiState {
+    fn default() -> Self {
+        Self {
+            selected_index: 0,
+            selected_hashes: HashSet::new(),
+            expanded_groups: HashSet::new(),
+            grouping_enabled: false,
+            is_searching: false,
+            search_query: String::new(),
+            selected_column_index: 1,
+            sort_column_index: Some(1),
+            sort_direction: SortDirection::Ascending,
+            status_message: None,
+            confirm_delete: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TorrentManagementDeleteConfirm {
+    pub info_hashes: Vec<Vec<u8>>,
+    pub delete_files: bool,
 }
 
 #[derive(Default)]
@@ -2618,6 +2658,9 @@ impl App {
     }
 
     async fn start_missing_runtime_torrents_for_current_role(&mut self) {
+        let mut running_torrents_started = 0usize;
+        let mut deferred_torrent_added = false;
+
         for torrent in self.client_configs.torrents.clone() {
             let Some(info_hash) = info_hash_from_torrent_source(&torrent.torrent_or_magnet) else {
                 continue;
@@ -2625,12 +2668,40 @@ impl App {
             if self.has_live_runtime_for_torrent(&info_hash) {
                 continue;
             }
+            if self
+                .startup_deferred_load_queue
+                .iter()
+                .any(|queued_hash| queued_hash == &info_hash)
+            {
+                continue;
+            }
             if self.should_suppress_follower_runtime_for_torrent(&torrent) {
                 self.ensure_display_only_torrent_from_settings(&torrent);
                 continue;
             }
-            self.load_runtime_torrent_from_settings(torrent).await;
+            let is_running = matches!(torrent.torrent_control_state, TorrentControlState::Running);
+            if is_running
+                && (running_torrents_started >= STARTUP_ROLLING_BATCH_SIZE
+                    || !self.startup_deferred_load_queue.is_empty())
+            {
+                self.startup_deferred_load_queue.push_back(info_hash);
+                deferred_torrent_added = true;
+                continue;
+            }
+
+            if self.load_runtime_torrent_from_settings(torrent).await {
+                if is_running {
+                    running_torrents_started = running_torrents_started.saturating_add(1);
+                }
+                self.startup_loaded_torrent_count =
+                    self.startup_loaded_torrent_count.saturating_add(1);
+            }
         }
+
+        if deferred_torrent_added {
+            self.reschedule_startup_load_deadline();
+        }
+        self.maybe_log_startup_load_summary();
     }
 
     pub fn is_shared_mode_enabled(&self) -> bool {
@@ -10252,6 +10323,78 @@ mod tests {
             TorrentControlState::Running
         );
         assert!(app.app_state.ui.needs_redraw);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn startup_restore_rolls_running_torrents_after_first() {
+        let mut settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        for index in 0..4 {
+            let hash_digit = char::from_digit((index + 1) as u32, 16).expect("hex digit");
+            settings.torrents.push(TorrentSettings {
+                torrent_or_magnet: format!(
+                    "magnet:?xt=urn:btih:{}",
+                    hash_digit.to_string().repeat(40)
+                ),
+                name: format!("roll-start-{}", index),
+                torrent_control_state: TorrentControlState::Running,
+                ..Default::default()
+            });
+        }
+
+        let app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+
+        assert_eq!(app.torrent_manager_command_txs.len(), 1);
+        assert_eq!(app.startup_deferred_load_queue.len(), 3);
+        assert_eq!(app.startup_loaded_torrent_count, 1);
+        assert!(app.next_startup_load_at.is_some());
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn start_missing_runtime_torrents_preserves_startup_rollout() {
+        let mut app = App::new(
+            crate::config::Settings {
+                client_port: 0,
+                ..Default::default()
+            },
+            AppRuntimeMode::Normal,
+        )
+        .await
+        .expect("build app");
+
+        for index in 0..4 {
+            let hash_digit = char::from_digit((index + 1) as u32, 16).expect("hex digit");
+            app.client_configs.torrents.push(TorrentSettings {
+                torrent_or_magnet: format!(
+                    "magnet:?xt=urn:btih:{}",
+                    hash_digit.to_string().repeat(40)
+                ),
+                name: format!("missing-roll-{}", index),
+                torrent_control_state: TorrentControlState::Running,
+                ..Default::default()
+            });
+        }
+
+        app.start_missing_runtime_torrents_for_current_role().await;
+
+        assert_eq!(app.torrent_manager_command_txs.len(), 1);
+        assert_eq!(app.startup_deferred_load_queue.len(), 3);
+        assert_eq!(app.startup_loaded_torrent_count, 1);
+        assert!(app.next_startup_load_at.is_some());
+
+        app.load_next_startup_batch().await;
+
+        assert_eq!(app.torrent_manager_command_txs.len(), 2);
+        assert_eq!(app.startup_deferred_load_queue.len(), 2);
+        assert_eq!(app.startup_loaded_torrent_count, 2);
 
         let _ = app.shutdown_tx.send(());
     }

@@ -27,9 +27,9 @@ use crate::persistence::network_history::NetworkHistoryPoint;
 use crate::theme::{ThemeContext, ThemeName};
 use crate::torrent_manager::{ManagerCommand, TorrentFileProbeStatus};
 use crate::tui::formatters::{
-    calculate_nice_upper_bound, format_bytes, format_countdown, format_duration, format_iops,
-    format_latency, format_limit_bps, format_memory, format_speed, format_time,
-    generate_x_axis_labels, ip_to_color, parse_peer_id, sanitize_text, speed_to_style,
+    anonymize_preserving_shape, calculate_nice_upper_bound, format_bytes, format_countdown,
+    format_duration, format_iops, format_latency, format_limit_bps, format_memory, format_speed,
+    format_time, generate_x_axis_labels, ip_to_color, parse_peer_id, sanitize_text, speed_to_style,
     truncate_with_ellipsis,
 };
 use crate::tui::layout::common::compute_visible_peer_columns;
@@ -409,6 +409,7 @@ pub enum UiAction {
     OpenConfig,
     OpenRss,
     OpenJournal,
+    OpenTorrentManagement,
     DataRateSlower,
     DataRateFaster,
     ThemePrev,
@@ -428,6 +429,7 @@ pub enum UiEffect {
     OpenConfigScreen,
     OpenRssScreen,
     OpenJournalScreen,
+    OpenTorrentManagementScreen,
     BroadcastManagerDataRate(u64),
     ApplyThemePrev,
     ApplyThemeNext,
@@ -549,6 +551,10 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
         UiAction::OpenJournal => ReduceResult {
             redraw: true,
             effects: vec![UiEffect::OpenJournalScreen],
+        },
+        UiAction::OpenTorrentManagement => ReduceResult {
+            redraw: true,
+            effects: vec![UiEffect::OpenTorrentManagementScreen],
         },
         UiAction::DataRateSlower => {
             app_state.data_rate = app_state.data_rate.next_slower();
@@ -747,6 +753,7 @@ fn map_key_to_ui_action(key: KeyEvent) -> Option<UiAction> {
         KeyCode::Char('c') => Some(UiAction::OpenConfig),
         KeyCode::Char('r') => Some(UiAction::OpenRss),
         KeyCode::Char('J') => Some(UiAction::OpenJournal),
+        KeyCode::Char('M') => Some(UiAction::OpenTorrentManagement),
         KeyCode::Char('m') => Some(UiAction::OpenHelp),
         KeyCode::Char('[') | KeyCode::Char('{') => Some(UiAction::DataRateSlower),
         KeyCode::Char(']') | KeyCode::Char('}') => Some(UiAction::DataRateFaster),
@@ -2132,7 +2139,7 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                                 }
                                 ColumnId::Name => {
                                     let name = if app_state.anonymize_torrent_names {
-                                        format!("Torrent {}", i + 1)
+                                        anonymize_preserving_shape(&state.torrent_name)
                                     } else {
                                         sanitize_text(&state.torrent_name)
                                     };
@@ -6269,45 +6276,6 @@ fn anonymize_tree_name(name: &str, is_dir: bool, anonymize: bool) -> String {
     anonymize_preserving_shape(name)
 }
 
-fn anonymize_preserving_shape(input: &str) -> String {
-    let seed = stable_string_seed(input);
-    input
-        .chars()
-        .enumerate()
-        .map(|(idx, ch)| anonymized_shape_char(seed, idx, ch))
-        .collect()
-}
-
-fn stable_string_seed(input: &str) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in input.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
-fn anonymized_shape_char(seed: u64, idx: usize, ch: char) -> char {
-    let mut state = seed ^ ((idx as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15));
-    state ^= state >> 30;
-    state = state.wrapping_mul(0xbf58476d1ce4e5b9);
-    state ^= state >> 27;
-    state = state.wrapping_mul(0x94d049bb133111eb);
-    state ^= state >> 31;
-
-    if ch.is_ascii_lowercase() {
-        (b'a' + (state % 26) as u8) as char
-    } else if ch.is_ascii_uppercase() {
-        (b'A' + (state % 26) as u8) as char
-    } else if ch.is_ascii_digit() {
-        (b'0' + (state % 10) as u8) as char
-    } else if ch.is_alphabetic() {
-        (b'a' + (state % 26) as u8) as char
-    } else {
-        ch
-    }
-}
-
 fn peer_has_all_pieces(peer: &PeerInfo, total_pieces: usize) -> bool {
     total_pieces > 0
         && peer
@@ -7011,6 +6979,11 @@ async fn execute_ui_effect(app: &mut App, effect: UiEffect) {
         UiEffect::OpenJournalScreen => {
             app.app_state.ui.journal.selected_index = 0;
             app.app_state.mode = AppMode::Journal;
+        }
+        UiEffect::OpenTorrentManagementScreen => {
+            app.app_state.ui.torrent_management.selected_index = 0;
+            app.app_state.ui.torrent_management.status_message = None;
+            app.app_state.mode = AppMode::TorrentManagement;
         }
         UiEffect::HandlePastedText(text) => {
             handle_pasted_text(app, &text).await;
@@ -8317,6 +8290,10 @@ mod tests {
             map_key_to_ui_action(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE)),
             Some(UiAction::ClearManualSorting)
         );
+        assert_eq!(
+            map_key_to_ui_action(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::NONE)),
+            Some(UiAction::OpenTorrentManagement)
+        );
     }
 
     #[test]
@@ -8458,6 +8435,16 @@ mod tests {
 
         assert!(result.redraw);
         assert_eq!(result.effects, vec![UiEffect::OpenJournalScreen]);
+    }
+
+    #[test]
+    fn reducer_open_torrent_management_emits_effect() {
+        let mut app_state = AppState::default();
+
+        let result = reduce_ui_action(&mut app_state, UiAction::OpenTorrentManagement);
+
+        assert!(result.redraw);
+        assert_eq!(result.effects, vec![UiEffect::OpenTorrentManagementScreen]);
     }
 
     #[test]

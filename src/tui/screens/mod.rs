@@ -9,4 +9,5 @@ pub mod journal;
 pub mod normal;
 pub mod power;
 pub mod rss;
+pub mod torrents;
 pub mod welcome;

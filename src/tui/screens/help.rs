@@ -276,6 +276,13 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
+                        "M",
+                        ctx.apply(Style::default().fg(ctx.state_selected())),
+                    )),
+                    Cell::from("Open torrent management"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
                         "z",
                         ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
                     )),
@@ -326,14 +333,21 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
                         "p",
                         ctx.apply(Style::default().fg(ctx.state_success())),
                     )),
-                    Cell::from("Pause / Resume selected torrent"),
+                    Cell::from("Pause / Resume selected torrent(s)"),
                 ]),
                 Row::new(vec![
                     Cell::from(Span::styled(
                         "d / D",
                         ctx.apply(Style::default().fg(ctx.state_error())),
                     )),
-                    Cell::from("Delete torrent (D includes downloaded files)"),
+                    Cell::from("Delete selected torrent(s); D includes downloaded files"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "h / l / s",
+                        ctx.apply(Style::default().fg(ctx.state_info())),
+                    )),
+                    Cell::from("Torrent management columns: move left/right and sort"),
                 ]),
                 Row::new(vec![Cell::from(""), Cell::from("")]).height(1),
                 Row::new(vec![Cell::from(Span::styled(
@@ -678,6 +692,60 @@ fn draw_help_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeC
             ],
         ),
         AppMode::Journal => (" Help / Journal ", journal_help_rows(ctx)),
+        AppMode::TorrentManagement => (
+            " Help / Torrent Management ",
+            vec![
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Esc / q",
+                        ctx.apply(Style::default().fg(ctx.state_error())),
+                    )),
+                    Cell::from("Return to dashboard"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "/",
+                        ctx.apply(Style::default().fg(ctx.state_warning())),
+                    )),
+                    Cell::from("Search torrent names and paths"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "g / Enter",
+                        ctx.apply(Style::default().fg(ctx.state_selected())),
+                    )),
+                    Cell::from("Toggle grouping / expand a group row"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "x",
+                        ctx.apply(Style::default().fg(ctx.accent_peach())),
+                    )),
+                    Cell::from("Toggle anonymized torrent names"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Space / A / u",
+                        ctx.apply(Style::default().fg(ctx.state_success())),
+                    )),
+                    Cell::from("Select current row / select visible / clear selection"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "p",
+                        ctx.apply(Style::default().fg(ctx.state_success())),
+                    )),
+                    Cell::from("Pause or resume selected torrents"),
+                ]),
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        "d / D",
+                        ctx.apply(Style::default().fg(ctx.state_error())),
+                    )),
+                    Cell::from("Remove selected torrents, or purge files after confirmation"),
+                ]),
+            ],
+        ),
         AppMode::Config => (
             " Help / Config ",
             vec![

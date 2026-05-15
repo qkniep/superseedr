@@ -1,0 +1,1915 @@
+// SPDX-FileCopyrightText: 2026 The superseedr Contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+use crate::app::{
+    torrent_completion_percent, App, AppCommand, AppMode, AppState, TorrentControlState,
+    TorrentDisplayState, TorrentManagementDeleteConfirm,
+};
+use crate::config::SortDirection;
+use crate::integrations::control::ControlRequest;
+use crate::theme::ThemeContext;
+use crate::tui::formatters::{
+    anonymize_preserving_shape, centered_rect, format_bytes, format_duration, format_speed,
+    sanitize_text, speed_to_style, truncate_with_ellipsis,
+};
+use crate::tui::layout::common::{compute_smart_table_layout, SmartCol};
+use crate::tui::screen_context::ScreenContext;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
+use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::prelude::{Frame, Line, Span, Style, Stylize};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Wrap,
+};
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TorrentManagementAction {
+    ToNormal,
+    MoveUp,
+    MoveDown,
+    MoveColumnLeft,
+    MoveColumnRight,
+    SortBySelectedColumn,
+    StartSearch,
+    SearchInsert(char),
+    SearchBackspace,
+    SearchCommit,
+    SearchCancel,
+    ToggleAnonymizeNames,
+    ToggleGrouping,
+    ToggleCurrentGroup,
+    ToggleCurrentSelection,
+    SelectAllVisible,
+    ClearSelection,
+    TogglePauseTargets,
+    StartDelete { delete_files: bool },
+    ConfirmDelete,
+    CancelDelete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TorrentManagementEffect {
+    ToNormal,
+    SubmitControlRequest(ControlRequest),
+    MarkControlState {
+        info_hash: Vec<u8>,
+        state: TorrentControlState,
+        delete_files: bool,
+    },
+}
+
+#[derive(Default)]
+pub struct TorrentManagementReduceResult {
+    pub consumed: bool,
+    pub redraw: bool,
+    pub effects: Vec<TorrentManagementEffect>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ManagementRow {
+    kind: ManagementRowKind,
+    label: String,
+    info_hashes: Vec<Vec<u8>>,
+    depth: usize,
+    metrics: RowMetrics,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ManagementRowKind {
+    Group { key: String, expanded: bool },
+    Torrent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManagementColumnId {
+    Selection,
+    Name,
+    Completed,
+    State,
+    Peers,
+    DownSpeed,
+    UpSpeed,
+    Activity,
+    Eta,
+    Size,
+}
+
+#[derive(Clone, Debug)]
+struct ManagementColumnDefinition {
+    id: ManagementColumnId,
+    header: &'static str,
+    min_width: u16,
+    priority: u8,
+    constraint: Constraint,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct RowMetrics {
+    count: usize,
+    completed: f64,
+    state_label: String,
+    peer_count: usize,
+    download_bps: u64,
+    upload_bps: u64,
+    activity_score: u64,
+    eta: Option<Duration>,
+    total_size: u64,
+}
+
+#[derive(Default)]
+struct GroupBucket {
+    key: String,
+    label: String,
+    info_hashes: Vec<Vec<u8>>,
+}
+
+pub fn handle_event(event: CrosstermEvent, app: &mut App) -> bool {
+    if !matches!(app.app_state.mode, AppMode::TorrentManagement) {
+        return false;
+    }
+
+    let CrosstermEvent::Key(key) = event else {
+        return false;
+    };
+    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return false;
+    }
+
+    let Some(action) = map_key_to_management_action(key.code, &app.app_state) else {
+        return false;
+    };
+    let result = reduce_torrent_management_action(&mut app.app_state, action);
+    if result.redraw {
+        app.app_state.ui.needs_redraw = true;
+    }
+    execute_management_effects(app, result.effects);
+    result.consumed
+}
+
+fn map_key_to_management_action(
+    key_code: KeyCode,
+    app_state: &AppState,
+) -> Option<TorrentManagementAction> {
+    if app_state.ui.torrent_management.confirm_delete.is_some() {
+        return match key_code {
+            KeyCode::Char('Y') => Some(TorrentManagementAction::ConfirmDelete),
+            KeyCode::Esc | KeyCode::Char('q') => Some(TorrentManagementAction::CancelDelete),
+            _ => None,
+        };
+    }
+
+    if app_state.ui.torrent_management.is_searching {
+        return match key_code {
+            KeyCode::Esc => Some(TorrentManagementAction::SearchCancel),
+            KeyCode::Enter => Some(TorrentManagementAction::SearchCommit),
+            KeyCode::Backspace => Some(TorrentManagementAction::SearchBackspace),
+            KeyCode::Char(c) => Some(TorrentManagementAction::SearchInsert(c)),
+            _ => None,
+        };
+    }
+
+    match key_code {
+        KeyCode::Esc | KeyCode::Char('q') => Some(TorrentManagementAction::ToNormal),
+        KeyCode::Up | KeyCode::Char('k') => Some(TorrentManagementAction::MoveUp),
+        KeyCode::Down | KeyCode::Char('j') => Some(TorrentManagementAction::MoveDown),
+        KeyCode::Left | KeyCode::Char('h') => Some(TorrentManagementAction::MoveColumnLeft),
+        KeyCode::Right | KeyCode::Char('l') => Some(TorrentManagementAction::MoveColumnRight),
+        KeyCode::Char('s') => Some(TorrentManagementAction::SortBySelectedColumn),
+        KeyCode::Char('/') => Some(TorrentManagementAction::StartSearch),
+        KeyCode::Char('x') => Some(TorrentManagementAction::ToggleAnonymizeNames),
+        KeyCode::Char('g') => Some(TorrentManagementAction::ToggleGrouping),
+        KeyCode::Enter => Some(TorrentManagementAction::ToggleCurrentGroup),
+        KeyCode::Char(' ') => Some(TorrentManagementAction::ToggleCurrentSelection),
+        KeyCode::Char('A') => Some(TorrentManagementAction::SelectAllVisible),
+        KeyCode::Char('u') => Some(TorrentManagementAction::ClearSelection),
+        KeyCode::Char('p') => Some(TorrentManagementAction::TogglePauseTargets),
+        KeyCode::Char('d') => Some(TorrentManagementAction::StartDelete {
+            delete_files: false,
+        }),
+        KeyCode::Char('D') => Some(TorrentManagementAction::StartDelete { delete_files: true }),
+        _ => None,
+    }
+}
+
+pub fn reduce_torrent_management_action(
+    app_state: &mut AppState,
+    action: TorrentManagementAction,
+) -> TorrentManagementReduceResult {
+    let mut result = TorrentManagementReduceResult {
+        consumed: true,
+        redraw: true,
+        effects: Vec::new(),
+    };
+    app_state.ui.torrent_management.status_message = None;
+    prune_selected_hashes(app_state);
+
+    match action {
+        TorrentManagementAction::ToNormal => {
+            app_state.ui.torrent_management.is_searching = false;
+            app_state.ui.torrent_management.confirm_delete = None;
+            result.effects.push(TorrentManagementEffect::ToNormal);
+        }
+        TorrentManagementAction::MoveUp => {
+            app_state.ui.torrent_management.selected_index = app_state
+                .ui
+                .torrent_management
+                .selected_index
+                .saturating_sub(1);
+        }
+        TorrentManagementAction::MoveDown => {
+            let row_count = build_management_rows(app_state).len();
+            if row_count > 0 {
+                app_state.ui.torrent_management.selected_index =
+                    (app_state.ui.torrent_management.selected_index + 1).min(row_count - 1);
+            }
+        }
+        TorrentManagementAction::MoveColumnLeft => {
+            move_management_column(app_state, -1);
+        }
+        TorrentManagementAction::MoveColumnRight => {
+            move_management_column(app_state, 1);
+        }
+        TorrentManagementAction::SortBySelectedColumn => {
+            let selected_column_index = normalized_selected_management_column_index(app_state);
+            app_state.ui.torrent_management.selected_column_index = selected_column_index;
+            if app_state.ui.torrent_management.sort_column_index == Some(selected_column_index) {
+                app_state.ui.torrent_management.sort_direction =
+                    reverse_sort_direction(app_state.ui.torrent_management.sort_direction);
+            } else {
+                app_state.ui.torrent_management.sort_column_index = Some(selected_column_index);
+                app_state.ui.torrent_management.sort_direction =
+                    management_column_default_direction(
+                        management_columns()[selected_column_index].id,
+                    );
+            }
+        }
+        TorrentManagementAction::StartSearch => {
+            app_state.ui.torrent_management.is_searching = true;
+            app_state.ui.torrent_management.selected_index = 0;
+        }
+        TorrentManagementAction::SearchInsert(c) => {
+            app_state.ui.torrent_management.search_query.push(c);
+            app_state.ui.torrent_management.selected_index = 0;
+        }
+        TorrentManagementAction::SearchBackspace => {
+            app_state.ui.torrent_management.search_query.pop();
+            app_state.ui.torrent_management.selected_index = 0;
+        }
+        TorrentManagementAction::SearchCommit => {
+            app_state.ui.torrent_management.is_searching = false;
+        }
+        TorrentManagementAction::SearchCancel => {
+            app_state.ui.torrent_management.is_searching = false;
+            app_state.ui.torrent_management.search_query.clear();
+            app_state.ui.torrent_management.selected_index = 0;
+        }
+        TorrentManagementAction::ToggleAnonymizeNames => {
+            app_state.anonymize_torrent_names = !app_state.anonymize_torrent_names;
+        }
+        TorrentManagementAction::ToggleGrouping => {
+            app_state.ui.torrent_management.grouping_enabled =
+                !app_state.ui.torrent_management.grouping_enabled;
+            app_state.ui.torrent_management.selected_index = 0;
+        }
+        TorrentManagementAction::ToggleCurrentGroup => {
+            let rows = build_management_rows(app_state);
+            if let Some(ManagementRow {
+                kind: ManagementRowKind::Group { key, .. },
+                ..
+            }) = rows.get(app_state.ui.torrent_management.selected_index)
+            {
+                if !app_state.ui.torrent_management.expanded_groups.remove(key) {
+                    app_state
+                        .ui
+                        .torrent_management
+                        .expanded_groups
+                        .insert(key.clone());
+                }
+            }
+        }
+        TorrentManagementAction::ToggleCurrentSelection => {
+            let targets = current_row_targets(app_state);
+            toggle_hash_selection(app_state, &targets);
+        }
+        TorrentManagementAction::SelectAllVisible => {
+            for hash in visible_torrent_hashes(app_state) {
+                app_state.ui.torrent_management.selected_hashes.insert(hash);
+            }
+            let selected_count = app_state.ui.torrent_management.selected_hashes.len();
+            app_state.ui.torrent_management.status_message =
+                Some(format!("Selected {selected_count} visible torrents"));
+        }
+        TorrentManagementAction::ClearSelection => {
+            app_state.ui.torrent_management.selected_hashes.clear();
+            app_state.ui.torrent_management.status_message = Some("Selection cleared".to_string());
+        }
+        TorrentManagementAction::TogglePauseTargets => {
+            let targets = management_targets(app_state);
+            if targets.is_empty() {
+                app_state.ui.torrent_management.status_message =
+                    Some("No torrents selected".to_string());
+            } else {
+                let should_resume = targets.iter().all(|hash| {
+                    app_state.torrents.get(hash).is_some_and(|torrent| {
+                        torrent.latest_state.torrent_control_state == TorrentControlState::Paused
+                    })
+                });
+                for info_hash in targets {
+                    let state = if should_resume {
+                        TorrentControlState::Running
+                    } else {
+                        TorrentControlState::Paused
+                    };
+                    let request = if should_resume {
+                        ControlRequest::Resume {
+                            info_hash_hex: hex::encode(&info_hash),
+                        }
+                    } else {
+                        ControlRequest::Pause {
+                            info_hash_hex: hex::encode(&info_hash),
+                        }
+                    };
+                    result
+                        .effects
+                        .push(TorrentManagementEffect::SubmitControlRequest(request));
+                    result
+                        .effects
+                        .push(TorrentManagementEffect::MarkControlState {
+                            info_hash,
+                            state,
+                            delete_files: false,
+                        });
+                }
+            }
+        }
+        TorrentManagementAction::StartDelete { delete_files } => {
+            let targets = management_targets(app_state);
+            if targets.is_empty() {
+                app_state.ui.torrent_management.status_message =
+                    Some("No torrents selected".to_string());
+            } else {
+                app_state.ui.torrent_management.confirm_delete =
+                    Some(TorrentManagementDeleteConfirm {
+                        info_hashes: targets,
+                        delete_files,
+                    });
+            }
+        }
+        TorrentManagementAction::ConfirmDelete => {
+            if let Some(confirm) = app_state.ui.torrent_management.confirm_delete.take() {
+                for info_hash in confirm.info_hashes {
+                    result
+                        .effects
+                        .push(TorrentManagementEffect::SubmitControlRequest(
+                            ControlRequest::Delete {
+                                info_hash_hex: hex::encode(&info_hash),
+                                delete_files: confirm.delete_files,
+                            },
+                        ));
+                    result
+                        .effects
+                        .push(TorrentManagementEffect::MarkControlState {
+                            info_hash: info_hash.clone(),
+                            state: TorrentControlState::Deleting,
+                            delete_files: confirm.delete_files,
+                        });
+                    app_state
+                        .ui
+                        .torrent_management
+                        .selected_hashes
+                        .remove(&info_hash);
+                }
+                app_state.ui.torrent_management.status_message =
+                    Some("Delete request queued".to_string());
+            }
+        }
+        TorrentManagementAction::CancelDelete => {
+            app_state.ui.torrent_management.confirm_delete = None;
+        }
+    }
+
+    clamp_management_selection(app_state);
+    clamp_management_column_state(app_state);
+    result
+}
+
+fn execute_management_effects(app: &mut App, effects: Vec<TorrentManagementEffect>) {
+    for effect in effects {
+        match effect {
+            TorrentManagementEffect::ToNormal => {
+                app.app_state.mode = AppMode::Normal;
+            }
+            TorrentManagementEffect::SubmitControlRequest(request) => {
+                let _ = app
+                    .app_command_tx
+                    .try_send(AppCommand::SubmitControlRequest(request));
+            }
+            TorrentManagementEffect::MarkControlState {
+                info_hash,
+                state,
+                delete_files,
+            } => {
+                if !app.is_current_shared_follower() {
+                    if let Some(torrent) = app.app_state.torrents.get_mut(&info_hash) {
+                        torrent.latest_state.torrent_control_state = state;
+                        torrent.latest_state.delete_files = delete_files;
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
+    let app_state = screen.app.state;
+    let ctx = screen.theme;
+    let area = f.area();
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    draw_toolbar(f, app_state, chunks[0], ctx);
+    draw_management_table(f, app_state, chunks[1], ctx);
+    draw_status_line(f, app_state, chunks[2], ctx);
+
+    if app_state.ui.torrent_management.confirm_delete.is_some() {
+        draw_delete_confirmation(f, app_state, ctx);
+    }
+}
+
+fn draw_toolbar(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
+    if area.height == 0 {
+        return;
+    }
+
+    let total = app_state.torrents.len();
+    let selected = app_state.ui.torrent_management.selected_hashes.len();
+    let group_style = if app_state.ui.torrent_management.grouping_enabled {
+        ctx.apply(Style::default().fg(ctx.state_selected()).bold())
+    } else {
+        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1))
+    };
+    let search_text = if app_state.ui.torrent_management.is_searching {
+        format!(
+            "Search /{}",
+            sanitize_text(&app_state.ui.torrent_management.search_query)
+        )
+    } else if app_state.ui.torrent_management.search_query.is_empty() {
+        "Search /".to_string()
+    } else {
+        format!(
+            "Filter [{}]",
+            sanitize_text(&app_state.ui.torrent_management.search_query)
+        )
+    };
+
+    let title = Line::from(vec![
+        Span::styled(
+            " Torrent Management ",
+            ctx.apply(Style::default().fg(ctx.accent_sapphire()).bold()),
+        ),
+        Span::styled(
+            format!("{total} torrents  {selected} selected"),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
+        ),
+    ]);
+    let controls = Line::from(vec![
+        Span::styled(
+            if app_state.ui.torrent_management.grouping_enabled {
+                "[g] Groups on"
+            } else {
+                "[g] Groups off"
+            },
+            group_style,
+        ),
+        Span::raw("  "),
+        Span::styled(
+            search_text,
+            ctx.apply(Style::default().fg(ctx.state_warning())),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            "[h/l] columns  [s] sort  [Space] select  [x] names  [p] pause/resume  [d/D] remove/purge  [q] back",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
+        ),
+    ]);
+
+    f.render_widget(Paragraph::new(vec![title, controls]), area);
+}
+
+fn draw_management_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
+    let rows = build_management_rows(app_state);
+    let all_columns = management_columns();
+    let (constraints, visible_columns) = compute_visible_management_columns(area.width);
+    let mut table_state = TableState::default();
+    if !rows.is_empty() {
+        table_state.select(Some(
+            app_state
+                .ui
+                .torrent_management
+                .selected_index
+                .min(rows.len().saturating_sub(1)),
+        ));
+    }
+
+    let table_rows = rows
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| management_table_row(app_state, row, idx, ctx, &visible_columns))
+        .collect::<Vec<_>>();
+
+    let header = Row::new(
+        visible_columns
+            .iter()
+            .map(|&idx| {
+                let column = &all_columns[idx];
+                let is_selected = idx
+                    == normalized_selected_column_from_visible(
+                        app_state.ui.torrent_management.selected_column_index,
+                        &visible_columns,
+                    );
+                let is_sorting = app_state.ui.torrent_management.sort_column_index == Some(idx);
+                let mut style = ctx.apply(Style::default().fg(ctx.state_warning()));
+                if is_sorting {
+                    style = ctx.apply(style.fg(ctx.state_selected()));
+                }
+
+                let mut spans = vec![Span::styled(column.header, style)];
+                if is_sorting {
+                    spans.push(Span::styled(
+                        if app_state.ui.torrent_management.sort_direction
+                            == SortDirection::Ascending
+                        {
+                            " ▲"
+                        } else {
+                            " ▼"
+                        },
+                        style,
+                    ));
+                }
+                if is_selected {
+                    spans[0] = spans[0].clone().underlined().bold();
+                }
+                Cell::from(Line::from(spans))
+            })
+            .collect::<Vec<_>>(),
+    )
+    .style(ctx.apply(Style::default().fg(ctx.state_warning()).bold()));
+
+    let table = Table::new(table_rows, constraints).header(header).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)))
+            .padding(Padding::new(1, 1, 0, 0)),
+    );
+    f.render_stateful_widget(table, area, &mut table_state);
+
+    if rows.is_empty() {
+        let inner = Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        let message = if app_state.ui.torrent_management.search_query.is_empty() {
+            "No torrents"
+        } else {
+            "No torrents match the search"
+        };
+        f.render_widget(
+            Paragraph::new(message)
+                .alignment(Alignment::Center)
+                .style(ctx.apply(Style::default().fg(ctx.theme.semantic.surface2))),
+            centered_line_rect(inner),
+        );
+    }
+}
+
+fn management_table_row<'a>(
+    app_state: &AppState,
+    row: &ManagementRow,
+    row_index: usize,
+    ctx: &ThemeContext,
+    visible_columns: &[usize],
+) -> Row<'a> {
+    let selected_state = row_selection_state(app_state, row);
+    let selection_marker = match selected_state {
+        SelectionState::None => "[ ]",
+        SelectionState::Partial => "[~]",
+        SelectionState::Full => "[x]",
+    };
+
+    let row_is_cursor = app_state.ui.torrent_management.selected_index == row_index;
+    let row_style = if row_is_cursor {
+        ctx.apply(Style::default().fg(ctx.state_warning()).bold())
+    } else if matches!(row.kind, ManagementRowKind::Group { .. }) {
+        ctx.apply(Style::default().fg(ctx.state_selected()).bold())
+    } else if row.metrics.state_label == "Paused" {
+        ctx.apply(Style::default().fg(ctx.theme.semantic.surface1))
+    } else if row.metrics.state_label == "Deleting" {
+        ctx.apply(Style::default().fg(ctx.state_error()))
+    } else {
+        ctx.apply(Style::default().fg(ctx.theme.semantic.text))
+    };
+
+    let name_prefix = match &row.kind {
+        ManagementRowKind::Group { expanded, .. } => {
+            if *expanded {
+                "v "
+            } else {
+                "> "
+            }
+        }
+        ManagementRowKind::Torrent => {
+            if row.depth > 0 {
+                "  "
+            } else {
+                ""
+            }
+        }
+    };
+    let name = match &row.kind {
+        ManagementRowKind::Group { .. } => {
+            format!("{name_prefix}{} ({})", row.label, row.metrics.count)
+        }
+        ManagementRowKind::Torrent => format!("{name_prefix}{}", row.label),
+    };
+
+    let all_columns = management_columns();
+    let cells = visible_columns
+        .iter()
+        .map(|&idx| match all_columns[idx].id {
+            ManagementColumnId::Selection => Cell::from(selection_marker),
+            ManagementColumnId::Name => Cell::from(truncate_with_ellipsis(&name, 80)),
+            ManagementColumnId::Completed => Cell::from(format!("{:.0}%", row.metrics.completed)),
+            ManagementColumnId::State => Cell::from(row.metrics.state_label.clone()),
+            ManagementColumnId::Peers => Cell::from(row.metrics.peer_count.to_string()),
+            ManagementColumnId::DownSpeed => management_speed_cell(ctx, row.metrics.download_bps),
+            ManagementColumnId::UpSpeed => management_speed_cell(ctx, row.metrics.upload_bps),
+            ManagementColumnId::Activity => {
+                Cell::from(format_management_activity_score(row.metrics.activity_score))
+            }
+            ManagementColumnId::Eta => Cell::from(
+                row.metrics
+                    .eta
+                    .map(format_duration)
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+            ManagementColumnId::Size => Cell::from(format_bytes(row.metrics.total_size)),
+        })
+        .collect::<Vec<_>>();
+
+    Row::new(cells).style(row_style)
+}
+
+fn draw_status_line(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
+    if area.height == 0 {
+        return;
+    }
+
+    let rows = build_management_rows(app_state);
+    let visible_torrents = visible_torrent_hashes(app_state).len();
+    let totals = aggregate_metrics_for_hashes(app_state, visible_torrent_hashes(app_state));
+    let message = if let Some(message) = app_state.ui.torrent_management.status_message.as_ref() {
+        Line::from(Span::styled(
+            sanitize_text(message),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(
+                format!("{} rows / {} torrents  ", rows.len(), visible_torrents),
+                ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
+            ),
+            Span::styled("DL ", ctx.apply(Style::default().fg(ctx.state_warning()))),
+            Span::styled(
+                format_speed(totals.download_bps),
+                ctx.apply(speed_to_style(ctx, totals.download_bps)),
+            ),
+            Span::styled("  UL ", ctx.apply(Style::default().fg(ctx.state_warning()))),
+            Span::styled(
+                format_speed(totals.upload_bps),
+                ctx.apply(speed_to_style(ctx, totals.upload_bps)),
+            ),
+        ])
+    };
+    f.render_widget(
+        Paragraph::new(message)
+            .alignment(Alignment::Right)
+            .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1))),
+        area,
+    );
+}
+
+fn draw_delete_confirmation(f: &mut Frame, app_state: &AppState, ctx: &ThemeContext) {
+    let Some(confirm) = app_state.ui.torrent_management.confirm_delete.as_ref() else {
+        return;
+    };
+    let area = centered_rect(58, 24, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Confirm ",
+            ctx.apply(Style::default().fg(ctx.state_error()).bold()),
+        ))
+        .borders(Borders::ALL)
+        .border_style(ctx.apply(Style::default().fg(ctx.state_error())))
+        .padding(Padding::new(2, 2, 1, 1));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let action = if confirm.delete_files {
+        "Purge and delete local data"
+    } else {
+        "Remove from list and keep files"
+    };
+    let body = vec![
+        Line::from(Span::styled(
+            format!("{action} for {} torrents?", confirm.info_hashes.len()),
+            ctx.apply(Style::default().fg(ctx.state_warning()).bold()),
+        )),
+        Line::from(""),
+        Line::from("Y confirms. Esc cancels."),
+    ];
+    f.render_widget(
+        Paragraph::new(body)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn centered_line_rect(area: Rect) -> Rect {
+    Rect::new(
+        area.x,
+        area.y + area.height.saturating_sub(1) / 2,
+        area.width,
+        1,
+    )
+}
+
+fn management_columns() -> Vec<ManagementColumnDefinition> {
+    vec![
+        ManagementColumnDefinition {
+            id: ManagementColumnId::Selection,
+            header: "Sel",
+            min_width: 4,
+            priority: 0,
+            constraint: Constraint::Length(4),
+        },
+        ManagementColumnDefinition {
+            id: ManagementColumnId::Name,
+            header: "Name",
+            min_width: 20,
+            priority: 0,
+            constraint: Constraint::Fill(3),
+        },
+        ManagementColumnDefinition {
+            id: ManagementColumnId::Completed,
+            header: "Done",
+            min_width: 7,
+            priority: 2,
+            constraint: Constraint::Length(7),
+        },
+        ManagementColumnDefinition {
+            id: ManagementColumnId::State,
+            header: "State",
+            min_width: 8,
+            priority: 2,
+            constraint: Constraint::Length(8),
+        },
+        ManagementColumnDefinition {
+            id: ManagementColumnId::Peers,
+            header: "Peers",
+            min_width: 7,
+            priority: 3,
+            constraint: Constraint::Length(7),
+        },
+        ManagementColumnDefinition {
+            id: ManagementColumnId::DownSpeed,
+            header: "DL",
+            min_width: 10,
+            priority: 1,
+            constraint: Constraint::Length(10),
+        },
+        ManagementColumnDefinition {
+            id: ManagementColumnId::UpSpeed,
+            header: "UL",
+            min_width: 10,
+            priority: 1,
+            constraint: Constraint::Length(10),
+        },
+        ManagementColumnDefinition {
+            id: ManagementColumnId::Activity,
+            header: "Act",
+            min_width: 7,
+            priority: 3,
+            constraint: Constraint::Length(7),
+        },
+        ManagementColumnDefinition {
+            id: ManagementColumnId::Eta,
+            header: "ETA",
+            min_width: 9,
+            priority: 4,
+            constraint: Constraint::Length(9),
+        },
+        ManagementColumnDefinition {
+            id: ManagementColumnId::Size,
+            header: "Size",
+            min_width: 10,
+            priority: 5,
+            constraint: Constraint::Length(10),
+        },
+    ]
+}
+
+fn compute_visible_management_columns(available_width: u16) -> (Vec<Constraint>, Vec<usize>) {
+    let columns = management_columns();
+    let smart_columns = columns
+        .iter()
+        .map(|column| SmartCol {
+            min_width: column.min_width,
+            priority: column.priority,
+            constraint: column.constraint,
+        })
+        .collect::<Vec<_>>();
+    compute_smart_table_layout(&smart_columns, available_width.saturating_sub(4), 1)
+}
+
+#[cfg(test)]
+fn visible_management_column_ids(available_width: u16) -> Vec<ManagementColumnId> {
+    let columns = management_columns();
+    let (_, visible_indices) = compute_visible_management_columns(available_width);
+    visible_indices
+        .into_iter()
+        .map(|idx| columns[idx].id)
+        .collect()
+}
+
+fn management_speed_cell<'a>(ctx: &ThemeContext, speed_bps: u64) -> Cell<'a> {
+    Cell::from(format_speed(speed_bps)).style(ctx.apply(speed_to_style(ctx, speed_bps)))
+}
+
+fn format_management_activity_score(score: u64) -> String {
+    if score < 1_000 {
+        score.to_string()
+    } else if score < 1_000_000 {
+        format!("{:.1}k", score as f64 / 1_000.0)
+    } else if score < 1_000_000_000 {
+        format!("{:.1}m", score as f64 / 1_000_000.0)
+    } else {
+        format!("{:.1}b", score as f64 / 1_000_000_000.0)
+    }
+}
+
+fn management_activity_sort_score(torrent: &TorrentDisplayState) -> u64 {
+    let window = 60;
+    let mut score = 0u64;
+    let mut sum_vec = |history: &Vec<u64>| {
+        for (i, &count) in history.iter().rev().take(window).enumerate() {
+            if count > 0 {
+                let weight = if i < 5 { (5 - i) as u64 * 10 } else { 1 };
+                score = score.saturating_add(count.saturating_mul(weight));
+            }
+        }
+    };
+    sum_vec(&torrent.peer_discovery_history);
+    sum_vec(&torrent.peer_connection_history);
+    sum_vec(&torrent.peer_disconnect_history);
+    score
+}
+
+fn management_table_width_for_state(app_state: &AppState) -> u16 {
+    if app_state.screen_area.width > 0 {
+        app_state.screen_area.width
+    } else {
+        140
+    }
+}
+
+fn visible_management_column_indices_for_state(app_state: &AppState) -> Vec<usize> {
+    compute_visible_management_columns(management_table_width_for_state(app_state)).1
+}
+
+fn normalized_selected_column_from_visible(
+    selected_index: usize,
+    visible_columns: &[usize],
+) -> usize {
+    if visible_columns.is_empty() {
+        return management_column_index(ManagementColumnId::Name).unwrap_or(0);
+    }
+    if visible_columns.contains(&selected_index) {
+        return selected_index;
+    }
+    visible_columns
+        .iter()
+        .copied()
+        .filter(|idx| *idx <= selected_index)
+        .next_back()
+        .or_else(|| visible_columns.first().copied())
+        .unwrap_or(0)
+}
+
+fn normalized_selected_management_column_index(app_state: &AppState) -> usize {
+    normalized_selected_column_from_visible(
+        app_state.ui.torrent_management.selected_column_index,
+        &visible_management_column_indices_for_state(app_state),
+    )
+}
+
+fn move_management_column(app_state: &mut AppState, direction: isize) {
+    let visible_columns = visible_management_column_indices_for_state(app_state);
+    if visible_columns.is_empty() {
+        return;
+    }
+
+    let current = normalized_selected_column_from_visible(
+        app_state.ui.torrent_management.selected_column_index,
+        &visible_columns,
+    );
+    let current_pos = visible_columns
+        .iter()
+        .position(|idx| *idx == current)
+        .unwrap_or(0);
+    let next_pos = if direction < 0 {
+        current_pos.saturating_sub(1)
+    } else {
+        (current_pos + 1).min(visible_columns.len().saturating_sub(1))
+    };
+    app_state.ui.torrent_management.selected_column_index = visible_columns[next_pos];
+}
+
+fn reverse_sort_direction(direction: SortDirection) -> SortDirection {
+    match direction {
+        SortDirection::Ascending => SortDirection::Descending,
+        SortDirection::Descending => SortDirection::Ascending,
+    }
+}
+
+fn management_column_default_direction(column: ManagementColumnId) -> SortDirection {
+    match column {
+        ManagementColumnId::Selection
+        | ManagementColumnId::Completed
+        | ManagementColumnId::Peers
+        | ManagementColumnId::DownSpeed
+        | ManagementColumnId::UpSpeed
+        | ManagementColumnId::Activity
+        | ManagementColumnId::Size => SortDirection::Descending,
+        ManagementColumnId::Name | ManagementColumnId::State | ManagementColumnId::Eta => {
+            SortDirection::Ascending
+        }
+    }
+}
+
+fn management_sort_column(app_state: &AppState) -> Option<ManagementColumnId> {
+    let columns = management_columns();
+    app_state
+        .ui
+        .torrent_management
+        .sort_column_index
+        .and_then(|idx| columns.get(idx))
+        .map(|column| column.id)
+}
+
+fn management_column_index(column_id: ManagementColumnId) -> Option<usize> {
+    management_columns()
+        .iter()
+        .position(|column| column.id == column_id)
+}
+
+fn sort_management_rows(app_state: &AppState, rows: &mut [ManagementRow]) {
+    if management_sort_column(app_state).is_some() {
+        rows.sort_by(|left, right| compare_management_rows(app_state, left, right));
+    }
+}
+
+fn compare_management_rows(
+    app_state: &AppState,
+    left: &ManagementRow,
+    right: &ManagementRow,
+) -> Ordering {
+    let Some(column) = management_sort_column(app_state) else {
+        return Ordering::Equal;
+    };
+    let ordering = match column {
+        ManagementColumnId::Selection => {
+            selection_sort_rank(app_state, left).cmp(&selection_sort_rank(app_state, right))
+        }
+        ManagementColumnId::Name => left.label.cmp(&right.label),
+        ManagementColumnId::Completed => left.metrics.completed.total_cmp(&right.metrics.completed),
+        ManagementColumnId::State => left.metrics.state_label.cmp(&right.metrics.state_label),
+        ManagementColumnId::Peers => left.metrics.peer_count.cmp(&right.metrics.peer_count),
+        ManagementColumnId::DownSpeed => left.metrics.download_bps.cmp(&right.metrics.download_bps),
+        ManagementColumnId::UpSpeed => left.metrics.upload_bps.cmp(&right.metrics.upload_bps),
+        ManagementColumnId::Activity => left
+            .metrics
+            .activity_score
+            .cmp(&right.metrics.activity_score),
+        ManagementColumnId::Eta => left.metrics.eta.cmp(&right.metrics.eta),
+        ManagementColumnId::Size => left.metrics.total_size.cmp(&right.metrics.total_size),
+    };
+
+    apply_sort_direction(ordering, app_state.ui.torrent_management.sort_direction)
+        .then_with(|| left.label.cmp(&right.label))
+        .then_with(|| left.info_hashes.len().cmp(&right.info_hashes.len()))
+}
+
+fn apply_sort_direction(ordering: Ordering, direction: SortDirection) -> Ordering {
+    match direction {
+        SortDirection::Ascending => ordering,
+        SortDirection::Descending => ordering.reverse(),
+    }
+}
+
+fn selection_sort_rank(app_state: &AppState, row: &ManagementRow) -> usize {
+    match row_selection_state(app_state, row) {
+        SelectionState::None => 0,
+        SelectionState::Partial => 1,
+        SelectionState::Full => 2,
+    }
+}
+
+fn build_management_rows(app_state: &AppState) -> Vec<ManagementRow> {
+    let visible = visible_torrent_hashes(app_state);
+    if !app_state.ui.torrent_management.grouping_enabled {
+        let mut rows = visible
+            .into_iter()
+            .filter_map(|info_hash| torrent_row(app_state, info_hash, 0))
+            .collect::<Vec<_>>();
+        sort_management_rows(app_state, &mut rows);
+        return rows;
+    }
+
+    let mut group_index_by_key: HashMap<String, usize> = HashMap::new();
+    let mut groups = Vec::<GroupBucket>::new();
+    for info_hash in visible {
+        let Some(torrent) = app_state.torrents.get(&info_hash) else {
+            continue;
+        };
+        let label = torrent_group_label(torrent);
+        let key = normalized_group_key(&label);
+        let idx = *group_index_by_key.entry(key.clone()).or_insert_with(|| {
+            groups.push(GroupBucket {
+                key: key.clone(),
+                label,
+                info_hashes: Vec::new(),
+            });
+            groups.len() - 1
+        });
+        groups[idx].info_hashes.push(info_hash);
+    }
+
+    let mut entries = Vec::<(ManagementRow, Vec<ManagementRow>)>::new();
+    for group in groups {
+        if group.info_hashes.len() <= 1 {
+            if let Some(info_hash) = group.info_hashes.into_iter().next() {
+                if let Some(row) = torrent_row(app_state, info_hash, 0) {
+                    entries.push((row, Vec::new()));
+                }
+            }
+            continue;
+        }
+
+        let expanded = app_state
+            .ui
+            .torrent_management
+            .expanded_groups
+            .contains(&group.key);
+        let metrics = aggregate_metrics_for_hashes(app_state, group.info_hashes.clone());
+        let label = if app_state.anonymize_torrent_names {
+            anonymize_preserving_shape(&group.label)
+        } else {
+            sanitize_text(&group.label)
+        };
+        let group_row = ManagementRow {
+            kind: ManagementRowKind::Group {
+                key: group.key.clone(),
+                expanded,
+            },
+            label,
+            info_hashes: group.info_hashes.clone(),
+            depth: 0,
+            metrics,
+        };
+
+        let mut child_rows = if expanded {
+            group
+                .info_hashes
+                .into_iter()
+                .filter_map(|info_hash| torrent_row(app_state, info_hash, 1))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        sort_management_rows(app_state, &mut child_rows);
+        entries.push((group_row, child_rows));
+    }
+
+    entries.sort_by(|left, right| compare_management_rows(app_state, &left.0, &right.0));
+    let mut rows = Vec::new();
+    for (row, child_rows) in entries {
+        rows.push(row);
+        rows.extend(child_rows);
+    }
+    rows
+}
+
+fn torrent_row(app_state: &AppState, info_hash: Vec<u8>, depth: usize) -> Option<ManagementRow> {
+    let torrent = app_state.torrents.get(&info_hash)?;
+    let label = if app_state.anonymize_torrent_names {
+        anonymize_preserving_shape(&torrent.latest_state.torrent_name)
+    } else {
+        sanitize_text(&torrent.latest_state.torrent_name)
+    };
+    Some(ManagementRow {
+        kind: ManagementRowKind::Torrent,
+        label,
+        info_hashes: vec![info_hash.clone()],
+        depth,
+        metrics: aggregate_metrics_for_hashes(app_state, vec![info_hash]),
+    })
+}
+
+fn visible_torrent_hashes(app_state: &AppState) -> Vec<Vec<u8>> {
+    let query = app_state.ui.torrent_management.search_query.trim();
+    let matcher = SkimMatcherV2::default();
+    ordered_torrent_hashes(app_state)
+        .into_iter()
+        .filter(|info_hash| {
+            app_state
+                .torrents
+                .get(info_hash)
+                .is_some_and(|torrent| torrent_matches_query(torrent, query, &matcher))
+        })
+        .collect()
+}
+
+fn ordered_torrent_hashes(app_state: &AppState) -> Vec<Vec<u8>> {
+    if !app_state.torrent_list_order.is_empty() {
+        return app_state
+            .torrent_list_order
+            .iter()
+            .filter(|info_hash| app_state.torrents.contains_key(*info_hash))
+            .cloned()
+            .collect();
+    }
+
+    let mut hashes = app_state.torrents.keys().cloned().collect::<Vec<_>>();
+    hashes.sort_by(|a, b| {
+        let a_name = app_state
+            .torrents
+            .get(a)
+            .map(|torrent| torrent.latest_state.torrent_name.as_str())
+            .unwrap_or_default();
+        let b_name = app_state
+            .torrents
+            .get(b)
+            .map(|torrent| torrent.latest_state.torrent_name.as_str())
+            .unwrap_or_default();
+        a_name.cmp(b_name)
+    });
+    hashes
+}
+
+fn torrent_matches_query(
+    torrent: &TorrentDisplayState,
+    query: &str,
+    matcher: &SkimMatcherV2,
+) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+
+    let mut haystack = torrent.latest_state.torrent_name.clone();
+    if let Some(path) = &torrent.latest_state.download_path {
+        haystack.push(' ');
+        haystack.push_str(&path.to_string_lossy());
+    }
+    if let Some(container) = &torrent.latest_state.container_name {
+        haystack.push(' ');
+        haystack.push_str(container);
+    }
+    haystack.push(' ');
+    haystack.push_str(&torrent_group_label(torrent));
+    matcher.fuzzy_match(&haystack, query).is_some()
+}
+
+fn aggregate_metrics_for_hashes<I>(app_state: &AppState, hashes: I) -> RowMetrics
+where
+    I: IntoIterator<Item = Vec<u8>>,
+{
+    let mut count = 0usize;
+    let mut peer_count = 0usize;
+    let mut download_bps = 0u64;
+    let mut upload_bps = 0u64;
+    let mut activity_score = 0u64;
+    let mut total_size = 0u64;
+    let mut weighted_done = 0f64;
+    let mut unweighted_done = 0f64;
+    let mut weighted_total = 0u64;
+    let mut max_eta = Duration::ZERO;
+    let mut any_incomplete = false;
+    let mut states = HashSet::new();
+
+    for info_hash in hashes {
+        let Some(torrent) = app_state.torrents.get(&info_hash) else {
+            continue;
+        };
+        let state = &torrent.latest_state;
+        count += 1;
+        peer_count += state
+            .number_of_successfully_connected_peers
+            .max(state.peers.len());
+        download_bps = download_bps.saturating_add(torrent.smoothed_download_speed_bps);
+        upload_bps = upload_bps.saturating_add(torrent.smoothed_upload_speed_bps);
+        activity_score = activity_score.saturating_add(management_activity_sort_score(torrent));
+        total_size = total_size.saturating_add(state.total_size);
+        states.insert(state.torrent_control_state.clone());
+
+        let pct = torrent_completion_percent(state).clamp(0.0, 100.0);
+        unweighted_done += pct;
+        if state.total_size > 0 {
+            weighted_done += pct * state.total_size as f64;
+            weighted_total = weighted_total.saturating_add(state.total_size);
+        }
+        if pct < 100.0 {
+            any_incomplete = true;
+            max_eta = max_eta.max(state.eta);
+        }
+    }
+
+    let completed = if weighted_total > 0 {
+        (weighted_done / weighted_total as f64).clamp(0.0, 100.0)
+    } else if count > 0 {
+        (unweighted_done / count as f64).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+
+    RowMetrics {
+        count,
+        completed,
+        state_label: aggregate_state_label(&states, count),
+        peer_count,
+        download_bps,
+        upload_bps,
+        activity_score,
+        eta: (any_incomplete && !max_eta.is_zero()).then_some(max_eta),
+        total_size,
+    }
+}
+
+fn aggregate_state_label(states: &HashSet<TorrentControlState>, count: usize) -> String {
+    if count == 0 {
+        return "-".to_string();
+    }
+    if states.contains(&TorrentControlState::Deleting) {
+        return "Deleting".to_string();
+    }
+    if states.len() > 1 {
+        return "Mixed".to_string();
+    }
+    if states.contains(&TorrentControlState::Paused) {
+        "Paused".to_string()
+    } else {
+        "Running".to_string()
+    }
+}
+
+fn torrent_group_label(torrent: &TorrentDisplayState) -> String {
+    group_label_from_name(&torrent.latest_state.torrent_name)
+        .filter(|label| !label.trim().is_empty())
+        .or_else(|| torrent.latest_state.container_name.clone())
+        .unwrap_or_else(|| "Ungrouped".to_string())
+}
+
+fn group_label_from_name(name: &str) -> Option<String> {
+    let cleaned = name
+        .replace(['.', '_', '-'], " ")
+        .replace(['[', ']', '(', ')'], " ");
+    let mut words = Vec::new();
+    for raw in cleaned.split_whitespace() {
+        let token = raw.trim_matches(|ch: char| !ch.is_ascii_alphanumeric());
+        if token.is_empty() {
+            continue;
+        }
+        let normalized = token.to_ascii_lowercase();
+        if is_group_boundary_token(&normalized) {
+            break;
+        }
+        words.push(token.to_string());
+    }
+
+    if words.is_empty() {
+        None
+    } else {
+        Some(sanitize_text(&words.join(" ")))
+    }
+}
+
+fn is_group_boundary_token(token: &str) -> bool {
+    if token.len() >= 4
+        && token.starts_with('s')
+        && token[1..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .count()
+            >= 1
+        && token.contains('e')
+    {
+        return true;
+    }
+    if token.len() >= 2 && token.starts_with('s') && token[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    if token.len() >= 2 && token.starts_with('e') && token[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    if token.split_once('x').is_some_and(|(left, right)| {
+        !left.is_empty()
+            && !right.is_empty()
+            && left.chars().all(|c| c.is_ascii_digit())
+            && right.chars().all(|c| c.is_ascii_digit())
+    }) {
+        return true;
+    }
+
+    matches!(
+        token,
+        "season"
+            | "episode"
+            | "ep"
+            | "720p"
+            | "1080p"
+            | "2160p"
+            | "x264"
+            | "x265"
+            | "h264"
+            | "h265"
+            | "hevc"
+            | "web"
+            | "webdl"
+            | "webrip"
+            | "bluray"
+            | "proper"
+            | "repack"
+    )
+}
+
+fn normalized_group_key(label: &str) -> String {
+    label
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionState {
+    None,
+    Partial,
+    Full,
+}
+
+fn row_selection_state(app_state: &AppState, row: &ManagementRow) -> SelectionState {
+    let selected = &app_state.ui.torrent_management.selected_hashes;
+    let selected_count = row
+        .info_hashes
+        .iter()
+        .filter(|hash| selected.contains(*hash))
+        .count();
+    match selected_count {
+        0 => SelectionState::None,
+        count if count == row.info_hashes.len() => SelectionState::Full,
+        _ => SelectionState::Partial,
+    }
+}
+
+fn toggle_hash_selection(app_state: &mut AppState, targets: &[Vec<u8>]) {
+    if targets.is_empty() {
+        return;
+    }
+    let selected = &mut app_state.ui.torrent_management.selected_hashes;
+    if targets.iter().all(|hash| selected.contains(hash)) {
+        for hash in targets {
+            selected.remove(hash);
+        }
+    } else {
+        for hash in targets {
+            selected.insert(hash.clone());
+        }
+    }
+}
+
+fn current_row_targets(app_state: &AppState) -> Vec<Vec<u8>> {
+    build_management_rows(app_state)
+        .get(app_state.ui.torrent_management.selected_index)
+        .map(|row| row.info_hashes.clone())
+        .unwrap_or_default()
+}
+
+fn management_targets(app_state: &AppState) -> Vec<Vec<u8>> {
+    if !app_state.ui.torrent_management.selected_hashes.is_empty() {
+        let visible: HashSet<Vec<u8>> = visible_torrent_hashes(app_state).into_iter().collect();
+        return app_state
+            .ui
+            .torrent_management
+            .selected_hashes
+            .iter()
+            .filter(|hash| visible.contains(*hash))
+            .cloned()
+            .collect();
+    }
+
+    current_row_targets(app_state)
+}
+
+fn prune_selected_hashes(app_state: &mut AppState) {
+    let live_hashes: HashSet<Vec<u8>> = app_state.torrents.keys().cloned().collect();
+    app_state
+        .ui
+        .torrent_management
+        .selected_hashes
+        .retain(|hash| live_hashes.contains(hash));
+}
+
+fn clamp_management_selection(app_state: &mut AppState) {
+    let row_count = build_management_rows(app_state).len();
+    if row_count == 0 {
+        app_state.ui.torrent_management.selected_index = 0;
+    } else if app_state.ui.torrent_management.selected_index >= row_count {
+        app_state.ui.torrent_management.selected_index = row_count - 1;
+    }
+}
+
+fn clamp_management_column_state(app_state: &mut AppState) {
+    let columns_len = management_columns().len();
+    if columns_len == 0 {
+        app_state.ui.torrent_management.selected_column_index = 0;
+        app_state.ui.torrent_management.sort_column_index = None;
+        return;
+    }
+
+    if app_state.ui.torrent_management.selected_column_index >= columns_len {
+        app_state.ui.torrent_management.selected_column_index = columns_len - 1;
+    }
+    if app_state
+        .ui
+        .torrent_management
+        .sort_column_index
+        .is_some_and(|idx| idx >= columns_len)
+    {
+        app_state.ui.torrent_management.sort_column_index = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{TorrentMetrics, UiState};
+
+    fn hash(byte: u8) -> Vec<u8> {
+        vec![byte; 20]
+    }
+
+    fn app_state_with_torrents(torrents: Vec<(Vec<u8>, &str, u64, u64, usize)>) -> AppState {
+        let mut app_state = AppState {
+            mode: AppMode::TorrentManagement,
+            ui: UiState {
+                torrent_management: crate::app::TorrentManagementUiState {
+                    grouping_enabled: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        for (idx, (info_hash, name, download_bps, upload_bps, peers)) in
+            torrents.into_iter().enumerate()
+        {
+            let mut metrics = TorrentMetrics {
+                info_hash: info_hash.clone(),
+                torrent_name: name.to_string(),
+                number_of_pieces_total: 100,
+                number_of_pieces_completed: 50,
+                number_of_successfully_connected_peers: peers,
+                total_size: 1_000 + idx as u64,
+                eta: Duration::from_secs(30 + idx as u64),
+                ..Default::default()
+            };
+            metrics.peers = Vec::new();
+            app_state.torrents.insert(
+                info_hash.clone(),
+                TorrentDisplayState {
+                    latest_state: metrics,
+                    smoothed_download_speed_bps: download_bps,
+                    smoothed_upload_speed_bps: upload_bps,
+                    ..Default::default()
+                },
+            );
+            app_state.torrent_list_order.push(info_hash);
+        }
+
+        app_state
+    }
+
+    #[test]
+    fn management_columns_keep_core_identity_on_tiny_widths() {
+        let visible = visible_management_column_ids(45);
+
+        assert_eq!(
+            visible,
+            vec![ManagementColumnId::Selection, ManagementColumnId::Name]
+        );
+    }
+
+    #[test]
+    fn management_columns_prioritize_speeds_on_medium_widths() {
+        let visible = visible_management_column_ids(80);
+
+        assert!(visible.contains(&ManagementColumnId::Selection));
+        assert!(visible.contains(&ManagementColumnId::Name));
+        assert!(visible.contains(&ManagementColumnId::DownSpeed));
+        assert!(visible.contains(&ManagementColumnId::UpSpeed));
+        assert!(!visible.contains(&ManagementColumnId::Eta));
+        assert!(!visible.contains(&ManagementColumnId::Size));
+    }
+
+    #[test]
+    fn management_columns_restore_all_metrics_on_wide_widths() {
+        let visible = visible_management_column_ids(140);
+
+        assert_eq!(
+            visible,
+            vec![
+                ManagementColumnId::Selection,
+                ManagementColumnId::Name,
+                ManagementColumnId::Completed,
+                ManagementColumnId::State,
+                ManagementColumnId::Peers,
+                ManagementColumnId::DownSpeed,
+                ManagementColumnId::UpSpeed,
+                ManagementColumnId::Activity,
+                ManagementColumnId::Eta,
+                ManagementColumnId::Size,
+            ]
+        );
+    }
+
+    #[test]
+    fn management_keymap_moves_columns_and_sorts_selected_column() {
+        let app_state = app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+
+        assert_eq!(
+            map_key_to_management_action(KeyCode::Left, &app_state),
+            Some(TorrentManagementAction::MoveColumnLeft)
+        );
+        assert_eq!(
+            map_key_to_management_action(KeyCode::Right, &app_state),
+            Some(TorrentManagementAction::MoveColumnRight)
+        );
+        assert_eq!(
+            map_key_to_management_action(KeyCode::Char('s'), &app_state),
+            Some(TorrentManagementAction::SortBySelectedColumn)
+        );
+    }
+
+    #[test]
+    fn management_column_movement_stays_on_visible_columns() {
+        let mut app_state =
+            app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+        app_state.screen_area = Rect::new(0, 0, 80, 24);
+        app_state.ui.torrent_management.selected_column_index =
+            management_column_index(ManagementColumnId::Name).expect("name column");
+
+        reduce_torrent_management_action(&mut app_state, TorrentManagementAction::MoveColumnRight);
+
+        let visible = visible_management_column_ids(app_state.screen_area.width);
+        assert!(visible.contains(
+            &management_columns()[app_state.ui.torrent_management.selected_column_index].id
+        ));
+    }
+
+    #[test]
+    fn default_management_sort_is_name_ascending() {
+        let mut app_state = app_state_with_torrents(vec![
+            (hash(1), "Zephyr Archive", 100, 10, 2),
+            (hash(2), "Aurora Archive", 100, 10, 2),
+        ]);
+        app_state.ui.torrent_management.grouping_enabled = false;
+
+        let rows = build_management_rows(&app_state);
+
+        assert_eq!(rows[0].label, "Aurora Archive");
+        assert_eq!(
+            app_state.ui.torrent_management.sort_column_index,
+            management_column_index(ManagementColumnId::Name)
+        );
+        assert_eq!(
+            app_state.ui.torrent_management.sort_direction,
+            SortDirection::Ascending
+        );
+    }
+
+    #[test]
+    fn sorting_by_download_speed_orders_rows_descending_then_toggles() {
+        let mut app_state = app_state_with_torrents(vec![
+            (hash(1), "Slower Seed", 100, 10, 2),
+            (hash(2), "Faster Seed", 900, 20, 3),
+        ]);
+        app_state.ui.torrent_management.grouping_enabled = false;
+        app_state.ui.torrent_management.selected_column_index =
+            management_column_index(ManagementColumnId::DownSpeed).expect("download column");
+
+        reduce_torrent_management_action(
+            &mut app_state,
+            TorrentManagementAction::SortBySelectedColumn,
+        );
+        let rows = build_management_rows(&app_state);
+        assert_eq!(rows[0].label, "Faster Seed");
+        assert_eq!(
+            app_state.ui.torrent_management.sort_direction,
+            SortDirection::Descending
+        );
+
+        reduce_torrent_management_action(
+            &mut app_state,
+            TorrentManagementAction::SortBySelectedColumn,
+        );
+        let rows = build_management_rows(&app_state);
+        assert_eq!(rows[0].label, "Slower Seed");
+        assert_eq!(
+            app_state.ui.torrent_management.sort_direction,
+            SortDirection::Ascending
+        );
+    }
+
+    #[test]
+    fn sorting_by_activity_orders_rows_by_explicit_activity_column() {
+        let mut app_state = app_state_with_torrents(vec![
+            (hash(1), "Calm Seed", 100, 10, 2),
+            (hash(2), "Busy Seed", 100, 10, 2),
+        ]);
+        app_state.ui.torrent_management.grouping_enabled = false;
+        app_state.ui.torrent_management.selected_column_index =
+            management_column_index(ManagementColumnId::Activity).expect("activity column");
+
+        app_state
+            .torrents
+            .get_mut(&hash(1))
+            .expect("calm torrent")
+            .peer_connection_history
+            .push(1);
+        app_state
+            .torrents
+            .get_mut(&hash(2))
+            .expect("busy torrent")
+            .peer_connection_history
+            .push(7);
+
+        reduce_torrent_management_action(
+            &mut app_state,
+            TorrentManagementAction::SortBySelectedColumn,
+        );
+
+        let rows = build_management_rows(&app_state);
+        assert_eq!(rows[0].label, "Busy Seed");
+        assert_eq!(
+            app_state.ui.torrent_management.sort_direction,
+            SortDirection::Descending
+        );
+    }
+
+    #[test]
+    fn management_speed_cells_use_shared_speed_palette() {
+        let ctx = ThemeContext::new(Default::default(), 0.0);
+        let cell = management_speed_cell(&ctx, 2_100_000);
+
+        assert_eq!(
+            ratatui::style::Styled::style(&cell).fg,
+            Some(ctx.theme.scale.speed[3])
+        );
+    }
+
+    #[test]
+    fn management_zero_speed_cells_inherit_row_style() {
+        let ctx = ThemeContext::new(Default::default(), 0.0);
+        let cell = management_speed_cell(&ctx, 0);
+
+        assert_eq!(ratatui::style::Styled::style(&cell).fg, None);
+    }
+
+    #[test]
+    fn group_label_strips_episode_tokens() {
+        assert_eq!(
+            group_label_from_name("Meadow Saga S01E02 1080p").as_deref(),
+            Some("Meadow Saga")
+        );
+        assert_eq!(
+            group_label_from_name("Meadow.Saga.1x03").as_deref(),
+            Some("Meadow Saga")
+        );
+    }
+
+    #[test]
+    fn grouped_rows_include_aggregated_live_metrics() {
+        let app_state = app_state_with_torrents(vec![
+            (hash(1), "Meadow Saga S01E01", 100, 10, 2),
+            (hash(2), "Meadow Saga S01E02", 300, 20, 3),
+            (hash(3), "Harbor Lights S01E01", 50, 5, 1),
+        ]);
+
+        let rows = build_management_rows(&app_state);
+        assert_eq!(rows.len(), 2);
+        let meadow_row = rows
+            .iter()
+            .find(|row| row.label == "Meadow Saga")
+            .expect("group row exists");
+        assert!(matches!(meadow_row.kind, ManagementRowKind::Group { .. }));
+        assert_eq!(meadow_row.metrics.count, 2);
+        assert_eq!(meadow_row.metrics.download_bps, 400);
+        assert_eq!(meadow_row.metrics.upload_bps, 30);
+        assert_eq!(meadow_row.metrics.peer_count, 5);
+    }
+
+    #[test]
+    fn search_filters_torrent_rows_without_mutating_dashboard_search() {
+        let mut app_state = app_state_with_torrents(vec![
+            (hash(1), "Meadow Saga S01E01", 100, 10, 2),
+            (hash(2), "Harbor Lights S01E01", 50, 5, 1),
+        ]);
+        app_state.ui.search_query = "normal".to_string();
+        app_state.ui.torrent_management.search_query = "harbor".to_string();
+
+        let rows = build_management_rows(&app_state);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "Harbor Lights S01E01");
+        assert_eq!(app_state.ui.search_query, "normal");
+    }
+
+    #[test]
+    fn anonymized_torrent_rows_preserve_name_shape() {
+        let mut app_state =
+            app_state_with_torrents(vec![(hash(1), "Harbor.Lights S01E01", 50, 5, 1)]);
+        app_state.anonymize_torrent_names = true;
+
+        let rows = build_management_rows(&app_state);
+        let anonymized = &rows[0].label;
+
+        assert_ne!(anonymized, "Harbor.Lights S01E01");
+        assert_ne!(anonymized, "Torrent 1");
+        assert_eq!(
+            anonymized.chars().count(),
+            "Harbor.Lights S01E01".chars().count()
+        );
+        assert_eq!(anonymized.matches('.').count(), 1);
+        assert_eq!(anonymized.matches(' ').count(), 1);
+    }
+
+    #[test]
+    fn anonymized_group_rows_preserve_group_name_shape() {
+        let mut app_state = app_state_with_torrents(vec![
+            (hash(1), "Meadow Saga S01E01", 100, 10, 2),
+            (hash(2), "Meadow Saga S01E02", 300, 20, 3),
+        ]);
+        app_state.anonymize_torrent_names = true;
+
+        let rows = build_management_rows(&app_state);
+        let anonymized = &rows[0].label;
+
+        assert_ne!(anonymized, "Meadow Saga");
+        assert_ne!(anonymized, "Group 1");
+        assert_eq!(anonymized.chars().count(), "Meadow Saga".chars().count());
+        assert_eq!(anonymized.matches(' ').count(), 1);
+    }
+
+    #[test]
+    fn x_toggles_anonymized_names_in_management_screen() {
+        let mut app_state =
+            app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+        assert!(!app_state.anonymize_torrent_names);
+        assert_eq!(
+            map_key_to_management_action(KeyCode::Char('x'), &app_state),
+            Some(TorrentManagementAction::ToggleAnonymizeNames)
+        );
+
+        reduce_torrent_management_action(
+            &mut app_state,
+            TorrentManagementAction::ToggleAnonymizeNames,
+        );
+        assert!(app_state.anonymize_torrent_names);
+
+        reduce_torrent_management_action(
+            &mut app_state,
+            TorrentManagementAction::ToggleAnonymizeNames,
+        );
+        assert!(!app_state.anonymize_torrent_names);
+    }
+
+    #[test]
+    fn x_still_types_into_management_search() {
+        let mut app_state =
+            app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+        app_state.ui.torrent_management.is_searching = true;
+
+        assert_eq!(
+            map_key_to_management_action(KeyCode::Char('x'), &app_state),
+            Some(TorrentManagementAction::SearchInsert('x'))
+        );
+    }
+
+    #[test]
+    fn toggle_current_group_selection_selects_all_children() {
+        let mut app_state = app_state_with_torrents(vec![
+            (hash(1), "Meadow Saga S01E01", 100, 10, 2),
+            (hash(2), "Meadow Saga S01E02", 300, 20, 3),
+        ]);
+
+        let result = reduce_torrent_management_action(
+            &mut app_state,
+            TorrentManagementAction::ToggleCurrentSelection,
+        );
+
+        assert!(result.consumed);
+        assert!(app_state
+            .ui
+            .torrent_management
+            .selected_hashes
+            .contains(&hash(1)));
+        assert!(app_state
+            .ui
+            .torrent_management
+            .selected_hashes
+            .contains(&hash(2)));
+    }
+
+    #[test]
+    fn pause_action_emits_batch_pause_requests_for_selected_torrents() {
+        let mut app_state = app_state_with_torrents(vec![
+            (hash(1), "Meadow Saga S01E01", 100, 10, 2),
+            (hash(2), "Meadow Saga S01E02", 300, 20, 3),
+        ]);
+        app_state
+            .ui
+            .torrent_management
+            .selected_hashes
+            .insert(hash(1));
+        app_state
+            .ui
+            .torrent_management
+            .selected_hashes
+            .insert(hash(2));
+
+        let result = reduce_torrent_management_action(
+            &mut app_state,
+            TorrentManagementAction::TogglePauseTargets,
+        );
+
+        assert_eq!(result.effects.len(), 4);
+        assert!(matches!(
+            result.effects[0],
+            TorrentManagementEffect::SubmitControlRequest(ControlRequest::Pause { .. })
+        ));
+        assert!(matches!(
+            result.effects[2],
+            TorrentManagementEffect::SubmitControlRequest(ControlRequest::Pause { .. })
+        ));
+    }
+
+    #[test]
+    fn delete_action_opens_confirmation_for_selected_targets() {
+        let mut app_state = app_state_with_torrents(vec![
+            (hash(1), "Cinder Trails S01E01", 100, 10, 2),
+            (hash(2), "Cinder Trails S01E02", 300, 20, 3),
+        ]);
+        app_state
+            .ui
+            .torrent_management
+            .selected_hashes
+            .insert(hash(2));
+
+        reduce_torrent_management_action(
+            &mut app_state,
+            TorrentManagementAction::StartDelete { delete_files: true },
+        );
+
+        let confirm = app_state
+            .ui
+            .torrent_management
+            .confirm_delete
+            .expect("delete confirmation");
+        assert_eq!(confirm.info_hashes, vec![hash(2)]);
+        assert!(confirm.delete_files);
+    }
+}

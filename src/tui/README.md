@@ -46,8 +46,18 @@
   - `c` -> `Config`.
   - `a` -> `FileBrowser` (add torrent flow).
   - `d`/`D` -> `DeleteConfirm`.
+  - `M` -> `TorrentManagement`.
   - `Q` sets quit flag.
   - `Esc` clears `system_error` (stays in `Normal`).
+- `TorrentManagement`:
+  - `/` searches torrent names and paths.
+  - `g` toggles grouped folder view.
+  - `x` toggles anonymized torrent names.
+  - `h`/`l` or `←`/`→` moves between visible columns; `s` sorts by the focused column.
+  - `Act` sorts peer-event activity in the management table.
+  - `Space` multi-selects the focused row; group rows apply to their children.
+  - `p`, `d`, and `D` apply pause/resume, remove, and purge actions to selected torrents.
+  - `Esc`/`q` returns to `Normal`.
 - `PowerSaving`: `z` -> `Normal`.
 - `Config`:
   - `Esc`/`Q` applies edited settings and returns to `Normal`.
@@ -70,6 +80,8 @@ This contract formalizes top-level screen transitions. Any transition behavior c
 | `PowerSaving` | `z` | `Normal` | Return from zen |
 | `Normal` | `c` | `Config` | Open settings |
 | `Config` | `Esc` or `Q` | `Normal` | Save + exit |
+| `Normal` | `M` | `TorrentManagement` | Batch torrent management |
+| `TorrentManagement` | `Esc` or `q` | `Normal` | Close management |
 | `Normal` | `d`/`D` | `DeleteConfirm` | Selected torrent only |
 | `DeleteConfirm` | `Enter` or `Esc` | `Normal` | Confirm/cancel dialog |
 | `Normal` | `a` | `FileBrowser` | Add torrent path flow |

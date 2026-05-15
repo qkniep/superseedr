@@ -198,6 +198,45 @@ pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
     }
 }
 
+pub(crate) fn anonymize_preserving_shape(input: &str) -> String {
+    let seed = stable_string_seed(input);
+    input
+        .chars()
+        .enumerate()
+        .map(|(idx, ch)| anonymized_shape_char(seed, idx, ch))
+        .collect()
+}
+
+fn stable_string_seed(input: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in input.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn anonymized_shape_char(seed: u64, idx: usize, ch: char) -> char {
+    let mut state = seed ^ ((idx as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15));
+    state ^= state >> 30;
+    state = state.wrapping_mul(0xbf58476d1ce4e5b9);
+    state ^= state >> 27;
+    state = state.wrapping_mul(0x94d049bb133111eb);
+    state ^= state >> 31;
+
+    if ch.is_ascii_lowercase() {
+        (b'a' + (state % 26) as u8) as char
+    } else if ch.is_ascii_uppercase() {
+        (b'A' + (state % 26) as u8) as char
+    } else if ch.is_ascii_digit() {
+        (b'0' + (state % 10) as u8) as char
+    } else if ch.is_alphabetic() {
+        (b'a' + (state % 26) as u8) as char
+    } else {
+        ch
+    }
+}
+
 pub fn calculate_nice_upper_bound(speed_bps: u64) -> u64 {
     if speed_bps == 0 {
         return 10_000;
