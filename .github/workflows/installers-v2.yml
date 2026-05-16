@@ -6,6 +6,10 @@ on:
       - installers_v2
   workflow_dispatch:
 
+concurrency:
+  group: installers-v2-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -136,91 +140,4 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: superseedr-installers-v2-${{ matrix.suffix }}-${{ github.run_number }}
-          path: staging/*
-
-  macos_dmg:
-    name: macOS DMG v2 (${{ matrix.suffix }})
-    if: github.ref == 'refs/heads/installers_v2'
-    runs-on: macos-latest
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suffix: normal
-            flags: ""
-          - suffix: private
-            flags: "--no-default-features"
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-installers-v2-dmg-${{ matrix.suffix }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-installers-v2-dmg-${{ matrix.suffix }}-
-            ${{ runner.os }}-cargo-
-
-      - name: Install DMG tooling
-        run: brew install create-dmg
-
-      - name: Build unsigned DMG
-        id: build_dmg
-        run: |
-          script_path="scripts/build_osx_universal_dmg.sh"
-          chmod +x "$script_path"
-
-          set -o pipefail
-          "$script_path" \
-            "0.0.0-installers-v2-${{ github.run_number }}" \
-            "${{ matrix.suffix }}" \
-            --unsigned \
-            ${{ matrix.flags }} \
-            2>&1 | tee build_log.txt
-
-          dmg_path=$(grep 'DMG_PATH=' build_log.txt | head -n 1 | sed -n 's/.*DMG_PATH=\(.*\)/\1/p' | tr -d '[:space:]')
-          if [ -z "$dmg_path" ]; then
-            echo "::error::Build script finished, but 'DMG_PATH=' was not found in the log."
-            exit 1
-          fi
-
-          echo "dmg_path=$dmg_path" >> "$GITHUB_OUTPUT"
-
-      - name: Verify DMG
-        run: hdiutil verify "${{ steps.build_dmg.outputs.dmg_path }}"
-
-      - name: Stage DMG artifact
-        id: stage
-        run: |
-          mkdir -p staging
-          suffix="${{ matrix.suffix }}"
-          version="0.0.0-installers-v2-${{ github.run_number }}"
-
-          if [ "$suffix" = "normal" ]; then
-            dmg_name="${{ env.APP_NAME }}-$version-universal-macos.dmg"
-          else
-            dmg_name="${{ env.APP_NAME }}-$version-$suffix-universal-macos.dmg"
-          fi
-
-          cp "${{ steps.build_dmg.outputs.dmg_path }}" "staging/$dmg_name"
-          ls -lh staging
-
-      - name: Upload DMG artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: superseedr-installers-v2-macos-${{ matrix.suffix }}-${{ github.run_number }}
           path: staging/*
