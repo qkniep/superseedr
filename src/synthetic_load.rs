@@ -8,6 +8,7 @@ use crate::integrations::cli::{
     SyntheticTransport,
 };
 use crate::networking::protocol::{generate_message, Message};
+use crate::networking::shared_udp::{SharedUdpFamily, SharedUdpHandle};
 use crate::networking::transport::PeerTransportKind;
 use crate::networking::{PeerConnection, TcpPeerTransport, UtpListenerSet, UtpPeerTransport};
 use crate::resource_manager::{
@@ -122,6 +123,7 @@ struct HarnessContext {
     global_ul_bucket: Arc<TokenBucket>,
     counters: Arc<SyntheticCounters>,
     shutdown_tx: broadcast::Sender<()>,
+    client_port: u16,
 }
 
 #[derive(Clone)]
@@ -1119,6 +1121,7 @@ async fn run_once(
     };
     let specs: Arc<[SyntheticTorrentSpec]> =
         build_torrent_specs(args.torrents, config.size_per_torrent, config.piece_size)?.into();
+    let (client_port, _client_udp_reservation) = synthetic_client_port(args.transport).await?;
 
     let resource_manager = build_resource_manager(args, topology, resource_shutdown_tx.clone());
     let resource_client = resource_manager.1.clone();
@@ -1146,6 +1149,7 @@ async fn run_once(
         global_ul_bucket,
         counters: counters.clone(),
         shutdown_tx: harness_shutdown_tx.clone(),
+        client_port,
     };
 
     let download_dir = output_dir.join("data").join("download");
@@ -1900,6 +1904,7 @@ fn build_manager_with_rx(
     let (metrics_tx, metrics_rx) = watch::channel(TorrentMetrics::default());
     let settings = Arc::new(Settings {
         client_id: CLIENT_ID.to_string(),
+        client_port: harness.client_port,
         private_client: false,
         ..Default::default()
     });
@@ -1928,6 +1933,22 @@ async fn bind_synthetic_tcp_listener() -> Result<(TcpListener, u16), DynError> {
     let listener = TcpListener::bind(synthetic_listener_bind_addr()).await?;
     let port = listener.local_addr()?.port();
     Ok((listener, port))
+}
+
+async fn synthetic_client_port(
+    transport: SyntheticTransport,
+) -> Result<(u16, Option<SharedUdpHandle>), DynError> {
+    if matches!(transport, SyntheticTransport::Tcp) {
+        return Ok((Settings::default().client_port, None));
+    }
+
+    let udp = SharedUdpHandle::bind(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        SharedUdpFamily::Ipv4,
+    )
+    .await?;
+    let port = udp.local_addr()?.port();
+    Ok((port, Some(udp)))
 }
 
 async fn bind_synthetic_utp_listener(port: u16) -> Result<(UtpListenerSet, u16), DynError> {
