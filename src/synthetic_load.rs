@@ -8,6 +8,7 @@ use crate::integrations::cli::{
     SyntheticTransport,
 };
 use crate::networking::protocol::{generate_message, Message};
+use crate::networking::shared_udp::{SharedUdpFamily, SharedUdpHandle};
 use crate::networking::transport::PeerTransportKind;
 use crate::networking::{PeerConnection, TcpPeerTransport, UtpListenerSet, UtpPeerTransport};
 use crate::resource_manager::{
@@ -48,8 +49,7 @@ const MAX_TORRENTS_PER_ORCHESTRATION_TICK: usize = 25;
 const MAX_PEERS_PER_ORCHESTRATION_TICK: usize = 1_000;
 const SYNTHETIC_PEERS_PER_INCOMING_HUB: usize = 8_000;
 const MAX_SYNTHETIC_INCOMING_HUBS: usize = 16;
-const SYNTHETIC_ENABLE_UTP_ENV: &str = "SUPERSEEDR_ENABLE_UTP";
-const SYNTHETIC_UTP_ONLY_ENV: &str = "SUPERSEEDR_UTP_ONLY";
+const SYNTHETIC_PEER_TRANSPORT_ENV: &str = "SUPERSEEDR_PEER_TRANSPORT";
 #[cfg(not(target_os = "macos"))]
 const SYNTHETIC_LOCAL_PORT_BASE: u16 = 10_000;
 #[cfg(not(target_os = "macos"))]
@@ -123,6 +123,7 @@ struct HarnessContext {
     global_ul_bucket: Arc<TokenBucket>,
     counters: Arc<SyntheticCounters>,
     shutdown_tx: broadcast::Sender<()>,
+    client_port: u16,
 }
 
 #[derive(Clone)]
@@ -230,60 +231,101 @@ impl SyntheticIncomingHub {
         }
     }
 
-    fn addr_for_peer(&self, peer_index: usize) -> SocketAddr {
+    fn transport_for_peer(&self, peer_index: usize) -> SyntheticTransport {
         match self.transport {
+            SyntheticTransport::Tcp => SyntheticTransport::Tcp,
+            SyntheticTransport::Utp => SyntheticTransport::Utp,
+            SyntheticTransport::All if peer_index.is_multiple_of(2) => SyntheticTransport::Tcp,
+            SyntheticTransport::All => SyntheticTransport::Utp,
+        }
+    }
+
+    fn addr_for_peer(&self, peer_index: usize, transport: SyntheticTransport) -> SocketAddr {
+        match transport {
             SyntheticTransport::Tcp => synthetic_single_listener_addr(peer_index, self.port),
             SyntheticTransport::Utp => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), self.port),
+            SyntheticTransport::All => {
+                self.addr_for_peer(peer_index, self.transport_for_peer(peer_index))
+            }
         }
     }
 }
 
 #[derive(Clone)]
 enum SyntheticSeederHub {
-    #[allow(dead_code)]
+    #[cfg(not(target_os = "macos"))]
     SinglePort {
         port: u16,
     },
     SharedUtp {
         port: u16,
     },
+    #[cfg(target_os = "macos")]
     PeerPorts {
         ports: Arc<[u16]>,
+    },
+    #[cfg(not(target_os = "macos"))]
+    MixedSingleTcpSharedUtp {
+        tcp_port: u16,
+        utp_port: u16,
+    },
+    #[cfg(target_os = "macos")]
+    MixedPeerTcpSharedUtp {
+        tcp_ports: Arc<[u16]>,
+        utp_port: u16,
     },
 }
 
 impl SyntheticSeederHub {
     fn addr_for_peer(&self, peer_index: usize) -> Result<SocketAddr, DynError> {
         match self {
-            Self::SinglePort { port } => {
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = peer_index;
-                    Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *port))
-                }
-
-                #[cfg(not(target_os = "macos"))]
-                {
-                    Ok(synthetic_loopback_addr(peer_index, *port))
-                }
-            }
-            Self::SharedUtp { port } => {
-                let _ = peer_index;
-                Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *port))
-            }
+            #[cfg(not(target_os = "macos"))]
+            Self::SinglePort { port } => Ok(synthetic_loopback_addr(peer_index, *port)),
+            #[cfg(target_os = "macos")]
             Self::PeerPorts { ports } => {
                 let port = ports.get(peer_index).copied().ok_or_else(|| {
                     format!("missing synthetic seeder listener for peer index {peer_index}")
                 })?;
                 Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
             }
+            Self::SharedUtp { port } => Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *port)),
+            #[cfg(not(target_os = "macos"))]
+            Self::MixedSingleTcpSharedUtp { tcp_port, utp_port } => {
+                if peer_index.is_multiple_of(2) {
+                    Ok(synthetic_single_listener_addr(peer_index, *tcp_port))
+                } else {
+                    Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *utp_port))
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Self::MixedPeerTcpSharedUtp {
+                tcp_ports,
+                utp_port,
+            } => {
+                if peer_index.is_multiple_of(2) {
+                    let port = tcp_ports.get(peer_index).copied().ok_or_else(|| {
+                        format!("missing synthetic TCP seeder listener for peer index {peer_index}")
+                    })?;
+                    Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
+                } else {
+                    Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *utp_port))
+                }
+            }
         }
     }
 
     fn synthetic_peer_key(&self, peer_index: usize) -> Option<String> {
         match self {
-            Self::SharedUtp { port } => Some(format!("synthetic-utp-{}:{peer_index}", port)),
-            Self::SinglePort { .. } | Self::PeerPorts { .. } => None,
+            Self::SharedUtp { port } => Some(format!("synthetic-utp-{port}:{peer_index}")),
+            #[cfg(not(target_os = "macos"))]
+            Self::MixedSingleTcpSharedUtp { utp_port, .. } if !peer_index.is_multiple_of(2) => {
+                Some(format!("synthetic-utp-{utp_port}:{peer_index}"))
+            }
+            #[cfg(target_os = "macos")]
+            Self::MixedPeerTcpSharedUtp { utp_port, .. } if !peer_index.is_multiple_of(2) => {
+                Some(format!("synthetic-utp-{utp_port}:{peer_index}"))
+            }
+            _ => None,
         }
     }
 }
@@ -542,12 +584,13 @@ impl PeerRamp {
                     incoming_hub,
                     leecher_pipeline,
                 } => {
-                    let addr = incoming_hub.addr_for_peer(peer_index);
+                    let transport = incoming_hub.transport_for_peer(peer_index);
+                    let addr = incoming_hub.addr_for_peer(peer_index, transport);
                     let handle = tokio::spawn(run_synthetic_leecher(
                         self.spec.clone(),
                         peer_index,
                         addr,
-                        incoming_hub.transport,
+                        transport,
                         *leecher_pipeline,
                         harness.counters.clone(),
                         harness.shutdown_tx.subscribe(),
@@ -990,27 +1033,16 @@ struct ResourceSample {
 }
 
 struct SyntheticTransportEnvGuard {
-    previous_enable_utp: Option<String>,
-    previous_utp_only: Option<String>,
+    previous_peer_transport: Option<String>,
 }
 
 impl SyntheticTransportEnvGuard {
     fn new(transport: SyntheticTransport) -> Self {
         let guard = Self {
-            previous_enable_utp: std::env::var(SYNTHETIC_ENABLE_UTP_ENV).ok(),
-            previous_utp_only: std::env::var(SYNTHETIC_UTP_ONLY_ENV).ok(),
+            previous_peer_transport: std::env::var(SYNTHETIC_PEER_TRANSPORT_ENV).ok(),
         };
 
-        match transport {
-            SyntheticTransport::Tcp => {
-                std::env::remove_var(SYNTHETIC_ENABLE_UTP_ENV);
-                std::env::remove_var(SYNTHETIC_UTP_ONLY_ENV);
-            }
-            SyntheticTransport::Utp => {
-                std::env::remove_var(SYNTHETIC_ENABLE_UTP_ENV);
-                std::env::set_var(SYNTHETIC_UTP_ONLY_ENV, "1");
-            }
-        }
+        std::env::set_var(SYNTHETIC_PEER_TRANSPORT_ENV, transport.as_str());
 
         guard
     }
@@ -1019,10 +1051,9 @@ impl SyntheticTransportEnvGuard {
 impl Drop for SyntheticTransportEnvGuard {
     fn drop(&mut self) {
         restore_env_var(
-            SYNTHETIC_ENABLE_UTP_ENV,
-            self.previous_enable_utp.as_deref(),
+            SYNTHETIC_PEER_TRANSPORT_ENV,
+            self.previous_peer_transport.as_deref(),
         );
-        restore_env_var(SYNTHETIC_UTP_ONLY_ENV, self.previous_utp_only.as_deref());
     }
 }
 
@@ -1098,6 +1129,7 @@ async fn run_once(
     };
     let specs: Arc<[SyntheticTorrentSpec]> =
         build_torrent_specs(args.torrents, config.size_per_torrent, config.piece_size)?.into();
+    let (client_port, _client_udp_reservation) = synthetic_client_port(args.transport).await?;
 
     let resource_manager = build_resource_manager(args, topology, resource_shutdown_tx.clone());
     let resource_client = resource_manager.1.clone();
@@ -1125,6 +1157,7 @@ async fn run_once(
         global_ul_bucket,
         counters: counters.clone(),
         shutdown_tx: harness_shutdown_tx.clone(),
+        client_port,
     };
 
     let download_dir = output_dir.join("data").join("download");
@@ -1879,6 +1912,7 @@ fn build_manager_with_rx(
     let (metrics_tx, metrics_rx) = watch::channel(TorrentMetrics::default());
     let settings = Arc::new(Settings {
         client_id: CLIENT_ID.to_string(),
+        client_port: harness.client_port,
         private_client: false,
         ..Default::default()
     });
@@ -1903,6 +1937,51 @@ fn build_manager_with_rx(
     Ok((manager, command_tx, metrics_rx))
 }
 
+async fn bind_synthetic_tcp_listener() -> Result<(TcpListener, u16), DynError> {
+    let listener = TcpListener::bind(synthetic_listener_bind_addr()).await?;
+    let port = listener.local_addr()?.port();
+    Ok((listener, port))
+}
+
+async fn synthetic_client_port(
+    transport: SyntheticTransport,
+) -> Result<(u16, Option<SharedUdpHandle>), DynError> {
+    if matches!(transport, SyntheticTransport::Tcp) {
+        return Ok((Settings::default().client_port, None));
+    }
+
+    let udp = SharedUdpHandle::bind(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        SharedUdpFamily::Ipv4,
+    )
+    .await?;
+    let port = udp.local_addr()?.port();
+    Ok((port, Some(udp)))
+}
+
+async fn bind_synthetic_utp_listener(port: u16) -> Result<(UtpListenerSet, u16), DynError> {
+    let listener = UtpPeerTransport::bind_listener(port).await?;
+    let port = listener
+        .local_port()
+        .ok_or("synthetic uTP listener did not expose a local port")?;
+    Ok((listener, port))
+}
+
+fn join_synthetic_handles(handles: Vec<JoinHandle<()>>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        for handle in handles {
+            let _ = handle.await;
+        }
+    })
+}
+
+async fn abort_synthetic_handles(handles: &mut Vec<JoinHandle<()>>) {
+    for mut handle in handles.drain(..) {
+        handle.abort();
+        let _ = (&mut handle).await;
+    }
+}
+
 async fn spawn_synthetic_seeder_hub(
     specs: Arc<[SyntheticTorrentSpec]>,
     counters: Arc<SyntheticCounters>,
@@ -1921,32 +2000,19 @@ async fn spawn_synthetic_seeder_hub(
 
     #[cfg(target_os = "macos")]
     {
+        // macOS does not route unconfigured 127/8 aliases, so give each
+        // synthetic seeder a unique localhost listener port instead.
+        let listener_count = peer_slots.max(1);
         match transport {
             SyntheticTransport::Tcp => {
-                // macOS does not route unconfigured 127/8 aliases for TCP, so
-                // give each synthetic seeder a unique localhost listener port.
-                let listener_count = peer_slots.max(1);
                 let mut ports = Vec::with_capacity(listener_count);
                 let mut handles: Vec<JoinHandle<()>> = Vec::with_capacity(listener_count);
                 for _ in 0..listener_count {
-                    let listener = match TcpListener::bind(synthetic_listener_bind_addr()).await {
-                        Ok(listener) => listener,
+                    let (listener, port) = match bind_synthetic_tcp_listener().await {
+                        Ok(result) => result,
                         Err(error) => {
-                            for mut handle in handles {
-                                handle.abort();
-                                let _ = (&mut handle).await;
-                            }
-                            return Err(error.into());
-                        }
-                    };
-                    let port = match listener.local_addr() {
-                        Ok(addr) => addr.port(),
-                        Err(error) => {
-                            for mut handle in handles {
-                                handle.abort();
-                                let _ = (&mut handle).await;
-                            }
-                            return Err(error.into());
+                            abort_synthetic_handles(&mut handles).await;
+                            return Err(error);
                         }
                     };
                     ports.push(port);
@@ -1958,32 +2024,67 @@ async fn spawn_synthetic_seeder_hub(
                         next_peer_id.clone(),
                     ));
                 }
-                let handle = tokio::spawn(async move {
-                    for handle in handles {
-                        let _ = handle.await;
-                    }
-                });
                 Ok((
                     SyntheticSeederHub::PeerPorts {
                         ports: Arc::<[u16]>::from(ports),
                     },
-                    handle,
+                    join_synthetic_handles(handles),
                 ))
             }
             SyntheticTransport::Utp => {
-                let _ = peer_slots;
-                let listener = UtpPeerTransport::bind_listener(0).await?;
-                let port = listener
-                    .local_port()
-                    .ok_or("synthetic uTP seeder listener did not expose a local port")?;
-                let handle = spawn_synthetic_utp_seeder_accept_loop(
-                    listener,
+                let (listener, port) = bind_synthetic_utp_listener(0).await?;
+                Ok((
+                    SyntheticSeederHub::SharedUtp { port },
+                    spawn_synthetic_utp_seeder_accept_loop(
+                        listener,
+                        specs_by_hash,
+                        counters,
+                        shutdown_tx,
+                        next_peer_id,
+                    ),
+                ))
+            }
+            SyntheticTransport::All => {
+                let mut tcp_ports = Vec::with_capacity(listener_count);
+                let mut handles: Vec<JoinHandle<()>> = Vec::with_capacity(listener_count + 1);
+                for _ in 0..listener_count {
+                    let (tcp_listener, tcp_port) = match bind_synthetic_tcp_listener().await {
+                        Ok(result) => result,
+                        Err(error) => {
+                            abort_synthetic_handles(&mut handles).await;
+                            return Err(error);
+                        }
+                    };
+                    tcp_ports.push(tcp_port);
+                    handles.push(spawn_synthetic_seeder_accept_loop(
+                        tcp_listener,
+                        specs_by_hash.clone(),
+                        counters.clone(),
+                        shutdown_tx.clone(),
+                        next_peer_id.clone(),
+                    ));
+                }
+                let (utp_listener, utp_port) = match bind_synthetic_utp_listener(0).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        abort_synthetic_handles(&mut handles).await;
+                        return Err(error);
+                    }
+                };
+                handles.push(spawn_synthetic_utp_seeder_accept_loop(
+                    utp_listener,
                     specs_by_hash,
                     counters,
                     shutdown_tx,
                     next_peer_id,
-                );
-                Ok((SyntheticSeederHub::SharedUtp { port }, handle))
+                ));
+                Ok((
+                    SyntheticSeederHub::MixedPeerTcpSharedUtp {
+                        tcp_ports: Arc::<[u16]>::from(tcp_ports),
+                        utp_port,
+                    },
+                    join_synthetic_handles(handles),
+                ))
             }
         }
     }
@@ -1993,8 +2094,7 @@ async fn spawn_synthetic_seeder_hub(
         match transport {
             SyntheticTransport::Tcp => {
                 let _ = peer_slots;
-                let listener = TcpListener::bind(synthetic_listener_bind_addr()).await?;
-                let port = listener.local_addr()?.port();
+                let (listener, port) = bind_synthetic_tcp_listener().await?;
                 let handle = spawn_synthetic_seeder_accept_loop(
                     listener,
                     specs_by_hash,
@@ -2002,22 +2102,51 @@ async fn spawn_synthetic_seeder_hub(
                     shutdown_tx,
                     next_peer_id,
                 );
-                Ok((SyntheticSeederHub::SharedUtp { port }, handle))
+                Ok((SyntheticSeederHub::SinglePort { port }, handle))
             }
             SyntheticTransport::Utp => {
                 let _ = peer_slots;
-                let listener = UtpPeerTransport::bind_listener(0).await?;
-                let port = listener
-                    .local_port()
-                    .ok_or("synthetic uTP seeder listener did not expose a local port")?;
-                let handle = spawn_synthetic_utp_seeder_accept_loop(
-                    listener,
+                let (listener, port) = bind_synthetic_utp_listener(0).await?;
+                Ok((
+                    SyntheticSeederHub::SharedUtp { port },
+                    spawn_synthetic_utp_seeder_accept_loop(
+                        listener,
+                        specs_by_hash,
+                        counters,
+                        shutdown_tx,
+                        next_peer_id,
+                    ),
+                ))
+            }
+            SyntheticTransport::All => {
+                let (tcp_listener, tcp_port) = bind_synthetic_tcp_listener().await?;
+                let _ = peer_slots;
+                let mut handles: Vec<JoinHandle<()>> = Vec::with_capacity(2);
+                handles.push(spawn_synthetic_seeder_accept_loop(
+                    tcp_listener,
+                    specs_by_hash.clone(),
+                    counters.clone(),
+                    shutdown_tx.clone(),
+                    next_peer_id.clone(),
+                ));
+                let (utp_listener, utp_port) = match bind_synthetic_utp_listener(0).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        abort_synthetic_handles(&mut handles).await;
+                        return Err(error);
+                    }
+                };
+                handles.push(spawn_synthetic_utp_seeder_accept_loop(
+                    utp_listener,
                     specs_by_hash,
                     counters,
                     shutdown_tx,
                     next_peer_id,
-                );
-                Ok((SyntheticSeederHub::SinglePort { port }, handle))
+                ));
+                Ok((
+                    SyntheticSeederHub::MixedSingleTcpSharedUtp { tcp_port, utp_port },
+                    join_synthetic_handles(handles),
+                ))
             }
         }
     }
@@ -2356,8 +2485,7 @@ async fn spawn_incoming_hub(
     let routes: IncomingRoutes = Arc::new(Mutex::new(HashMap::new()));
     let (port, handle) = match transport {
         SyntheticTransport::Tcp => {
-            let listener = TcpListener::bind(synthetic_listener_bind_addr()).await?;
-            let port = listener.local_addr()?.port();
+            let (listener, port) = bind_synthetic_tcp_listener().await?;
             let routes = routes.clone();
             let handle = tokio::spawn(async move {
                 let mut shutdown_rx = shutdown_tx.subscribe();
@@ -2381,10 +2509,7 @@ async fn spawn_incoming_hub(
             (port, handle)
         }
         SyntheticTransport::Utp => {
-            let listener = UtpPeerTransport::bind_listener(0).await?;
-            let port = listener
-                .local_port()
-                .ok_or("synthetic uTP incoming hub did not expose a local port")?;
+            let (listener, port) = bind_synthetic_utp_listener(0).await?;
             let routes = routes.clone();
             let handle = tokio::spawn(async move {
                 let mut shutdown_rx = shutdown_tx.subscribe();
@@ -2405,6 +2530,52 @@ async fn spawn_incoming_hub(
                 }
             });
             (port, handle)
+        }
+        SyntheticTransport::All => {
+            let (tcp_listener, port) = bind_synthetic_tcp_listener().await?;
+            let (utp_listener, _) = bind_synthetic_utp_listener(port).await?;
+            let tcp_routes = routes.clone();
+            let tcp_counters = counters.clone();
+            let tcp_shutdown = shutdown_tx.clone();
+            let tcp_handle = tokio::spawn(async move {
+                let mut shutdown_rx = tcp_shutdown.subscribe();
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.recv() => break,
+                        accepted = tcp_listener.accept() => {
+                            let Ok((stream, remote_addr)) = accepted else {
+                                break;
+                            };
+                            let connection = TcpPeerTransport::incoming(stream, remote_addr);
+                            spawn_incoming_hub_connection(
+                                connection,
+                                tcp_routes.clone(),
+                                tcp_counters.clone(),
+                            );
+                        }
+                    }
+                }
+            });
+            let utp_routes = routes.clone();
+            let utp_handle = tokio::spawn(async move {
+                let mut shutdown_rx = shutdown_tx.subscribe();
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.recv() => break,
+                        accepted = utp_listener.accept() => {
+                            let Ok(connection) = accepted else {
+                                break;
+                            };
+                            spawn_incoming_hub_connection(
+                                connection,
+                                utp_routes.clone(),
+                                counters.clone(),
+                            );
+                        }
+                    }
+                }
+            });
+            (port, join_synthetic_handles(vec![tcp_handle, utp_handle]))
         }
     };
     let hub = SyntheticIncomingHub {
@@ -2524,6 +2695,7 @@ async fn run_synthetic_leecher_inner(
             )
             .await
         }
+        SyntheticTransport::All => Err("synthetic leecher needs a concrete transport".into()),
     }
 }
 
@@ -4922,11 +5094,41 @@ mod tests {
 
     #[test]
     fn shared_utp_seeder_hub_uses_unique_synthetic_peer_keys() {
-        let hub = SyntheticSeederHub::SharedUtp { port: 34567 };
+        let hub = SyntheticSeederHub::SharedUtp { port: 34_567 };
 
         assert_eq!(hub.addr_for_peer(0).unwrap(), hub.addr_for_peer(1).unwrap());
         assert_ne!(hub.synthetic_peer_key(0), hub.synthetic_peer_key(1));
         assert!(hub.synthetic_peer_key(0).is_some());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn mixed_shared_utp_seeder_hub_keys_only_utp_peers() {
+        let hub = SyntheticSeederHub::MixedSingleTcpSharedUtp {
+            tcp_port: 23_456,
+            utp_port: 34_567,
+        };
+
+        assert!(hub.synthetic_peer_key(0).is_none());
+        assert_eq!(
+            hub.synthetic_peer_key(1),
+            Some("synthetic-utp-34567:1".to_string())
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mixed_macos_shared_utp_seeder_hub_keys_only_utp_peers() {
+        let hub = SyntheticSeederHub::MixedPeerTcpSharedUtp {
+            tcp_ports: Arc::<[u16]>::from(vec![23_456, 23_457]),
+            utp_port: 34_567,
+        };
+
+        assert!(hub.synthetic_peer_key(0).is_none());
+        assert_eq!(
+            hub.synthetic_peer_key(1),
+            Some("synthetic-utp-34567:1".to_string())
+        );
     }
 
     #[test]
