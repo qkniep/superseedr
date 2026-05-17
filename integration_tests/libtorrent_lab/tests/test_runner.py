@@ -10,6 +10,7 @@ from integration_tests.libtorrent_lab.run import (
     _project_name,
     _superseedr_seed_is_ready,
     _superseedr_download_path,
+    _validate_superseedr_transport_observations,
     _validate_download,
 )
 
@@ -38,6 +39,19 @@ def test_load_superseedr_to_libtorrent_scenario() -> None:
     assert scenario.leech_client == CLIENT_LIBTORRENT
     assert scenario.superseedr_peer_transport == "tcp"
     assert scenario.libtorrent_settings["enable_incoming_utp"] is False
+
+
+def test_load_utp_only_scenarios_disable_tcp() -> None:
+    for name in ("superseedr_utp_to_libtorrent", "libtorrent_utp_to_superseedr"):
+        scenario = LabScenario.from_file(
+            Path(f"integration_tests/libtorrent_lab/scenarios/{name}.json")
+        )
+
+        assert scenario.superseedr_peer_transport == "utp"
+        assert scenario.libtorrent_settings["enable_incoming_tcp"] is False
+        assert scenario.libtorrent_settings["enable_outgoing_tcp"] is False
+        assert scenario.libtorrent_settings["enable_incoming_utp"] is True
+        assert scenario.libtorrent_settings["enable_outgoing_utp"] is True
 
 
 def test_superseedr_payload_path_preserves_fixture_bucket(tmp_path: Path) -> None:
@@ -70,6 +84,51 @@ def test_superseedr_seed_ready_accepts_completed_data() -> None:
     }
 
     assert _superseedr_seed_is_ready(status)
+
+
+def test_utp_only_scenario_requires_superseedr_utp_payload() -> None:
+    scenario = LabScenario.from_file(
+        Path("integration_tests/libtorrent_lab/scenarios/libtorrent_utp_to_superseedr.json")
+    )
+    seed_status = {"client": CLIENT_LIBTORRENT}
+    leech_status = {
+        "status": "ok",
+        "tcp_peer_count": 0,
+        "utp_peer_count": 1,
+        "beneficial_utp_peer_count": 1,
+    }
+
+    assert _validate_superseedr_transport_observations(
+        scenario,
+        seed_status,
+        leech_status,
+    ) == {"ok": True, "issues": []}
+
+
+def test_utp_only_scenario_rejects_superseedr_tcp_payload() -> None:
+    scenario = LabScenario.from_file(
+        Path("integration_tests/libtorrent_lab/scenarios/superseedr_utp_to_libtorrent.json")
+    )
+    seed_status = {
+        "status": "ok",
+        "tcp_peer_count": 1,
+        "utp_peer_count": 0,
+        "beneficial_utp_peer_count": 0,
+    }
+    leech_status = {"client": CLIENT_LIBTORRENT}
+
+    report = _validate_superseedr_transport_observations(
+        scenario,
+        seed_status,
+        leech_status,
+    )
+
+    assert report["ok"] is False
+    assert report["issues"] == [
+        "seed Superseedr observed 1 TCP peer(s) in uTP-only mode",
+        "seed Superseedr did not observe a uTP peer",
+        "seed Superseedr did not move payload over uTP",
+    ]
 
 
 def test_validate_download_reports_hash_match(tmp_path: Path) -> None:

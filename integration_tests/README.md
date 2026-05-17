@@ -172,6 +172,8 @@ Initial scenario names:
 - `basic_ul_dl`
 - `superseedr_to_libtorrent`
 - `libtorrent_to_superseedr`
+- `superseedr_utp_to_libtorrent`
+- `libtorrent_utp_to_superseedr`
 
 Artifacts are written under:
 

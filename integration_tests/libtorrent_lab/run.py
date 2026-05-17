@@ -178,6 +178,14 @@ def _read_superseedr_status(share_root: Path, role: str) -> dict[str, object]:
         "session_total_downloaded": sum(int(t.get("session_total_downloaded", 0)) for t in torrents),
         "session_total_uploaded": sum(int(t.get("session_total_uploaded", 0)) for t in torrents),
         "connected_peers": sum(int(t.get("number_of_successfully_connected_peers", 0)) for t in torrents),
+        "tcp_peer_count": sum(int(t.get("tcp_peer_count", 0)) for t in torrents),
+        "utp_peer_count": sum(int(t.get("utp_peer_count", 0)) for t in torrents),
+        "beneficial_tcp_peer_count": sum(
+            int(t.get("beneficial_tcp_peer_count", 0)) for t in torrents
+        ),
+        "beneficial_utp_peer_count": sum(
+            int(t.get("beneficial_utp_peer_count", 0)) for t in torrents
+        ),
     }
 
 
@@ -191,6 +199,37 @@ def _superseedr_seed_is_ready(status: dict[str, object]) -> bool:
         int(status.get("complete_torrents", 0)) > 0
         and int(status.get("data_available_torrents", 0)) > 0
     )
+
+
+def _validate_superseedr_transport_observations(
+    scenario: LabScenario,
+    seed_status: dict[str, object],
+    leech_status: dict[str, object],
+) -> dict[str, object]:
+    issues: list[str] = []
+    if scenario.superseedr_peer_transport != "utp":
+        return {"ok": True, "issues": issues}
+
+    for role, client, status in (
+        ("seed", scenario.seed_client, seed_status),
+        ("leech", scenario.leech_client, leech_status),
+    ):
+        if client != CLIENT_SUPERSEEDR:
+            continue
+        if status.get("status") != "ok":
+            issues.append(f"{role} Superseedr status is not ok")
+            continue
+        tcp_peers = int(status.get("tcp_peer_count", 0))
+        utp_peers = int(status.get("utp_peer_count", 0))
+        beneficial_utp_peers = int(status.get("beneficial_utp_peer_count", 0))
+        if tcp_peers != 0:
+            issues.append(f"{role} Superseedr observed {tcp_peers} TCP peer(s) in uTP-only mode")
+        if utp_peers < 1:
+            issues.append(f"{role} Superseedr did not observe a uTP peer")
+        if beneficial_utp_peers < 1:
+            issues.append(f"{role} Superseedr did not move payload over uTP")
+
+    return {"ok": not issues, "issues": issues}
 
 
 def _wait_for_superseedr_seed_ready(share_root: Path, timeout_secs: int) -> None:
@@ -586,26 +625,41 @@ def run_lab_scenario(
                 break
             time.sleep(1)
 
+        final_seed_status = (
+            seed_status
+            if seed_status is not None
+            else _scenario_client_status(
+                scenario.seed_client,
+                "seed",
+                lt_seed_artifacts_root,
+                ss_seed_share_root,
+            )
+        )
+        final_leech_status = (
+            leech_status
+            if leech_status is not None
+            else _scenario_client_status(
+                scenario.leech_client,
+                "leech",
+                lt_leech_artifacts_root,
+                ss_leech_share_root,
+            )
+        )
+        transport_validation = _validate_superseedr_transport_observations(
+            scenario,
+            final_seed_status,
+            final_leech_status,
+        )
+        if not transport_validation["ok"]:
+            summary["ok"] = False
+
         summary.update(
             {
                 "duration_secs": round(time.monotonic() - started_at, 3),
                 "validation": validation,
-                "seed_status": seed_status
-                if seed_status is not None
-                else _scenario_client_status(
-                    scenario.seed_client,
-                    "seed",
-                    lt_seed_artifacts_root,
-                    ss_seed_share_root,
-                ),
-                "leech_status": leech_status
-                if leech_status is not None
-                else _scenario_client_status(
-                    scenario.leech_client,
-                    "leech",
-                    lt_leech_artifacts_root,
-                    ss_leech_share_root,
-                ),
+                "transport_validation": transport_validation,
+                "seed_status": final_seed_status,
+                "leech_status": final_leech_status,
             }
         )
         return summary

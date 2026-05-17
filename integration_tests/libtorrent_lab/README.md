@@ -42,6 +42,13 @@ tracker and write byte-identical output. Future uTP-only and mixed-transport
 scenarios can reuse the same manifests by changing the Superseedr transport env
 and libtorrent settings.
 
+uTP-only baselines disable TCP on both sides:
+
+```bash
+./integration_tests/run_libtorrent_lab.sh superseedr_utp_to_libtorrent
+./integration_tests/run_libtorrent_lab.sh libtorrent_utp_to_superseedr
+```
+
 The Superseedr containers use `docker/Dockerfile.superseedr`, which builds a
 debug binary for fast lab iteration instead of the production release image.
 
