@@ -149,6 +149,34 @@ Artifacts are written under:
 
 - `integration_tests/artifacts/cluster_cli/<run_id>/`
 
+## Libtorrent Lab
+
+The libtorrent lab is a separate Docker-first lane for direct libtorrent-backed
+test peers. It is intended for future protocol, behavior, performance, and
+settings probes without pulling in a full client UI stack.
+
+Main entrypoint:
+
+```bash
+./integration_tests/run_libtorrent_lab.sh
+```
+
+or:
+
+```bash
+python3 -m integration_tests.libtorrent_lab.run --scenario basic_ul_dl
+```
+
+Initial scenario names:
+
+- `basic_ul_dl`
+- `superseedr_to_libtorrent`
+- `libtorrent_to_superseedr`
+
+Artifacts are written under:
+
+- `integration_tests/artifacts/libtorrent_lab/<run_id>/`
+
 ## Artifacts and Monitoring
 
 Per run output:

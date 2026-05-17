@@ -1,0 +1,73 @@
+# Libtorrent Lab
+
+Dockerized lab for programmable libtorrent-backed interop and behavior tests.
+
+This lab is separate from the existing client-to-client interop harness. The
+current seed/leech smoke keeps the surface intentionally small while leaving a
+clean place for future scenarios with different peer counts, libtorrent
+settings, transport modes, extension behavior, and performance probes.
+
+## Basic Smoke
+
+```bash
+./integration_tests/run_libtorrent_lab.sh
+```
+
+or:
+
+```bash
+python3 -m integration_tests.libtorrent_lab.run \
+  --scenario basic_ul_dl \
+  --timeout-secs 120
+```
+
+The smoke scenario:
+
+1. Generates deterministic integration fixture data and torrents with the
+   Docker-internal tracker announce URL.
+2. Starts the local tracker.
+3. Starts a libtorrent seed peer with the fixture payload mounted at `/data`.
+4. Starts a libtorrent leech peer with an empty `/data`.
+5. Validates the downloaded file by size and sha256.
+
+The first Superseedr interop scenarios are TCP baselines:
+
+```bash
+./integration_tests/run_libtorrent_lab.sh superseedr_to_libtorrent
+./integration_tests/run_libtorrent_lab.sh libtorrent_to_superseedr
+```
+
+These prove the two implementations can exchange the fixture through the local
+tracker and write byte-identical output. Future uTP-only and mixed-transport
+scenarios can reuse the same manifests by changing the Superseedr transport env
+and libtorrent settings.
+
+The Superseedr containers use `docker/Dockerfile.superseedr`, which builds a
+debug binary for fast lab iteration instead of the production release image.
+
+Artifacts are written under:
+
+```text
+integration_tests/artifacts/libtorrent_lab/<run_id>/
+```
+
+Important files:
+
+- `summary.json`: scenario result and final peer status.
+- `peers/seed/status.json`: latest seed status emitted by the peer.
+- `peers/seed/events.jsonl`: seed libtorrent events and alerts.
+- `peers/leech/status.json`: latest leech status emitted by the peer.
+- `peers/leech/events.jsonl`: leech libtorrent events and alerts.
+- `logs/*.log`: compose and container logs.
+
+## Scenario Contract
+
+Scenarios live in `integration_tests/libtorrent_lab/scenarios/*.json`.
+
+Each scenario declares seed/leech client types, one torrent, one payload file,
+listen ports, timeout, Superseedr peer transport, and the libtorrent settings
+applied to libtorrent peers. The libtorrent peer process takes a generated
+`/config/peer.json` and writes JSON status plus JSONL events to `/artifacts`.
+
+Future scenarios should add knobs to the scenario manifest rather than baking
+new topology assumptions into the runner.

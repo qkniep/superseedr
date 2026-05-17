@@ -1,0 +1,675 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib import error as url_error
+from urllib import request as url_request
+
+from integration_tests.harness.config import resolve_paths
+from integration_tests.harness.docker_ctl import DockerCompose
+
+
+LAB_ROOT = Path(__file__).resolve().parent
+SCENARIOS_ROOT = LAB_ROOT / "scenarios"
+COMPOSE_FILE = LAB_ROOT / "docker" / "docker-compose.libtorrent-lab.yml"
+TRACKER_ANNOUNCE_URL = "http://tracker:6969/announce"
+CLIENT_LIBTORRENT = "libtorrent"
+CLIENT_SUPERSEEDR = "superseedr"
+CLIENTS = {CLIENT_LIBTORRENT, CLIENT_SUPERSEEDR}
+
+
+@dataclass(frozen=True)
+class LabScenario:
+    name: str
+    seed_client: str
+    leech_client: str
+    mode: str
+    torrent: str
+    payload: str
+    download_name: str
+    timeout_secs: int
+    seed_listen_port: int
+    leech_listen_port: int
+    superseedr_peer_transport: str
+    libtorrent_settings: dict[str, object]
+
+    @classmethod
+    def from_file(cls, path: Path) -> "LabScenario":
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        seed_client = str(raw.get("seed_client", CLIENT_LIBTORRENT))
+        leech_client = str(raw.get("leech_client", CLIENT_LIBTORRENT))
+        if seed_client not in CLIENTS:
+            raise ValueError(f"Unsupported seed_client={seed_client!r} in {path}")
+        if leech_client not in CLIENTS:
+            raise ValueError(f"Unsupported leech_client={leech_client!r} in {path}")
+        return cls(
+            name=str(raw["name"]),
+            seed_client=seed_client,
+            leech_client=leech_client,
+            mode=str(raw["mode"]),
+            torrent=str(raw["torrent"]),
+            payload=str(raw["payload"]),
+            download_name=str(raw["download_name"]),
+            timeout_secs=int(raw.get("timeout_secs", 120)),
+            seed_listen_port=int(raw.get("seed_listen_port", 26881)),
+            leech_listen_port=int(raw.get("leech_listen_port", 26882)),
+            superseedr_peer_transport=str(raw.get("superseedr_peer_transport", "tcp")),
+            libtorrent_settings=dict(raw.get("libtorrent_settings", {})),
+        )
+
+
+def _utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+def _reserve_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _project_name(run_id: str) -> str:
+    safe = "".join(ch.lower() if ch.isalnum() else "" for ch in run_id)
+    return f"ltlab{safe}"[:48]
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _wait_for_tracker(port: int, timeout_secs: int = 20) -> None:
+    deadline = time.monotonic() + timeout_secs
+    url = f"http://127.0.0.1:{port}/announce"
+    while time.monotonic() < deadline:
+        try:
+            with url_request.urlopen(url, timeout=1) as resp:
+                if resp.status in (200, 400):
+                    return
+        except url_error.HTTPError as exc:
+            if exc.code == 400:
+                return
+        except Exception:
+            pass
+        time.sleep(0.25)
+    raise RuntimeError(f"Tracker did not become ready within {timeout_secs}s on {url}")
+
+
+def _read_status(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"status": "missing"}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {"status": "invalid", "error": str(exc)}
+
+
+def _payload_parent(scenario: LabScenario) -> Path:
+    parent = Path(scenario.payload).parent
+    return Path() if parent.as_posix() == "." else parent
+
+
+def _client_payload_path(client: str, data_root: Path, scenario: LabScenario) -> Path:
+    if client == CLIENT_SUPERSEEDR:
+        return data_root / scenario.mode / _payload_parent(scenario) / scenario.download_name
+    return data_root / scenario.download_name
+
+
+def _superseedr_download_path(role: str, scenario: LabScenario) -> str:
+    parts = ["/superseedr-data", role, scenario.mode]
+    parent = _payload_parent(scenario).as_posix()
+    if parent:
+        parts.append(parent)
+    return "/".join(parts)
+
+
+def _status_torrents(raw: dict[str, object]) -> list[dict[str, object]]:
+    torrents = raw.get("torrents", {})
+    if isinstance(torrents, dict):
+        return [value for value in torrents.values() if isinstance(value, dict)]
+    return []
+
+
+def _read_superseedr_status(share_root: Path, role: str) -> dict[str, object]:
+    status_file = share_root / "status_files" / "app_state.json"
+    raw = _read_status(status_file)
+    if raw.get("status") in {"missing", "invalid"}:
+        return {
+            "client": CLIENT_SUPERSEEDR,
+            "role": role,
+            "status": raw.get("status"),
+            "error": raw.get("error"),
+            "status_path": str(status_file),
+        }
+
+    torrents = _status_torrents(raw)
+    return {
+        "client": CLIENT_SUPERSEEDR,
+        "role": role,
+        "status": "ok",
+        "status_path": str(status_file),
+        "torrent_count": len(torrents),
+        "complete_torrents": sum(1 for t in torrents if t.get("is_complete") is True),
+        "data_available_torrents": sum(1 for t in torrents if t.get("data_available") is True),
+        "activity_messages": sorted(
+            {str(t.get("activity_message", "")) for t in torrents if t.get("activity_message")}
+        ),
+        "session_total_downloaded": sum(int(t.get("session_total_downloaded", 0)) for t in torrents),
+        "session_total_uploaded": sum(int(t.get("session_total_uploaded", 0)) for t in torrents),
+        "connected_peers": sum(int(t.get("number_of_successfully_connected_peers", 0)) for t in torrents),
+    }
+
+
+def _superseedr_seed_is_ready(status: dict[str, object]) -> bool:
+    if status.get("status") != "ok":
+        return False
+    messages = set(status.get("activity_messages", []))
+    if messages.intersection({"Seeding", "Finished"}):
+        return True
+    return (
+        int(status.get("complete_torrents", 0)) > 0
+        and int(status.get("data_available_torrents", 0)) > 0
+    )
+
+
+def _wait_for_superseedr_seed_ready(share_root: Path, timeout_secs: int) -> None:
+    deadline = time.monotonic() + timeout_secs
+    while time.monotonic() < deadline:
+        status = _read_superseedr_status(share_root, role="seed")
+        if _superseedr_seed_is_ready(status):
+            return
+        time.sleep(0.5)
+    raise RuntimeError(f"Superseedr seed did not become ready within {timeout_secs}s")
+
+
+def _wait_for_superseedr_counter_at_least(
+    share_root: Path,
+    role: str,
+    field: str,
+    minimum: int,
+    timeout_secs: int,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout_secs
+    last_status: dict[str, object] = {"status": "missing"}
+    while time.monotonic() < deadline:
+        last_status = _read_superseedr_status(share_root, role=role)
+        try:
+            current = int(last_status.get(field, 0))
+        except (TypeError, ValueError):
+            current = 0
+        if current >= minimum:
+            return last_status
+        time.sleep(0.25)
+    return last_status
+
+
+def _wait_for_seed_ready(status_path: Path, timeout_secs: int) -> None:
+    deadline = time.monotonic() + timeout_secs
+    while time.monotonic() < deadline:
+        status = _read_status(status_path)
+        if status.get("is_seed") is True:
+            return
+        time.sleep(0.5)
+    raise RuntimeError(f"Seed peer did not become ready within {timeout_secs}s")
+
+
+def _wait_for_seed_status(status_path: Path, timeout_secs: int) -> dict[str, object]:
+    deadline = time.monotonic() + timeout_secs
+    last_status: dict[str, object] = {"status": "missing"}
+    while time.monotonic() < deadline:
+        last_status = _read_status(status_path)
+        if last_status.get("is_seed") is True:
+            return last_status
+        time.sleep(0.25)
+    return last_status
+
+
+def _wait_for_counter_at_least(
+    status_path: Path,
+    field: str,
+    minimum: int,
+    timeout_secs: int,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout_secs
+    last_status: dict[str, object] = {"status": "missing"}
+    while time.monotonic() < deadline:
+        last_status = _read_status(status_path)
+        try:
+            current = int(last_status.get(field, 0))
+        except (TypeError, ValueError):
+            current = 0
+        if current >= minimum:
+            return last_status
+        time.sleep(0.25)
+    return last_status
+
+
+def _validate_download(actual_path: Path, expected_path: Path) -> dict[str, object]:
+    issues: list[str] = []
+    if not actual_path.exists():
+        issues.append(f"missing {actual_path.name}")
+        return {"ok": False, "issues": issues}
+
+    expected_size = expected_path.stat().st_size
+    actual_size = actual_path.stat().st_size
+    if actual_size != expected_size:
+        issues.append(f"size expected={expected_size} actual={actual_size}")
+
+    expected_hash = _sha256_file(expected_path)
+    actual_hash = _sha256_file(actual_path)
+    if actual_hash != expected_hash:
+        issues.append(f"sha256 expected={expected_hash} actual={actual_hash}")
+
+    return {
+        "ok": not issues,
+        "issues": issues,
+        "expected_size": expected_size,
+        "actual_size": actual_size,
+        "expected_sha256": expected_hash,
+        "actual_sha256": actual_hash,
+    }
+
+
+def _generate_torrents(repo_root: Path, output_root: Path) -> None:
+    subprocess.run(["python3", "scripts/generate_integration_bins.py"], cwd=repo_root, check=True)
+    subprocess.run(
+        [
+            "python3",
+            "scripts/generate_integration_torrents.py",
+            "--announce-url",
+            TRACKER_ANNOUNCE_URL,
+            "--output-root",
+            str(output_root),
+        ],
+        cwd=repo_root,
+        check=True,
+    )
+
+
+def _write_peer_config(
+    path: Path,
+    *,
+    peer_id: str,
+    role: str,
+    listen_port: int,
+    torrent_path: str,
+    save_path: str,
+    timeout_secs: int,
+    settings: dict[str, object],
+) -> None:
+    _write_json(
+        path,
+        {
+            "peer_id": peer_id,
+            "role": role,
+            "listen_port": listen_port,
+            "torrent_path": torrent_path,
+            "save_path": save_path,
+            "timeout_secs": timeout_secs,
+            "exit_when_seed": role == "leech",
+            "status_path": "/artifacts/status.json",
+            "events_path": "/artifacts/events.jsonl",
+            "settings": settings,
+        },
+    )
+
+
+def _write_superseedr_settings(
+    path: Path,
+    *,
+    role: str,
+    scenario: LabScenario,
+    client_port: int,
+) -> None:
+    role_root = f"/superseedr-data/{role}/{scenario.mode}"
+    download_path = _superseedr_download_path(role, scenario)
+    torrent_name = scenario.torrent.removesuffix(".torrent")
+    client_id = "-SS1000-SEEDCLIENT01" if role == "seed" else "-SS1000-LEECHCLIENT1"
+    lines = [
+        f'client_id = "{client_id}"',
+        f"client_port = {client_port}",
+        "lifetime_downloaded = 0",
+        "lifetime_uploaded = 0",
+        "private_client = false",
+        'torrent_sort_column = "Up"',
+        'torrent_sort_direction = "Ascending"',
+        'peer_sort_column = "UL"',
+        'peer_sort_direction = "Ascending"',
+        'ui_theme = "catppuccin_mocha"',
+        f'default_download_folder = "{role_root}"',
+        "max_connected_peers = 500",
+        "output_status_interval = 1",
+        "bootstrap_nodes = []",
+        "global_download_limit_bps = 0",
+        "global_upload_limit_bps = 0",
+        "max_concurrent_validations = 16",
+        "connection_attempt_permits = 16",
+        "upload_slots = 8",
+        "peer_upload_in_flight_limit = 4",
+        "tracker_fallback_interval_secs = 10",
+        "client_leeching_fallback_interval_secs = 10",
+        "",
+        "[[torrents]]",
+        f'torrent_or_magnet = "/fixtures/torrents/{scenario.mode}/{scenario.torrent}"',
+        f'name = "{torrent_name}"',
+        "validation_status = false",
+        f'download_path = "{download_path}"',
+        'container_name = ""',
+        'torrent_control_state = "Running"',
+        "",
+        "[torrents.file_priorities]",
+        '0 = "Normal"',
+        "",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _copy_payload(source: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, dest)
+
+
+def run_lab_scenario(
+    *,
+    scenario: LabScenario,
+    run_id: str,
+    timeout_secs: int | None = None,
+    skip_build: bool = False,
+) -> dict[str, object]:
+    paths = resolve_paths()
+    timeout = timeout_secs or scenario.timeout_secs
+    run_root = paths.artifacts_root / "libtorrent_lab" / run_id
+    runtime_root = run_root / "runtime"
+    fixtures_root = runtime_root / "fixtures"
+    torrents_root = fixtures_root / "torrents"
+    lt_seed_data_root = runtime_root / "libtorrent_seed_data"
+    lt_leech_data_root = runtime_root / "libtorrent_leech_data"
+    lt_seed_config_root = runtime_root / "libtorrent_seed_config"
+    lt_leech_config_root = runtime_root / "libtorrent_leech_config"
+    lt_seed_artifacts_root = run_root / "peers" / "libtorrent_seed"
+    lt_leech_artifacts_root = run_root / "peers" / "libtorrent_leech"
+    ss_seed_data_root = runtime_root / "superseedr_seed_data"
+    ss_leech_data_root = runtime_root / "superseedr_leech_data"
+    ss_seed_config_root = runtime_root / "superseedr_seed_config"
+    ss_leech_config_root = runtime_root / "superseedr_leech_config"
+    ss_seed_share_root = runtime_root / "superseedr_seed_share"
+    ss_leech_share_root = runtime_root / "superseedr_leech_share"
+    logs_root = run_root / "logs"
+
+    if run_root.exists():
+        shutil.rmtree(run_root)
+    for path in (
+        torrents_root,
+        lt_seed_data_root,
+        lt_leech_data_root,
+        lt_seed_config_root,
+        lt_leech_config_root,
+        lt_seed_artifacts_root,
+        lt_leech_artifacts_root,
+        ss_seed_data_root,
+        ss_leech_data_root,
+        ss_seed_config_root,
+        ss_leech_config_root,
+        ss_seed_share_root,
+        ss_leech_share_root,
+        logs_root,
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+
+    _generate_torrents(paths.root, torrents_root)
+
+    source_payload = paths.test_data_root / scenario.payload
+    seed_payload = _client_payload_path(
+        scenario.seed_client,
+        ss_seed_data_root if scenario.seed_client == CLIENT_SUPERSEEDR else lt_seed_data_root,
+        scenario,
+    )
+    leech_payload = _client_payload_path(
+        scenario.leech_client,
+        ss_leech_data_root if scenario.leech_client == CLIENT_SUPERSEEDR else lt_leech_data_root,
+        scenario,
+    )
+    _copy_payload(source_payload, seed_payload)
+
+    torrent_path = f"/fixtures/torrents/{scenario.mode}/{scenario.torrent}"
+    settings = dict(scenario.libtorrent_settings)
+    _write_peer_config(
+        lt_seed_config_root / "peer.json",
+        peer_id="seed",
+        role="seed",
+        listen_port=scenario.seed_listen_port,
+        torrent_path=torrent_path,
+        save_path="/data",
+        timeout_secs=timeout,
+        settings=settings,
+    )
+    _write_peer_config(
+        lt_leech_config_root / "peer.json",
+        peer_id="leech",
+        role="leech",
+        listen_port=scenario.leech_listen_port,
+        torrent_path=torrent_path,
+        save_path="/data",
+        timeout_secs=timeout,
+        settings=settings,
+    )
+    _write_superseedr_settings(
+        ss_seed_config_root / "settings.toml",
+        role="seed",
+        scenario=scenario,
+        client_port=16881,
+    )
+    _write_superseedr_settings(
+        ss_leech_config_root / "settings.toml",
+        role="leech",
+        scenario=scenario,
+        client_port=16882,
+    )
+
+    project_name = _project_name(run_id)
+    tracker_port = _reserve_local_port()
+    compose_env = {
+        "LIBTORRENT_LAB_TRACKER_PORT": str(tracker_port),
+        "LIBTORRENT_LAB_TRACKER_SCRIPT_PATH": str(paths.tracker_script.resolve()),
+        "LIBTORRENT_LAB_FIXTURES_PATH": str(fixtures_root.resolve()),
+        "LIBTORRENT_LAB_SEED_DATA_PATH": str(lt_seed_data_root.resolve()),
+        "LIBTORRENT_LAB_LEECH_DATA_PATH": str(lt_leech_data_root.resolve()),
+        "LIBTORRENT_LAB_SEED_CONFIG_PATH": str(lt_seed_config_root.resolve()),
+        "LIBTORRENT_LAB_LEECH_CONFIG_PATH": str(lt_leech_config_root.resolve()),
+        "LIBTORRENT_LAB_SEED_ARTIFACTS_PATH": str(lt_seed_artifacts_root.resolve()),
+        "LIBTORRENT_LAB_LEECH_ARTIFACTS_PATH": str(lt_leech_artifacts_root.resolve()),
+        "LIBTORRENT_LAB_SUPERSEEDR_PEER_TRANSPORT": scenario.superseedr_peer_transport,
+        "LIBTORRENT_LAB_SUPERSEEDR_SEED_DATA_PATH": str(ss_seed_data_root.resolve()),
+        "LIBTORRENT_LAB_SUPERSEEDR_LEECH_DATA_PATH": str(ss_leech_data_root.resolve()),
+        "LIBTORRENT_LAB_SUPERSEEDR_SEED_CONFIG_PATH": str(ss_seed_config_root.resolve()),
+        "LIBTORRENT_LAB_SUPERSEEDR_LEECH_CONFIG_PATH": str(ss_leech_config_root.resolve()),
+        "LIBTORRENT_LAB_SUPERSEEDR_SEED_SHARE_PATH": str(ss_seed_share_root.resolve()),
+        "LIBTORRENT_LAB_SUPERSEEDR_LEECH_SHARE_PATH": str(ss_leech_share_root.resolve()),
+    }
+    compose = DockerCompose(COMPOSE_FILE, project_name, compose_env)
+
+    summary: dict[str, object] = {
+        "run_id": run_id,
+        "scenario": scenario.name,
+        "seed_client": scenario.seed_client,
+        "leech_client": scenario.leech_client,
+        "superseedr_peer_transport": scenario.superseedr_peer_transport,
+        "artifacts_dir": str(run_root),
+        "ok": False,
+    }
+    started_at = time.monotonic()
+    seed_service = (
+        "superseedr_seed"
+        if scenario.seed_client == CLIENT_SUPERSEEDR
+        else "libtorrent_seed"
+    )
+    leech_service = (
+        "superseedr_leech"
+        if scenario.leech_client == CLIENT_SUPERSEEDR
+        else "libtorrent_leech"
+    )
+
+    try:
+        compose.down()
+        if not skip_build:
+            compose.run(["build", "libtorrent_seed"])
+            if CLIENT_SUPERSEEDR in {scenario.seed_client, scenario.leech_client}:
+                compose.run(["build", "superseedr_seed"])
+        compose.up(["tracker"], no_build=True)
+        _wait_for_tracker(tracker_port)
+        compose.up([seed_service], no_build=True)
+        if scenario.seed_client == CLIENT_SUPERSEEDR:
+            _wait_for_superseedr_seed_ready(ss_seed_share_root, timeout_secs=30)
+        else:
+            _wait_for_seed_ready(lt_seed_artifacts_root / "status.json", timeout_secs=30)
+        compose.up([leech_service], no_build=True)
+
+        deadline = time.monotonic() + timeout
+        validation: dict[str, object] = {"ok": False, "issues": ["not checked"]}
+        seed_status: dict[str, object] | None = None
+        leech_status: dict[str, object] | None = None
+        while time.monotonic() < deadline:
+            validation = _validate_download(leech_payload, source_payload)
+            if validation["ok"]:
+                summary["ok"] = True
+                if scenario.leech_client == CLIENT_LIBTORRENT:
+                    leech_status = _wait_for_seed_status(
+                        lt_leech_artifacts_root / "status.json",
+                        timeout_secs=10,
+                    )
+                else:
+                    leech_status = _wait_for_superseedr_counter_at_least(
+                        ss_leech_share_root,
+                        role="leech",
+                        field="session_total_downloaded",
+                        minimum=source_payload.stat().st_size,
+                        timeout_secs=10,
+                    )
+
+                if scenario.seed_client == CLIENT_LIBTORRENT:
+                    seed_status = _wait_for_counter_at_least(
+                        lt_seed_artifacts_root / "status.json",
+                        "total_upload",
+                        minimum=source_payload.stat().st_size,
+                        timeout_secs=10,
+                    )
+                else:
+                    seed_status = _wait_for_superseedr_counter_at_least(
+                        ss_seed_share_root,
+                        role="seed",
+                        field="session_total_uploaded",
+                        minimum=source_payload.stat().st_size,
+                        timeout_secs=10,
+                    )
+                break
+            time.sleep(1)
+
+        summary.update(
+            {
+                "duration_secs": round(time.monotonic() - started_at, 3),
+                "validation": validation,
+                "seed_status": seed_status
+                if seed_status is not None
+                else _scenario_client_status(
+                    scenario.seed_client,
+                    "seed",
+                    lt_seed_artifacts_root,
+                    ss_seed_share_root,
+                ),
+                "leech_status": leech_status
+                if leech_status is not None
+                else _scenario_client_status(
+                    scenario.leech_client,
+                    "leech",
+                    lt_leech_artifacts_root,
+                    ss_leech_share_root,
+                ),
+            }
+        )
+        return summary
+    finally:
+        (logs_root / "compose_ps.txt").write_text(compose.ps(), encoding="utf-8")
+        (logs_root / "tracker.log").write_text(compose.logs("tracker", tail=1000), encoding="utf-8")
+        (logs_root / "libtorrent_seed.log").write_text(
+            compose.logs("libtorrent_seed", tail=1000),
+            encoding="utf-8",
+        )
+        (logs_root / "libtorrent_leech.log").write_text(
+            compose.logs("libtorrent_leech", tail=1000),
+            encoding="utf-8",
+        )
+        (logs_root / "superseedr_seed.log").write_text(
+            compose.logs("superseedr_seed", tail=1000),
+            encoding="utf-8",
+        )
+        (logs_root / "superseedr_leech.log").write_text(
+            compose.logs("superseedr_leech", tail=1000),
+            encoding="utf-8",
+        )
+        _write_json(run_root / "summary.json", summary)
+        compose.down()
+
+
+def _scenario_client_status(
+    client: str,
+    role: str,
+    lt_artifacts_root: Path,
+    ss_share_root: Path,
+) -> dict[str, object]:
+    if client == CLIENT_SUPERSEEDR:
+        return _read_superseedr_status(ss_share_root, role=role)
+    status = _read_status(lt_artifacts_root / "status.json")
+    status["client"] = CLIENT_LIBTORRENT
+    return status
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Run Dockerized libtorrent lab scenarios")
+    p.add_argument("--scenario", default="basic_ul_dl")
+    p.add_argument("--run-id", default="")
+    p.add_argument("--timeout-secs", type=int, default=0)
+    p.add_argument("--skip-build", action="store_true")
+    return p.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    scenario_path = SCENARIOS_ROOT / f"{args.scenario}.json"
+    if not scenario_path.exists():
+        raise SystemExit(f"Unknown libtorrent lab scenario: {args.scenario}")
+    scenario = LabScenario.from_file(scenario_path)
+    run_id = args.run_id or f"libtorrent_lab_{scenario.name}_{_utc_stamp()}"
+    summary = run_lab_scenario(
+        scenario=scenario,
+        run_id=run_id,
+        timeout_secs=args.timeout_secs or None,
+        skip_build=args.skip_build,
+    )
+    print(f"LIBTORRENT_LAB_RESULT {'PASS' if summary['ok'] else 'FAIL'} artifacts={summary['artifacts_dir']}")
+    return 0 if summary["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
