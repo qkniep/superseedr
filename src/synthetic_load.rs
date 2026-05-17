@@ -5,10 +5,10 @@ use crate::app::TorrentMetrics;
 use crate::config::Settings;
 use crate::integrations::cli::{
     SyntheticBenchmarkArgs, SyntheticLoadAddMode, SyntheticLoadArgs, SyntheticLoadMode,
-    SyntheticTransport,
+    SyntheticTransport, SyntheticUdpChaosArgs,
 };
 use crate::networking::protocol::{generate_message, Message};
-use crate::networking::shared_udp::{SharedUdpFamily, SharedUdpHandle};
+use crate::networking::shared_udp::{SharedUdpFamily, SharedUdpHandle, SHARED_UDP_CHAOS_ENV};
 use crate::networking::transport::PeerTransportKind;
 use crate::networking::{PeerConnection, TcpPeerTransport, UtpListenerSet, UtpPeerTransport};
 use crate::resource_manager::{
@@ -653,6 +653,7 @@ struct SyntheticSummary {
     run_id: String,
     mode: String,
     transport: String,
+    utp_chaos: Option<String>,
     add_mode: String,
     peer_add_mode: String,
     torrents: usize,
@@ -705,6 +706,7 @@ struct SyntheticSummary {
 struct BenchmarkSummary {
     run_id: String,
     transport: String,
+    utp_chaos: Option<String>,
     interrupted: bool,
     disk_budget_bytes: u64,
     preferred_size_per_torrent_bytes: u64,
@@ -1036,6 +1038,10 @@ struct SyntheticTransportEnvGuard {
     previous_peer_transport: Option<String>,
 }
 
+struct SharedUdpChaosEnvGuard {
+    previous_chaos: Option<String>,
+}
+
 impl SyntheticTransportEnvGuard {
     fn new(transport: SyntheticTransport) -> Self {
         let guard = Self {
@@ -1048,6 +1054,21 @@ impl SyntheticTransportEnvGuard {
     }
 }
 
+impl SharedUdpChaosEnvGuard {
+    fn new(chaos: SyntheticUdpChaosArgs) -> Self {
+        let guard = Self {
+            previous_chaos: std::env::var(SHARED_UDP_CHAOS_ENV).ok(),
+        };
+
+        match shared_udp_chaos_env_value(chaos) {
+            Some(value) => std::env::set_var(SHARED_UDP_CHAOS_ENV, value),
+            None => std::env::remove_var(SHARED_UDP_CHAOS_ENV),
+        }
+
+        guard
+    }
+}
+
 impl Drop for SyntheticTransportEnvGuard {
     fn drop(&mut self) {
         restore_env_var(
@@ -1055,6 +1076,33 @@ impl Drop for SyntheticTransportEnvGuard {
             self.previous_peer_transport.as_deref(),
         );
     }
+}
+
+impl Drop for SharedUdpChaosEnvGuard {
+    fn drop(&mut self) {
+        restore_env_var(SHARED_UDP_CHAOS_ENV, self.previous_chaos.as_deref());
+    }
+}
+
+fn shared_udp_chaos_env_value(chaos: SyntheticUdpChaosArgs) -> Option<String> {
+    if chaos.utp_chaos_loss_ppm == 0
+        && chaos.utp_chaos_duplicate_ppm == 0
+        && chaos.utp_chaos_corrupt_ppm == 0
+        && chaos.utp_chaos_reorder_ppm == 0
+        && chaos.utp_chaos_max_delay_ms == 0
+    {
+        return None;
+    }
+
+    Some(format!(
+        "seed={},loss_ppm={},duplicate_ppm={},corrupt_ppm={},reorder_ppm={},max_delay_ms={}",
+        chaos.utp_chaos_seed,
+        chaos.utp_chaos_loss_ppm,
+        chaos.utp_chaos_duplicate_ppm,
+        chaos.utp_chaos_corrupt_ppm,
+        chaos.utp_chaos_reorder_ppm,
+        chaos.utp_chaos_max_delay_ms,
+    ))
 }
 
 fn restore_env_var(name: &str, value: Option<&str>) {
@@ -1112,6 +1160,7 @@ async fn run_once(
 ) -> Result<(SyntheticSummary, PathBuf, PathBuf), DynError> {
     let config = ParsedSyntheticConfig::from_args(args)?;
     let _transport_env_guard = SyntheticTransportEnvGuard::new(args.transport);
+    let _chaos_env_guard = SharedUdpChaosEnvGuard::new(args.utp_chaos);
     let run_id = Local::now().format("run_%Y%m%d_%H%M%S").to_string();
     let output_dir = args.out.join(&run_id);
     tokio::fs::create_dir_all(&output_dir).await?;
@@ -1385,6 +1434,7 @@ pub async fn run_benchmark(
     let summary = BenchmarkSummary {
         run_id,
         transport: args.transport.as_str().to_string(),
+        utp_chaos: shared_udp_chaos_env_value(args.utp_chaos),
         interrupted,
         disk_budget_bytes: config.disk_budget,
         preferred_size_per_torrent_bytes: config.preferred_size_per_torrent,
@@ -1640,6 +1690,7 @@ struct ParsedBenchmarkConfig {
 
 impl ParsedBenchmarkConfig {
     fn from_args(args: &SyntheticBenchmarkArgs) -> Result<Self, DynError> {
+        validate_udp_chaos_args(args.utp_chaos)?;
         if args.start_torrents == 0 || args.max_torrents == 0 {
             return Err("benchmark requires torrent counts greater than 0".into());
         }
@@ -1714,6 +1765,7 @@ impl ParsedBenchmarkConfig {
 
 impl ParsedSyntheticConfig {
     fn from_args(args: &SyntheticLoadArgs) -> Result<Self, DynError> {
+        validate_udp_chaos_args(args.utp_chaos)?;
         if args.torrents == 0 {
             return Err("synthetic-load requires --torrents greater than 0".into());
         }
@@ -1759,6 +1811,22 @@ impl ParsedSyntheticConfig {
             piece_size,
         })
     }
+}
+
+fn validate_udp_chaos_args(chaos: SyntheticUdpChaosArgs) -> Result<(), DynError> {
+    const MAX_PPM: u32 = 1_000_000;
+    let values = [
+        ("--utp-chaos-loss-ppm", chaos.utp_chaos_loss_ppm),
+        ("--utp-chaos-duplicate-ppm", chaos.utp_chaos_duplicate_ppm),
+        ("--utp-chaos-corrupt-ppm", chaos.utp_chaos_corrupt_ppm),
+        ("--utp-chaos-reorder-ppm", chaos.utp_chaos_reorder_ppm),
+    ];
+    for (name, value) in values {
+        if value > MAX_PPM {
+            return Err(format!("{name} must be between 0 and {MAX_PPM}").into());
+        }
+    }
+    Ok(())
 }
 
 struct SideSetup {
@@ -3117,6 +3185,7 @@ async fn sample_loop(
         run_id: run_id.to_string(),
         mode: mode_name(args.mode).to_string(),
         transport: args.transport.as_str().to_string(),
+        utp_chaos: shared_udp_chaos_env_value(args.utp_chaos),
         add_mode: add_mode_name(add_plan.mode).to_string(),
         peer_add_mode: add_mode_name(peer_plan.mode).to_string(),
         torrents: args.torrents,
@@ -3461,6 +3530,7 @@ fn benchmark_synthetic_args(
         leecher_pipeline: args.leecher_pipeline,
         target_gbps: Some(args.target_gbps),
         transport: args.transport,
+        utp_chaos: args.utp_chaos,
         peer_connection_permits: args.peer_connection_permits,
         disk_read_permits: args.disk_read_permits,
         disk_write_permits: args.disk_write_permits,
@@ -5093,6 +5163,41 @@ mod tests {
     }
 
     #[test]
+    fn default_utp_chaos_does_not_set_shared_udp_env() {
+        assert!(shared_udp_chaos_env_value(SyntheticUdpChaosArgs::default()).is_none());
+    }
+
+    #[test]
+    fn utp_chaos_args_build_reproducible_env_spec() {
+        let chaos = SyntheticUdpChaosArgs {
+            utp_chaos_seed: 42,
+            utp_chaos_loss_ppm: 1_000,
+            utp_chaos_duplicate_ppm: 2_000,
+            utp_chaos_corrupt_ppm: 3_000,
+            utp_chaos_reorder_ppm: 4_000,
+            utp_chaos_max_delay_ms: 50,
+        };
+
+        assert_eq!(
+            shared_udp_chaos_env_value(chaos),
+            Some(
+                "seed=42,loss_ppm=1000,duplicate_ppm=2000,corrupt_ppm=3000,reorder_ppm=4000,max_delay_ms=50"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn utp_chaos_validation_rejects_invalid_ppm() {
+        let chaos = SyntheticUdpChaosArgs {
+            utp_chaos_loss_ppm: 1_000_001,
+            ..SyntheticUdpChaosArgs::default()
+        };
+
+        assert!(validate_udp_chaos_args(chaos).is_err());
+    }
+
+    #[test]
     fn shared_utp_seeder_hub_uses_unique_synthetic_peer_keys() {
         let hub = SyntheticSeederHub::SharedUtp { port: 34_567 };
 
@@ -5237,6 +5342,7 @@ mod tests {
             leecher_pipeline: 1,
             target_gbps: 1.0,
             transport: SyntheticTransport::Tcp,
+            utp_chaos: SyntheticUdpChaosArgs::default(),
             peer_add_interval_ms: 1000,
             peer_add_burst_size: 1,
             peer_connection_permits: None,

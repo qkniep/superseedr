@@ -5,7 +5,10 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket as StdUdpSocket};
-use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, LazyLock, Mutex as StdMutex, Weak,
+};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
@@ -15,6 +18,9 @@ const MAX_DATAGRAM_SIZE: usize = 65_535;
 const SHARED_UDP_SUBSCRIBER_QUEUE_CAPACITY: usize = 1_024;
 const SHARED_UDP_BIND_RETRY_ATTEMPTS: usize = 16;
 const SHARED_UDP_BIND_RETRY_DELAY: Duration = Duration::from_millis(1);
+const CHAOS_PPM_DENOMINATOR: u64 = 1_000_000;
+
+pub const SHARED_UDP_CHAOS_ENV: &str = "SUPERSEEDR_SHARED_UDP_CHAOS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SharedUdpFamily {
@@ -44,6 +50,8 @@ pub struct SharedUdpDatagram {
 struct SharedUdpInner {
     key: SharedUdpKey,
     socket: Arc<UdpSocket>,
+    chaos: SharedUdpChaosConfig,
+    chaos_sequence: AtomicU64,
     dht_tx: StdMutex<Option<mpsc::Sender<SharedUdpDatagram>>>,
     utp_tx: StdMutex<Option<mpsc::Sender<SharedUdpDatagram>>>,
     shutdown_tx: watch::Sender<bool>,
@@ -57,6 +65,24 @@ pub struct SharedUdpHandle {
 
 static SHARED_UDP_REGISTRY: LazyLock<StdMutex<HashMap<SharedUdpKey, Weak<SharedUdpInner>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SharedUdpChaosConfig {
+    seed: u64,
+    loss_ppm: u32,
+    duplicate_ppm: u32,
+    corrupt_ppm: u32,
+    reorder_ppm: u32,
+    max_delay_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SharedUdpChaosAction {
+    drop_original: bool,
+    duplicate: bool,
+    corrupt: bool,
+    delay: Duration,
+}
 
 impl SharedUdpKey {
     pub fn new(bind_addr: SocketAddr, family: SharedUdpFamily) -> Self {
@@ -107,6 +133,8 @@ impl SharedUdpHandle {
         let inner = Arc::new(SharedUdpInner {
             key: actual_key,
             socket: socket.clone(),
+            chaos: SharedUdpChaosConfig::from_env(),
+            chaos_sequence: AtomicU64::new(0),
             dht_tx: StdMutex::new(None),
             utp_tx: StdMutex::new(None),
             shutdown_tx,
@@ -143,7 +171,40 @@ impl SharedUdpHandle {
     }
 
     pub async fn send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
-        self.inner.socket.send_to(payload, target).await
+        if self.inner.chaos.is_disabled() {
+            return self.inner.socket.send_to(payload, target).await;
+        }
+        let action = self.inner.chaos.action_for(
+            self.inner.chaos_sequence.fetch_add(1, Ordering::Relaxed),
+            self.inner.key,
+            target,
+            payload,
+        );
+        if action.drop_original {
+            tracing::trace!(%target, "shared UDP chaos dropped outbound datagram");
+            return Ok(payload.len());
+        }
+
+        let mut datagram = payload.to_vec();
+        if action.corrupt {
+            corrupt_datagram(&mut datagram);
+        }
+
+        if action.duplicate {
+            send_chaos_datagram(
+                self.inner.socket.clone(),
+                target,
+                datagram.clone(),
+                action.delay,
+            );
+        }
+
+        if !action.delay.is_zero() {
+            send_chaos_datagram(self.inner.socket.clone(), target, datagram, action.delay);
+            return Ok(payload.len());
+        }
+
+        self.inner.socket.send_to(&datagram, target).await
     }
 
     pub fn subscribe(
@@ -306,6 +367,160 @@ fn dispatch_datagram(inner: &SharedUdpInner, source: SocketAddr, payload: &[u8])
     }
 }
 
+fn send_chaos_datagram(
+    socket: Arc<UdpSocket>,
+    target: SocketAddr,
+    datagram: Vec<u8>,
+    delay: Duration,
+) {
+    tokio::spawn(async move {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        let _ = socket.send_to(&datagram, target).await;
+    });
+}
+
+fn corrupt_datagram(datagram: &mut [u8]) {
+    if let Some(byte) = datagram.last_mut() {
+        *byte ^= 0x80;
+    }
+}
+
+impl SharedUdpChaosConfig {
+    fn from_env() -> Self {
+        std::env::var(SHARED_UDP_CHAOS_ENV)
+            .ok()
+            .and_then(|value| Self::parse(&value))
+            .unwrap_or_default()
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        let mut config = Self::default();
+        for part in value
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            let (key, value) = part.split_once('=')?;
+            match key.trim() {
+                "seed" => config.seed = value.trim().parse().ok()?,
+                "loss_ppm" => config.loss_ppm = parse_ppm(value)?,
+                "duplicate_ppm" => config.duplicate_ppm = parse_ppm(value)?,
+                "corrupt_ppm" => config.corrupt_ppm = parse_ppm(value)?,
+                "reorder_ppm" => config.reorder_ppm = parse_ppm(value)?,
+                "max_delay_ms" => config.max_delay_ms = value.trim().parse().ok()?,
+                _ => return None,
+            }
+        }
+        Some(config)
+    }
+
+    fn is_disabled(self) -> bool {
+        self.loss_ppm == 0
+            && self.duplicate_ppm == 0
+            && self.corrupt_ppm == 0
+            && self.reorder_ppm == 0
+            && self.max_delay_ms == 0
+    }
+
+    fn action_for(
+        self,
+        sequence: u64,
+        key: SharedUdpKey,
+        target: SocketAddr,
+        payload: &[u8],
+    ) -> SharedUdpChaosAction {
+        if self.is_disabled() {
+            return SharedUdpChaosAction {
+                drop_original: false,
+                duplicate: false,
+                corrupt: false,
+                delay: Duration::ZERO,
+            };
+        }
+
+        let sample = chaos_sample(self.seed, sequence, key, target, payload);
+        let drop_original = chance(sample, self.loss_ppm, 0);
+        let duplicate = chance(sample, self.duplicate_ppm, 1);
+        let corrupt = chance(sample, self.corrupt_ppm, 2);
+        let reorder = chance(sample, self.reorder_ppm, 3);
+        let delay = if self.max_delay_ms == 0 {
+            Duration::ZERO
+        } else if reorder {
+            Duration::from_millis(chaos_delay_ms(sample, self.max_delay_ms, 4))
+        } else {
+            Duration::from_millis(chaos_delay_ms(sample, self.max_delay_ms, 5) / 4)
+        };
+
+        SharedUdpChaosAction {
+            drop_original,
+            duplicate,
+            corrupt,
+            delay,
+        }
+    }
+}
+
+fn parse_ppm(value: &str) -> Option<u32> {
+    let ppm = value.trim().parse::<u32>().ok()?;
+    (u64::from(ppm) <= CHAOS_PPM_DENOMINATOR).then_some(ppm)
+}
+
+fn chance(sample: u64, ppm: u32, stream: u64) -> bool {
+    if ppm == 0 {
+        return false;
+    }
+    splitmix64(sample ^ stream) % CHAOS_PPM_DENOMINATOR < u64::from(ppm)
+}
+
+fn chaos_delay_ms(sample: u64, max_delay_ms: u64, stream: u64) -> u64 {
+    if max_delay_ms == 0 {
+        return 0;
+    }
+    splitmix64(sample ^ stream) % (max_delay_ms.saturating_add(1))
+}
+
+fn chaos_sample(
+    seed: u64,
+    sequence: u64,
+    key: SharedUdpKey,
+    target: SocketAddr,
+    payload: &[u8],
+) -> u64 {
+    let mut sample = seed ^ sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    sample ^= socket_addr_hash(key.bind_addr());
+    sample ^= socket_addr_hash(target).rotate_left(17);
+    sample ^= (payload.len() as u64).rotate_left(29);
+    if let Some(first) = payload.first() {
+        sample ^= u64::from(*first).rotate_left(7);
+    }
+    if let Some(last) = payload.last() {
+        sample ^= u64::from(*last).rotate_left(41);
+    }
+    splitmix64(sample)
+}
+
+fn socket_addr_hash(addr: SocketAddr) -> u64 {
+    let ip_hash = match addr.ip() {
+        IpAddr::V4(ip) => u32::from(ip) as u64,
+        IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            segments.into_iter().fold(0u64, |hash, segment| {
+                hash.rotate_left(11) ^ u64::from(segment)
+            })
+        }
+    };
+    ip_hash ^ (u64::from(addr.port()) << 48)
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
 fn looks_like_dht(payload: &[u8]) -> bool {
     payload.first().copied() == Some(b'd')
 }
@@ -411,5 +626,85 @@ mod tests {
         assert_eq!(dht.payload, b"d1:eli201ee");
         assert_eq!(utp.payload[0] >> 4, 4);
         handle.shutdown().await;
+    }
+
+    #[test]
+    fn shared_udp_chaos_config_parses_spec() {
+        let config = SharedUdpChaosConfig::parse(
+            "seed=42,loss_ppm=1000,duplicate_ppm=2000,corrupt_ppm=3000,reorder_ppm=4000,max_delay_ms=50",
+        )
+        .unwrap();
+
+        assert_eq!(
+            config,
+            SharedUdpChaosConfig {
+                seed: 42,
+                loss_ppm: 1_000,
+                duplicate_ppm: 2_000,
+                corrupt_ppm: 3_000,
+                reorder_ppm: 4_000,
+                max_delay_ms: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn shared_udp_chaos_config_rejects_invalid_ppm() {
+        assert!(SharedUdpChaosConfig::parse("loss_ppm=1000001").is_none());
+    }
+
+    #[test]
+    fn shared_udp_chaos_action_is_deterministic() {
+        let config = SharedUdpChaosConfig {
+            seed: 7,
+            loss_ppm: 10_000,
+            duplicate_ppm: 10_000,
+            corrupt_ppm: 10_000,
+            reorder_ppm: 10_000,
+            max_delay_ms: 20,
+        };
+        let key = SharedUdpKey::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10_000),
+            SharedUdpFamily::Ipv4,
+        );
+        let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 20_000);
+
+        assert_eq!(
+            config.action_for(123, key, target, b"payload"),
+            config.action_for(123, key, target, b"payload")
+        );
+    }
+
+    #[test]
+    fn shared_udp_chaos_action_can_force_all_faults() {
+        let config = SharedUdpChaosConfig {
+            seed: 7,
+            loss_ppm: 1_000_000,
+            duplicate_ppm: 1_000_000,
+            corrupt_ppm: 1_000_000,
+            reorder_ppm: 1_000_000,
+            max_delay_ms: 20,
+        };
+        let key = SharedUdpKey::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10_000),
+            SharedUdpFamily::Ipv4,
+        );
+        let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 20_000);
+
+        let action = config.action_for(123, key, target, b"payload");
+
+        assert!(action.drop_original);
+        assert!(action.duplicate);
+        assert!(action.corrupt);
+        assert!(action.delay <= Duration::from_millis(20));
+    }
+
+    #[test]
+    fn corrupt_datagram_flips_last_byte() {
+        let mut datagram = vec![0x00, 0x7f];
+
+        corrupt_datagram(&mut datagram);
+
+        assert_eq!(datagram, vec![0x00, 0xff]);
     }
 }

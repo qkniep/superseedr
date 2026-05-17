@@ -535,7 +535,7 @@ fn spawn_utp_demux_task(
 }
 
 async fn dispatch_utp_datagram(endpoint: &Arc<UtpEndpointInner>, datagram: SharedUdpDatagram) {
-    let Ok(packet) = UtpPacket::decode(&datagram.payload) else {
+    let Ok(packet) = decode_packet(&datagram.payload) else {
         return;
     };
     if packet.packet_type == TYPE_SYN {
@@ -755,43 +755,119 @@ impl UtpPacket {
         })
     }
 
+    #[cfg(test)]
     fn decode(bytes: &[u8]) -> io::Result<Self> {
-        if bytes.len() < HEADER_LEN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "uTP packet shorter than header",
-            ));
-        }
+        decode_packet(bytes)
+    }
+}
 
-        let packet_type = bytes[0] >> 4;
-        let version = bytes[0] & 0x0f;
-        if version != UTP_VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unsupported uTP packet version",
-            ));
-        }
-        if packet_type > TYPE_SYN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unsupported uTP packet type",
-            ));
-        }
-        let (payload_offset, selective_ack) = parse_extension_chain(bytes, bytes[1])?;
+fn decode_packet(bytes: &[u8]) -> io::Result<UtpPacket> {
+    if bytes.len() < HEADER_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "uTP packet shorter than header",
+        ));
+    }
 
-        Ok(Self {
-            packet_type,
-            connection_id: u16::from_be_bytes([bytes[2], bytes[3]]),
-            timestamp_microseconds: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-            timestamp_difference_microseconds: u32::from_be_bytes([
-                bytes[8], bytes[9], bytes[10], bytes[11],
-            ]),
-            wnd_size: u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
-            seq_nr: u16::from_be_bytes([bytes[16], bytes[17]]),
-            ack_nr: u16::from_be_bytes([bytes[18], bytes[19]]),
-            selective_ack,
-            payload: bytes[payload_offset..].to_vec(),
-        })
+    let packet_type = bytes[0] >> 4;
+    let version = bytes[0] & 0x0f;
+    if version != UTP_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported uTP packet version",
+        ));
+    }
+    if packet_type > TYPE_SYN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported uTP packet type",
+        ));
+    }
+    let (payload_offset, selective_ack) = parse_extension_chain(bytes, bytes[1])?;
+
+    Ok(UtpPacket {
+        packet_type,
+        connection_id: u16::from_be_bytes([bytes[2], bytes[3]]),
+        timestamp_microseconds: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        timestamp_difference_microseconds: u32::from_be_bytes([
+            bytes[8], bytes[9], bytes[10], bytes[11],
+        ]),
+        wnd_size: u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+        seq_nr: u16::from_be_bytes([bytes[16], bytes[17]]),
+        ack_nr: u16::from_be_bytes([bytes[18], bytes[19]]),
+        selective_ack,
+        payload: bytes[payload_offset..].to_vec(),
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn decode_packet_for_fuzzing(bytes: &[u8]) -> bool {
+    decode_packet(bytes).is_ok()
+}
+
+#[allow(dead_code)]
+pub(crate) fn roundtrip_packet_for_fuzzing(bytes: &[u8]) {
+    let mut input = UtpFuzzInput::new(bytes);
+    let selective_ack_len = usize::from(input.next_u8() % 4) * SACK_EXTENSION_BYTES;
+    let mut selective_ack = input.take(selective_ack_len);
+    selective_ack.resize(selective_ack_len, 0);
+    let packet = UtpPacket {
+        packet_type: input.next_u8() % (TYPE_SYN + 1),
+        connection_id: input.next_u16(),
+        timestamp_microseconds: input.next_u32(),
+        timestamp_difference_microseconds: input.next_u32(),
+        wnd_size: input.next_u32(),
+        seq_nr: input.next_u16(),
+        ack_nr: input.next_u16(),
+        selective_ack,
+        payload: input.take(input.remaining().min(MAX_PACKET_SIZE)),
+    };
+
+    let decoded = decode_packet(&packet.encode()).expect("structured uTP packet decodes");
+    assert_eq!(decoded, packet);
+}
+
+#[allow(dead_code)]
+struct UtpFuzzInput<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+#[allow(dead_code)]
+impl<'a> UtpFuzzInput<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn next_u8(&mut self) -> u8 {
+        let byte = self.bytes.get(self.offset).copied().unwrap_or_default();
+        self.offset = self.offset.saturating_add(1);
+        byte
+    }
+
+    fn next_u16(&mut self) -> u16 {
+        u16::from_be_bytes([self.next_u8(), self.next_u8()])
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        u32::from_be_bytes([
+            self.next_u8(),
+            self.next_u8(),
+            self.next_u8(),
+            self.next_u8(),
+        ])
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.offset)
+    }
+
+    fn take(&mut self, len: usize) -> Vec<u8> {
+        let start = self.offset.min(self.bytes.len());
+        let end = start.saturating_add(len).min(self.bytes.len());
+        let data = self.bytes[start..end].to_vec();
+        self.offset = end;
+        data
     }
 }
 
@@ -1913,6 +1989,34 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UdpSocket;
 
+    fn test_syn(connection_id: u16, seq_nr: u16) -> UtpPacket {
+        UtpPacket {
+            packet_type: TYPE_SYN,
+            connection_id,
+            timestamp_microseconds: 10,
+            timestamp_difference_microseconds: 0,
+            wnd_size: RECEIVE_WINDOW,
+            seq_nr,
+            ack_nr: 0,
+            selective_ack: Vec::new(),
+            payload: Vec::new(),
+        }
+    }
+
+    fn test_reset(connection_id: u16, ack_nr: u16) -> UtpPacket {
+        UtpPacket {
+            packet_type: TYPE_RESET,
+            connection_id,
+            timestamp_microseconds: 20,
+            timestamp_difference_microseconds: 0,
+            wnd_size: RECEIVE_WINDOW,
+            seq_nr: 1,
+            ack_nr,
+            selective_ack: Vec::new(),
+            payload: Vec::new(),
+        }
+    }
+
     #[test]
     fn packet_round_trips() {
         let packet = UtpPacket {
@@ -2051,6 +2155,33 @@ mod tests {
         assert_eq!(outcome.acked_packets.len(), 2);
         assert_eq!(unacked.len(), 1);
         assert_eq!(unacked.front().unwrap().seq_nr, 11);
+    }
+
+    #[test]
+    fn ack_processing_ignores_stale_ack_numbers() {
+        let mut unacked = VecDeque::from([
+            SentPacket {
+                packet_type: TYPE_DATA,
+                seq_nr: 10,
+                payload: vec![1],
+                sent_at: Instant::now(),
+                retransmits: 0,
+            },
+            SentPacket {
+                packet_type: TYPE_DATA,
+                seq_nr: 11,
+                payload: vec![2],
+                sent_at: Instant::now(),
+                retransmits: 0,
+            },
+        ]);
+
+        let outcome = acknowledge_packets(&mut unacked, 9, &[]);
+
+        assert!(!outcome.advanced_ack);
+        assert!(outcome.acked_packets.is_empty());
+        assert_eq!(unacked.len(), 2);
+        assert_eq!(unacked.front().unwrap().seq_nr, 10);
     }
 
     #[test]
@@ -2403,6 +2534,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn outbound_connection_treats_duplicate_fin_as_eof_once() {
+        let server = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let mut buf = vec![0_u8; 2_048];
+            let (n, client_addr) = server.recv_from(&mut buf).await.unwrap();
+            let syn = UtpPacket::decode(&buf[..n]).unwrap();
+            assert_eq!(syn.packet_type, TYPE_SYN);
+
+            let server_seq_nr = 77;
+            let state = UtpPacket {
+                packet_type: TYPE_STATE,
+                connection_id: syn.connection_id,
+                timestamp_microseconds: 1,
+                timestamp_difference_microseconds: 0,
+                wnd_size: RECEIVE_WINDOW,
+                seq_nr: server_seq_nr,
+                ack_nr: syn.seq_nr,
+                selective_ack: Vec::new(),
+                payload: Vec::new(),
+            };
+            server.send_to(&state.encode(), client_addr).await.unwrap();
+
+            let data = UtpPacket {
+                packet_type: TYPE_DATA,
+                connection_id: syn.connection_id,
+                timestamp_microseconds: 2,
+                timestamp_difference_microseconds: 0,
+                wnd_size: RECEIVE_WINDOW,
+                seq_nr: server_seq_nr,
+                ack_nr: syn.seq_nr,
+                selective_ack: Vec::new(),
+                payload: b"done".to_vec(),
+            };
+            server.send_to(&data.encode(), client_addr).await.unwrap();
+
+            let fin = UtpPacket {
+                packet_type: TYPE_FIN,
+                connection_id: syn.connection_id,
+                timestamp_microseconds: 3,
+                timestamp_difference_microseconds: 0,
+                wnd_size: RECEIVE_WINDOW,
+                seq_nr: server_seq_nr.wrapping_add(1),
+                ack_nr: syn.seq_nr,
+                selective_ack: Vec::new(),
+                payload: Vec::new(),
+            };
+            server.send_to(&fin.encode(), client_addr).await.unwrap();
+            server.send_to(&fin.encode(), client_addr).await.unwrap();
+        });
+
+        let mut connection = UtpPeerTransport::connect(server_addr).await.unwrap();
+        let mut payload = Vec::new();
+        time::timeout(
+            Duration::from_secs(1),
+            connection.stream.read_to_end(&mut payload),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(&payload, b"done");
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn outbound_connection_retransmits_unacked_fin() {
+        let server = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let mut buf = vec![0_u8; 2_048];
+            let (n, client_addr) = server.recv_from(&mut buf).await.unwrap();
+            let syn = UtpPacket::decode(&buf[..n]).unwrap();
+            assert_eq!(syn.packet_type, TYPE_SYN);
+
+            let state = UtpPacket {
+                packet_type: TYPE_STATE,
+                connection_id: syn.connection_id,
+                timestamp_microseconds: 1,
+                timestamp_difference_microseconds: 0,
+                wnd_size: RECEIVE_WINDOW,
+                seq_nr: 77,
+                ack_nr: syn.seq_nr,
+                selective_ack: Vec::new(),
+                payload: Vec::new(),
+            };
+            server.send_to(&state.encode(), client_addr).await.unwrap();
+
+            let mut fins = Vec::new();
+            while fins.len() < 2 {
+                let (n, _) = time::timeout(Duration::from_secs(3), server.recv_from(&mut buf))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let packet = UtpPacket::decode(&buf[..n]).unwrap();
+                if packet.packet_type == TYPE_FIN {
+                    fins.push(packet);
+                }
+            }
+
+            assert_eq!(fins[0].connection_id, syn.connection_id.wrapping_add(1));
+            assert_eq!(fins[1].connection_id, syn.connection_id.wrapping_add(1));
+            assert_eq!(fins[0].seq_nr, fins[1].seq_nr);
+        });
+
+        let mut connection = UtpPeerTransport::connect(server_addr).await.unwrap();
+        connection.stream.shutdown().await.unwrap();
+
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn inbound_listener_resends_state_for_retransmitted_syn() {
         let listener = UtpPeerTransport::bind_listener(0).await.unwrap();
         let listen_addr = SocketAddr::new(
@@ -2412,17 +2661,7 @@ mod tests {
         let client = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
             .await
             .unwrap();
-        let syn = UtpPacket {
-            packet_type: TYPE_SYN,
-            connection_id: 0x1234,
-            timestamp_microseconds: 10,
-            timestamp_difference_microseconds: 0,
-            wnd_size: RECEIVE_WINDOW,
-            seq_nr: 9,
-            ack_nr: 0,
-            selective_ack: Vec::new(),
-            payload: Vec::new(),
-        };
+        let syn = test_syn(0x1234, 9);
         let mut buf = vec![0_u8; 2_048];
 
         client.send_to(&syn.encode(), listen_addr).await.unwrap();
@@ -2453,6 +2692,118 @@ mod tests {
                 .is_err(),
             "duplicate SYN should not enqueue a second accepted connection"
         );
+    }
+
+    #[tokio::test]
+    async fn inbound_listener_ignores_adversarial_udp_without_accepting() {
+        let listener = UtpPeerTransport::bind_listener(0).await.unwrap();
+        let listen_addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            listener.local_port().unwrap(),
+        );
+        let client = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .unwrap();
+        let mut wrong_version = test_syn(0x1234, 9).encode();
+        wrong_version[0] = (TYPE_SYN << 4) | 2;
+        let mut wrong_type = test_syn(0x1235, 10).encode();
+        wrong_type[0] = (7 << 4) | UTP_VERSION;
+        let stale_data = UtpPacket {
+            packet_type: TYPE_DATA,
+            connection_id: 0x1236,
+            timestamp_microseconds: 10,
+            timestamp_difference_microseconds: 0,
+            wnd_size: RECEIVE_WINDOW,
+            seq_nr: 11,
+            ack_nr: 0,
+            selective_ack: Vec::new(),
+            payload: b"ignored".to_vec(),
+        };
+        let stale_data = stale_data.encode();
+
+        for payload in [
+            b"not utp".as_slice(),
+            wrong_version.as_slice(),
+            wrong_type.as_slice(),
+            stale_data.as_slice(),
+        ] {
+            client.send_to(payload, listen_addr).await.unwrap();
+        }
+
+        assert!(
+            time::timeout(Duration::from_millis(150), listener.accept())
+                .await
+                .is_err(),
+            "invalid or stale UDP datagrams must not create accepted uTP connections"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_listener_resets_syn_when_accept_queue_is_full() {
+        let listener = UtpPeerTransport::bind_listener(0).await.unwrap();
+        let listen_addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            listener.local_port().unwrap(),
+        );
+        let client = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .unwrap();
+        let mut buf = vec![0_u8; 2_048];
+        let syn_count = UTP_ACCEPT_QUEUE_CAPACITY + 1;
+
+        for offset in 0..syn_count {
+            let connection_id = 0x2000_u16.wrapping_add(offset as u16);
+            let seq_nr = 100_u16.wrapping_add(offset as u16);
+            client
+                .send_to(&test_syn(connection_id, seq_nr).encode(), listen_addr)
+                .await
+                .unwrap();
+        }
+
+        let mut states = Vec::new();
+        let mut resets = 0usize;
+        while states.len() + resets < syn_count {
+            let (n, _) = time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            let packet = UtpPacket::decode(&buf[..n]).unwrap();
+            match packet.packet_type {
+                TYPE_STATE => states.push(packet),
+                TYPE_RESET => resets += 1,
+                _ => {}
+            }
+        }
+
+        assert_eq!(states.len(), UTP_ACCEPT_QUEUE_CAPACITY);
+        assert_eq!(resets, 1);
+
+        for state in states {
+            client
+                .send_to(
+                    &test_reset(state.connection_id.wrapping_add(1), state.ack_nr).encode(),
+                    listen_addr,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn inbound_listener_rebinds_after_drop() {
+        let listener = UtpPeerTransport::bind_listener(0).await.unwrap();
+        let port = listener.local_port().unwrap();
+        drop(listener);
+
+        let rebound = time::timeout(
+            Duration::from_secs(1),
+            UtpPeerTransport::bind_listener(port),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(rebound.local_port(), Some(port));
     }
 
     #[tokio::test]

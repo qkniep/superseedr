@@ -284,6 +284,8 @@ pub struct SyntheticBenchmarkArgs {
         help = "Transport mode used by the synthetic peer harness"
     )]
     pub transport: SyntheticTransport,
+    #[command(flatten)]
+    pub utp_chaos: SyntheticUdpChaosArgs,
     #[arg(long, default_value_t = 1000)]
     pub peer_add_interval_ms: u64,
     #[arg(long, default_value_t = 10)]
@@ -315,6 +317,47 @@ pub struct SyntheticBenchmarkArgs {
     pub keep_output: bool,
     #[arg(long, default_value = "tmp/synthetic-benchmark")]
     pub out: PathBuf,
+}
+
+#[cfg(feature = "synthetic-load")]
+#[derive(Args, Debug, Clone, Copy, Default)]
+pub struct SyntheticUdpChaosArgs {
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Deterministic UDP chaos seed for synthetic uTP runs"
+    )]
+    pub utp_chaos_seed: u64,
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Outbound synthetic uTP packet loss, in packets per million"
+    )]
+    pub utp_chaos_loss_ppm: u32,
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Outbound synthetic uTP packet duplication, in packets per million"
+    )]
+    pub utp_chaos_duplicate_ppm: u32,
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Outbound synthetic uTP packet corruption, in packets per million"
+    )]
+    pub utp_chaos_corrupt_ppm: u32,
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Outbound synthetic uTP packet reordering, in packets per million"
+    )]
+    pub utp_chaos_reorder_ppm: u32,
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Maximum synthetic uTP packet delay for chaos injection"
+    )]
+    pub utp_chaos_max_delay_ms: u64,
 }
 
 #[cfg(feature = "synthetic-load")]
@@ -389,6 +432,8 @@ pub struct SyntheticLoadArgs {
         help = "Transport mode used by the synthetic peer harness"
     )]
     pub transport: SyntheticTransport,
+    #[command(flatten)]
+    pub utp_chaos: SyntheticUdpChaosArgs,
     #[arg(long)]
     pub peer_connection_permits: Option<usize>,
     #[arg(long, default_value_t = 256)]
