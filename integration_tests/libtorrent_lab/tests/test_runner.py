@@ -66,6 +66,40 @@ def test_superseedr_payload_path_preserves_fixture_bucket(tmp_path: Path) -> Non
     )
 
 
+def test_directory_payload_paths_use_torrent_bucket(tmp_path: Path) -> None:
+    scenario = LabScenario.from_file(
+        Path("integration_tests/libtorrent_lab/scenarios/libtorrent_to_superseedr_v1_nested.json")
+    )
+
+    assert _client_payload_path(CLIENT_LIBTORRENT, tmp_path, scenario) == (
+        tmp_path / "nested"
+    )
+    assert _client_payload_path(CLIENT_SUPERSEEDR, tmp_path, scenario) == (
+        tmp_path / "v1" / "nested"
+    )
+    assert _superseedr_download_path("seed", scenario) == (
+        "/superseedr-data/seed/v1/nested"
+    )
+
+
+def test_load_directory_and_mode_scenarios() -> None:
+    expected = {
+        "superseedr_to_libtorrent_v1_multi_file": ("v1", "multi_file"),
+        "libtorrent_to_superseedr_v1_nested": ("v1", "nested"),
+        "superseedr_to_libtorrent_v2_multi_file": ("v2", "multi_file"),
+        "libtorrent_to_superseedr_hybrid_nested": ("hybrid", "nested"),
+    }
+
+    for name, (mode, payload) in expected.items():
+        scenario = LabScenario.from_file(
+            Path(f"integration_tests/libtorrent_lab/scenarios/{name}.json")
+        )
+        assert scenario.mode == mode
+        assert scenario.payload == payload
+        assert scenario.download_name == payload
+        assert scenario.superseedr_peer_transport == "tcp"
+
+
 def test_superseedr_lab_uses_fast_lab_image() -> None:
     compose = Path(
         "integration_tests/libtorrent_lab/docker/docker-compose.libtorrent-lab.yml"
@@ -153,3 +187,39 @@ def test_validate_download_reports_missing_file(tmp_path: Path) -> None:
 
     assert report["ok"] is False
     assert report["issues"] == ["missing missing.bin"]
+
+
+def test_validate_download_reports_directory_hash_match(tmp_path: Path) -> None:
+    expected = tmp_path / "expected"
+    actual = tmp_path / "actual"
+    (expected / "subdir").mkdir(parents=True)
+    (actual / "subdir").mkdir(parents=True)
+    (expected / "root.bin").write_bytes(b"root")
+    (actual / "root.bin").write_bytes(b"root")
+    (expected / "subdir" / "leaf.bin").write_bytes(b"leaf")
+    (actual / "subdir" / "leaf.bin").write_bytes(b"leaf")
+
+    report = _validate_download(actual, expected)
+
+    assert report["ok"] is True
+    assert report["issues"] == []
+    assert report["expected_files"] == 2
+    assert report["actual_files"] == 2
+
+
+def test_validate_download_reports_directory_mismatch(tmp_path: Path) -> None:
+    expected = tmp_path / "expected"
+    actual = tmp_path / "actual"
+    expected.mkdir()
+    actual.mkdir()
+    (expected / "same.bin").write_bytes(b"same")
+    (actual / "same.bin").write_bytes(b"different")
+    (expected / "missing.bin").write_bytes(b"missing")
+    (actual / "extra.bin").write_bytes(b"extra")
+
+    report = _validate_download(actual, expected)
+
+    assert report["ok"] is False
+    assert report["missing"] == ["missing.bin"]
+    assert report["extra"] == ["extra.bin"]
+    assert report["mismatched"][0].startswith("same.bin size expected=4 actual=9")

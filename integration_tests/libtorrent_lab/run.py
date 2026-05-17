@@ -130,17 +130,30 @@ def _payload_parent(scenario: LabScenario) -> Path:
     return Path() if parent.as_posix() == "." else parent
 
 
+def _payload_is_directory(scenario: LabScenario) -> bool:
+    return Path(scenario.payload).suffix == ""
+
+
+def _superseedr_payload_bucket(scenario: LabScenario) -> Path:
+    if _payload_is_directory(scenario):
+        return Path(scenario.payload)
+    return _payload_parent(scenario)
+
+
 def _client_payload_path(client: str, data_root: Path, scenario: LabScenario) -> Path:
     if client == CLIENT_SUPERSEEDR:
-        return data_root / scenario.mode / _payload_parent(scenario) / scenario.download_name
+        bucket = _superseedr_payload_bucket(scenario)
+        if _payload_is_directory(scenario):
+            return data_root / scenario.mode / bucket
+        return data_root / scenario.mode / bucket / scenario.download_name
     return data_root / scenario.download_name
 
 
 def _superseedr_download_path(role: str, scenario: LabScenario) -> str:
     parts = ["/superseedr-data", role, scenario.mode]
-    parent = _payload_parent(scenario).as_posix()
-    if parent:
-        parts.append(parent)
+    bucket = _superseedr_payload_bucket(scenario).as_posix()
+    if bucket:
+        parts.append(bucket)
     return "/".join(parts)
 
 
@@ -305,6 +318,9 @@ def _wait_for_counter_at_least(
 
 
 def _validate_download(actual_path: Path, expected_path: Path) -> dict[str, object]:
+    if expected_path.is_dir():
+        return _validate_directory(actual_path, expected_path)
+
     issues: list[str] = []
     if not actual_path.exists():
         issues.append(f"missing {actual_path.name}")
@@ -327,6 +343,78 @@ def _validate_download(actual_path: Path, expected_path: Path) -> dict[str, obje
         "actual_size": actual_size,
         "expected_sha256": expected_hash,
         "actual_sha256": actual_hash,
+    }
+
+
+def _directory_manifest(root: Path) -> dict[str, tuple[int, str]]:
+    manifest: dict[str, tuple[int, str]] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and not path.name.startswith("."):
+            rel = path.relative_to(root).as_posix()
+            manifest[rel] = (path.stat().st_size, _sha256_file(path))
+    return manifest
+
+
+def _manifest_total_size(manifest: dict[str, tuple[int, str]]) -> int:
+    return sum(size for size, _sha in manifest.values())
+
+
+def _payload_total_size(path: Path) -> int:
+    if path.is_dir():
+        return _manifest_total_size(_directory_manifest(path))
+    return path.stat().st_size
+
+
+def _validate_directory(actual_path: Path, expected_path: Path) -> dict[str, object]:
+    if not actual_path.exists():
+        return {
+            "ok": False,
+            "issues": [f"missing {actual_path.name}"],
+            "missing": ["."],
+            "extra": [],
+            "mismatched": [],
+        }
+    if not actual_path.is_dir():
+        return {
+            "ok": False,
+            "issues": [f"expected directory at {actual_path.name}"],
+            "missing": [],
+            "extra": [],
+            "mismatched": [],
+        }
+
+    expected_manifest = _directory_manifest(expected_path)
+    actual_manifest = _directory_manifest(actual_path)
+    missing: list[str] = []
+    extra: list[str] = []
+    mismatched: list[str] = []
+
+    for rel, (expected_size, expected_sha) in expected_manifest.items():
+        actual = actual_manifest.get(rel)
+        if actual is None:
+            missing.append(rel)
+            continue
+        actual_size, actual_sha = actual
+        if actual_size != expected_size:
+            mismatched.append(f"{rel} size expected={expected_size} actual={actual_size}")
+            continue
+        if actual_sha != expected_sha:
+            mismatched.append(f"{rel} sha256 expected={expected_sha} actual={actual_sha}")
+
+    for rel in sorted(set(actual_manifest) - set(expected_manifest)):
+        extra.append(rel)
+
+    issues = [*missing, *extra, *mismatched]
+    return {
+        "ok": not issues,
+        "issues": issues,
+        "missing": missing,
+        "extra": extra,
+        "mismatched": mismatched,
+        "expected_files": len(expected_manifest),
+        "actual_files": len(actual_manifest),
+        "expected_size": _manifest_total_size(expected_manifest),
+        "actual_size": _manifest_total_size(actual_manifest),
     }
 
 
@@ -426,6 +514,12 @@ def _write_superseedr_settings(
 
 
 def _copy_payload(source: Path, dest: Path) -> None:
+    if source.is_dir():
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, dest)
+        return
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, dest)
 
@@ -491,6 +585,7 @@ def run_lab_scenario(
         scenario,
     )
     _copy_payload(source_payload, seed_payload)
+    source_payload_size = _payload_total_size(source_payload)
 
     torrent_path = f"/fixtures/torrents/{scenario.mode}/{scenario.torrent}"
     settings = dict(scenario.libtorrent_settings)
@@ -603,7 +698,7 @@ def run_lab_scenario(
                         ss_leech_share_root,
                         role="leech",
                         field="session_total_downloaded",
-                        minimum=source_payload.stat().st_size,
+                        minimum=source_payload_size,
                         timeout_secs=10,
                     )
 
@@ -611,7 +706,7 @@ def run_lab_scenario(
                     seed_status = _wait_for_counter_at_least(
                         lt_seed_artifacts_root / "status.json",
                         "total_upload",
-                        minimum=source_payload.stat().st_size,
+                        minimum=source_payload_size,
                         timeout_secs=10,
                     )
                 else:
@@ -619,7 +714,7 @@ def run_lab_scenario(
                         ss_seed_share_root,
                         role="seed",
                         field="session_total_uploaded",
-                        minimum=source_payload.stat().st_size,
+                        minimum=source_payload_size,
                         timeout_secs=10,
                     )
                 break

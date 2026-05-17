@@ -174,6 +174,10 @@ Initial scenario names:
 - `libtorrent_to_superseedr`
 - `superseedr_utp_to_libtorrent`
 - `libtorrent_utp_to_superseedr`
+- `superseedr_to_libtorrent_v1_multi_file`
+- `libtorrent_to_superseedr_v1_nested`
+- `superseedr_to_libtorrent_v2_multi_file`
+- `libtorrent_to_superseedr_hybrid_nested`
 
 Artifacts are written under:
 

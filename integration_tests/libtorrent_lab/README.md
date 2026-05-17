@@ -49,6 +49,16 @@ uTP-only baselines disable TCP on both sides:
 ./integration_tests/run_libtorrent_lab.sh libtorrent_utp_to_superseedr
 ```
 
+Directory and metainfo-mode scenarios cover multi-file, nested, v2, and hybrid
+torrents without widening into a full matrix:
+
+```bash
+./integration_tests/run_libtorrent_lab.sh superseedr_to_libtorrent_v1_multi_file
+./integration_tests/run_libtorrent_lab.sh libtorrent_to_superseedr_v1_nested
+./integration_tests/run_libtorrent_lab.sh superseedr_to_libtorrent_v2_multi_file
+./integration_tests/run_libtorrent_lab.sh libtorrent_to_superseedr_hybrid_nested
+```
+
 The Superseedr containers use `docker/Dockerfile.superseedr`, which builds a
 debug binary for fast lab iteration instead of the production release image.
 
