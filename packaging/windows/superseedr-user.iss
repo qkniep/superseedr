@@ -254,7 +254,7 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if (CurStep = ssPostInstall) and IsTaskSelected('path') then
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('path') then
   begin
     AddToUserPath();
   end;
