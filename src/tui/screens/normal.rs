@@ -27,9 +27,9 @@ use crate::persistence::network_history::NetworkHistoryPoint;
 use crate::theme::{ThemeContext, ThemeName};
 use crate::torrent_manager::{ManagerCommand, TorrentFileProbeStatus};
 use crate::tui::formatters::{
-    calculate_nice_upper_bound, format_bytes, format_countdown, format_duration, format_iops,
-    format_latency, format_limit_bps, format_memory, format_speed, format_time,
-    generate_x_axis_labels, ip_to_color, parse_peer_id, sanitize_text, speed_to_style,
+    auto_download_limit_applied, calculate_nice_upper_bound, format_bytes, format_countdown,
+    format_duration, format_iops, format_latency, format_limit_bps, format_memory, format_speed,
+    format_time, generate_x_axis_labels, ip_to_color, parse_peer_id, sanitize_text, speed_to_style,
     truncate_with_ellipsis,
 };
 use crate::tui::layout::common::compute_visible_peer_columns;
@@ -3286,6 +3286,7 @@ pub fn draw_stats_panel(
 
     let dl_speed = *app_state.avg_download_history.last().unwrap_or(&0);
     let dl_limit = app_state.effective_download_limit_bps;
+    let dl_auto_limited = auto_download_limit_applied(settings.global_download_limit_bps, dl_limit);
 
     let mut dl_spans = vec![
         Span::styled(
@@ -3298,7 +3299,7 @@ pub fn draw_stats_panel(
         ),
         Span::raw(" / "),
     ];
-    if dl_limit > 0 && dl_speed >= dl_limit {
+    if dl_auto_limited || (dl_limit > 0 && dl_speed >= dl_limit) {
         dl_spans.push(Span::styled(
             format_limit_bps(dl_limit),
             ctx.apply(Style::default().fg(ctx.state_error())),
