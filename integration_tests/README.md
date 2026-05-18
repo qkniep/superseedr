@@ -185,6 +185,17 @@ Profile entrypoint:
 ./integration_tests/run_libtorrent_lab.sh --profile soak
 ```
 
+Readiness entrypoint for final uTP merge/release validation:
+
+```bash
+./integration_tests/run_libtorrent_lab.sh --readiness quick --fail-fast
+./integration_tests/run_libtorrent_lab.sh --readiness release --fail-fast
+```
+
+Readiness summaries fail on any failed scenario attempt or any Superseedr
+error-level app log line. Warning-level Superseedr log lines are counted and
+surfaced in `readiness_summary.json`/`.md`.
+
 Network impairment can be applied to any scenario or matrix with the `netem`
 flags:
 

@@ -8,15 +8,20 @@ from integration_tests.libtorrent_lab.run import (
     LabScenario,
     NetworkImpairment,
     _client_payload_path,
+    _collect_superseedr_logs,
     _matrix_markdown,
     _netem_command,
+    _probe_superseedr_health,
     _profile_for_name,
     _profile_markdown,
+    _readiness_for_name,
+    _readiness_markdown,
     _probe_tracker_announces,
     _project_name,
     _run_behavior_probes,
     _scenario_names_for_matrix,
     _summarize_libtorrent_events_for_role,
+    _summarize_superseedr_logs,
     _summarize_tracker_log,
     _superseedr_seed_is_ready,
     _superseedr_download_path,
@@ -200,6 +205,22 @@ def test_profile_presets_are_stable() -> None:
     assert soak.steps[0].repeat > stress.steps[0].repeat
 
 
+def test_readiness_presets_are_stable() -> None:
+    quick = _readiness_for_name("quick")
+    release = _readiness_for_name("release")
+
+    assert [step.matrix for step in quick.steps] == ["behavior"]
+    assert [step.name for step in release.steps] == [
+        "clean_full",
+        "focused_config",
+        "behavior_probes",
+        "impaired_transport",
+        "impaired_fanout",
+    ]
+    assert release.steps[3].network_impairment.enabled() is True
+    assert release.steps[4].matrix == "fanout"
+
+
 def test_netem_command_includes_impairment_knobs() -> None:
     command = _netem_command(
         NetworkImpairment(
@@ -267,7 +288,7 @@ def test_matrix_markdown_summarizes_results() -> None:
     )
 
     assert "Result: FAIL" in markdown
-    assert "| basic_ul_dl | 2 | FAIL | PASS | PASS | 0 | 4.0s | `/tmp/lab/two` |" in markdown
+    assert "| basic_ul_dl | 2 | FAIL | PASS | PASS | n/a | 0 | 4.0s | `/tmp/lab/two` |" in markdown
 
 
 def test_profile_markdown_summarizes_steps() -> None:
@@ -311,8 +332,48 @@ def test_profile_markdown_summarizes_steps() -> None:
     )
 
     assert "Libtorrent Lab Profile: premerge" in markdown
-    assert "| clean_full | full | PASS | 1 | 11 | 0 | off | 30.0s | `/tmp/profile/clean` |" in markdown
-    assert "| mild_netem_transport | transport | PASS | 1 | 4 | 0 | on | 12.0s | `/tmp/profile/netem` |" in markdown
+    assert "| clean_full | full | PASS | 1 | 11 | 0 | off | 0 | 0 | 30.0s | `/tmp/profile/clean` |" in markdown
+    assert "| mild_netem_transport | transport | PASS | 1 | 4 | 0 | on | 0 | 0 | 12.0s | `/tmp/profile/netem` |" in markdown
+
+
+def test_readiness_markdown_summarizes_gates() -> None:
+    markdown = _readiness_markdown(
+        {
+            "readiness": "quick",
+            "description": "Fast gate.",
+            "ok": False,
+            "step_count": 1,
+            "completed_steps": 1,
+            "attempt_count": 4,
+            "passed_attempts": 3,
+            "failed_attempts": 1,
+            "behavior_warning_count": 2,
+            "superseedr_error_count": 1,
+            "superseedr_warning_count": 1,
+            "duration_secs": 18.0,
+            "artifacts_dir": "/tmp/readiness",
+            "steps": [
+                {
+                    "name": "behavior",
+                    "matrix": "behavior",
+                    "ok": False,
+                    "repeat_count": 1,
+                    "attempt_count": 4,
+                    "failed_attempts": 1,
+                    "behavior_warning_count": 2,
+                    "superseedr_error_count": 1,
+                    "superseedr_warning_count": 1,
+                    "duration_secs": 18.0,
+                    "artifacts_dir": "/tmp/readiness/behavior",
+                    "network_impairment": {"enabled": False},
+                },
+            ],
+        }
+    )
+
+    assert "uTP Readiness Suite: quick" in markdown
+    assert "- Superseedr errors: 1" in markdown
+    assert "| behavior | behavior | FAIL | 1 | 4 | 1 | off | 1 | 2 | 18.0s | `/tmp/readiness/behavior` |" in markdown
 
 
 def test_superseedr_lab_uses_fast_lab_image() -> None:
@@ -543,6 +604,78 @@ def test_tracker_log_summary_requires_expected_announcers() -> None:
     ]
 
 
+def test_superseedr_log_summary_flags_errors_and_warnings() -> None:
+    summary = _summarize_superseedr_logs(
+        {
+            "superseedr_seed": "\n".join(
+                [
+                    "2026-05-17T10:00:00Z  INFO superseedr: ready",
+                    "2026-05-17T10:00:01Z  WARN superseedr::watcher: transient watch issue",
+                    "2026-05-17T10:00:02Z ERROR superseedr::utp: simulated transport fault",
+                ]
+            )
+        }
+    )
+
+    assert summary["ok"] is False
+    assert summary["error_count"] == 1
+    assert summary["warning_count"] == 1
+    assert summary["issues"] == ["superseedr_seed emitted 1 Superseedr error log line(s)"]
+    assert summary["warnings"] == [
+        "superseedr_seed emitted 1 Superseedr warning log line(s)"
+    ]
+
+
+def test_collect_superseedr_logs_reads_runtime_log_files(tmp_path: Path) -> None:
+    share_root = tmp_path / "share"
+    logs_root = share_root / "logs"
+    logs_root.mkdir(parents=True)
+    (logs_root / "app.2026-05-17.log").write_text(
+        "2026-05-17T10:00:00Z  INFO superseedr: ready\n",
+        encoding="utf-8",
+    )
+
+    logs = _collect_superseedr_logs({"superseedr_seed": share_root})
+
+    assert logs["superseedr_seed"]["files"] == [str(logs_root / "app.2026-05-17.log")]
+    assert "ready" in logs["superseedr_seed"]["text"]
+
+
+def test_superseedr_log_summary_requires_collected_app_logs() -> None:
+    summary = _summarize_superseedr_logs(
+        {
+            "superseedr_seed": {
+                "files": [],
+                "text": "",
+            }
+        }
+    )
+
+    assert summary["ok"] is False
+    assert summary["issues"] == [
+        "superseedr_seed did not produce a Superseedr app log file",
+    ]
+
+
+def test_superseedr_health_probe_fails_on_error_logs() -> None:
+    probe = _probe_superseedr_health(
+        {
+            "ok": False,
+            "issues": ["superseedr_leech emitted 1 Superseedr error log line(s)"],
+            "warnings": [],
+            "service_count": 1,
+            "line_count": 3,
+            "error_count": 1,
+            "warning_count": 0,
+            "services": {},
+        }
+    )
+
+    assert probe["ok"] is False
+    assert probe["issues"] == ["superseedr_leech emitted 1 Superseedr error log line(s)"]
+    assert probe["metrics"]["error_count"] == 1
+
+
 def test_behavior_probes_include_transfer_and_event_health() -> None:
     scenario = LabScenario.from_file(
         Path("integration_tests/libtorrent_lab/scenarios/basic_ul_dl_tcp_only.json")
@@ -570,6 +703,16 @@ def test_behavior_probes_include_transfer_and_event_health() -> None:
             "announce_count": 2,
             "unique_peer_count": 2,
         },
+        superseedr_summary={
+            "ok": True,
+            "issues": [],
+            "warnings": [],
+            "service_count": 0,
+            "line_count": 0,
+            "error_count": 0,
+            "warning_count": 0,
+            "services": {},
+        },
     )
 
     assert report["ok"] is True
@@ -578,6 +721,7 @@ def test_behavior_probes_include_transfer_and_event_health() -> None:
         "libtorrent_event_health",
         "tracker_announces",
         "progress_timeline",
+        "superseedr_health",
     ]
 
 

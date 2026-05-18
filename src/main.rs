@@ -586,11 +586,6 @@ fn init_tracing(
     let quiet_filter = Targets::new()
         .with_default(DEFAULT_LOG_FILTER)
         .with_target("mainline::rpc::socket", LevelFilter::ERROR);
-    let stderr_fallback_filter = Targets::new()
-        .with_default(LevelFilter::WARN)
-        .with_target("mainline::rpc::socket", LevelFilter::ERROR);
-    let mut suppressed_failures = Vec::new();
-
     for log_dir in log_dirs {
         if let Err(error) = fs::create_dir_all(&log_dir) {
             let message = format!(
@@ -600,11 +595,14 @@ fn init_tracing(
             );
             if emit_stderr {
                 eprintln!("[Warn] {}", message);
-            } else {
-                suppressed_failures.push(message);
             }
         } else {
-            match logging::non_blocking_daily_file_writer(&log_dir, filename_prefix, 31) {
+            match logging::non_blocking_daily_file_writer_with_stderr_reporting(
+                &log_dir,
+                filename_prefix,
+                31,
+                emit_stderr,
+            ) {
                 Ok((non_blocking_general, guard_general)) => {
                     let general_layer = fmt::layer()
                         .with_writer(non_blocking_general)
@@ -623,8 +621,6 @@ fn init_tracing(
                         );
                         if emit_stderr {
                             eprintln!("[Warn] {}", message);
-                        } else {
-                            suppressed_failures.push(message);
                         }
                     }
                 }
@@ -636,31 +632,19 @@ fn init_tracing(
                     );
                     if emit_stderr {
                         eprintln!("[Warn] {}", message);
-                    } else {
-                        suppressed_failures.push(message);
                     }
                 }
             }
         }
     }
 
-    if !emit_stderr && !suppressed_failures.is_empty() {
-        eprintln!(
-            "[Warn] File logging unavailable; falling back to stderr logging. {}",
-            suppressed_failures[0]
-        );
-        if suppressed_failures.len() > 1 {
-            eprintln!(
-                "[Warn] {} additional logging setup failure(s) were suppressed.",
-                suppressed_failures.len() - 1
-            );
-        }
-    }
-
     let fallback_layer = if emit_stderr {
         fmt::layer().with_filter(quiet_filter).boxed()
     } else {
-        fmt::layer().with_filter(stderr_fallback_filter).boxed()
+        fmt::layer()
+            .with_writer(io::sink)
+            .with_filter(quiet_filter)
+            .boxed()
     };
     let _ = tracing_subscriber::registry()
         .with(fallback_layer)
@@ -857,7 +841,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| "Unable to determine config path.".to_string());
             let message = private_client_leak_guard_message(&config_path_str);
 
-            eprintln!("{message}");
+            println!("{message}");
             tracing::error!(
                 config_path = %config_path_str,
                 "Potential leak guard triggered. You are running the normal build with DHT/PEX enabled, but your configuration indicates the private build was used previously. To continue safely, either install and run the private build with `cargo install superseedr --no-default-features`, or edit the configuration at {} and change `private_client = true` to `private_client = false`. Exiting to prevent potential tracker issues.",
@@ -949,11 +933,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    if let Err(e) = app.run(&mut terminal).await {
-        eprintln!("[Error] Application failed: {}", e);
-    }
-
+    let app_result = app.run(&mut terminal).await;
     cleanup_terminal()?;
+
+    if let Err(error) = app_result {
+        tracing::error!("Application failed: {}", error);
+        return Err(error);
+    }
 
     Ok(())
 }

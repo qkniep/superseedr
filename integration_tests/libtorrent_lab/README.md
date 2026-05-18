@@ -126,6 +126,29 @@ normal per-step matrix summaries. `--repeat N` multiplies each profile step's
 repeat count, and explicit `--netem-*` flags override each profile step's
 default impairment.
 
+## uTP Readiness Runs
+
+Readiness suites are release-oriented gates on top of the matrix runner. They
+preserve the per-scenario artifacts, but add an overall `readiness_summary.json`
+and `readiness_summary.md` with explicit Superseedr error counts.
+
+```bash
+./integration_tests/run_libtorrent_lab.sh --readiness quick --fail-fast
+./integration_tests/run_libtorrent_lab.sh --readiness release --fail-fast
+```
+
+Current readiness suites:
+
+- `quick`: behavior matrix only, for fast validation of probe wiring and
+  Superseedr log health.
+- `release`: full clean matrix, focused config matrix, behavior matrix,
+  impaired transport matrix, and impaired fanout matrix.
+
+Readiness passes only when all planned steps complete, no scenario attempt
+fails, and Superseedr emits zero error-level log lines. Warning-level
+Superseedr log lines are kept as warnings in the summaries so expected lab
+environment noise remains visible without hiding transfer failures.
+
 ## Network Impairment
 
 Scenario and matrix runs can apply Docker `tc netem` impairment to active peer
@@ -157,14 +180,17 @@ Important files:
 - `summary.json.assertions`: stronger pass/fail checks for completed payload
   bytes, participant completion, seed upload floors, and leech download floors.
 - `summary.json.behavior_probes`: probe results and warnings for transfer
-  accounting, libtorrent event health, tracker announces, and progress timing.
+  accounting, libtorrent event health, tracker announces, progress timing, and
+  Superseedr log health.
 - `summary.json.libtorrent_events`: summarized libtorrent alert/event counts
   and per-peer progress timing.
+- `summary.json.superseedr`: summarized Superseedr app logs, including
+  error/warning counts and sampled log lines.
 - `peers/seed/status.json`: latest seed status emitted by the peer.
 - `peers/seed/events.jsonl`: seed libtorrent events and alerts.
 - `peers/leech/status.json`: latest leech status emitted by the peer.
 - `peers/leech/events.jsonl`: leech libtorrent events and alerts.
-- `logs/*.log`: compose and container logs.
+- `logs/*.log`: compose logs, container logs, and copied Superseedr app logs.
 
 ## Scenario Contract
 

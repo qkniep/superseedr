@@ -227,6 +227,7 @@ impl SharedUdpHandle {
         Ok(rx)
     }
 
+    #[cfg(feature = "dht")]
     pub async fn close_if_unused(&self) {
         if self.has_active_subscribers() {
             return;
@@ -234,6 +235,7 @@ impl SharedUdpHandle {
         self.shutdown().await;
     }
 
+    #[cfg(any(feature = "dht", test))]
     pub async fn shutdown(&self) {
         unregister_shared_udp(self.inner.key, &self.inner);
         let _ = self.inner.shutdown_tx.send(true);
@@ -248,6 +250,7 @@ impl SharedUdpHandle {
         }
     }
 
+    #[cfg(feature = "dht")]
     fn has_active_subscribers(&self) -> bool {
         [SharedUdpProtocol::Dht, SharedUdpProtocol::Utp]
             .into_iter()
@@ -290,6 +293,7 @@ fn register_shared_udp(key: SharedUdpKey, inner: &Arc<SharedUdpInner>) {
     registry.insert(key, Arc::downgrade(inner));
 }
 
+#[cfg(any(feature = "dht", test))]
 fn unregister_shared_udp(key: SharedUdpKey, inner: &Arc<SharedUdpInner>) {
     let mut registry = SHARED_UDP_REGISTRY
         .lock()

@@ -32,6 +32,7 @@ DEFAULT_BEHAVIOR_PROBES = (
     "libtorrent_event_health",
     "tracker_announces",
     "progress_timeline",
+    "superseedr_health",
 )
 LIBTORRENT_HARD_FAILURE_ALERTS = {
     "file_error_alert",
@@ -44,6 +45,22 @@ LIBTORRENT_HARD_FAILURE_ALERTS = {
     "torrent_error_alert",
     "url_seed_alert",
 }
+SUPERSEEDR_LOG_SAMPLE_LIMIT = 20
+SUPERSEEDR_LOG_LINE_LIMIT = 500
+SUPERSEEDR_ERROR_MARKERS = (
+    " ERROR ",
+    " PANIC ",
+    "PANICKED AT",
+    "STACK BACKTRACE",
+    "SEGMENTATION FAULT",
+    "ASSERTION FAILED",
+    "FATAL",
+)
+SUPERSEEDR_WARNING_MARKERS = (
+    " WARN ",
+    "[WARN]",
+    "[WARNING]",
+)
 LAB_MATRIXES: dict[str, list[str]] = {
     "smoke": [
         "basic_ul_dl",
@@ -211,6 +228,13 @@ class LabProfile:
     steps: tuple[ProfileStep, ...]
 
 
+@dataclass(frozen=True)
+class ReadinessSuite:
+    name: str
+    description: str
+    steps: tuple[ProfileStep, ...]
+
+
 LAB_PROFILES: dict[str, LabProfile] = {
     "quick": LabProfile(
         name="quick",
@@ -296,6 +320,68 @@ LAB_PROFILES: dict[str, LabProfile] = {
     ),
 }
 
+READINESS_SUITES: dict[str, ReadinessSuite] = {
+    "quick": ReadinessSuite(
+        name="quick",
+        description="Fast uTP readiness gate for the behavior probes and Superseedr log health.",
+        steps=(
+            ProfileStep(
+                name="behavior",
+                matrix="behavior",
+                fail_fast=True,
+            ),
+        ),
+    ),
+    "release": ReadinessSuite(
+        name="release",
+        description=(
+            "Final uTP readiness gate before merge/release: clean interop coverage, "
+            "focused transport/config probes, and impaired transport/fanout passes."
+        ),
+        steps=(
+            ProfileStep(
+                name="clean_full",
+                matrix="full",
+                fail_fast=True,
+            ),
+            ProfileStep(
+                name="focused_config",
+                matrix="config",
+                fail_fast=True,
+            ),
+            ProfileStep(
+                name="behavior_probes",
+                matrix="behavior",
+                fail_fast=True,
+            ),
+            ProfileStep(
+                name="impaired_transport",
+                matrix="transport",
+                fail_fast=True,
+                network_impairment=NetworkImpairment(
+                    delay_ms=50,
+                    jitter_ms=10,
+                    loss_pct=0.5,
+                    duplicate_pct=0.1,
+                    reorder_pct=1.0,
+                ),
+            ),
+            ProfileStep(
+                name="impaired_fanout",
+                matrix="fanout",
+                fail_fast=True,
+                network_impairment=NetworkImpairment(
+                    delay_ms=50,
+                    jitter_ms=10,
+                    loss_pct=0.5,
+                    duplicate_pct=0.1,
+                    reorder_pct=1.0,
+                ),
+            ),
+        ),
+    ),
+}
+
 
 def _utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -326,6 +412,16 @@ def _profile_for_name(profile: str) -> LabProfile:
     except KeyError as exc:
         known = ", ".join(sorted(LAB_PROFILES))
         raise ValueError(f"Unknown libtorrent lab profile {profile!r}; expected one of: {known}") from exc
+
+
+def _readiness_for_name(readiness: str) -> ReadinessSuite:
+    try:
+        return READINESS_SUITES[readiness]
+    except KeyError as exc:
+        known = ", ".join(sorted(READINESS_SUITES))
+        raise ValueError(
+            f"Unknown libtorrent lab readiness suite {readiness!r}; expected one of: {known}"
+        ) from exc
 
 
 def _libtorrent_service(role: str, index: int) -> str:
@@ -943,6 +1039,130 @@ def _summarize_tracker_log(
     }
 
 
+def _superseedr_log_files(share_root: Path) -> list[Path]:
+    logs_root = share_root / "logs"
+    if not logs_root.exists():
+        return []
+    return sorted(path for path in logs_root.glob("*.log") if path.is_file())
+
+
+def _collect_superseedr_logs(service_share_roots: dict[str, Path]) -> dict[str, dict[str, object]]:
+    logs: dict[str, dict[str, object]] = {}
+    for service, share_root in sorted(service_share_roots.items()):
+        files: list[str] = []
+        parts: list[str] = []
+        for path in _superseedr_log_files(share_root):
+            files.append(str(path))
+            parts.append(path.read_text(encoding="utf-8", errors="replace"))
+        logs[service] = {
+            "files": files,
+            "text": "\n".join(part for part in parts if part),
+        }
+    return logs
+
+
+def _truncate_superseedr_log_line(line: str) -> str:
+    stripped = line.strip()
+    if len(stripped) <= SUPERSEEDR_LOG_LINE_LIMIT:
+        return stripped
+    return stripped[: SUPERSEEDR_LOG_LINE_LIMIT - 3] + "..."
+
+
+def _classify_superseedr_log_line(line: str) -> str:
+    normalized = f" {line.upper()} "
+    if any(marker in normalized for marker in SUPERSEEDR_ERROR_MARKERS):
+        return "error"
+    if any(marker in normalized for marker in SUPERSEEDR_WARNING_MARKERS):
+        return "warning"
+    return ""
+
+
+def _summarize_superseedr_logs(
+    logs_by_service: dict[str, object],
+) -> dict[str, object]:
+    services: dict[str, object] = {}
+    issues: list[str] = []
+    warnings: list[str] = []
+    total_errors = 0
+    total_warnings = 0
+    total_lines = 0
+
+    for service, raw in sorted(logs_by_service.items()):
+        expects_files = isinstance(raw, dict)
+        if isinstance(raw, dict):
+            text = str(raw.get("text", ""))
+            files = [str(path) for path in raw.get("files", [])]
+        else:
+            text = str(raw)
+            files = []
+
+        service_errors: list[dict[str, object]] = []
+        service_warnings: list[dict[str, object]] = []
+        line_count = 0
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            if not line.strip():
+                continue
+            line_count += 1
+            total_lines += 1
+            classification = _classify_superseedr_log_line(line)
+            if not classification:
+                continue
+            sample = {
+                "line": line_no,
+                "message": _truncate_superseedr_log_line(line),
+            }
+            if classification == "error":
+                service_errors.append(sample)
+            elif classification == "warning":
+                service_warnings.append(sample)
+
+        error_count = len(service_errors)
+        warning_count = len(service_warnings)
+        service_issues: list[str] = []
+        if expects_files and not files:
+            service_issues.append(f"{service} did not produce a Superseedr app log file")
+        if expects_files and files and line_count == 0:
+            service_issues.append(f"{service} produced an empty Superseedr app log")
+        total_errors += error_count
+        total_warnings += warning_count
+        issues.extend(service_issues)
+        if error_count:
+            issues.append(f"{service} emitted {error_count} Superseedr error log line(s)")
+        if warning_count:
+            warnings.append(f"{service} emitted {warning_count} Superseedr warning log line(s)")
+        services[service] = {
+            "ok": error_count == 0 and not service_issues,
+            "log_files": files,
+            "line_count": line_count,
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "issues": service_issues,
+            "errors": service_errors[:SUPERSEEDR_LOG_SAMPLE_LIMIT],
+            "warnings": service_warnings[:SUPERSEEDR_LOG_SAMPLE_LIMIT],
+        }
+
+    return {
+        "ok": total_errors == 0 and not issues,
+        "issues": issues,
+        "warnings": warnings,
+        "service_count": len(services),
+        "line_count": total_lines,
+        "error_count": total_errors,
+        "warning_count": total_warnings,
+        "services": services,
+    }
+
+
+def _write_superseedr_app_logs(
+    logs_root: Path,
+    logs_by_service: dict[str, dict[str, object]],
+) -> None:
+    for service, raw in sorted(logs_by_service.items()):
+        text = str(raw.get("text", ""))
+        if text:
+            (logs_root / f"{service}_app.log").write_text(text, encoding="utf-8")
+
+
 def _append_issue(issues: list[str], checks: list[dict[str, object]], name: str, issue: str) -> None:
     issues.append(issue)
     checks.append({"name": name, "ok": False, "issue": issue})
@@ -1290,12 +1510,41 @@ def _probe_progress_timeline(
     )
 
 
+def _probe_superseedr_health(
+    superseedr_summary: dict[str, object] | None,
+) -> dict[str, object]:
+    if not superseedr_summary:
+        return _behavior_probe_result(
+            "superseedr_health",
+            metrics={
+                "services": 0,
+                "log_lines": 0,
+                "error_count": 0,
+                "warning_count": 0,
+            },
+        )
+
+    return _behavior_probe_result(
+        "superseedr_health",
+        ok=bool(superseedr_summary.get("ok", False)),
+        issues=[str(issue) for issue in superseedr_summary.get("issues", [])],
+        warnings=[str(warning) for warning in superseedr_summary.get("warnings", [])],
+        metrics={
+            "services": _int_value(superseedr_summary.get("service_count")),
+            "log_lines": _int_value(superseedr_summary.get("line_count")),
+            "error_count": _int_value(superseedr_summary.get("error_count")),
+            "warning_count": _int_value(superseedr_summary.get("warning_count")),
+        },
+    )
+
+
 def _run_behavior_probes(
     *,
     scenario: LabScenario,
     transfer_assertions: dict[str, object],
     event_summary: dict[str, object],
     tracker_summary: dict[str, object] | None,
+    superseedr_summary: dict[str, object] | None,
 ) -> dict[str, object]:
     probe_names = set(scenario.behavior_probes)
     probes: list[dict[str, object]] = []
@@ -1321,6 +1570,8 @@ def _run_behavior_probes(
         )
     if "progress_timeline" in probe_names:
         probes.append(_probe_progress_timeline(event_summary))
+    if "superseedr_health" in probe_names:
+        probes.append(_probe_superseedr_health(superseedr_summary))
 
     issues = [
         issue
@@ -1728,6 +1979,12 @@ def run_lab_scenario(
         else [_libtorrent_service("leech", index) for index in range(1, active_leech_count + 1)]
     )
     active_services = ["tracker", *seed_services, *leech_services]
+    superseedr_log_roots: dict[str, Path] = {}
+    if scenario.seed_client == CLIENT_SUPERSEEDR:
+        superseedr_log_roots["superseedr_seed"] = ss_seed_share_root
+    if scenario.leech_client == CLIENT_SUPERSEEDR:
+        superseedr_log_roots["superseedr_leech"] = ss_leech_share_root
+    superseedr_logs: dict[str, dict[str, object]] = {}
 
     try:
         compose.down()
@@ -1841,16 +2098,20 @@ def run_lab_scenario(
             compose.logs("tracker", tail=1000),
             expected_peer_count=expected_tracker_peers,
         )
+        superseedr_logs = _collect_superseedr_logs(superseedr_log_roots)
+        superseedr_summary = _summarize_superseedr_logs(superseedr_logs)
         behavior_probes = _run_behavior_probes(
             scenario=scenario,
             transfer_assertions=assertions,
             event_summary=libtorrent_events,
             tracker_summary=tracker_summary,
+            superseedr_summary=superseedr_summary,
         )
         summary["ok"] = (
             validation.get("ok") is True
             and transport_validation.get("ok") is True
             and assertions.get("ok") is True
+            and superseedr_summary.get("ok") is True
             and behavior_probes.get("ok") is True
         )
 
@@ -1863,18 +2124,22 @@ def run_lab_scenario(
                 "behavior_probes": behavior_probes,
                 "libtorrent_events": libtorrent_events,
                 "tracker": tracker_summary,
+                "superseedr": superseedr_summary,
                 "seed_status": final_seed_status,
                 "leech_status": final_leech_status,
             }
         )
         return summary
     finally:
+        if superseedr_log_roots and not superseedr_logs:
+            superseedr_logs = _collect_superseedr_logs(superseedr_log_roots)
         (logs_root / "compose_ps.txt").write_text(compose.ps(), encoding="utf-8")
         for service in active_services:
             (logs_root / f"{service}.log").write_text(
                 compose.logs(service, tail=1000),
                 encoding="utf-8",
             )
+        _write_superseedr_app_logs(logs_root, superseedr_logs)
         _write_json(run_root / "summary.json", summary)
         compose.down()
 
@@ -1895,6 +2160,7 @@ def _short_result(summary: dict[str, object]) -> dict[str, object]:
     transport_validation = summary.get("transport_validation", {})
     assertions = summary.get("assertions", {})
     behavior_probes = summary.get("behavior_probes", {})
+    superseedr = summary.get("superseedr", {})
     return {
         "run_id": summary.get("run_id", ""),
         "scenario": summary.get("scenario", ""),
@@ -1920,7 +2186,33 @@ def _short_result(summary: dict[str, object]) -> dict[str, object]:
         "behavior_warnings": (
             behavior_probes.get("warnings", []) if isinstance(behavior_probes, dict) else []
         ),
+        "superseedr_ok": superseedr.get("ok") if isinstance(superseedr, dict) else None,
+        "superseedr_service_count": (
+            superseedr.get("service_count", 0) if isinstance(superseedr, dict) else 0
+        ),
+        "superseedr_error_count": (
+            superseedr.get("error_count", 0) if isinstance(superseedr, dict) else 0
+        ),
+        "superseedr_warning_count": (
+            superseedr.get("warning_count", 0) if isinstance(superseedr, dict) else 0
+        ),
+        "superseedr_issues": (
+            superseedr.get("issues", []) if isinstance(superseedr, dict) else []
+        ),
+        "superseedr_warnings": (
+            superseedr.get("warnings", []) if isinstance(superseedr, dict) else []
+        ),
     }
+
+
+def _superseedr_result_label(result: dict[str, object]) -> str:
+    service_count = _int_value(result.get("superseedr_service_count"))
+    if service_count == 0:
+        return "n/a"
+    status = "PASS" if result.get("superseedr_ok") is not False else "FAIL"
+    errors = _int_value(result.get("superseedr_error_count"))
+    warnings = _int_value(result.get("superseedr_warning_count"))
+    return f"{status} {errors}E/{warnings}W"
 
 
 def _matrix_markdown(summary: dict[str, object]) -> str:
@@ -1936,8 +2228,8 @@ def _matrix_markdown(summary: dict[str, object]) -> str:
         f"- Duration: {summary['duration_secs']}s",
         f"- Artifacts: `{summary['artifacts_dir']}`",
         "",
-        "| Scenario | Iteration | Result | Assertions | Behavior | Warnings | Duration | Artifacts |",
-        "| --- | ---: | --- | --- | --- | ---: | ---: | --- |",
+        "| Scenario | Iteration | Result | Assertions | Behavior | Superseedr | Warnings | Duration | Artifacts |",
+        "| --- | ---: | --- | --- | --- | --- | ---: | ---: | --- |",
     ]
     for result in summary["results"]:
         status = "PASS" if result.get("ok") else "FAIL"
@@ -1947,7 +2239,7 @@ def _matrix_markdown(summary: dict[str, object]) -> str:
         warnings = len(result.get("behavior_warnings", []))
         lines.append(
             f"| {result['scenario']} | {result['iteration']} | {status} | "
-            f"{assertions} | {behavior} | {warnings} | "
+            f"{assertions} | {behavior} | {_superseedr_result_label(result)} | {warnings} | "
             f"{duration}s | `{result.get('artifacts_dir', '')}` |"
         )
     return "\n".join(lines) + "\n"
@@ -1964,6 +2256,9 @@ def _profile_step_result(matrix_summary: dict[str, object], step: ProfileStep) -
         "failed_attempts": matrix_summary.get("failed_attempts", 0),
         "duration_secs": matrix_summary.get("duration_secs", 0),
         "artifacts_dir": matrix_summary.get("artifacts_dir", ""),
+        "behavior_warning_count": matrix_summary.get("behavior_warning_count", 0),
+        "superseedr_error_count": matrix_summary.get("superseedr_error_count", 0),
+        "superseedr_warning_count": matrix_summary.get("superseedr_warning_count", 0),
         "network_impairment": matrix_summary.get(
             "network_impairment",
             step.network_impairment.as_dict(),
@@ -1984,17 +2279,19 @@ def _profile_markdown(summary: dict[str, object]) -> str:
         f"- Duration: {summary['duration_secs']}s",
         f"- Artifacts: `{summary['artifacts_dir']}`",
         "",
-        "| Step | Matrix | Result | Repeat | Attempts | Failed | Netem | Duration | Artifacts |",
-        "| --- | --- | --- | ---: | ---: | ---: | --- | ---: | --- |",
+        "| Step | Matrix | Result | Repeat | Attempts | Failed | Netem | SS Errors | Warnings | Duration | Artifacts |",
+        "| --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |",
     ]
     for step in summary["steps"]:
         status = "PASS" if step.get("ok") else "FAIL"
         impairment = step.get("network_impairment", {})
         netem = "on" if isinstance(impairment, dict) and impairment.get("enabled") else "off"
+        warnings = _int_value(step.get("behavior_warning_count"))
         lines.append(
             f"| {step['name']} | {step['matrix']} | {status} | "
             f"{step.get('repeat_count', 0)} | {step.get('attempt_count', 0)} | "
             f"{step.get('failed_attempts', 0)} | {netem} | "
+            f"{step.get('superseedr_error_count', 0)} | {warnings} | "
             f"{step.get('duration_secs', 0)}s | `{step.get('artifacts_dir', '')}` |"
         )
     return "\n".join(lines) + "\n"
@@ -2066,12 +2363,19 @@ def run_lab_matrix(
                     "behavior_ok": None,
                     "behavior_issues": [],
                     "behavior_warnings": [],
+                    "superseedr_ok": None,
+                    "superseedr_service_count": 0,
+                    "superseedr_error_count": 0,
+                    "superseedr_warning_count": 0,
+                    "superseedr_issues": [],
+                    "superseedr_warnings": [],
                 }
             results.append(result)
             print(
                 "LIBTORRENT_LAB_MATRIX_STEP "
                 f"{'PASS' if result['ok'] else 'FAIL'} "
                 f"matrix={matrix} scenario={scenario.name} iteration={iteration} "
+                f"superseedr_errors={result['superseedr_error_count']} "
                 f"artifacts={result['artifacts_dir']}"
             )
             if fail_fast and not result["ok"]:
@@ -2081,6 +2385,11 @@ def run_lab_matrix(
 
     passed = sum(1 for result in results if result.get("ok") is True)
     failed = len(results) - passed
+    superseedr_error_count = sum(_int_value(result.get("superseedr_error_count")) for result in results)
+    superseedr_warning_count = sum(
+        _int_value(result.get("superseedr_warning_count")) for result in results
+    )
+    behavior_warning_count = sum(len(result.get("behavior_warnings", [])) for result in results)
     summary: dict[str, object] = {
         "run_id": run_id,
         "matrix": matrix,
@@ -2092,6 +2401,9 @@ def run_lab_matrix(
         "repeat_count": repeat,
         "fail_fast": fail_fast,
         "network_impairment": impairment.as_dict(),
+        "behavior_warning_count": behavior_warning_count,
+        "superseedr_error_count": superseedr_error_count,
+        "superseedr_warning_count": superseedr_warning_count,
         "duration_secs": round(time.monotonic() - started_at, 3),
         "artifacts_dir": str(matrix_root),
         "results": results,
@@ -2139,6 +2451,7 @@ def run_lab_profile(
             "LIBTORRENT_LAB_PROFILE_STEP "
             f"{'PASS' if step_result['ok'] else 'FAIL'} "
             f"profile={profile.name} step={step.name} matrix={step.matrix} "
+            f"superseedr_errors={step_result['superseedr_error_count']} "
             f"artifacts={step_result['artifacts_dir']}"
         )
         if (fail_fast or step.fail_fast) and not step_result["ok"]:
@@ -2157,6 +2470,15 @@ def run_lab_profile(
         "attempt_count": sum(int(step.get("attempt_count", 0)) for step in step_results),
         "passed_attempts": sum(int(step.get("passed_attempts", 0)) for step in step_results),
         "failed_attempts": sum(int(step.get("failed_attempts", 0)) for step in step_results),
+        "behavior_warning_count": sum(
+            _int_value(step.get("behavior_warning_count")) for step in step_results
+        ),
+        "superseedr_error_count": sum(
+            _int_value(step.get("superseedr_error_count")) for step in step_results
+        ),
+        "superseedr_warning_count": sum(
+            _int_value(step.get("superseedr_warning_count")) for step in step_results
+        ),
         "repeat_multiplier": repeat_multiplier,
         "duration_secs": round(time.monotonic() - started_at, 3),
         "artifacts_dir": str(profile_root),
@@ -2167,11 +2489,139 @@ def run_lab_profile(
     return summary
 
 
+def _readiness_step_result(matrix_summary: dict[str, object], step: ProfileStep) -> dict[str, object]:
+    return _profile_step_result(matrix_summary, step)
+
+
+def _readiness_markdown(summary: dict[str, object]) -> str:
+    warning_count = _int_value(summary.get("behavior_warning_count"))
+    lines = [
+        f"# uTP Readiness Suite: {summary['readiness']}",
+        "",
+        f"- Result: {'PASS' if summary['ok'] else 'FAIL'}",
+        f"- Description: {summary['description']}",
+        f"- Steps: {summary['completed_steps']}/{summary['step_count']}",
+        f"- Attempts: {summary['attempt_count']}",
+        f"- Passed attempts: {summary['passed_attempts']}",
+        f"- Failed attempts: {summary['failed_attempts']}",
+        f"- Superseedr errors: {summary['superseedr_error_count']}",
+        f"- Warnings: {warning_count}",
+        f"- Duration: {summary['duration_secs']}s",
+        f"- Artifacts: `{summary['artifacts_dir']}`",
+        "",
+        "| Step | Matrix | Result | Repeat | Attempts | Failed | Netem | SS Errors | Warnings | Duration | Artifacts |",
+        "| --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |",
+    ]
+    for step in summary["steps"]:
+        status = "PASS" if step.get("ok") else "FAIL"
+        impairment = step.get("network_impairment", {})
+        netem = "on" if isinstance(impairment, dict) and impairment.get("enabled") else "off"
+        step_warnings = _int_value(step.get("behavior_warning_count"))
+        lines.append(
+            f"| {step['name']} | {step['matrix']} | {status} | "
+            f"{step.get('repeat_count', 0)} | {step.get('attempt_count', 0)} | "
+            f"{step.get('failed_attempts', 0)} | {netem} | "
+            f"{step.get('superseedr_error_count', 0)} | {step_warnings} | "
+            f"{step.get('duration_secs', 0)}s | `{step.get('artifacts_dir', '')}` |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def run_readiness_suite(
+    *,
+    readiness_name: str,
+    run_id: str,
+    timeout_secs: int | None = None,
+    skip_build: bool = False,
+    repeat_multiplier: int = 1,
+    fail_fast: bool = False,
+    network_impairment_override: NetworkImpairment | None = None,
+) -> dict[str, object]:
+    if repeat_multiplier < 1:
+        raise ValueError("repeat multiplier must be at least 1")
+
+    readiness = _readiness_for_name(readiness_name)
+    paths = resolve_paths()
+    readiness_root = paths.artifacts_root / "libtorrent_lab" / run_id
+    readiness_root.mkdir(parents=True, exist_ok=True)
+
+    started_at = time.monotonic()
+    step_results: list[dict[str, object]] = []
+    for step in readiness.steps:
+        step_impairment = network_impairment_override or step.network_impairment
+        matrix_run_id = f"{run_id}_{step.name}"
+        matrix_summary = run_lab_matrix(
+            matrix=step.matrix,
+            run_id=matrix_run_id,
+            timeout_secs=timeout_secs or step.timeout_secs,
+            skip_build=skip_build,
+            repeat=step.repeat * repeat_multiplier,
+            fail_fast=fail_fast or step.fail_fast,
+            network_impairment=step_impairment,
+        )
+        step_result = _readiness_step_result(matrix_summary, step)
+        step_results.append(step_result)
+        print(
+            "LIBTORRENT_LAB_READINESS_STEP "
+            f"{'PASS' if step_result['ok'] else 'FAIL'} "
+            f"readiness={readiness.name} step={step.name} matrix={step.matrix} "
+            f"superseedr_errors={step_result['superseedr_error_count']} "
+            f"artifacts={step_result['artifacts_dir']}"
+        )
+        if (fail_fast or step.fail_fast) and not step_result["ok"]:
+            break
+
+    failed_steps = sum(1 for step in step_results if step.get("ok") is not True)
+    superseedr_error_count = sum(
+        _int_value(step.get("superseedr_error_count")) for step in step_results
+    )
+    summary: dict[str, object] = {
+        "run_id": run_id,
+        "readiness": readiness.name,
+        "description": readiness.description,
+        "ok": (
+            failed_steps == 0
+            and len(step_results) == len(readiness.steps)
+            and superseedr_error_count == 0
+        ),
+        "step_count": len(readiness.steps),
+        "completed_steps": len(step_results),
+        "passed_steps": sum(1 for step in step_results if step.get("ok") is True),
+        "failed_steps": failed_steps,
+        "attempt_count": sum(int(step.get("attempt_count", 0)) for step in step_results),
+        "passed_attempts": sum(int(step.get("passed_attempts", 0)) for step in step_results),
+        "failed_attempts": sum(int(step.get("failed_attempts", 0)) for step in step_results),
+        "behavior_warning_count": sum(
+            _int_value(step.get("behavior_warning_count")) for step in step_results
+        ),
+        "superseedr_error_count": superseedr_error_count,
+        "superseedr_warning_count": sum(
+            _int_value(step.get("superseedr_warning_count")) for step in step_results
+        ),
+        "repeat_multiplier": repeat_multiplier,
+        "duration_secs": round(time.monotonic() - started_at, 3),
+        "artifacts_dir": str(readiness_root),
+        "steps": step_results,
+        "gates": {
+            "all_steps_completed": len(step_results) == len(readiness.steps),
+            "no_failed_attempts": failed_steps == 0,
+            "no_superseedr_errors": superseedr_error_count == 0,
+        },
+    }
+    _write_json(readiness_root / "readiness_summary.json", summary)
+    (readiness_root / "readiness_summary.md").write_text(
+        _readiness_markdown(summary),
+        encoding="utf-8",
+    )
+    return summary
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run Dockerized libtorrent lab scenarios")
     p.add_argument("--scenario", default="basic_ul_dl")
     p.add_argument("--matrix", choices=sorted(LAB_MATRIXES), default="")
     p.add_argument("--profile", choices=sorted(LAB_PROFILES), default="")
+    p.add_argument("--readiness", choices=sorted(READINESS_SUITES), default="")
     p.add_argument("--run-id", default="")
     p.add_argument("--timeout-secs", type=int, default=0)
     p.add_argument("--skip-build", action="store_true")
@@ -2188,8 +2638,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.profile and args.matrix:
-        raise SystemExit("Choose only one of --profile or --matrix")
+    selected_modes = [mode for mode in (args.profile, args.matrix, args.readiness) if mode]
+    if len(selected_modes) > 1:
+        raise SystemExit("Choose only one of --profile, --matrix, or --readiness")
 
     impairment = NetworkImpairment(
         delay_ms=args.netem_delay_ms,
@@ -2214,7 +2665,28 @@ def main() -> int:
         )
         print(
             "LIBTORRENT_LAB_PROFILE_RESULT "
-            f"{'PASS' if summary['ok'] else 'FAIL'} artifacts={summary['artifacts_dir']}"
+            f"{'PASS' if summary['ok'] else 'FAIL'} "
+            f"superseedr_errors={summary['superseedr_error_count']} "
+            f"artifacts={summary['artifacts_dir']}"
+        )
+        return 0 if summary["ok"] else 1
+
+    if args.readiness:
+        run_id = args.run_id or f"libtorrent_lab_readiness_{args.readiness}_{_utc_stamp()}"
+        summary = run_readiness_suite(
+            readiness_name=args.readiness,
+            run_id=run_id,
+            timeout_secs=args.timeout_secs or None,
+            skip_build=args.skip_build,
+            repeat_multiplier=args.repeat,
+            fail_fast=args.fail_fast,
+            network_impairment_override=impairment_override,
+        )
+        print(
+            "LIBTORRENT_LAB_READINESS_RESULT "
+            f"{'PASS' if summary['ok'] else 'FAIL'} "
+            f"superseedr_errors={summary['superseedr_error_count']} "
+            f"artifacts={summary['artifacts_dir']}"
         )
         return 0 if summary["ok"] else 1
 
@@ -2231,7 +2703,9 @@ def main() -> int:
         )
         print(
             "LIBTORRENT_LAB_MATRIX_RESULT "
-            f"{'PASS' if summary['ok'] else 'FAIL'} artifacts={summary['artifacts_dir']}"
+            f"{'PASS' if summary['ok'] else 'FAIL'} "
+            f"superseedr_errors={summary['superseedr_error_count']} "
+            f"artifacts={summary['artifacts_dir']}"
         )
         return 0 if summary["ok"] else 1
 
@@ -2244,7 +2718,14 @@ def main() -> int:
         skip_build=args.skip_build,
         network_impairment=impairment,
     )
-    print(f"LIBTORRENT_LAB_RESULT {'PASS' if summary['ok'] else 'FAIL'} artifacts={summary['artifacts_dir']}")
+    superseedr = summary.get("superseedr", {})
+    superseedr_errors = (
+        superseedr.get("error_count", 0) if isinstance(superseedr, dict) else 0
+    )
+    print(
+        f"LIBTORRENT_LAB_RESULT {'PASS' if summary['ok'] else 'FAIL'} "
+        f"superseedr_errors={superseedr_errors} artifacts={summary['artifacts_dir']}"
+    )
     return 0 if summary["ok"] else 1
 
 
