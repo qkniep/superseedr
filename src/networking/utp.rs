@@ -5,12 +5,19 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     future, io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::{Arc, LazyLock, Mutex as StdMutex, Weak},
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, LazyLock, Mutex as StdMutex, Weak,
+    },
+    task::{Context, Poll},
     time::Duration,
 };
 
 use tokio::{
-    io::{self as tokio_io, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream},
+    io::{
+        self as tokio_io, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf,
+    },
     sync::{mpsc, watch},
     time::{self, Instant},
 };
@@ -163,10 +170,12 @@ impl UtpPeerTransport {
         };
 
         let (client_stream, driver_stream) = tokio_io::duplex(STREAM_BUFFER);
+        let local_receive_buffered_bytes = Arc::new(AtomicUsize::new(0));
         let io = UtpSessionIo {
             endpoint,
             remote_addr,
             incoming_packets,
+            local_receive_buffered_bytes: local_receive_buffered_bytes.clone(),
             _session_guard: session_guard,
         };
         tokio::spawn(async move {
@@ -178,6 +187,7 @@ impl UtpPeerTransport {
             }
         });
 
+        let client_stream = TrackedUtpStream::new(client_stream, local_receive_buffered_bytes);
         Ok(PeerConnection::new(
             client_stream,
             PeerEndpoint::utp(remote_addr),
@@ -310,7 +320,13 @@ struct UtpSessionIo {
     endpoint: UtpEndpoint,
     remote_addr: SocketAddr,
     incoming_packets: mpsc::Receiver<UtpPacket>,
+    local_receive_buffered_bytes: Arc<AtomicUsize>,
     _session_guard: UtpSessionGuard,
+}
+
+struct TrackedUtpStream {
+    inner: DuplexStream,
+    local_receive_buffered_bytes: Arc<AtomicUsize>,
 }
 
 struct UtpSessionGuard {
@@ -326,6 +342,51 @@ struct UtpSessionKey {
 
 static UTP_ENDPOINT_REGISTRY: LazyLock<StdMutex<HashMap<SharedUdpKey, Weak<UtpEndpointInner>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+impl TrackedUtpStream {
+    fn new(inner: DuplexStream, local_receive_buffered_bytes: Arc<AtomicUsize>) -> Self {
+        Self {
+            inner,
+            local_receive_buffered_bytes,
+        }
+    }
+}
+
+impl AsyncRead for TrackedUtpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let filled_before = buf.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = &result {
+            let bytes_read = buf.filled().len().saturating_sub(filled_before);
+            if bytes_read > 0 {
+                saturating_atomic_sub(&self.local_receive_buffered_bytes, bytes_read);
+            }
+        }
+        result
+    }
+}
+
+impl AsyncWrite for TrackedUtpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
 
 impl UtpEndpoint {
     async fn bind(bind_addr: SocketAddr) -> io::Result<Self> {
@@ -468,7 +529,7 @@ impl UtpSessionIo {
             connection_id: state.send_connection_id,
             timestamp_microseconds: timestamp_microseconds(state.start),
             timestamp_difference_microseconds: timestamp_difference_microseconds(state),
-            wnd_size: advertised_window(out_of_order_payloads),
+            wnd_size: advertised_window(out_of_order_payloads, self.local_receive_buffered_bytes()),
             seq_nr,
             ack_nr: state.ack_nr(),
             selective_ack: &[],
@@ -484,6 +545,10 @@ impl UtpSessionIo {
                 "uTP shared UDP session closed",
             )
         })
+    }
+
+    fn local_receive_buffered_bytes(&self) -> usize {
+        self.local_receive_buffered_bytes.load(Ordering::Relaxed)
     }
 }
 
@@ -652,10 +717,12 @@ async fn handle_inbound_syn(
     state.record_received_packet(&syn);
 
     let (app_stream, driver_stream) = tokio_io::duplex(STREAM_BUFFER);
+    let local_receive_buffered_bytes = Arc::new(AtomicUsize::new(0));
     let io = UtpSessionIo {
         endpoint,
         remote_addr,
         incoming_packets,
+        local_receive_buffered_bytes: local_receive_buffered_bytes.clone(),
         _session_guard: session_guard,
     };
     let state_packet = UtpPacket {
@@ -688,6 +755,7 @@ async fn handle_inbound_syn(
         }
     });
 
+    let app_stream = TrackedUtpStream::new(app_stream, local_receive_buffered_bytes);
     let connection = PeerConnection::new(
         app_stream,
         PeerEndpoint::utp(remote_addr),
@@ -936,14 +1004,6 @@ fn parse_extension_chain(bytes: &[u8], first_extension: u8) -> io::Result<(usize
         }
 
         if extension == EXT_SELECTIVE_ACK {
-            if extension_len < SACK_EXTENSION_BYTES
-                || !extension_len.is_multiple_of(SACK_EXTENSION_BYTES)
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "uTP selective ack extension has invalid length",
-                ));
-            }
             selective_ack = bytes[offset..offset + extension_len].to_vec();
         }
 
@@ -1524,8 +1584,12 @@ where
     match packet.packet_type {
         TYPE_STATE | TYPE_DATA | TYPE_FIN => {
             let in_flight_before_ack = unacked_payload_bytes(unacked_packets);
-            let outcome =
-                acknowledge_packets(unacked_packets, packet.ack_nr, &packet.selective_ack);
+            let outcome = acknowledge_packets(
+                unacked_packets,
+                packet.ack_nr,
+                &packet.selective_ack,
+                state.next_send_seq_nr,
+            );
             state
                 .apply_ack_outcome(
                     io,
@@ -1546,7 +1610,12 @@ where
             let expected_seq_nr = state.last_remote_seq_nr.wrapping_add(1);
             let immediate_ack = if state.accepts_remote_payload_sequence(packet.seq_nr) {
                 if !packet.payload.is_empty() {
-                    local_writer.write_all(&packet.payload).await?;
+                    write_all_tracked(
+                        local_writer,
+                        &packet.payload,
+                        &io.local_receive_buffered_bytes,
+                    )
+                    .await?;
                 }
                 state.record_remote_payload_sequence(packet.seq_nr);
                 let should_ack_now = !receive.out_of_order_payloads.is_empty();
@@ -1555,6 +1624,7 @@ where
                     state,
                     &mut *receive.out_of_order_payloads,
                     &*receive.remote_fin_seq_nr,
+                    &io.local_receive_buffered_bytes,
                 )
                 .await?
                 {
@@ -1682,7 +1752,7 @@ async fn send_fin_packet(
         connection_id: state.send_connection_id,
         timestamp_microseconds: timestamp_microseconds(state.start),
         timestamp_difference_microseconds: timestamp_difference_microseconds(state),
-        wnd_size: advertised_window(out_of_order_payloads),
+        wnd_size: advertised_window(out_of_order_payloads, io.local_receive_buffered_bytes()),
         seq_nr,
         ack_nr: state.ack_nr(),
         selective_ack: Vec::new(),
@@ -1710,7 +1780,7 @@ async fn send_state_packet(
         connection_id: state.send_connection_id,
         timestamp_microseconds: timestamp_microseconds(state.start),
         timestamp_difference_microseconds: timestamp_difference_microseconds(state),
-        wnd_size: advertised_window(out_of_order_payloads),
+        wnd_size: advertised_window(out_of_order_payloads, io.local_receive_buffered_bytes()),
         seq_nr: state.next_send_seq_nr,
         ack_nr,
         selective_ack: selective_ack_for(ack_nr, out_of_order_payloads),
@@ -1752,7 +1822,13 @@ fn acknowledge_packets(
     unacked_packets: &mut VecDeque<SentPacket>,
     ack_nr: u16,
     selective_ack: &[u8],
+    next_send_seq_nr: u16,
 ) -> AckOutcome {
+    let last_sent_seq_nr = next_send_seq_nr.wrapping_sub(1);
+    if !unacked_packets.is_empty() && seq_gt(ack_nr, last_sent_seq_nr) {
+        return AckOutcome::default();
+    }
+
     let now = Instant::now();
     let mut outcome = AckOutcome {
         advanced_ack: unacked_packets
@@ -1823,6 +1899,7 @@ async fn deliver_buffered_payloads<W>(
     state: &mut UtpDriverState,
     out_of_order_payloads: &mut BTreeMap<u16, Vec<u8>>,
     remote_fin_seq_nr: &Option<u16>,
+    local_receive_buffered_bytes: &AtomicUsize,
 ) -> io::Result<bool>
 where
     W: AsyncWrite + Unpin,
@@ -1839,12 +1916,34 @@ where
             break;
         }
         if !payload.is_empty() {
-            local_writer.write_all(&payload).await?;
+            write_all_tracked(local_writer, &payload, local_receive_buffered_bytes).await?;
         }
         state.record_remote_payload_sequence(expected_seq_nr);
     }
 
     Ok(delivered_remote_fin)
+}
+
+async fn write_all_tracked<W>(
+    local_writer: &mut W,
+    mut payload: &[u8],
+    local_receive_buffered_bytes: &AtomicUsize,
+) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    while !payload.is_empty() {
+        let written = local_writer.write(payload).await?;
+        if written == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "failed to write uTP payload to local stream",
+            ));
+        }
+        local_receive_buffered_bytes.fetch_add(written, Ordering::Relaxed);
+        payload = &payload[written..];
+    }
+    Ok(())
 }
 
 async fn retransmit_packet(
@@ -1885,13 +1984,22 @@ async fn retransmit_packet(
     Ok(true)
 }
 
-fn advertised_window(out_of_order_payloads: &BTreeMap<u16, Vec<u8>>) -> u32 {
-    RECEIVE_WINDOW.saturating_sub(
-        out_of_order_payloads
-            .values()
-            .map(|payload| payload.len() as u32)
-            .sum::<u32>(),
-    )
+fn advertised_window(
+    out_of_order_payloads: &BTreeMap<u16, Vec<u8>>,
+    local_receive_buffered_bytes: usize,
+) -> u32 {
+    let buffered_bytes = out_of_order_payloads
+        .values()
+        .map(|payload| payload.len() as u32)
+        .sum::<u32>()
+        .saturating_add(local_receive_buffered_bytes.min(u32::MAX as usize) as u32);
+    RECEIVE_WINDOW.saturating_sub(buffered_bytes)
+}
+
+fn saturating_atomic_sub(value: &AtomicUsize, amount: usize) {
+    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(amount))
+    });
 }
 
 fn selective_ack_for(ack_nr: u16, out_of_order_payloads: &BTreeMap<u16, Vec<u8>>) -> Vec<u8> {
@@ -2081,6 +2189,28 @@ mod tests {
     }
 
     #[test]
+    fn decode_accepts_libtorrent_short_selective_ack_extension() {
+        let packet = UtpPacket {
+            packet_type: TYPE_STATE,
+            connection_id: 123,
+            timestamp_microseconds: 456,
+            timestamp_difference_microseconds: 789,
+            wnd_size: 1_024,
+            seq_nr: 65_530,
+            ack_nr: 42,
+            selective_ack: vec![0b0000_0101],
+            payload: Vec::new(),
+        };
+
+        let bytes = packet.encode();
+        assert_eq!(bytes[1], EXT_SELECTIVE_ACK);
+
+        let decoded = UtpPacket::decode(&bytes).unwrap();
+
+        assert_eq!(decoded, packet);
+    }
+
+    #[test]
     fn selective_ack_bit_mapping_starts_at_ack_plus_two() {
         let mut out_of_order = BTreeMap::new();
         out_of_order.insert(12, b"later".to_vec());
@@ -2100,7 +2230,30 @@ mod tests {
         out_of_order.insert(12, vec![0; 1_024]);
         out_of_order.insert(14, vec![0; 512]);
 
-        assert_eq!(advertised_window(&out_of_order), RECEIVE_WINDOW - 1_536);
+        assert_eq!(advertised_window(&out_of_order, 0), RECEIVE_WINDOW - 1_536);
+        assert_eq!(
+            advertised_window(&out_of_order, 2_048),
+            RECEIVE_WINDOW - 3_584
+        );
+    }
+
+    #[tokio::test]
+    async fn tracked_stream_releases_advertised_window_when_read() {
+        let (client_stream, mut driver_stream) = tokio_io::duplex(64);
+        let buffered = Arc::new(AtomicUsize::new(0));
+        let mut client_stream = TrackedUtpStream::new(client_stream, buffered.clone());
+
+        write_all_tracked(&mut driver_stream, b"abcdef", &buffered)
+            .await
+            .unwrap();
+        assert_eq!(buffered.load(Ordering::Relaxed), 6);
+
+        let mut buf = [0_u8; 4];
+        assert_eq!(client_stream.read(&mut buf).await.unwrap(), 4);
+        assert_eq!(buffered.load(Ordering::Relaxed), 2);
+
+        assert_eq!(client_stream.read(&mut buf).await.unwrap(), 2);
+        assert_eq!(buffered.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -2150,7 +2303,7 @@ mod tests {
             },
         ]);
 
-        let outcome = acknowledge_packets(&mut unacked, 10, &[0b0000_0001, 0, 0, 0]);
+        let outcome = acknowledge_packets(&mut unacked, 10, &[0b0000_0001, 0, 0, 0], 13);
 
         assert_eq!(outcome.acked_packets.len(), 2);
         assert_eq!(unacked.len(), 1);
@@ -2176,7 +2329,34 @@ mod tests {
             },
         ]);
 
-        let outcome = acknowledge_packets(&mut unacked, 9, &[]);
+        let outcome = acknowledge_packets(&mut unacked, 9, &[], 12);
+
+        assert!(!outcome.advanced_ack);
+        assert!(outcome.acked_packets.is_empty());
+        assert_eq!(unacked.len(), 2);
+        assert_eq!(unacked.front().unwrap().seq_nr, 10);
+    }
+
+    #[test]
+    fn ack_processing_ignores_future_ack_numbers() {
+        let mut unacked = VecDeque::from([
+            SentPacket {
+                packet_type: TYPE_DATA,
+                seq_nr: 10,
+                payload: vec![1],
+                sent_at: Instant::now(),
+                retransmits: 0,
+            },
+            SentPacket {
+                packet_type: TYPE_DATA,
+                seq_nr: 11,
+                payload: vec![2],
+                sent_at: Instant::now(),
+                retransmits: 0,
+            },
+        ]);
+
+        let outcome = acknowledge_packets(&mut unacked, 40, &[], 12);
 
         assert!(!outcome.advanced_ack);
         assert!(outcome.acked_packets.is_empty());
