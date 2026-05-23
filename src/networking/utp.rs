@@ -52,7 +52,6 @@ const ENDPOINT_BIND_RETRY_ATTEMPTS: usize = 16;
 const ENDPOINT_BIND_RETRY_DELAY: Duration = Duration::from_millis(1);
 const INITIAL_RETRANSMIT_TIMEOUT: Duration = Duration::from_secs(1);
 const MIN_RETRANSMIT_TIMEOUT: Duration = Duration::from_millis(500);
-const RETRANSMIT_TICK: Duration = Duration::from_millis(100);
 const DELAYED_ACK_DELAY: Duration = Duration::from_millis(5);
 const DELAYED_ACK_PACKET_THRESHOLD: u8 = 4;
 const MAX_RETRANSMITS: u8 = 8;
@@ -1450,8 +1449,6 @@ async fn run_utp_driver(
     let mut local_fin_sent = false;
     let mut remote_fin_seq_nr = None;
     let mut remote_eof_delivered = false;
-    let mut retransmit_tick = time::interval(RETRANSMIT_TICK);
-
     loop {
         flush_pending_payloads(
             &io,
@@ -1478,6 +1475,7 @@ async fn run_utp_driver(
         }
 
         let ack_deadline = delayed_ack.deadline();
+        let retransmit_deadline = next_retransmit_deadline(&state, &unacked_packets);
         tokio::select! {
             read_result = local_reader.read(&mut local_buf), if !local_eof && !remote_eof_delivered && pending_payloads.len() < MAX_INFLIGHT_PACKETS => {
                 let bytes_read = read_result?;
@@ -1505,7 +1503,13 @@ async fn run_utp_driver(
                     local_eof = true;
                 }
             }
-            _ = retransmit_tick.tick() => {
+            _ = async move {
+                if let Some(deadline) = retransmit_deadline {
+                    time::sleep_until(deadline).await;
+                } else {
+                    future::pending::<()>().await;
+                }
+            }, if retransmit_deadline.is_some() => {
                 retransmit_due_packets(&io, &mut state, &mut unacked_packets, &out_of_order_payloads).await?;
             }
             _ = async move {
@@ -1519,6 +1523,16 @@ async fn run_utp_driver(
             }
         }
     }
+}
+
+fn next_retransmit_deadline(
+    state: &UtpDriverState,
+    unacked_packets: &VecDeque<SentPacket>,
+) -> Option<Instant> {
+    unacked_packets
+        .iter()
+        .map(|packet| packet.sent_at + state.retransmit_timeout)
+        .min()
 }
 
 async fn flush_pending_payloads(
