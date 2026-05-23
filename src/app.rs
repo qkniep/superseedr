@@ -158,16 +158,11 @@ const WATCH_FOLDER_RESCAN_INTERVAL_SECS: u64 = 5;
 const SHARED_ROLE_RETRY_INTERVAL_SECS: u64 = 2;
 const STARTUP_ROLLING_BATCH_INTERVAL_SECS: u64 = 1;
 const STARTUP_ROLLING_LOADS_PER_INTERVAL: usize = 1;
-const STARTUP_ROLLING_WARMUP_DELAY_SECS: u64 = 1;
-const STARTUP_ROLLING_PRESSURE_DELAY_SECS: u64 = 3;
-const STARTUP_ROLLING_WAKE_HOLD_RATIO: f64 = 0.35;
-const STARTUP_ROLLING_DRAW_HOLD_RATIO: f64 = 0.90;
-const STARTUP_ROLLING_CPU_HOLD_PERCENT: f32 = 85.0;
 
 const SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 const INCOMING_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 const INCOMING_PEER_HANDSHAKE_QUEUE_SIZE: usize = 1024;
-const PORT_FAMILY_HIGHLIGHT_DURATION: Duration = Duration::from_secs(2);
+const PORT_FAMILY_HIGHLIGHT_DURATION: Duration = Duration::from_millis(450);
 const UI_FPS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const UI_RESPONSIVENESS_EMA_ALPHA: f64 = 0.35;
 const WAKE_LAG_PEER_THROTTLE_BAD_RATIO: f64 = 0.25;
@@ -177,6 +172,7 @@ const WAKE_LAG_PEER_THROTTLE_ADDITIVE_STEP_PEERS: usize = 256;
 const WAKE_LAG_PEER_THROTTLE_ADDITIVE_STEP_PERCENT: usize = 10;
 const WAKE_LAG_PEER_THROTTLE_RECOVERY_HEADROOM_PEERS: usize = 512;
 const WAKE_LAG_PEER_THROTTLE_MIN_PEERS: usize = 8;
+const WAKE_LAG_PEER_THROTTLE_DOWNLOAD_FLOOR_PERCENT: usize = 25;
 const NORMAL_IDLE_FRAME_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 const NORMAL_ANIMATION_RECENT_BLOCK_ROWS: usize = 64;
 const NORMAL_ANIMATION_RECENT_PEER_EVENTS: usize = 120;
@@ -1203,7 +1199,6 @@ pub struct SwarmAvailabilityFlashState {
     pub previous_availability: Vec<u32>,
     pub flash_start: Vec<Option<Instant>>,
     pub flash_until: Vec<Option<Instant>>,
-    pub flash_pending_availability: Vec<Option<u32>>,
     previous_peer_bitfields: HashMap<String, Vec<bool>>,
 }
 
@@ -1262,7 +1257,6 @@ impl SwarmAvailabilityFlashState {
             self.previous_availability = current_availability;
             self.flash_start = vec![None; self.previous_availability.len()];
             self.flash_until = vec![None; self.previous_availability.len()];
-            self.flash_pending_availability = vec![None; self.previous_availability.len()];
             self.previous_peer_bitfields = current_peer_bitfields;
             return;
         }
@@ -1305,7 +1299,6 @@ impl SwarmAvailabilityFlashState {
             self.previous_availability = current_availability;
             self.flash_start = vec![None; self.previous_availability.len()];
             self.flash_until = vec![None; self.previous_availability.len()];
-            self.flash_pending_availability = vec![None; self.previous_availability.len()];
             self.previous_peer_bitfields.clear();
             return;
         }
@@ -1315,10 +1308,6 @@ impl SwarmAvailabilityFlashState {
         }
         if self.flash_until.len() != current_availability.len() {
             self.flash_until.resize(current_availability.len(), None);
-        }
-        if self.flash_pending_availability.len() != current_availability.len() {
-            self.flash_pending_availability
-                .resize(current_availability.len(), None);
         }
 
         let increased_count = self
@@ -1341,32 +1330,8 @@ impl SwarmAvailabilityFlashState {
                 let delay =
                     swarm_availability_flash_rollout_delay(rank, increased_count, flash_duration);
                 let start = now + delay;
-                let deadline = start + flash_duration;
-                match self.flash_start[idx] {
-                    Some(existing_start) if existing_start <= now => {
-                        self.flash_until[idx] = Some(
-                            self.flash_until[idx].map_or(deadline, |until| until.max(deadline)),
-                        );
-                    }
-                    Some(existing_start) => {
-                        let merged_start = existing_start.min(start);
-                        self.flash_start[idx] = Some(merged_start);
-                        self.flash_until[idx] = Some(
-                            self.flash_until[idx].map_or(deadline, |until| until.max(deadline)),
-                        );
-                        if merged_start > now && self.flash_pending_availability[idx].is_none() {
-                            self.flash_pending_availability[idx] = Some(previous);
-                        }
-                        if merged_start <= now {
-                            self.flash_pending_availability[idx] = None;
-                        }
-                    }
-                    None => {
-                        self.flash_start[idx] = Some(start);
-                        self.flash_until[idx] = Some(deadline);
-                        self.flash_pending_availability[idx] = (start > now).then_some(previous);
-                    }
-                }
+                self.flash_start[idx] = Some(start);
+                self.flash_until[idx] = Some(start + flash_duration);
                 rank += 1;
             }
         }
@@ -1398,40 +1363,12 @@ impl SwarmAvailabilityFlashState {
             .any(|&deadline| deadline > now)
     }
 
-    pub fn display_availability(
-        &self,
-        info_hash: &[u8],
-        current_availability: &[u32],
-        now: Instant,
-    ) -> Vec<u32> {
-        if self.info_hash.as_slice() != info_hash {
-            return current_availability.to_vec();
-        }
-
-        current_availability
-            .iter()
-            .enumerate()
-            .map(|(idx, &current)| {
-                match (
-                    self.flash_pending_availability.get(idx).copied().flatten(),
-                    self.flash_start.get(idx).copied().flatten(),
-                ) {
-                    (Some(pending), Some(start)) if now < start => pending,
-                    _ => current,
-                }
-            })
-            .collect()
-    }
-
     fn clear_expired(&mut self, now: Instant) {
         for idx in 0..self.flash_until.len() {
             if self.flash_until[idx].is_some_and(|deadline| deadline <= now) {
                 self.flash_until[idx] = None;
                 if let Some(start) = self.flash_start.get_mut(idx) {
                     *start = None;
-                }
-                if let Some(pending) = self.flash_pending_availability.get_mut(idx) {
-                    *pending = None;
                 }
             }
         }
@@ -2025,46 +1962,6 @@ impl WakeLagPeerThrottle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartupRollInPressureReason {
-    Warmup,
-    WakeLag,
-    DrawCost,
-    Cpu,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct StartupRollInPressureStats {
-    total_deferrals: usize,
-    warmup_deferrals: usize,
-    peer_limit_deferrals: usize,
-    wake_lag_deferrals: usize,
-    draw_cost_deferrals: usize,
-    cpu_deferrals: usize,
-    total_delay_secs: u64,
-}
-
-impl StartupRollInPressureStats {
-    fn record(&mut self, reason: StartupRollInPressureReason, delay: Duration) {
-        self.total_deferrals = self.total_deferrals.saturating_add(1);
-        self.total_delay_secs = self.total_delay_secs.saturating_add(delay.as_secs());
-        match reason {
-            StartupRollInPressureReason::Warmup => {
-                self.warmup_deferrals = self.warmup_deferrals.saturating_add(1);
-            }
-            StartupRollInPressureReason::WakeLag => {
-                self.wake_lag_deferrals = self.wake_lag_deferrals.saturating_add(1);
-            }
-            StartupRollInPressureReason::DrawCost => {
-                self.draw_cost_deferrals = self.draw_cost_deferrals.saturating_add(1);
-            }
-            StartupRollInPressureReason::Cpu => {
-                self.cpu_deferrals = self.cpu_deferrals.saturating_add(1);
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct DiskBackpressureDownloadThrottle {
     active: bool,
@@ -2322,7 +2219,6 @@ pub struct App {
     pub startup_loaded_torrent_count: usize,
     pub startup_load_summary_logged: bool,
     pub next_startup_load_at: Option<time::Instant>,
-    startup_roll_in_pressure_stats: StartupRollInPressureStats,
     pub last_dht_peer_slot_usage: Option<(usize, usize)>,
     persisted_torrent_metadata_cache: HashMap<Vec<u8>, TorrentMetadataEntry>,
 }
@@ -2870,7 +2766,6 @@ impl App {
             startup_loaded_torrent_count: 0,
             startup_load_summary_logged: false,
             next_startup_load_at: None,
-            startup_roll_in_pressure_stats: StartupRollInPressureStats::default(),
             last_dht_peer_slot_usage: None,
             persisted_torrent_metadata_cache,
         };
@@ -3838,7 +3733,29 @@ impl App {
             return 0;
         }
 
-        WAKE_LAG_PEER_THROTTLE_MIN_PEERS.min(base_peer_limit)
+        let minimum_floor = WAKE_LAG_PEER_THROTTLE_MIN_PEERS.min(base_peer_limit);
+        if self.peer_limiter_download_activity_active() {
+            let download_floor = base_peer_limit
+                .saturating_mul(WAKE_LAG_PEER_THROTTLE_DOWNLOAD_FLOOR_PERCENT)
+                .saturating_div(100)
+                .clamp(1, base_peer_limit);
+            minimum_floor.max(download_floor)
+        } else {
+            minimum_floor
+        }
+    }
+
+    fn peer_limiter_download_activity_active(&self) -> bool {
+        self.app_state
+            .avg_download_history
+            .last()
+            .copied()
+            .unwrap_or(0)
+            > 0
+            || self.app_state.torrents.values().any(|torrent| {
+                torrent.latest_state.torrent_control_state == TorrentControlState::Running
+                    && !torrent.latest_state.is_complete
+            })
     }
 
     fn effective_resource_limits(&self) -> CalculatedLimits {
@@ -7708,36 +7625,6 @@ impl App {
         };
     }
 
-    fn startup_roll_in_pressure_reason(&self) -> Option<StartupRollInPressureReason> {
-        let ui = &self.app_state.ui;
-
-        if ui
-            .frame_wake_lag_ratio_ema
-            .is_some_and(|ratio| ratio.is_finite() && ratio >= STARTUP_ROLLING_WAKE_HOLD_RATIO)
-        {
-            return Some(StartupRollInPressureReason::WakeLag);
-        }
-
-        if ui
-            .frame_draw_ratio_ema
-            .is_some_and(|ratio| ratio.is_finite() && ratio >= STARTUP_ROLLING_DRAW_HOLD_RATIO)
-        {
-            return Some(StartupRollInPressureReason::DrawCost);
-        }
-
-        if self.app_state.cpu_usage.is_finite()
-            && self.app_state.cpu_usage >= STARTUP_ROLLING_CPU_HOLD_PERCENT
-        {
-            return Some(StartupRollInPressureReason::Cpu);
-        }
-
-        if ui.frame_wake_lag_ratio_ema.is_none() || ui.frame_draw_ratio_ema.is_none() {
-            return Some(StartupRollInPressureReason::Warmup);
-        }
-
-        None
-    }
-
     fn maybe_log_startup_load_summary(&mut self) {
         if self.startup_load_summary_logged || !self.startup_deferred_load_queue.is_empty() {
             return;
@@ -7750,18 +7637,6 @@ impl App {
     }
 
     async fn load_next_startup_batch(&mut self) {
-        if let Some(reason) = self.startup_roll_in_pressure_reason() {
-            let delay = match reason {
-                StartupRollInPressureReason::Warmup => {
-                    Duration::from_secs(STARTUP_ROLLING_WARMUP_DELAY_SECS)
-                }
-                _ => Duration::from_secs(STARTUP_ROLLING_PRESSURE_DELAY_SECS),
-            };
-            self.startup_roll_in_pressure_stats.record(reason, delay);
-            self.reschedule_startup_load_deadline_after(delay);
-            return;
-        }
-
         let mut loaded_count = 0usize;
 
         for _ in 0..STARTUP_ROLLING_LOADS_PER_INTERVAL {
@@ -9240,41 +9115,6 @@ mod tests {
     }
 
     #[test]
-    fn swarm_availability_flash_holds_pending_piece_until_delayed_flash_starts() {
-        let now = Instant::now();
-        let duration = Duration::from_millis(300);
-        let mut state = SwarmAvailabilityFlashState::default();
-
-        state.update(b"torrent-a", vec![0, 0, 0, 0], now, duration);
-
-        let first_update = now + Duration::from_millis(10);
-        state.update(b"torrent-a", vec![1, 1, 0, 1], first_update, duration);
-        assert_eq!(
-            state.display_availability(b"torrent-a", &[1, 1, 0, 1], first_update),
-            vec![1, 0, 0, 0]
-        );
-
-        let second_update = first_update + Duration::from_millis(50);
-        state.update(b"torrent-a", vec![1, 2, 0, 2], second_update, duration);
-        assert_eq!(
-            state.display_availability(b"torrent-a", &[1, 2, 0, 2], second_update),
-            vec![1, 2, 0, 0]
-        );
-
-        let second_start = first_update + Duration::from_millis(150);
-        assert_eq!(
-            state.display_availability(b"torrent-a", &[1, 2, 0, 2], second_start),
-            vec![1, 2, 0, 0]
-        );
-
-        let third_start = first_update + duration;
-        assert_eq!(
-            state.display_availability(b"torrent-a", &[1, 2, 0, 2], third_start),
-            vec![1, 2, 0, 2]
-        );
-    }
-
-    #[test]
     fn swarm_availability_flash_suppresses_full_map_increase() {
         let now = Instant::now();
         let duration = Duration::from_millis(350);
@@ -9639,6 +9479,31 @@ mod tests {
         assert_eq!(
             throttle.effective_peer_limit(65, super::WAKE_LAG_PEER_THROTTLE_MIN_PEERS),
             super::WAKE_LAG_PEER_THROTTLE_MIN_PEERS
+        );
+    }
+
+    #[test]
+    fn wake_lag_peer_throttle_uses_download_floor_when_provided() {
+        let mut throttle = WakeLagPeerThrottle::default();
+        let base_peer_limit: usize = 100;
+        let download_floor = base_peer_limit
+            .saturating_mul(super::WAKE_LAG_PEER_THROTTLE_DOWNLOAD_FLOOR_PERCENT)
+            .saturating_div(100);
+
+        let change = throttle
+            .update(
+                Some(super::WAKE_LAG_PEER_THROTTLE_BAD_RATIO),
+                base_peer_limit,
+                download_floor,
+                10,
+            )
+            .expect("throttle should reduce under bad wake lag");
+
+        assert_eq!(change.previous_peer_limit, base_peer_limit);
+        assert_eq!(change.current_peer_limit, download_floor);
+        assert_eq!(
+            throttle.effective_peer_limit(base_peer_limit, download_floor),
+            download_floor
         );
     }
 
@@ -10871,6 +10736,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wake_lag_peer_throttle_floor_is_more_lenient_while_downloading() {
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("create app");
+        let base_peer_limit = 100;
+
+        assert_eq!(
+            app.wake_lag_peer_throttle_floor(base_peer_limit),
+            super::WAKE_LAG_PEER_THROTTLE_MIN_PEERS
+        );
+
+        let info_hash = vec![9; 20];
+        let mut display = TorrentDisplayState::default();
+        display.latest_state.info_hash = info_hash.clone();
+        display.latest_state.torrent_name = "sample download".to_string();
+        display.latest_state.torrent_control_state = TorrentControlState::Running;
+        display.latest_state.is_complete = false;
+        app.app_state.torrents.insert(info_hash, display);
+
+        assert_eq!(
+            app.wake_lag_peer_throttle_floor(base_peer_limit),
+            base_peer_limit * super::WAKE_LAG_PEER_THROTTLE_DOWNLOAD_FLOOR_PERCENT / 100
+        );
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn apply_settings_update_reconfigures_dht_bootstrap_after_failed_port_rebind() {
         let settings = crate::config::Settings {
             client_port: 0,
@@ -11170,88 +11067,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_next_startup_batch_defers_when_runtime_pressure_is_high() {
-        let info_hash_hex = "1".repeat(40);
-        let torrent = TorrentSettings {
-            torrent_or_magnet: format!("magnet:?xt=urn:btih:{info_hash_hex}"),
-            name: "pressure-start".to_string(),
-            torrent_control_state: TorrentControlState::Running,
-            ..Default::default()
-        };
-
-        let mut app = App::new(
-            crate::config::Settings {
-                client_port: 0,
-                ..Default::default()
-            },
-            AppRuntimeMode::Normal,
-        )
-        .await
-        .expect("build app");
-        app.client_configs.torrents = vec![torrent.clone()];
-        app.startup_deferred_load_queue =
-            VecDeque::from([info_hash_from_torrent_source(&torrent.torrent_or_magnet)
-                .expect("derive info hash")]);
-        app.app_state.ui.frame_wake_lag_ratio_ema = Some(super::STARTUP_ROLLING_WAKE_HOLD_RATIO);
-        app.app_state.ui.frame_draw_ratio_ema = Some(0.0);
-
-        app.load_next_startup_batch().await;
-
-        assert!(app.app_state.torrents.is_empty());
-        assert_eq!(app.startup_deferred_load_queue.len(), 1);
-        assert_eq!(app.startup_loaded_torrent_count, 0);
-        assert_eq!(app.startup_roll_in_pressure_stats.total_deferrals, 1);
-        assert_eq!(app.startup_roll_in_pressure_stats.wake_lag_deferrals, 1);
-        assert_eq!(
-            app.startup_roll_in_pressure_stats.total_delay_secs,
-            super::STARTUP_ROLLING_PRESSURE_DELAY_SECS
-        );
-        assert!(app.next_startup_load_at.is_some());
-
-        let _ = app.shutdown_tx.send(());
-    }
-
-    #[tokio::test]
-    async fn load_next_startup_batch_waits_for_initial_responsiveness_samples() {
-        let info_hash_hex = "1".repeat(40);
-        let torrent = TorrentSettings {
-            torrent_or_magnet: format!("magnet:?xt=urn:btih:{info_hash_hex}"),
-            name: "warmup-start".to_string(),
-            torrent_control_state: TorrentControlState::Running,
-            ..Default::default()
-        };
-
-        let mut app = App::new(
-            crate::config::Settings {
-                client_port: 0,
-                ..Default::default()
-            },
-            AppRuntimeMode::Normal,
-        )
-        .await
-        .expect("build app");
-        app.client_configs.torrents = vec![torrent.clone()];
-        app.startup_deferred_load_queue =
-            VecDeque::from([info_hash_from_torrent_source(&torrent.torrent_or_magnet)
-                .expect("derive info hash")]);
-
-        app.load_next_startup_batch().await;
-
-        assert!(app.app_state.torrents.is_empty());
-        assert_eq!(app.startup_deferred_load_queue.len(), 1);
-        assert_eq!(app.startup_loaded_torrent_count, 0);
-        assert_eq!(app.startup_roll_in_pressure_stats.total_deferrals, 1);
-        assert_eq!(app.startup_roll_in_pressure_stats.warmup_deferrals, 1);
-        assert_eq!(
-            app.startup_roll_in_pressure_stats.total_delay_secs,
-            super::STARTUP_ROLLING_WARMUP_DELAY_SECS
-        );
-        assert!(app.next_startup_load_at.is_some());
-
-        let _ = app.shutdown_tx.send(());
-    }
-
-    #[tokio::test]
     async fn load_next_startup_batch_keeps_loading_when_effective_peer_limit_is_active() {
         let info_hash_hex = "1".repeat(40);
         let torrent = TorrentSettings {
@@ -11284,9 +11099,6 @@ mod tests {
         assert_eq!(app.app_state.torrents.len(), 1);
         assert!(app.startup_deferred_load_queue.is_empty());
         assert_eq!(app.startup_loaded_torrent_count, 1);
-        assert_eq!(app.startup_roll_in_pressure_stats.total_deferrals, 0);
-        assert_eq!(app.startup_roll_in_pressure_stats.peer_limit_deferrals, 0);
-        assert_eq!(app.startup_roll_in_pressure_stats.total_delay_secs, 0);
         assert!(app.next_startup_load_at.is_none());
 
         let _ = app.shutdown_tx.send(());

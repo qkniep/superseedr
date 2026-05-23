@@ -3962,13 +3962,9 @@ mod tests {
         std::env::set_var("SUPERSEEDR_SHARED_HOST_ID", "host-a");
         clear_shared_config_state_for_tests();
 
-        let request = add_control_request_for_input(
-            source_path.to_string_lossy().as_ref(),
-            None,
-            true,
-            true,
-        )
-        .expect("build shared add request");
+        let request =
+            add_control_request_for_input(source_path.to_string_lossy().as_ref(), None, true, true)
+                .expect("build shared add request");
 
         match request {
             ControlRequest::AddTorrentFile { source_path, .. } => {
