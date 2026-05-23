@@ -93,6 +93,9 @@ are removed on a successful refresh.
 ├─ hosts/
 │  └─ <host-id>/
 │     └─ config.toml
+├─ backups/
+│  └─ catalog/
+│     └─ catalog_YYYYMMDD_HH.toml
 └─ torrents/
    └─ <info-hash>.torrent
 ```
@@ -114,7 +117,7 @@ download-data backup.
 | --- | --- | --- |
 | Standalone timestamped settings backups | Every standalone settings save. | Latest 64 `settings_*.toml` files. |
 | Standalone critical mirror | Best-effort refresh after each successful standalone settings save. Metadata-only updates do not refresh it. | One fully refreshed `latest` tree. |
-| Shared critical mirror | Best-effort refresh after shared settings, catalog, host config, or settings-derived metadata changes are saved. Metadata-only upserts do not refresh it. | One fully refreshed `latest` tree. |
+| Shared critical mirror | Best-effort refresh after shared settings, catalog, host config, or settings-derived metadata changes are saved. Every running shared-mode node also refreshes its own local mirror every 15 minutes. Metadata-only upserts do not refresh it directly. | One fully refreshed `latest` tree per node. |
 | Shared catalog safety snapshots | Before overwriting a changed shared `catalog.toml`, at most once per active time bucket. | Depends on catalog size; see below. |
 
 Shared catalog safety snapshots are stored as:
@@ -148,13 +151,15 @@ For shared recovery, the critical files are:
 - `settings.toml`
 - `catalog.toml`
 - `hosts/<host-id>/config.toml`
+- time-bucketed catalog snapshots from `backups/catalog/`
 - any referenced `.torrent` files from `torrents/`
 
 If a shared catalog was accidentally overwritten or truncated, first inspect the
 time-bucketed catalog snapshots under `superseedr-config/backups/catalog/`.
-Those snapshots preserve historical `catalog.toml` versions, while the
-`~/.superseedr/backups/shared-config/latest/` mirror preserves only the latest
-critical state.
+Each running shared-mode node also mirrors those snapshots to its own
+`~/.superseedr/backups/shared-config/latest/backups/catalog/`, so the normal
+config directory keeps a recent local copy of both the latest critical state and
+the catalog snapshot history.
 
 Configuration and `.torrent` files can include tracker URLs, folder names, and
 other operational details. Treat backup copies as private operational data.

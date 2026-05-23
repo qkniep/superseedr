@@ -1820,7 +1820,7 @@ fn refresh_normal_config_recovery_backup(
     })
 }
 
-fn refresh_shared_config_recovery_backup(
+fn refresh_shared_config_recovery_backup_tree(
     paths: &SharedConfigPaths,
     layered: &LayeredConfig,
 ) -> io::Result<()> {
@@ -1841,8 +1841,21 @@ fn refresh_shared_config_recovery_backup(
             &paths.root_dir.join("torrents"),
             &backup_dir.join("torrents"),
         )?;
+        copy_dir_if_exists(
+            &paths.root_dir.join("backups").join("catalog"),
+            &backup_dir.join("backups").join("catalog"),
+        )?;
         Ok(())
     })
+}
+
+pub(crate) fn refresh_shared_config_recovery_backup_now() -> io::Result<bool> {
+    let Some(paths) = resolve_shared_config_paths()? else {
+        return Ok(false);
+    };
+    let (layered, _metadata) = load_current_shared_layered(&paths, true)?;
+    refresh_shared_config_recovery_backup_tree(&paths, &layered)?;
+    Ok(true)
 }
 
 fn log_recovery_backup_error(kind: &str, error: &io::Error) {
@@ -2269,7 +2282,9 @@ impl SharedConfigBackend {
             || shared_metadata_changed
             || shared_host_changed
         {
-            if let Err(error) = refresh_shared_config_recovery_backup(&self.paths, &next_layered) {
+            if let Err(error) =
+                refresh_shared_config_recovery_backup_tree(&self.paths, &next_layered)
+            {
                 log_recovery_backup_error("shared-config", &error);
             }
         }
@@ -4196,6 +4211,19 @@ mod tests {
         fs::create_dir_all(shared_torrent.parent().expect("shared torrent parent"))
             .expect("create shared torrent cache");
         fs::write(&shared_torrent, b"sample torrent bytes").expect("write shared torrent");
+        let catalog_snapshot = backend
+            .paths
+            .root_dir
+            .join("backups")
+            .join("catalog")
+            .join("catalog_20260523_10.toml");
+        fs::create_dir_all(catalog_snapshot.parent().expect("catalog snapshot parent"))
+            .expect("create catalog snapshot dir");
+        fs::write(
+            &catalog_snapshot,
+            "[[torrents]]\nname = \"Previous Sample\"\n",
+        )
+        .expect("write catalog snapshot");
 
         let mut settings = backend.load_settings().expect("load shared settings");
         settings.client_id = "shared-backup-node".to_string();
@@ -4231,6 +4259,16 @@ mod tests {
             .join("torrents")
             .join("0123456789abcdef0123456789abcdef01234567.torrent")
             .exists());
+        assert_eq!(
+            fs::read_to_string(
+                latest
+                    .join("backups")
+                    .join("catalog")
+                    .join("catalog_20260523_10.toml")
+            )
+            .expect("read backup catalog snapshot"),
+            "[[torrents]]\nname = \"Previous Sample\"\n"
+        );
         assert!(!latest.join("torrent_metadata.toml").exists());
         assert!(!latest.join("cluster.revision").exists());
         assert!(!latest.join("stale.txt").exists());

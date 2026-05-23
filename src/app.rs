@@ -21,10 +21,10 @@ use crate::torrent_manager::DiskIoOperation;
 
 use crate::config::{
     classify_shared_mode_settings_change, host_watch_paths, load_torrent_metadata,
-    runtime_watch_paths, save_settings, shared_host_id, shared_inbox_path, shared_root_path,
-    upsert_torrent_metadata, FeedSyncError, PeerSortColumn, RssFilterMode, RssHistoryEntry,
-    Settings, SettingsChangeScope, SortDirection, TorrentMetadataEntry, TorrentMetadataFileEntry,
-    TorrentSettings, TorrentSortColumn,
+    refresh_shared_config_recovery_backup_now, runtime_watch_paths, save_settings, shared_host_id,
+    shared_inbox_path, shared_root_path, upsert_torrent_metadata, FeedSyncError, PeerSortColumn,
+    RssFilterMode, RssHistoryEntry, Settings, SettingsChangeScope, SortDirection,
+    TorrentMetadataEntry, TorrentMetadataFileEntry, TorrentSettings, TorrentSortColumn,
 };
 use crate::control_service::{
     control_event_details, online_control_success_message, plan_control_request,
@@ -154,6 +154,7 @@ const SAFE_BUDGET_PERCENTAGE: f64 = 0.85;
 pub const RSS_MAX_TORRENT_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 const RSS_MANUAL_DOWNLOAD_TIMEOUT_SECS: u64 = 20;
 const NETWORK_HISTORY_PERSIST_INTERVAL_SECS: u64 = 15 * 60;
+const SHARED_RECOVERY_BACKUP_REFRESH_INTERVAL_SECS: u64 = 15 * 60;
 const WATCH_FOLDER_RESCAN_INTERVAL_SECS: u64 = 5;
 const SHARED_ROLE_RETRY_INTERVAL_SECS: u64 = 2;
 const STARTUP_ROLLING_BATCH_INTERVAL_SECS: u64 = 1;
@@ -2992,6 +2993,19 @@ impl App {
         matches!(self.current_cluster_role, Some(AppClusterRole::Leader))
     }
 
+    fn refresh_shared_recovery_backup_on_interval(&self) {
+        if !self.is_shared_mode_enabled() {
+            return;
+        }
+        if let Err(error) = refresh_shared_config_recovery_backup_now() {
+            tracing_event!(
+                Level::WARN,
+                error = %error,
+                "Failed to refresh scheduled shared config recovery backup"
+            );
+        }
+    }
+
     pub fn is_current_shared_follower(&self) -> bool {
         self.is_shared_mode_enabled()
             && matches!(self.current_cluster_role, Some(AppClusterRole::Follower))
@@ -3874,6 +3888,9 @@ impl App {
         let mut version_interval = time::interval(Duration::from_secs(24 * 60 * 60));
         let mut network_history_persist_interval =
             time::interval(Duration::from_secs(NETWORK_HISTORY_PERSIST_INTERVAL_SECS));
+        let mut shared_recovery_backup_interval = time::interval(Duration::from_secs(
+            SHARED_RECOVERY_BACKUP_REFRESH_INTERVAL_SECS,
+        ));
         let mut watch_folder_rescan_interval =
             time::interval(Duration::from_secs(WATCH_FOLDER_RESCAN_INTERVAL_SECS));
         let mut shared_role_retry_interval =
@@ -3881,6 +3898,7 @@ impl App {
         let mut integrity_scheduler_interval = time::interval(INTEGRITY_SCHEDULER_TICK_INTERVAL);
         self.reschedule_tuning_deadline();
         network_history_persist_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        shared_recovery_backup_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         watch_folder_rescan_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         shared_role_retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         integrity_scheduler_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -3995,6 +4013,9 @@ impl App {
                     if should_persist_network_history_on_interval(&self.app_state) {
                         self.save_state_to_disk();
                     }
+                }
+                _ = shared_recovery_backup_interval.tick() => {
+                    self.refresh_shared_recovery_backup_on_interval();
                 }
                 _ = integrity_scheduler_interval.tick() => {
                     self.advance_integrity_scheduler(INTEGRITY_SCHEDULER_TICK_INTERVAL);
