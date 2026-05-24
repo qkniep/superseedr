@@ -2145,11 +2145,11 @@ pub fn draw_torrent_list(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                                     Cell::from(status.text).style(status.style)
                                 }
                                 ColumnId::Name => {
-                                    let name = if app_state.anonymize_torrent_names {
-                                        format!("Torrent {}", i + 1)
-                                    } else {
-                                        sanitize_text(&state.torrent_name)
-                                    };
+                                    let name = anonymize_tree_name(
+                                        &state.torrent_name,
+                                        false,
+                                        app_state.anonymize_torrent_names,
+                                    );
                                     let mut c = Cell::from(name);
                                     if is_selected {
                                         let s = ctx.apply(Style::default().fg(ctx.state_warning()));
@@ -6360,16 +6360,12 @@ fn anonymized_shape_char(seed: u64, idx: usize, ch: char) -> char {
     state = state.wrapping_mul(0x94d049bb133111eb);
     state ^= state >> 31;
 
-    if ch.is_ascii_lowercase() {
+    if ch.is_alphanumeric() || ch.is_alphabetic() {
         (b'a' + (state % 26) as u8) as char
-    } else if ch.is_ascii_uppercase() {
-        (b'A' + (state % 26) as u8) as char
-    } else if ch.is_ascii_digit() {
-        (b'0' + (state % 10) as u8) as char
-    } else if ch.is_alphabetic() {
-        (b'a' + (state % 26) as u8) as char
-    } else {
+    } else if ch.is_whitespace() || ch == '/' || ch == '\\' {
         ch
+    } else {
+        ' '
     }
 }
 
@@ -7784,8 +7780,8 @@ mod tests {
     }
 
     #[test]
-    fn anonymize_preserving_shape_keeps_length_and_structure() {
-        let original = r"C:\Users\jagat\Documents\seedbox\episode_01.mkv";
+    fn anonymize_preserving_shape_keeps_length_and_path_separators() {
+        let original = r"C:\Users\jagat\Documents\seedbox\[Group] Episode_01.mkv";
         let anonymized = anonymize_preserving_shape(original);
 
         assert_eq!(anonymized.chars().count(), original.chars().count());
@@ -7793,19 +7789,46 @@ mod tests {
             anonymized.matches('\\').count(),
             original.matches('\\').count()
         );
-        assert_eq!(
-            anonymized.matches(':').count(),
-            original.matches(':').count()
-        );
-        assert_eq!(
-            anonymized.matches('.').count(),
-            original.matches('.').count()
-        );
-        assert_eq!(
-            anonymized.matches('_').count(),
-            original.matches('_').count()
-        );
+        assert!(!anonymized.contains(':'));
+        assert!(!anonymized.contains('.'));
+        assert!(!anonymized.contains('_'));
+        assert!(!anonymized.contains('['));
+        assert!(!anonymized.contains(']'));
+        assert!(!anonymized.chars().any(|ch| ch.is_ascii_digit()));
+        assert!(anonymized.chars().all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_whitespace() || ch == '/' || ch == '\\'
+        }));
         assert_ne!(anonymized, original);
+    }
+
+    #[test]
+    fn anonymize_preserving_shape_hides_release_clues() {
+        let original = "[Group] Episode 01_sample S7 - 99 (2097y) [17AC1A4Z].qfo (1.36 GB)";
+        let anonymized = anonymize_preserving_shape(original);
+
+        assert_eq!(anonymized.chars().count(), original.chars().count());
+        assert!(anonymized.matches(' ').count() > original.matches(' ').count());
+        assert!(!anonymized.contains("Episode"));
+        assert!(!anonymized.contains("2097"));
+        assert!(!anonymized.contains("qfo"));
+        assert!(!anonymized.contains("GB"));
+        assert!(!anonymized.contains('['));
+        assert!(!anonymized.contains('.'));
+        assert!(!anonymized.chars().any(|ch| ch.is_ascii_digit()));
+    }
+
+    #[test]
+    fn torrent_list_name_uses_file_panel_anonymizer() {
+        let original = "Episode 01_sample.mkv";
+
+        assert_eq!(
+            anonymize_tree_name(original, false, true),
+            anonymize_preserving_shape(original)
+        );
+        assert_eq!(
+            anonymize_tree_name(original, false, false),
+            original.to_string()
+        );
     }
 
     #[test]
@@ -7824,10 +7847,7 @@ mod tests {
             anonymized.matches('\\').count(),
             original.matches('\\').count()
         );
-        assert_eq!(
-            anonymized.matches(':').count(),
-            original.matches(':').count()
-        );
+        assert!(!anonymized.contains(':'));
         assert_ne!(anonymized, original);
     }
 
