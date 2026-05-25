@@ -2092,7 +2092,7 @@ fn initial_disk_throttle_rate(configured_download_limit_bps: u64) -> f64 {
 }
 
 fn configured_download_ceiling_bytes_per_sec(configured_download_limit_bps: u64) -> f64 {
-    if configured_download_limit_bps == 0 {
+    if configured_download_limit_bps == crate::config::UNLIMITED_RATE_LIMIT_BPS {
         f64::INFINITY
     } else {
         configured_download_limit_bps as f64 / 8.0
@@ -2134,7 +2134,9 @@ fn effective_download_limit_bps(
     adaptive_bps: Option<u64>,
 ) -> u64 {
     match adaptive_bps.filter(|bps| *bps > 0) {
-        Some(adaptive_bps) if configured_download_limit_bps > 0 => {
+        Some(adaptive_bps)
+            if configured_download_limit_bps != crate::config::UNLIMITED_RATE_LIMIT_BPS =>
+        {
             configured_download_limit_bps.min(adaptive_bps)
         }
         Some(adaptive_bps) => adaptive_bps,
@@ -8802,7 +8804,17 @@ mod tests {
         assert_eq!(configured_upload_bucket_rate(16_000), 2_000.0);
         assert_eq!(configured_download_bucket_rate(0), 0.0);
         assert_eq!(configured_upload_bucket_rate(0), 0.0);
-        assert!(configured_download_ceiling_bytes_per_sec(0).is_infinite());
+        assert!(
+            configured_download_bucket_rate(crate::config::UNLIMITED_RATE_LIMIT_BPS).is_infinite()
+        );
+        assert!(
+            configured_upload_bucket_rate(crate::config::UNLIMITED_RATE_LIMIT_BPS).is_infinite()
+        );
+        assert_eq!(configured_download_ceiling_bytes_per_sec(0), 0.0);
+        assert!(
+            configured_download_ceiling_bytes_per_sec(crate::config::UNLIMITED_RATE_LIMIT_BPS)
+                .is_infinite()
+        );
     }
 
     #[test]
@@ -8830,8 +8842,12 @@ mod tests {
     fn effective_download_limit_uses_lower_configured_or_adaptive_limit() {
         assert_eq!(effective_download_limit_bps(0, None), 0);
         assert_eq!(effective_download_limit_bps(800_000_000, None), 800_000_000);
+        assert_eq!(effective_download_limit_bps(0, Some(500_000_000)), 0);
         assert_eq!(
-            effective_download_limit_bps(0, Some(500_000_000)),
+            effective_download_limit_bps(
+                crate::config::UNLIMITED_RATE_LIMIT_BPS,
+                Some(500_000_000)
+            ),
             500_000_000
         );
         assert_eq!(
@@ -8850,7 +8866,7 @@ mod tests {
         let _temp_paths = configure_temp_app_paths_for_test();
         let settings = crate::config::Settings {
             client_port: 0,
-            global_download_limit_bps: 0,
+            global_download_limit_bps: crate::config::UNLIMITED_RATE_LIMIT_BPS,
             ..Default::default()
         };
         let mut app = App::new(settings, AppRuntimeMode::Normal)
@@ -8864,7 +8880,7 @@ mod tests {
         app.app_state.avg_disk_write_latency = Duration::from_millis(1);
         app.app_state.recv_to_write_p95 = Duration::from_secs(1);
 
-        assert_eq!(app.global_dl_bucket.get_fill_rate(), 0.0);
+        assert!(app.global_dl_bucket.get_fill_rate().is_infinite());
 
         for _ in 0..DISK_WRITE_THROTTLE_WINDOW_TICKS {
             app.update_disk_backpressure_download_throttle();

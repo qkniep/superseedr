@@ -265,7 +265,7 @@ pub fn format_countdown(duration: Duration) -> String {
 }
 
 pub fn format_limit_bps(bps: u64) -> String {
-    if bps == 0 {
+    if bps == crate::config::UNLIMITED_RATE_LIMIT_BPS {
         "Unlimited".to_string()
     } else {
         format_speed(bps)

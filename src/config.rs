@@ -26,6 +26,8 @@ use crate::theme::ThemeName;
 use strum_macros::EnumCount;
 use strum_macros::EnumIter;
 
+pub const UNLIMITED_RATE_LIMIT_BPS: u64 = u64::MAX;
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default, EnumIter, EnumCount)]
 pub enum TorrentSortColumn {
     Name,
@@ -211,8 +213,8 @@ impl Default for Settings {
             lifetime_downloaded: 0,
             lifetime_uploaded: 0,
             private_client: false,
-            global_download_limit_bps: 0,
-            global_upload_limit_bps: 0,
+            global_download_limit_bps: UNLIMITED_RATE_LIMIT_BPS,
+            global_upload_limit_bps: UNLIMITED_RATE_LIMIT_BPS,
             torrent_sort_column: TorrentSortColumn::default(),
             torrent_sort_direction: TorrentSortColumn::default().default_direction(),
             torrent_sort_pinned: false,
@@ -3237,7 +3239,7 @@ mod tests {
         assert_eq!(settings.client_id, default_settings.client_id);
         assert_eq!(settings.client_port, 6681);
         assert_eq!(settings.lifetime_downloaded, 0);
-        assert_eq!(settings.global_upload_limit_bps, 0);
+        assert_eq!(settings.global_upload_limit_bps, UNLIMITED_RATE_LIMIT_BPS);
         assert_eq!(settings.torrent_sort_column, TorrentSortColumn::Up);
         assert_eq!(settings.peer_sort_direction, SortDirection::Descending);
         assert!(settings.watch_folder.is_none());
