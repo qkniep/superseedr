@@ -9,12 +9,17 @@ use crate::torrent_file::Torrent;
 
 use crate::tracker::TrackerResponse;
 
+use crate::networking::transport::PeerTransportKind;
 use crate::networking::BlockInfo;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum TorrentCommand {
     SuccessfullyConnected(String),
     PeerId(String, Vec<u8>),
+    PeerTransportSelected {
+        peer_id: String,
+        transport: PeerTransportKind,
+    },
 
     Choke(String),
     Unchoke(String),

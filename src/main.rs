@@ -34,7 +34,7 @@ mod tuning;
 mod watch_inbox;
 
 use app::{App, AppRuntimeMode};
-use rand::RngExt;
+use rand::{Rng, RngExt};
 
 use std::fs;
 use std::fs::File;
@@ -44,7 +44,7 @@ use std::io::Write;
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::Settings;
 use crate::config::{
@@ -53,7 +53,7 @@ use crate::config::{
     get_watch_path, is_shared_config_mode, load_settings, load_settings_for_cli,
     persisted_host_id_path, persisted_shared_config_path, resolve_command_watch_path,
     set_persisted_host_id, set_persisted_shared_config, shared_lock_path, shared_processed_path,
-    HostIdSource, SharedConfigSource,
+    shared_root_path, HostIdSource, SharedConfigSource,
 };
 use crate::control_service::{
     apply_offline_control_request, apply_offline_purge, control_event_details, list_torrent_files,
@@ -586,11 +586,8 @@ fn init_tracing(
     let quiet_filter = Targets::new()
         .with_default(DEFAULT_LOG_FILTER)
         .with_target("mainline::rpc::socket", LevelFilter::ERROR);
-    let stderr_fallback_filter = Targets::new()
-        .with_default(LevelFilter::WARN)
-        .with_target("mainline::rpc::socket", LevelFilter::ERROR);
-    let mut suppressed_failures = Vec::new();
-
+    let attempted_file_logging = !log_dirs.is_empty();
+    let mut suppressed_warnings = Vec::new();
     for log_dir in log_dirs {
         if let Err(error) = fs::create_dir_all(&log_dir) {
             let message = format!(
@@ -598,11 +595,7 @@ fn init_tracing(
                 log_dir.display(),
                 error
             );
-            if emit_stderr {
-                eprintln!("[Warn] {}", message);
-            } else {
-                suppressed_failures.push(message);
-            }
+            report_logging_setup_warning(message, emit_stderr, &mut suppressed_warnings);
         } else {
             match logging::non_blocking_daily_file_writer_with_stderr_reporting(
                 &log_dir,
@@ -626,11 +619,11 @@ fn init_tracing(
                             "Failed to initialize tracing subscriber for file logging at {}",
                             log_dir.display()
                         );
-                        if emit_stderr {
-                            eprintln!("[Warn] {}", message);
-                        } else {
-                            suppressed_failures.push(message);
-                        }
+                        report_logging_setup_warning(
+                            message,
+                            emit_stderr,
+                            &mut suppressed_warnings,
+                        );
                     }
                 }
                 Err(error) => {
@@ -639,42 +632,77 @@ fn init_tracing(
                         log_dir.display(),
                         error
                     );
-                    if emit_stderr {
-                        eprintln!("[Warn] {}", message);
-                    } else {
-                        suppressed_failures.push(message);
-                    }
+                    report_logging_setup_warning(message, emit_stderr, &mut suppressed_warnings);
                 }
             }
         }
     }
 
-    if !emit_stderr && !suppressed_failures.is_empty() {
+    let fallback_mode = fallback_tracing_mode(emit_stderr);
+    if fallback_mode == FallbackTracingMode::Stderr {
         eprintln!(
-            "[Warn] File logging unavailable; runtime log output will be suppressed. {}",
-            suppressed_failures[0]
+            "[Warn] {}",
+            final_logging_fallback_message(attempted_file_logging)
         );
-        if suppressed_failures.len() > 1 {
-            eprintln!(
-                "[Warn] {} additional logging setup failure(s) were suppressed.",
-                suppressed_failures.len() - 1
-            );
+        for warning in &suppressed_warnings {
+            eprintln!("[Warn] {}", warning);
         }
     }
 
-    let fallback_layer = if emit_stderr {
-        fmt::layer().with_filter(quiet_filter).boxed()
-    } else {
-        fmt::layer()
-            .with_writer(io::sink)
-            .with_filter(stderr_fallback_filter)
-            .boxed()
+    let fallback_layer = match fallback_mode {
+        FallbackTracingMode::Stderr => fmt::layer()
+            .with_writer(io::stderr)
+            .with_filter(quiet_filter)
+            .boxed(),
+        FallbackTracingMode::Sink => {
+            let sink_filter = Targets::new()
+                .with_default(LevelFilter::WARN)
+                .with_target("mainline::rpc::socket", LevelFilter::ERROR);
+            fmt::layer()
+                .with_writer(io::sink)
+                .with_filter(sink_filter)
+                .boxed()
+        }
     };
     let _ = tracing_subscriber::registry()
         .with(fallback_layer)
         .try_init();
 
     Vec::new()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackTracingMode {
+    Stderr,
+    Sink,
+}
+
+fn fallback_tracing_mode(emit_stderr: bool) -> FallbackTracingMode {
+    if emit_stderr {
+        FallbackTracingMode::Stderr
+    } else {
+        FallbackTracingMode::Sink
+    }
+}
+
+fn report_logging_setup_warning(
+    message: String,
+    emit_stderr: bool,
+    suppressed_warnings: &mut Vec<String>,
+) {
+    if emit_stderr {
+        eprintln!("[Warn] {}", message);
+    } else {
+        suppressed_warnings.push(message);
+    }
+}
+
+fn final_logging_fallback_message(attempted_file_logging: bool) -> &'static str {
+    if attempted_file_logging {
+        "File logging is unavailable; using stderr fallback for diagnostics."
+    } else {
+        "No file logging directories were available; using stderr fallback for diagnostics."
+    }
 }
 
 fn already_running_message() -> &'static str {
@@ -865,7 +893,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| "Unable to determine config path.".to_string());
             let message = private_client_leak_guard_message(&config_path_str);
 
-            eprintln!("{message}");
+            println!("{message}");
             tracing::error!(
                 config_path = %config_path_str,
                 "Potential leak guard triggered. You are running the normal build with DHT/PEX enabled, but your configuration indicates the private build was used previously. To continue safely, either install and run the private build with `cargo install superseedr --no-default-features`, or edit the configuration at {} and change `private_client = true` to `private_client = false`. Exiting to prevent potential tracker issues.",
@@ -957,11 +985,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    if let Err(e) = app.run(&mut terminal).await {
-        eprintln!("[Error] Application failed: {}", e);
-    }
-
+    let app_result = app.run(&mut terminal).await;
     cleanup_terminal()?;
+
+    if let Err(error) = app_result {
+        tracing::error!("Application failed: {}", error);
+        return Err(error);
+    }
 
     Ok(())
 }
@@ -2138,24 +2168,100 @@ fn process_cli_request(
     };
 
     match command {
-        Commands::Add { inputs } => {
+        Commands::Add {
+            inputs,
+            validated,
+            path,
+        } => {
             let mut queued = Vec::new();
+            let download_path = match path {
+                Some(path) => Some(validate_add_download_path(path)?),
+                None => None,
+            };
+            let mut offline_add_settings = settings.clone();
             for input in expand_add_inputs(inputs) {
                 tracing::info!("Processing Add subcommand input: {}", input);
-                let command_path = queue_direct_input_command(settings, &input)?;
-                if output_mode == OutputMode::Text {
-                    println!("Queued add command at {}", command_path.display());
+                if *validated || download_path.is_some() {
+                    let request = add_control_request_for_input(
+                        &input,
+                        download_path.clone(),
+                        *validated,
+                        shared_mode,
+                    )?;
+                    let result = if shared_mode && leader_is_running {
+                        let _ = queue_control_request_command(settings, &request)?;
+                        let message = online_control_success_message(&request);
+                        if output_mode == OutputMode::Text {
+                            print_queued_control_message(
+                                &request,
+                                true,
+                                leader_is_running,
+                                output_mode,
+                            );
+                        }
+                        json!({
+                            "input": input,
+                            "queued": true,
+                            "pending_leader": false,
+                            "request": request,
+                            "message": message,
+                        })
+                    } else if leader_is_running {
+                        let _ = queue_control_request_command(settings, &request)?;
+                        let message = online_control_success_message(&request);
+                        if output_mode == OutputMode::Text {
+                            print_success(
+                                output_mode,
+                                request.action_name(),
+                                &message,
+                                json!({ "queued": true, "request": request }),
+                            );
+                        }
+                        json!({
+                            "input": input,
+                            "queued": true,
+                            "request": request,
+                            "message": message,
+                        })
+                    } else {
+                        let message =
+                            apply_offline_control_request_mut(&mut offline_add_settings, &request)?;
+                        if output_mode == OutputMode::Text {
+                            print_success(
+                                output_mode,
+                                request.action_name(),
+                                &message,
+                                json!({ "applied": true, "request": request, "message": message }),
+                            );
+                        }
+                        json!({
+                            "input": input,
+                            "applied": true,
+                            "request": request,
+                            "message": message,
+                        })
+                    };
+                    queued.push(result);
+                } else {
+                    let command_path = queue_direct_input_command(settings, &input)?;
+                    if output_mode == OutputMode::Text {
+                        println!("Queued add command at {}", command_path.display());
+                    }
+                    queued.push(json!({
+                        "input": input,
+                        "command_path": command_path,
+                    }));
                 }
-                queued.push(json!({
-                    "input": input,
-                    "command_path": command_path,
-                }));
             }
             if output_mode == OutputMode::Json {
                 print_success(
                     output_mode,
                     "add",
-                    "Queued add command(s).",
+                    if *validated || download_path.is_some() {
+                        "Processed add request(s)."
+                    } else {
+                        "Queued add command(s)."
+                    },
                     json!({ "queued": queued }),
                 );
             }
@@ -2216,28 +2322,23 @@ fn process_cli_request(
         Commands::Purge { targets } => {
             let resolved_targets = require_cli_targets(targets, "purge")
                 .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+            let mut requests = Vec::new();
             for target in resolved_targets {
                 let info_hash_hex =
                     resolve_purge_target_info_hash(settings, &target).map_err(io::Error::other)?;
-                let request = ControlRequest::Delete {
+                requests.push(ControlRequest::Delete {
                     info_hash_hex,
                     delete_files: true,
-                };
-
-                if shared_mode && leader_is_running {
-                    process_shared_control_request(
-                        settings,
-                        &request,
-                        leader_is_running,
-                        output_mode,
-                    )?;
-                } else if leader_is_running {
-                    process_online_control_request(settings, &request, output_mode)?;
-                } else {
-                    process_offline_control_request(settings, &request, output_mode)?;
-                }
+                });
             }
-            Ok(())
+            process_control_requests(
+                settings,
+                &requests,
+                "purge",
+                shared_mode,
+                leader_is_running,
+                output_mode,
+            )
         }
         _ => {
             let requests =
@@ -2249,21 +2350,17 @@ fn process_cli_request(
                     io::Error::new(io::ErrorKind::InvalidInput, "Unsupported command")
                 })?;
 
-            for request in requests {
-                if shared_mode && leader_is_running {
-                    process_shared_control_request(
-                        settings,
-                        &request,
-                        leader_is_running,
-                        output_mode,
-                    )?;
-                } else if leader_is_running {
-                    process_online_control_request(settings, &request, output_mode)?;
-                } else {
-                    process_offline_control_request(settings, &request, output_mode)?;
-                }
-            }
-            Ok(())
+            let command_name = cli_command_name(Some(command))
+                .or_else(|| requests.first().map(ControlRequest::action_name))
+                .unwrap_or("control");
+            process_control_requests(
+                settings,
+                &requests,
+                command_name,
+                shared_mode,
+                leader_is_running,
+                output_mode,
+            )
         }
     }
 }
@@ -2295,6 +2392,85 @@ fn queue_direct_input_command(settings: &Settings, input: &str) -> io::Result<Pa
     }
 
     write_input_command(input, &watch_path)
+}
+
+fn validate_add_download_path(path: &Path) -> io::Result<PathBuf> {
+    if path.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Add --path must not be empty",
+        ));
+    }
+    if !path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Add --path does not exist: {}", path.display()),
+        ));
+    }
+    if !path.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Add --path must be a directory: {}", path.display()),
+        ));
+    }
+    fs::canonicalize(path)
+}
+
+fn add_control_request_for_input(
+    input: &str,
+    download_path: Option<PathBuf>,
+    validation_status: bool,
+    shared_mode: bool,
+) -> io::Result<ControlRequest> {
+    if input.starts_with("magnet:") {
+        return Ok(ControlRequest::AddMagnet {
+            magnet_link: input.to_string(),
+            download_path,
+            container_name: None,
+            validation_status,
+            file_priorities: Vec::new(),
+        });
+    }
+
+    let source_path = control_torrent_source_path(input, shared_mode)?;
+    Ok(ControlRequest::AddTorrentFile {
+        source_path,
+        download_path,
+        container_name: None,
+        validation_status,
+        file_priorities: Vec::new(),
+    })
+}
+
+fn control_torrent_source_path(input: &str, shared_mode: bool) -> io::Result<PathBuf> {
+    let source_path = fs::canonicalize(input)?;
+    if !shared_mode {
+        return Ok(source_path);
+    }
+
+    stage_shared_control_torrent_file(&source_path)
+}
+
+fn stage_shared_control_torrent_file(source_path: &Path) -> io::Result<PathBuf> {
+    let Some(shared_root) = shared_root_path() else {
+        return Ok(source_path.to_path_buf());
+    };
+    let staging_dir = shared_root.join("staged-adds");
+    fs::create_dir_all(&staging_dir)?;
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let mut random_bytes = [0_u8; 8];
+    rand::rng().fill_bytes(&mut random_bytes);
+    let staged_path = staging_dir.join(format!(
+        "staged-{}-{}.torrent",
+        now_ms,
+        hex::encode(random_bytes)
+    ));
+    fs::copy(source_path, &staged_path)?;
+    Ok(staged_path)
 }
 
 fn queue_runtime_stop_command(settings: &Settings) -> io::Result<PathBuf> {
@@ -2439,41 +2615,115 @@ fn process_online_status_request(
     }
 }
 
-fn process_online_control_request(
-    settings: &Settings,
-    request: &ControlRequest,
-    output_mode: OutputMode,
-) -> io::Result<()> {
-    let _ = queue_control_request_command(settings, request)?;
-    print_success(
-        output_mode,
-        request.action_name(),
-        &online_control_success_message(request),
-        json!({ "queued": true, "request": request }),
-    );
-    Ok(())
-}
-
-fn process_shared_control_request(
-    settings: &Settings,
-    request: &ControlRequest,
-    leader_is_running: bool,
-    output_mode: OutputMode,
-) -> io::Result<()> {
-    let _ = queue_control_request_command(settings, request)?;
-    print_queued_control_message(request, true, leader_is_running, output_mode);
-    Ok(())
-}
-
 fn process_offline_control_request(
     settings: &Settings,
     request: &ControlRequest,
     output_mode: OutputMode,
 ) -> io::Result<()> {
+    let mut next_settings = settings.clone();
+    if matches!(request, ControlRequest::StatusNow) {
+        let raw = offline_output_json(&next_settings)?;
+        return print_json_passthrough(output_mode, "status", &raw);
+    }
+    let message = apply_offline_control_request_mut(&mut next_settings, request)?;
+    print_success(
+        output_mode,
+        request.action_name(),
+        &message,
+        json!({ "applied": true, "request": request, "message": message }),
+    );
+    Ok(())
+}
+
+fn process_control_requests(
+    settings: &Settings,
+    requests: &[ControlRequest],
+    command_name: &str,
+    shared_mode: bool,
+    leader_is_running: bool,
+    output_mode: OutputMode,
+) -> io::Result<()> {
+    let mut results = Vec::new();
+    let mut offline_settings = settings.clone();
+
+    for request in requests {
+        let result = if shared_mode && leader_is_running {
+            let _ = queue_control_request_command(settings, request)?;
+            let message = online_control_success_message(request);
+            if output_mode == OutputMode::Text {
+                print_queued_control_message(request, true, leader_is_running, output_mode);
+            }
+            json!({
+                "queued": true,
+                "pending_leader": false,
+                "request": request,
+                "message": message,
+            })
+        } else if leader_is_running {
+            let _ = queue_control_request_command(settings, request)?;
+            let message = online_control_success_message(request);
+            if output_mode == OutputMode::Text {
+                print_success(
+                    output_mode,
+                    request.action_name(),
+                    &message,
+                    json!({ "queued": true, "request": request }),
+                );
+            }
+            json!({
+                "queued": true,
+                "request": request,
+                "message": message,
+            })
+        } else {
+            if matches!(request, ControlRequest::StatusNow) {
+                let raw = offline_output_json(&offline_settings)?;
+                if output_mode == OutputMode::Json {
+                    return print_json_passthrough(output_mode, "status", &raw);
+                }
+                print_json_passthrough(output_mode, "status", &raw)?;
+                continue;
+            }
+            let message = apply_offline_control_request_mut(&mut offline_settings, request)?;
+            if output_mode == OutputMode::Text {
+                print_success(
+                    output_mode,
+                    request.action_name(),
+                    &message,
+                    json!({ "applied": true, "request": request, "message": message }),
+                );
+            }
+            json!({
+                "applied": true,
+                "request": request,
+                "message": message,
+            })
+        };
+
+        results.push(result);
+    }
+
+    if output_mode == OutputMode::Json {
+        print_success(
+            output_mode,
+            command_name,
+            "Processed control request(s).",
+            json!({ "results": results }),
+        );
+    }
+
+    Ok(())
+}
+
+fn apply_offline_control_request_mut(
+    settings: &mut Settings,
+    request: &ControlRequest,
+) -> io::Result<String> {
     match request {
         ControlRequest::StatusNow => {
-            let raw = offline_output_json(settings)?;
-            return print_json_passthrough(output_mode, "status", &raw);
+            return Err(io::Error::other(
+                "Status snapshot requests should use process_offline_control_request",
+            ));
         }
         ControlRequest::StatusFollowStart { .. } | ControlRequest::StatusFollowStop => {
             return Err(io::Error::other(
@@ -2483,28 +2733,21 @@ fn process_offline_control_request(
         _ => {}
     }
 
-    let mut next_settings = settings.clone();
     let mut result = match request {
         ControlRequest::Delete {
             info_hash_hex,
             delete_files: true,
-        } => apply_offline_purge(&mut next_settings, info_hash_hex),
-        _ => apply_offline_control_request(&mut next_settings, request),
+        } => apply_offline_purge(settings, info_hash_hex),
+        _ => apply_offline_control_request(settings, request),
     };
     if result.is_ok() {
-        if let Err(error) = config::save_settings(&next_settings) {
+        if let Err(error) = config::save_settings(settings) {
             result = Err(format!("Failed to save updated settings: {}", error));
         }
     }
     record_offline_control_journal_entry(request, &result);
     let message = result.map_err(io::Error::other)?;
-    print_success(
-        output_mode,
-        request.action_name(),
-        &message,
-        json!({ "applied": true, "request": request, "message": message }),
-    );
-    Ok(())
+    Ok(message)
 }
 
 fn process_files_command(
@@ -3372,6 +3615,40 @@ mod tests {
     }
 
     #[test]
+    fn final_logging_fallback_message_reports_emergency_stderr_path() {
+        assert_eq!(
+            final_logging_fallback_message(true),
+            "File logging is unavailable; using stderr fallback for diagnostics."
+        );
+        assert_eq!(
+            final_logging_fallback_message(false),
+            "No file logging directories were available; using stderr fallback for diagnostics."
+        );
+    }
+
+    #[test]
+    fn fallback_tracing_mode_keeps_non_cli_fallback_off_stderr() {
+        assert_eq!(fallback_tracing_mode(false), FallbackTracingMode::Sink);
+        assert_eq!(fallback_tracing_mode(true), FallbackTracingMode::Stderr);
+    }
+
+    #[test]
+    fn logging_setup_warning_is_collected_when_stderr_is_suppressed() {
+        let mut suppressed_warnings = Vec::new();
+
+        report_logging_setup_warning(
+            "Failed to initialize file logging at /tmp/demo: denied".to_string(),
+            false,
+            &mut suppressed_warnings,
+        );
+
+        assert_eq!(
+            suppressed_warnings,
+            vec!["Failed to initialize file logging at /tmp/demo: denied"]
+        );
+    }
+
+    #[test]
     #[cfg(all(feature = "dht", feature = "pex"))]
     fn private_client_leak_guard_message_includes_recovery_steps() {
         let message = private_client_leak_guard_message("/tmp/config.toml");
@@ -3592,6 +3869,116 @@ mod tests {
         } else {
             std::env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
         }
+        clear_shared_config_state_for_tests();
+    }
+
+    #[test]
+    fn shared_offline_multi_add_carries_forward_previous_adds() {
+        let _guard = shared_env_guard().lock().unwrap();
+        let dir = tempdir().expect("create tempdir");
+        let shared_root = std::fs::canonicalize(dir.path()).expect("canonical shared root");
+        let download_path = shared_root.join("downloads");
+        std::fs::create_dir_all(&download_path).expect("create downloads");
+        let _shared_dir_restore = EnvVarRestore::capture("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let _host_id_restore = EnvVarRestore::capture("SUPERSEEDR_SHARED_HOST_ID");
+
+        std::env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", &shared_root);
+        std::env::set_var("SUPERSEEDR_SHARED_HOST_ID", "host-a");
+        clear_shared_config_state_for_tests();
+
+        let settings = crate::config::load_settings().expect("initialize shared settings");
+        let input = concat!(
+            "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=linux-alpha.iso&xl=100",
+            ",magnet:?xt=urn:btih:2222222222222222222222222222222222222222&dn=linux-beta.iso&xl=200",
+            ",magnet:?xt=urn:btih:3333333333333333333333333333333333333333&dn=linux-gamma.iso&xl=300"
+        )
+        .to_string();
+        let cli = Cli {
+            json: false,
+            input: None,
+            command: Some(Commands::Add {
+                validated: true,
+                path: Some(download_path.clone()),
+                inputs: vec![input],
+            }),
+        };
+
+        process_cli_request(&cli, &settings, true, false, OutputMode::Text)
+            .expect("shared offline multi add");
+
+        let reloaded = crate::config::load_settings().expect("reload shared settings");
+        assert_eq!(reloaded.torrents.len(), 3);
+        assert!(reloaded
+            .torrents
+            .iter()
+            .all(|torrent| torrent.validation_status));
+        assert!(reloaded
+            .torrents
+            .iter()
+            .all(|torrent| torrent.download_path.as_deref() == Some(download_path.as_path())));
+
+        let metadata = crate::config::load_torrent_metadata().expect("load metadata");
+        assert_eq!(metadata.torrents.len(), 3);
+        assert_eq!(
+            metadata.torrents[0].files[0].relative_path,
+            "linux-alpha.iso"
+        );
+        assert_eq!(
+            metadata.torrents[1].files[0].relative_path,
+            "linux-beta.iso"
+        );
+        assert_eq!(
+            metadata.torrents[2].files[0].relative_path,
+            "linux-gamma.iso"
+        );
+
+        clear_shared_config_state_for_tests();
+    }
+
+    #[test]
+    fn validate_add_download_path_rejects_regular_file() {
+        let dir = tempdir().expect("create tempdir");
+        let file_path = dir.path().join("not-a-directory");
+        std::fs::write(&file_path, b"content").expect("write file");
+
+        let error = validate_add_download_path(&file_path).expect_err("regular file should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("must be a directory"));
+    }
+
+    #[test]
+    fn shared_control_torrent_file_add_stages_source_path() {
+        let _guard = shared_env_guard().lock().unwrap();
+        let dir = tempdir().expect("create tempdir");
+        let shared_mount = dir.path().join("shared");
+        std::fs::create_dir_all(&shared_mount).expect("create shared mount");
+        let source_path = dir.path().join("input.torrent");
+        std::fs::write(&source_path, b"torrent bytes").expect("write source torrent");
+        let _shared_dir_restore = EnvVarRestore::capture("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let _host_id_restore = EnvVarRestore::capture("SUPERSEEDR_SHARED_HOST_ID");
+
+        std::env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", &shared_mount);
+        std::env::set_var("SUPERSEEDR_SHARED_HOST_ID", "host-a");
+        clear_shared_config_state_for_tests();
+
+        let request =
+            add_control_request_for_input(source_path.to_string_lossy().as_ref(), None, true, true)
+                .expect("build shared add request");
+
+        match request {
+            ControlRequest::AddTorrentFile { source_path, .. } => {
+                let shared_config_root = crate::config::shared_root_path()
+                    .expect("shared config root should be available");
+                assert!(source_path.starts_with(shared_config_root.join("staged-adds")));
+                assert_eq!(
+                    std::fs::read(&source_path).expect("read staged torrent"),
+                    b"torrent bytes"
+                );
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+
         clear_shared_config_state_for_tests();
     }
 

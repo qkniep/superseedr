@@ -29,13 +29,14 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::net::TcpStream;
-
+#[cfg(feature = "synthetic-load")]
+use crate::networking::transport::PeerTransportKind;
+use crate::networking::PeerConnection;
 use crate::resource_manager::ResourceManagerClient;
 
 pub struct TorrentParameters {
     pub dht_handle: DhtHandle,
-    pub incoming_peer_rx: Receiver<(TcpStream, Vec<u8>)>,
+    pub incoming_peer_rx: Receiver<(PeerConnection, Vec<u8>)>,
     pub metrics_tx: watch::Sender<TorrentMetrics>,
     pub torrent_validation_status: bool,
     pub torrent_data_path: Option<PathBuf>,
@@ -144,11 +145,16 @@ pub enum ManagerEvent {
         info_hash: Vec<u8>,
     },
     #[cfg(feature = "synthetic-load")]
-    PeerConnectAttempted,
+    PeerConnectAttempted {
+        transport: PeerTransportKind,
+    },
     #[cfg(feature = "synthetic-load")]
-    PeerConnectEstablished,
+    PeerConnectEstablished {
+        transport: PeerTransportKind,
+    },
     #[cfg(feature = "synthetic-load")]
     PeerConnectFailed {
+        transport: PeerTransportKind,
         reason: SyntheticPeerConnectFailure,
     },
     #[cfg(feature = "synthetic-load")]
@@ -190,6 +196,11 @@ pub enum SyntheticPeerConnectFailure {
 pub enum ManagerCommand {
     #[cfg(feature = "synthetic-load")]
     ConnectToPeer(SocketAddr),
+    #[cfg(feature = "synthetic-load")]
+    ConnectToSyntheticPeer {
+        addr: SocketAddr,
+        peer_key: String,
+    },
     ProbeFileBatch {
         epoch: u64,
         start_file_index: usize,

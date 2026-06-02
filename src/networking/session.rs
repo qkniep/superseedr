@@ -159,6 +159,7 @@ pub struct PeerSession {
     pending_window_shrink: usize,
     peer_flood_gate: PeerFloodGate,
     last_piece_received: Instant,
+    last_payload_activity: Instant,
 
     #[cfg(test)]
     testing_window_monitor: Option<Arc<AtomicUsize>>,
@@ -209,6 +210,7 @@ impl PeerSession {
             pending_window_shrink: 0,
             peer_flood_gate: PeerFloodGate::new(now),
             last_piece_received: now,
+            last_payload_activity: now,
 
             #[cfg(test)]
             testing_window_monitor: None,
@@ -308,24 +310,21 @@ impl PeerSession {
         let _reader_abort_guard = AbortOnDrop(reader_handle);
 
         let mut keep_alive_timer = tokio::time::interval(Duration::from_secs(60));
-        let inactivity_timeout = tokio::time::sleep(Duration::from_secs(120));
-        tokio::pin!(inactivity_timeout);
-
         let mut speed_adjustment_timer = tokio::time::interval(Duration::from_secs(1));
         speed_adjustment_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let manager_tx = self.torrent_manager_tx.clone();
 
-        let _result: Result<(), Box<dyn StdError + Send + Sync>> = 'session: loop {
+        let result: Result<(), Box<dyn StdError + Send + Sync>> = 'session: loop {
             tokio::select! {
-                // Timeout Check
-                _ = &mut inactivity_timeout => break 'session Err("Timeout".into()),
-
                 // KeepAlive
                 _ = keep_alive_timer.tick() => { let _ = self.writer_tx.try_send(Message::KeepAlive); },
 
                 _ = speed_adjustment_timer.tick() => {
+                    if self.last_payload_activity.elapsed() > Duration::from_secs(120) {
+                        break 'session Err("Timeout".into());
+                    }
                     if !self.adjust_window_size() {
                         break 'session Ok(());
                     }
@@ -333,8 +332,6 @@ impl PeerSession {
 
                 // INCOMING MESSAGES (From Reader Task)
                 Some(msg) = peer_msg_rx.recv() => {
-                    inactivity_timeout.as_mut().reset(Instant::now() + Duration::from_secs(120));
-
                     match self.incoming_peer_message_flood_action() {
                         PeerFloodAction::Allow => {}
                         PeerFloodAction::DisconnectAndLog => {
@@ -362,6 +359,7 @@ impl PeerSession {
                             if was_expected {
                                 self.blocks_received_interval += 1;
                                 self.last_piece_received = Instant::now();
+                                self.last_payload_activity = Instant::now();
 
                                 if self.pending_window_shrink > 0 {
                                     self.pending_window_shrink -= 1;
@@ -493,7 +491,7 @@ impl PeerSession {
             }
         };
 
-        Ok(())
+        result
     }
 
     fn process_manager_command(
@@ -595,6 +593,7 @@ impl PeerSession {
             }
 
             TorrentCommand::Upload(index, begin, data) => {
+                self.last_payload_activity = Instant::now();
                 let _ = self.writer_tx.try_send(Message::Piece(index, begin, data));
             }
             TorrentCommand::PeerBitfield(_, bf) => {
