@@ -26,7 +26,11 @@ use crate::theme::ThemeName;
 use strum_macros::EnumCount;
 use strum_macros::EnumIter;
 
-pub const UNLIMITED_RATE_LIMIT_BPS: u64 = u64::MAX;
+pub const UNLIMITED_RATE_LIMIT_BPS: u64 = i64::MAX as u64;
+
+pub fn is_unlimited_rate_limit_bps(limit_bps: u64) -> bool {
+    limit_bps == 0 || limit_bps >= UNLIMITED_RATE_LIMIT_BPS
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default, EnumIter, EnumCount)]
 pub enum TorrentSortColumn {

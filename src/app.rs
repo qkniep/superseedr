@@ -2092,7 +2092,7 @@ fn initial_disk_throttle_rate(configured_download_limit_bps: u64) -> f64 {
 }
 
 fn configured_download_ceiling_bytes_per_sec(configured_download_limit_bps: u64) -> f64 {
-    if configured_download_limit_bps == crate::config::UNLIMITED_RATE_LIMIT_BPS {
+    if crate::config::is_unlimited_rate_limit_bps(configured_download_limit_bps) {
         f64::INFINITY
     } else {
         configured_download_limit_bps as f64 / 8.0
@@ -2135,7 +2135,7 @@ fn effective_download_limit_bps(
 ) -> u64 {
     match adaptive_bps.filter(|bps| *bps > 0) {
         Some(adaptive_bps)
-            if configured_download_limit_bps != crate::config::UNLIMITED_RATE_LIMIT_BPS =>
+            if !crate::config::is_unlimited_rate_limit_bps(configured_download_limit_bps) =>
         {
             configured_download_limit_bps.min(adaptive_bps)
         }
@@ -8802,15 +8802,15 @@ mod tests {
     fn configured_rate_limit_buckets_use_bytes_per_second() {
         assert_eq!(configured_download_bucket_rate(8_000), 1_000.0);
         assert_eq!(configured_upload_bucket_rate(16_000), 2_000.0);
-        assert_eq!(configured_download_bucket_rate(0), 0.0);
-        assert_eq!(configured_upload_bucket_rate(0), 0.0);
+        assert!(configured_download_bucket_rate(0).is_infinite());
+        assert!(configured_upload_bucket_rate(0).is_infinite());
         assert!(
             configured_download_bucket_rate(crate::config::UNLIMITED_RATE_LIMIT_BPS).is_infinite()
         );
         assert!(
             configured_upload_bucket_rate(crate::config::UNLIMITED_RATE_LIMIT_BPS).is_infinite()
         );
-        assert_eq!(configured_download_ceiling_bytes_per_sec(0), 0.0);
+        assert!(configured_download_ceiling_bytes_per_sec(0).is_infinite());
         assert!(
             configured_download_ceiling_bytes_per_sec(crate::config::UNLIMITED_RATE_LIMIT_BPS)
                 .is_infinite()
@@ -8842,7 +8842,10 @@ mod tests {
     fn effective_download_limit_uses_lower_configured_or_adaptive_limit() {
         assert_eq!(effective_download_limit_bps(0, None), 0);
         assert_eq!(effective_download_limit_bps(800_000_000, None), 800_000_000);
-        assert_eq!(effective_download_limit_bps(0, Some(500_000_000)), 0);
+        assert_eq!(
+            effective_download_limit_bps(0, Some(500_000_000)),
+            500_000_000
+        );
         assert_eq!(
             effective_download_limit_bps(
                 crate::config::UNLIMITED_RATE_LIMIT_BPS,
