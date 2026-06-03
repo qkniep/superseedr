@@ -332,6 +332,7 @@ impl PeerSession {
 
                 // INCOMING MESSAGES (From Reader Task)
                 Some(msg) = peer_msg_rx.recv() => {
+                    self.last_payload_activity = Instant::now();
                     match self.incoming_peer_message_flood_action() {
                         PeerFloodAction::Allow => {}
                         PeerFloodAction::DisconnectAndLog => {
@@ -359,7 +360,6 @@ impl PeerSession {
                             if was_expected {
                                 self.blocks_received_interval += 1;
                                 self.last_piece_received = Instant::now();
-                                self.last_payload_activity = Instant::now();
 
                                 if self.pending_window_shrink > 0 {
                                     self.pending_window_shrink -= 1;
@@ -502,20 +502,25 @@ impl PeerSession {
             TorrentCommand::Disconnect(_) => return Ok(false),
 
             TorrentCommand::PeerChoke | TorrentCommand::Choke(_) => {
+                self.last_payload_activity = Instant::now();
                 let _ = self.writer_tx.try_send(Message::Choke);
             }
             TorrentCommand::PeerUnchoke | TorrentCommand::Unchoke(_) => {
+                self.last_payload_activity = Instant::now();
                 let _ = self.writer_tx.try_send(Message::Unchoke);
             }
             TorrentCommand::ClientInterested => {
+                self.last_payload_activity = Instant::now();
                 let _ = self.writer_tx.try_send(Message::Interested);
             }
             TorrentCommand::NotInterested => {
+                self.last_payload_activity = Instant::now();
                 let _ = self.writer_tx.try_send(Message::NotInterested);
             }
 
             // --- BULK REQUEST WITH ZOMBIE REAPER ---
             TorrentCommand::BulkRequest(requests) => {
+                self.last_payload_activity = Instant::now();
                 let writer = self.writer_tx.clone();
                 let sem = self.block_request_limit_semaphore.clone();
                 let tracker = self.block_tracker.clone();
@@ -564,6 +569,7 @@ impl PeerSession {
             }
 
             TorrentCommand::BulkCancel(cancels) => {
+                self.last_payload_activity = Instant::now();
                 for (index, begin, len) in &cancels {
                     let _ = self
                         .writer_tx
@@ -597,6 +603,7 @@ impl PeerSession {
                 let _ = self.writer_tx.try_send(Message::Piece(index, begin, data));
             }
             TorrentCommand::PeerBitfield(_, bf) => {
+                self.last_payload_activity = Instant::now();
                 let _ = self.writer_tx.try_send(Message::Bitfield(bf));
             }
             #[cfg(feature = "pex")]
@@ -604,6 +611,7 @@ impl PeerSession {
                 self.handle_pex(peers);
             }
             TorrentCommand::Have(_, idx) => {
+                self.last_payload_activity = Instant::now();
                 let _ = self.writer_tx.try_send(Message::Have(idx));
             }
             TorrentCommand::SendHashPiece {
@@ -613,6 +621,7 @@ impl PeerSession {
                 proof,
                 ..
             } => {
+                self.last_payload_activity = Instant::now();
                 let _ = self
                     .writer_tx
                     .try_send(Message::HashPiece(root, base_layer, index, proof));
@@ -625,6 +634,7 @@ impl PeerSession {
                 length,
                 ..
             } => {
+                self.last_payload_activity = Instant::now();
                 let _ = self
                     .writer_tx
                     .try_send(Message::HashReject(root, base_layer, index, length, 0));
@@ -638,6 +648,7 @@ impl PeerSession {
                 proof_layers,
                 ..
             } => {
+                self.last_payload_activity = Instant::now();
                 let _ = self.writer_tx.try_send(Message::HashRequest(
                     file_root.clone(),
                     base_layer,

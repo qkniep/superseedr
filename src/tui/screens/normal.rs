@@ -1952,11 +1952,15 @@ pub fn draw_footer(
     };
     let v4_port_style = if v4_highlight_active {
         ctx.apply(Style::default().fg(ctx.state_success()).bold())
+    } else if app_state.externally_accessable_port_v4 {
+        ctx.apply(Style::default().fg(ctx.state_success()))
     } else {
         ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
     };
     let v6_port_style = if v6_highlight_active {
         ctx.apply(Style::default().fg(ctx.state_success()).bold())
+    } else if app_state.externally_accessable_port_v6 {
+        ctx.apply(Style::default().fg(ctx.state_success()))
     } else {
         ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0))
     };
