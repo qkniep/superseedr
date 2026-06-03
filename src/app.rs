@@ -2185,7 +2185,8 @@ pub struct App {
 
     pub listener: Option<ListenerSet>,
 
-    pub torrent_manager_incoming_peer_txs: HashMap<Vec<u8>, Sender<(PeerConnection, Vec<u8>)>>,
+    pub torrent_manager_incoming_peer_txs:
+        HashMap<Vec<u8>, Sender<crate::torrent_manager::IncomingPeerSession>>,
     pub torrent_manager_command_txs: HashMap<Vec<u8>, Sender<ManagerCommand>>,
     incoming_peer_handshake_tx: mpsc::Sender<IncomingPeerHandshake>,
     incoming_peer_handshake_rx: mpsc::Receiver<IncomingPeerHandshake>,
@@ -4547,9 +4548,7 @@ impl App {
         let torrent_manager_tx = torrent_manager_tx.clone();
         let app_command_tx = self.app_command_tx.clone();
         tokio::spawn(async move {
-            let session_permit = permit;
-            let send_result = torrent_manager_tx.send((connection, buffer)).await;
-            drop(session_permit);
+            let send_result = torrent_manager_tx.send((connection, buffer, permit)).await;
             match send_result {
                 Ok(()) => {
                     let _ = app_command_tx.try_send(AppCommand::MarkPortOpen(peer_addr));
@@ -6423,7 +6422,8 @@ impl App {
             self.app_state.mode = AppMode::Normal;
         }
 
-        let (incoming_peer_tx, incoming_peer_rx) = mpsc::channel::<(PeerConnection, Vec<u8>)>(100);
+        let (incoming_peer_tx, incoming_peer_rx) =
+            mpsc::channel::<crate::torrent_manager::IncomingPeerSession>(100);
         self.torrent_manager_incoming_peer_txs
             .insert(info_hash.clone(), incoming_peer_tx);
         let (manager_command_tx, manager_command_rx) = mpsc::channel::<ManagerCommand>(100);
@@ -6590,7 +6590,8 @@ impl App {
             self.app_state.mode = AppMode::Normal;
         }
 
-        let (incoming_peer_tx, incoming_peer_rx) = mpsc::channel::<(PeerConnection, Vec<u8>)>(100);
+        let (incoming_peer_tx, incoming_peer_rx) =
+            mpsc::channel::<crate::torrent_manager::IncomingPeerSession>(100);
         self.torrent_manager_incoming_peer_txs
             .insert(info_hash.clone(), incoming_peer_tx);
         let (manager_command_tx, manager_command_rx) = mpsc::channel::<ManagerCommand>(100);

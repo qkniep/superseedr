@@ -90,7 +90,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::telemetry::manager_telemetry::ManagerTelemetry;
-use crate::torrent_manager::TorrentParameters;
+use crate::torrent_manager::{IncomingPeerSession, TorrentParameters};
 
 const HASH_LENGTH: usize = 20;
 
@@ -398,7 +398,7 @@ pub struct TorrentManager {
     #[allow(dead_code)]
     dht_rx: Receiver<()>,
 
-    incoming_peer_rx: Receiver<(PeerConnection, Vec<u8>)>,
+    incoming_peer_rx: Receiver<IncomingPeerSession>,
     manager_command_rx: Receiver<ManagerCommand>,
 
     in_flight_uploads: HashMap<String, HashMap<BlockInfo, JoinHandle<()>>>,
@@ -3121,7 +3121,7 @@ impl TorrentManager {
                     }
                 }
 
-                Some((connection, handshake_response)) = self.incoming_peer_rx.recv(), if !self.state.is_paused => {
+                Some((connection, handshake_response, session_permit)) = self.incoming_peer_rx.recv(), if !self.state.is_paused => {
                     if !self.should_accept_new_peers() {
                         continue;
                     }
@@ -3204,6 +3204,7 @@ impl TorrentManager {
                             "incoming peer transport routed to torrent manager"
                         );
                         tokio::spawn(async move {
+                            let _held_session_permit = session_permit;
                             let session = PeerSession::new(PeerSessionParameters {
                                 info_hash: session_info_hash, // <--- Corrected Hash passed here
                                 torrent_metadata_length: torrent_metadata_length_clone,
@@ -3698,7 +3699,7 @@ mod tests {
             manager_command_rx,
             manager_event_tx,
             settings,
-            resource_manager: resource_manager_client,
+            resource_manager: resource_manager_client.clone(),
             global_dl_bucket: dl_bucket,
             global_ul_bucket: ul_bucket,
             file_priorities: HashMap::new(),
@@ -3933,8 +3934,9 @@ mod resource_tests {
         limits.insert(ResourceType::DiskWrite, (1000, 1000));
         limits.insert(ResourceType::Reserve, (0, 0));
 
-        let (_resource_manager, resource_manager_client) =
+        let (resource_manager, resource_manager_client) =
             ResourceManager::new(limits, shutdown_tx.clone());
+        let resource_handle = tokio::spawn(resource_manager.run());
         let params = TorrentParameters {
             dht_handle: build_test_dht_handle(),
             incoming_peer_rx,
@@ -3945,7 +3947,7 @@ mod resource_tests {
             manager_command_rx,
             manager_event_tx,
             settings,
-            resource_manager: resource_manager_client,
+            resource_manager: resource_manager_client.clone(),
             global_dl_bucket: Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)),
             global_ul_bucket: Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)),
             file_priorities: HashMap::new(),
@@ -3970,8 +3972,12 @@ mod resource_tests {
             peer_addr,
             crate::networking::transport::PeerConnectionDirection::Incoming,
         );
+        let permit = resource_manager_client
+            .acquire_peer_connection()
+            .await
+            .expect("incoming peer permit");
         incoming_tx
-            .send((connection, handshake_response))
+            .send((connection, handshake_response, permit))
             .await
             .unwrap();
 
@@ -3992,6 +3998,7 @@ mod resource_tests {
             .await
             .unwrap();
         run_task.await.unwrap().unwrap();
+        resource_handle.abort();
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
