@@ -1201,6 +1201,7 @@ pub struct SwarmAvailabilityFlashState {
     pub previous_availability: Vec<u32>,
     pub flash_start: Vec<Option<Instant>>,
     pub flash_until: Vec<Option<Instant>>,
+    active_flash_pieces: Vec<usize>,
     previous_peer_bitfields: HashMap<String, Vec<bool>>,
 }
 
@@ -1259,6 +1260,7 @@ impl SwarmAvailabilityFlashState {
             self.previous_availability = current_availability;
             self.flash_start = vec![None; self.previous_availability.len()];
             self.flash_until = vec![None; self.previous_availability.len()];
+            self.active_flash_pieces.clear();
             self.previous_peer_bitfields = current_peer_bitfields;
             return;
         }
@@ -1301,6 +1303,7 @@ impl SwarmAvailabilityFlashState {
             self.previous_availability = current_availability;
             self.flash_start = vec![None; self.previous_availability.len()];
             self.flash_until = vec![None; self.previous_availability.len()];
+            self.active_flash_pieces.clear();
             self.previous_peer_bitfields.clear();
             return;
         }
@@ -1334,6 +1337,9 @@ impl SwarmAvailabilityFlashState {
                 let start = now + delay;
                 self.flash_start[idx] = Some(start);
                 self.flash_until[idx] = Some(start + flash_duration);
+                if !self.active_flash_pieces.contains(&idx) {
+                    self.active_flash_pieces.push(idx);
+                }
                 rank += 1;
             }
         }
@@ -1359,21 +1365,39 @@ impl SwarmAvailabilityFlashState {
     }
 
     pub fn has_active_flash(&self, now: Instant) -> bool {
-        self.flash_until
+        self.active_flash_pieces.iter().any(|&piece_index| {
+            self.flash_until
+                .get(piece_index)
+                .copied()
+                .flatten()
+                .is_some_and(|deadline| deadline > now)
+        })
+    }
+
+    pub fn active_flash_piece_indices(&self, info_hash: &[u8], now: Instant) -> Vec<usize> {
+        if self.info_hash.as_slice() != info_hash {
+            return Vec::new();
+        }
+
+        self.active_flash_pieces
             .iter()
-            .flatten()
-            .any(|&deadline| deadline > now)
+            .copied()
+            .filter(|&piece_index| self.is_piece_flashing(info_hash, piece_index, now))
+            .collect()
     }
 
     fn clear_expired(&mut self, now: Instant) {
-        for idx in 0..self.flash_until.len() {
+        self.active_flash_pieces.retain(|&idx| {
             if self.flash_until[idx].is_some_and(|deadline| deadline <= now) {
                 self.flash_until[idx] = None;
                 if let Some(start) = self.flash_start.get_mut(idx) {
                     *start = None;
                 }
+                false
+            } else {
+                true
             }
-        }
+        });
     }
 }
 
@@ -9139,6 +9163,10 @@ mod tests {
         assert!(state.is_piece_flashing(b"torrent-a", 0, next));
         assert!(!state.is_piece_flashing(b"torrent-a", 1, next));
         assert!(!state.is_piece_flashing(b"torrent-a", 2, next));
+        assert_eq!(
+            state.active_flash_piece_indices(b"torrent-a", next),
+            vec![0]
+        );
         assert!(state.has_active_flash(next));
         assert!(!state.is_piece_flashing(b"torrent-a", 0, next + duration));
         assert!(state.is_piece_flashing(b"torrent-a", 2, next + duration));

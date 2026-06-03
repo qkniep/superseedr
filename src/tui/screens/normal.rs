@@ -1028,11 +1028,11 @@ fn swarm_heatmap_flashing_peer_addresses(
     };
 
     let mut addresses = HashSet::new();
-    for piece_index in 0..total_pieces {
-        if !flash
-            .state
-            .is_piece_flashing(flash.info_hash, piece_index, flash.now)
-        {
+    for piece_index in flash
+        .state
+        .active_flash_piece_indices(flash.info_hash, flash.now)
+    {
+        if piece_index >= total_pieces {
             continue;
         }
         if let Some(peer) = swarm_heatmap_flash_peer(peers, total_pieces, piece_index) {

@@ -1194,10 +1194,7 @@ async fn run_once(
         event_handle,
     );
 
-    let rate_limit = args
-        .target_gbps
-        .map(gbps_to_bytes_per_second)
-        .unwrap_or(0.0);
+    let rate_limit = synthetic_target_rate_limit(args.target_gbps);
     let global_dl_bucket = Arc::new(TokenBucket::new(rate_limit, rate_limit));
     let global_ul_bucket = Arc::new(TokenBucket::new(rate_limit, rate_limit));
     let harness = HarnessContext {
@@ -5064,6 +5061,12 @@ fn gbps_to_bytes_per_second(gbps: f64) -> f64 {
     }
 }
 
+fn synthetic_target_rate_limit(target_gbps: Option<f64>) -> f64 {
+    target_gbps
+        .map(gbps_to_bytes_per_second)
+        .unwrap_or(f64::INFINITY)
+}
+
 fn bytes_to_bits_per_second(bytes: u64, secs: f64) -> u64 {
     ((bytes as f64 * 8.0) / secs.max(0.001)) as u64
 }
@@ -5182,6 +5185,13 @@ mod tests {
     #[test]
     fn default_utp_chaos_does_not_set_shared_udp_env() {
         assert!(shared_udp_chaos_env_value(SyntheticUdpChaosArgs::default()).is_none());
+    }
+
+    #[test]
+    fn omitted_synthetic_target_rate_is_unlimited() {
+        assert!(synthetic_target_rate_limit(None).is_infinite());
+        assert_eq!(synthetic_target_rate_limit(Some(0.0)), 0.0);
+        assert_eq!(synthetic_target_rate_limit(Some(8.0)), 1_000_000_000.0);
     }
 
     #[test]
