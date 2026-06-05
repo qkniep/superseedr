@@ -5,6 +5,7 @@ use crate::app::{AppCommand, AppMode, AppState, RssScreen, RssSectionFocus};
 use crate::config::RssFilterMode;
 use crate::tui::formatters::centered_rect;
 use crate::tui::screen_context::ScreenContext;
+use crate::tui::screens::input_panel::draw_prompt_panel;
 use chrono::{DateTime, Local, Utc};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -799,14 +800,7 @@ fn draw_input_panel(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
         )
     };
 
-    let mut line_spans = vec![
-        Span::styled(
-            "> ",
-            ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
-        ),
-        Span::raw(value),
-        Span::styled("_", ctx.apply(Style::default().fg(ctx.state_warning()))),
-    ];
+    let mut trailing_spans = Vec::new();
     if app_state.ui.rss.is_editing
         && matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters)
     {
@@ -820,19 +814,12 @@ fn draw_input_panel(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
                 ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
             ),
         };
-        line_spans.push(Span::raw("  "));
-        line_spans.push(Span::styled("Fuzzy", fuzzy_style));
-        line_spans.push(Span::raw(" / "));
-        line_spans.push(Span::styled("Regex", regex_style));
+        trailing_spans.push(Span::raw("  "));
+        trailing_spans.push(Span::styled("Fuzzy", fuzzy_style));
+        trailing_spans.push(Span::raw(" / "));
+        trailing_spans.push(Span::styled("Regex", regex_style));
     }
-    let line = Line::from(line_spans);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .padding(Padding::horizontal(1))
-        .border_style(ctx.apply(Style::default().fg(ctx.state_selected())));
-    f.render_widget(Paragraph::new(line).block(block), area);
+    draw_prompt_panel(f, area, title, value, trailing_spans, ctx);
 }
 
 fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {

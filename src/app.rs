@@ -1159,6 +1159,7 @@ impl Default for TorrentMetrics {
 #[derive(Default, Debug)]
 pub struct TorrentDisplayState {
     pub latest_state: TorrentMetrics,
+    pub added_at_unix_secs: Option<u64>,
     pub file_preview_tree: Vec<RawNode<TorrentPreviewPayload>>,
     pub recent_file_activity: HashMap<String, RecentFileActivity>,
     pub latest_file_probe_status: Option<TorrentFileProbeStatus>,
@@ -2954,6 +2955,7 @@ impl App {
                 activity_message: "Reader mode waiting for leader status".to_string(),
                 ..Default::default()
             },
+            added_at_unix_secs: torrent.added_at_unix_secs,
             ..Default::default()
         })
     }
@@ -4880,6 +4882,7 @@ impl App {
                     .clone()
                     .or_else(|| new_settings.default_download_folder.clone());
                 runtime.latest_state.container_name = torrent.container_name.clone();
+                runtime.added_at_unix_secs = torrent.added_at_unix_secs;
                 let updated_file_priorities = torrent.file_priorities.clone();
                 runtime.latest_state.file_priorities = updated_file_priorities.clone();
                 if !runtime.file_preview_tree.is_empty() {
@@ -6482,6 +6485,7 @@ impl App {
 
         self.persist_torrent_metadata_snapshot(&info_hash, &torrent, &file_priorities);
         let number_of_pieces_total = torrent_piece_count(&torrent);
+        let added_at_unix_secs = current_unix_secs();
 
         let resolved_torrent_name = torrent.info.name.clone();
         let placeholder_state = TorrentDisplayState {
@@ -6504,6 +6508,7 @@ impl App {
                 file_priorities: file_priorities.clone(),
                 ..Default::default()
             },
+            added_at_unix_secs: Some(added_at_unix_secs),
             file_preview_tree: build_torrent_preview_tree(torrent.file_list(), &file_priorities),
             ..Default::default()
         };
@@ -6673,6 +6678,7 @@ impl App {
                 file_count: None,
                 ..Default::default()
             },
+            added_at_unix_secs: Some(current_unix_secs()),
             ..Default::default()
         };
         self.app_state
@@ -8321,6 +8327,13 @@ fn should_load_persisted_torrent(torrent_settings: &TorrentSettings) -> bool {
     torrent_settings.torrent_control_state != TorrentControlState::Deleting
 }
 
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn build_persist_payload(
     client_configs: &mut Settings,
     app_state: &mut AppState,
@@ -8342,6 +8355,11 @@ fn build_persist_payload(
         .iter()
         .map(|cfg| (cfg.torrent_or_magnet.clone(), cfg.validation_status))
         .collect();
+    let old_added_at_unix_secs: HashMap<String, Option<u64>> = client_configs
+        .torrents
+        .iter()
+        .map(|cfg| (cfg.torrent_or_magnet.clone(), cfg.added_at_unix_secs))
+        .collect();
     let previous_torrents = client_configs.torrents.clone();
     let deferred_hashes: HashSet<Vec<u8>> = startup_deferred_load_queue.iter().cloned().collect();
     let mut persisted_info_hashes: HashSet<Vec<u8>> = app_state.torrents.keys().cloned().collect();
@@ -8362,6 +8380,12 @@ fn build_persist_payload(
             TorrentSettings {
                 torrent_or_magnet: torrent_state.torrent_or_magnet.clone(),
                 name: torrent_state.torrent_name.clone(),
+                added_at_unix_secs: torrent.added_at_unix_secs.or_else(|| {
+                    old_added_at_unix_secs
+                        .get(&torrent_state.torrent_or_magnet)
+                        .copied()
+                        .flatten()
+                }),
                 validation_status: final_validation_status,
                 download_path: torrent_state.download_path.clone(),
                 container_name: torrent_state.container_name.clone(),
@@ -9163,6 +9187,7 @@ mod tests {
                 TorrentSettings {
                     torrent_or_magnet: loaded_magnet.clone(),
                     name: "sample-loaded".to_string(),
+                    added_at_unix_secs: Some(1_700_000_000),
                     torrent_control_state: TorrentControlState::Running,
                     ..Default::default()
                 },
@@ -9175,7 +9200,7 @@ mod tests {
             TorrentDisplayState {
                 latest_state: TorrentMetrics {
                     info_hash: vec![0x66; 20],
-                    torrent_or_magnet: loaded_magnet,
+                    torrent_or_magnet: loaded_magnet.clone(),
                     torrent_name: "sample-loaded".to_string(),
                     torrent_control_state: TorrentControlState::Running,
                     ..Default::default()
@@ -9191,6 +9216,10 @@ mod tests {
         assert!(payload.settings.torrents.iter().any(|torrent| {
             torrent.torrent_or_magnet == deferred_magnet
                 && torrent.torrent_control_state == TorrentControlState::Running
+        }));
+        assert!(payload.settings.torrents.iter().any(|torrent| {
+            torrent.torrent_or_magnet == loaded_magnet
+                && torrent.added_at_unix_secs == Some(1_700_000_000)
         }));
     }
 

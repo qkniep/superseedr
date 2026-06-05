@@ -252,6 +252,7 @@ impl Default for Settings {
 pub struct TorrentSettings {
     pub torrent_or_magnet: String,
     pub name: String,
+    pub added_at_unix_secs: Option<u64>,
     pub validation_status: bool,
     pub download_path: Option<PathBuf>,
     pub container_name: Option<String>,
@@ -377,6 +378,7 @@ pub struct SharedConfigSelection {
 struct CatalogTorrentSettings {
     pub torrent_or_magnet: String,
     pub name: String,
+    pub added_at_unix_secs: Option<u64>,
     pub validation_status: bool,
     pub download_path: Option<PathBuf>,
     pub container_name: Option<String>,
@@ -640,6 +642,7 @@ impl CatalogTorrentSettings {
                 shared_config_root,
             ),
             name: settings.name.clone(),
+            added_at_unix_secs: settings.added_at_unix_secs,
             validation_status: settings.validation_status,
             download_path: settings
                 .download_path
@@ -670,6 +673,7 @@ impl CatalogTorrentSettings {
                 shared_config_root,
             ),
             name: self.name.clone(),
+            added_at_unix_secs: self.added_at_unix_secs,
             validation_status: self.validation_status,
             download_path: self
                 .download_path

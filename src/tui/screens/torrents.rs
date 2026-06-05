@@ -14,17 +14,19 @@ use crate::tui::formatters::{
 };
 use crate::tui::layout::common::{compute_smart_table_layout, SmartCol};
 use crate::tui::screen_context::ScreenContext;
+use crate::tui::screens::input_panel::draw_prompt_panel;
+use chrono::{DateTime, Local};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::prelude::{Frame, Line, Span, Style, Stylize};
+use ratatui::prelude::{Color, Frame, Line, Span, Style, Stylize};
 use ratatui::widgets::{
     Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Wrap,
 };
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TorrentManagementAction {
@@ -93,9 +95,9 @@ enum ManagementColumnId {
     Peers,
     DownSpeed,
     UpSpeed,
-    Activity,
     Eta,
     Size,
+    DateAdded,
 }
 
 #[derive(Clone, Debug)]
@@ -115,9 +117,9 @@ struct RowMetrics {
     peer_count: usize,
     download_bps: u64,
     upload_bps: u64,
-    activity_score: u64,
     eta: Option<Duration>,
     total_size: u64,
+    added_at_unix_secs: Option<u64>,
 }
 
 #[derive(Default)]
@@ -427,81 +429,49 @@ fn execute_management_effects(app: &mut App, effects: Vec<TorrentManagementEffec
 pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
     let app_state = screen.app.state;
     let ctx = screen.theme;
-    let area = f.area();
-    let chunks = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(4),
-        Constraint::Length(1),
-    ])
-    .split(area);
+    let area = centered_rect(94, 88, f.area());
+    f.render_widget(Clear, area);
 
-    draw_toolbar(f, app_state, chunks[0], ctx);
-    draw_management_table(f, app_state, chunks[1], ctx);
-    draw_status_line(f, app_state, chunks[2], ctx);
+    let chunks = if app_state.ui.torrent_management.is_searching {
+        Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(1),
+        ])
+        .split(area)
+    } else {
+        Layout::vertical([Constraint::Min(5), Constraint::Length(1)]).split(area)
+    };
+
+    let (table_area, footer_area) = if app_state.ui.torrent_management.is_searching {
+        draw_management_search_panel(f, app_state, chunks[0], ctx);
+        (chunks[1], chunks[2])
+    } else {
+        (chunks[0], chunks[1])
+    };
+
+    draw_management_table(f, app_state, table_area, ctx);
+    draw_management_footer(f, app_state, footer_area, ctx);
 
     if app_state.ui.torrent_management.confirm_delete.is_some() {
         draw_delete_confirmation(f, app_state, ctx);
     }
 }
 
-fn draw_toolbar(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
-    if area.height == 0 {
-        return;
-    }
-
-    let total = app_state.torrents.len();
-    let selected = app_state.ui.torrent_management.selected_hashes.len();
-    let group_style = if app_state.ui.torrent_management.grouping_enabled {
-        ctx.apply(Style::default().fg(ctx.state_selected()).bold())
-    } else {
-        ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1))
-    };
-    let search_text = if app_state.ui.torrent_management.is_searching {
-        format!(
-            "Search /{}",
-            sanitize_text(&app_state.ui.torrent_management.search_query)
-        )
-    } else if app_state.ui.torrent_management.search_query.is_empty() {
-        "Search /".to_string()
-    } else {
-        format!(
-            "Filter [{}]",
-            sanitize_text(&app_state.ui.torrent_management.search_query)
-        )
-    };
-
-    let title = Line::from(vec![
-        Span::styled(
-            " Torrent Management ",
-            ctx.apply(Style::default().fg(ctx.accent_sapphire()).bold()),
-        ),
-        Span::styled(
-            format!("{total} torrents  {selected} selected"),
-            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
-        ),
-    ]);
-    let controls = Line::from(vec![
-        Span::styled(
-            if app_state.ui.torrent_management.grouping_enabled {
-                "[g] Groups on"
-            } else {
-                "[g] Groups off"
-            },
-            group_style,
-        ),
-        Span::raw("  "),
-        Span::styled(
-            search_text,
-            ctx.apply(Style::default().fg(ctx.state_warning())),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            "[h/l] columns  [s] sort  [Space] select  [x] names  [p] pause/resume  [d/D] remove/purge  [q] back",
-            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
-        ),
-    ]);
-
-    f.render_widget(Paragraph::new(vec![title, controls]), area);
+fn draw_management_search_panel(
+    f: &mut Frame,
+    app_state: &AppState,
+    area: Rect,
+    ctx: &ThemeContext,
+) {
+    draw_prompt_panel(
+        f,
+        area,
+        " Torrent Search ".to_string(),
+        sanitize_text(&app_state.ui.torrent_management.search_query),
+        Vec::new(),
+        ctx,
+    );
 }
 
 fn draw_management_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
@@ -536,7 +506,8 @@ fn draw_management_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
                         &visible_columns,
                     );
                 let is_sorting = app_state.ui.torrent_management.sort_column_index == Some(idx);
-                let mut style = ctx.apply(Style::default().fg(ctx.state_warning()));
+                let mut style =
+                    ctx.apply(Style::default().fg(management_column_header_color(column.id, ctx)));
                 if is_sorting {
                     style = ctx.apply(style.fg(ctx.state_selected()));
                 }
@@ -565,6 +536,10 @@ fn draw_management_table(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &
 
     let table = Table::new(table_rows, constraints).header(header).block(
         Block::default()
+            .title(Span::styled(
+                " Torrents ",
+                ctx.apply(Style::default().fg(ctx.state_selected())),
+            ))
             .borders(Borders::ALL)
             .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)))
             .padding(Padding::new(1, 1, 0, 0)),
@@ -648,14 +623,14 @@ fn management_table_row<'a>(
         .map(|&idx| match all_columns[idx].id {
             ManagementColumnId::Selection => Cell::from(selection_marker),
             ManagementColumnId::Name => Cell::from(truncate_with_ellipsis(&name, 80)),
+            ManagementColumnId::DateAdded => {
+                Cell::from(format_added_date(row.metrics.added_at_unix_secs))
+            }
             ManagementColumnId::Completed => Cell::from(format!("{:.0}%", row.metrics.completed)),
             ManagementColumnId::State => Cell::from(row.metrics.state_label.clone()),
             ManagementColumnId::Peers => Cell::from(row.metrics.peer_count.to_string()),
             ManagementColumnId::DownSpeed => management_speed_cell(ctx, row.metrics.download_bps),
             ManagementColumnId::UpSpeed => management_speed_cell(ctx, row.metrics.upload_bps),
-            ManagementColumnId::Activity => {
-                Cell::from(format_management_activity_score(row.metrics.activity_score))
-            }
             ManagementColumnId::Eta => Cell::from(
                 row.metrics
                     .eta
@@ -669,43 +644,71 @@ fn management_table_row<'a>(
     Row::new(cells).style(row_style)
 }
 
-fn draw_status_line(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
+fn management_column_header_color(column: ManagementColumnId, ctx: &ThemeContext) -> Color {
+    match column {
+        ManagementColumnId::Selection => ctx.state_info(),
+        ManagementColumnId::Name => ctx.accent_sky(),
+        ManagementColumnId::Completed => ctx.state_success(),
+        ManagementColumnId::State => ctx.state_warning(),
+        ManagementColumnId::Peers => ctx.accent_sapphire(),
+        ManagementColumnId::DownSpeed => ctx.accent_sky(),
+        ManagementColumnId::UpSpeed => ctx.accent_teal(),
+        ManagementColumnId::Eta => ctx.accent_peach(),
+        ManagementColumnId::Size => ctx.accent_maroon(),
+        ManagementColumnId::DateAdded => ctx.state_complete(),
+    }
+}
+
+fn draw_management_footer(f: &mut Frame, app_state: &AppState, area: Rect, ctx: &ThemeContext) {
     if area.height == 0 {
         return;
     }
 
-    let rows = build_management_rows(app_state);
-    let visible_torrents = visible_torrent_hashes(app_state).len();
-    let totals = aggregate_metrics_for_hashes(app_state, visible_torrent_hashes(app_state));
-    let message = if let Some(message) = app_state.ui.torrent_management.status_message.as_ref() {
-        Line::from(Span::styled(
-            sanitize_text(message),
-            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
-        ))
-    } else {
-        Line::from(vec![
-            Span::styled(
-                format!("{} rows / {} torrents  ", rows.len(), visible_torrents),
-                ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
-            ),
-            Span::styled("DL ", ctx.apply(Style::default().fg(ctx.state_warning()))),
-            Span::styled(
-                format_speed(totals.download_bps),
-                ctx.apply(speed_to_style(ctx, totals.download_bps)),
-            ),
-            Span::styled("  UL ", ctx.apply(Style::default().fg(ctx.state_warning()))),
-            Span::styled(
-                format_speed(totals.upload_bps),
-                ctx.apply(speed_to_style(ctx, totals.upload_bps)),
-            ),
-        ])
+    let mut footer_spans = Vec::new();
+    let mut push_action = |key: &str, action: &str, key_color: Color| {
+        footer_spans.push(Span::styled(
+            format!("[{key}]"),
+            ctx.apply(Style::default().fg(key_color).bold()),
+        ));
+        footer_spans.push(Span::styled(
+            action.to_string(),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
+        ));
+        footer_spans.push(Span::styled(
+            " | ",
+            ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0)),
+        ));
     };
-    f.render_widget(
-        Paragraph::new(message)
-            .alignment(Alignment::Right)
-            .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1))),
-        area,
-    );
+
+    if app_state.ui.torrent_management.confirm_delete.is_some() {
+        push_action("Y", "confirm-delete", ctx.state_error());
+        push_action("Esc", "cancel", ctx.state_selected());
+    } else if app_state.ui.torrent_management.is_searching {
+        push_action("Enter", "apply", ctx.state_success());
+        push_action("Esc", "clear", ctx.state_error());
+    } else {
+        push_action("arrows", "nav", ctx.state_info());
+        push_action("h/l", "columns", ctx.state_selected());
+        push_action("s", "ort", ctx.state_warning());
+        push_action("Space", "select", ctx.state_info());
+        push_action("A", "select-all", ctx.state_success());
+        push_action("u", "clear", ctx.accent_sapphire());
+        push_action("g", "roups", ctx.state_selected());
+        push_action("/", "search", ctx.accent_sapphire());
+        push_action("x", "names", ctx.accent_sapphire());
+        push_action("p", "ause", ctx.state_warning());
+        push_action("d/D", "remove/purge", ctx.state_error());
+        push_action("Esc", "back", ctx.state_error());
+    }
+
+    if !footer_spans.is_empty() {
+        footer_spans.pop();
+    }
+
+    let footer = Paragraph::new(Line::from(footer_spans))
+        .alignment(Alignment::Center)
+        .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
+    f.render_widget(footer, area);
 }
 
 fn draw_delete_confirmation(f: &mut Frame, app_state: &AppState, ctx: &ThemeContext) {
@@ -808,13 +811,6 @@ fn management_columns() -> Vec<ManagementColumnDefinition> {
             constraint: Constraint::Length(10),
         },
         ManagementColumnDefinition {
-            id: ManagementColumnId::Activity,
-            header: "Act",
-            min_width: 7,
-            priority: 3,
-            constraint: Constraint::Length(7),
-        },
-        ManagementColumnDefinition {
             id: ManagementColumnId::Eta,
             header: "ETA",
             min_width: 9,
@@ -824,6 +820,13 @@ fn management_columns() -> Vec<ManagementColumnDefinition> {
         ManagementColumnDefinition {
             id: ManagementColumnId::Size,
             header: "Size",
+            min_width: 10,
+            priority: 5,
+            constraint: Constraint::Length(10),
+        },
+        ManagementColumnDefinition {
+            id: ManagementColumnId::DateAdded,
+            header: "Added",
             min_width: 10,
             priority: 5,
             constraint: Constraint::Length(10),
@@ -856,35 +859,6 @@ fn visible_management_column_ids(available_width: u16) -> Vec<ManagementColumnId
 
 fn management_speed_cell<'a>(ctx: &ThemeContext, speed_bps: u64) -> Cell<'a> {
     Cell::from(format_speed(speed_bps)).style(ctx.apply(speed_to_style(ctx, speed_bps)))
-}
-
-fn format_management_activity_score(score: u64) -> String {
-    if score < 1_000 {
-        score.to_string()
-    } else if score < 1_000_000 {
-        format!("{:.1}k", score as f64 / 1_000.0)
-    } else if score < 1_000_000_000 {
-        format!("{:.1}m", score as f64 / 1_000_000.0)
-    } else {
-        format!("{:.1}b", score as f64 / 1_000_000_000.0)
-    }
-}
-
-fn management_activity_sort_score(torrent: &TorrentDisplayState) -> u64 {
-    let window = 60;
-    let mut score = 0u64;
-    let mut sum_vec = |history: &Vec<u64>| {
-        for (i, &count) in history.iter().rev().take(window).enumerate() {
-            if count > 0 {
-                let weight = if i < 5 { (5 - i) as u64 * 10 } else { 1 };
-                score = score.saturating_add(count.saturating_mul(weight));
-            }
-        }
-    };
-    sum_vec(&torrent.peer_discovery_history);
-    sum_vec(&torrent.peer_connection_history);
-    sum_vec(&torrent.peer_disconnect_history);
-    score
 }
 
 fn management_table_width_for_state(app_state: &AppState) -> u16 {
@@ -961,8 +935,8 @@ fn management_column_default_direction(column: ManagementColumnId) -> SortDirect
         | ManagementColumnId::Peers
         | ManagementColumnId::DownSpeed
         | ManagementColumnId::UpSpeed
-        | ManagementColumnId::Activity
-        | ManagementColumnId::Size => SortDirection::Descending,
+        | ManagementColumnId::Size
+        | ManagementColumnId::DateAdded => SortDirection::Descending,
         ManagementColumnId::Name | ManagementColumnId::State | ManagementColumnId::Eta => {
             SortDirection::Ascending
         }
@@ -1006,13 +980,14 @@ fn compare_management_rows(
         ManagementColumnId::Name => left.label.cmp(&right.label),
         ManagementColumnId::Completed => left.metrics.completed.total_cmp(&right.metrics.completed),
         ManagementColumnId::State => left.metrics.state_label.cmp(&right.metrics.state_label),
+        ManagementColumnId::DateAdded => left
+            .metrics
+            .added_at_unix_secs
+            .unwrap_or(0)
+            .cmp(&right.metrics.added_at_unix_secs.unwrap_or(0)),
         ManagementColumnId::Peers => left.metrics.peer_count.cmp(&right.metrics.peer_count),
         ManagementColumnId::DownSpeed => left.metrics.download_bps.cmp(&right.metrics.download_bps),
         ManagementColumnId::UpSpeed => left.metrics.upload_bps.cmp(&right.metrics.upload_bps),
-        ManagementColumnId::Activity => left
-            .metrics
-            .activity_score
-            .cmp(&right.metrics.activity_score),
         ManagementColumnId::Eta => left.metrics.eta.cmp(&right.metrics.eta),
         ManagementColumnId::Size => left.metrics.total_size.cmp(&right.metrics.total_size),
     };
@@ -1210,8 +1185,8 @@ where
     let mut peer_count = 0usize;
     let mut download_bps = 0u64;
     let mut upload_bps = 0u64;
-    let mut activity_score = 0u64;
     let mut total_size = 0u64;
+    let mut latest_added_at_unix_secs = None::<u64>;
     let mut weighted_done = 0f64;
     let mut unweighted_done = 0f64;
     let mut weighted_total = 0u64;
@@ -1230,8 +1205,8 @@ where
             .max(state.peers.len());
         download_bps = download_bps.saturating_add(torrent.smoothed_download_speed_bps);
         upload_bps = upload_bps.saturating_add(torrent.smoothed_upload_speed_bps);
-        activity_score = activity_score.saturating_add(management_activity_sort_score(torrent));
         total_size = total_size.saturating_add(state.total_size);
+        latest_added_at_unix_secs = latest_added_at_unix_secs.max(torrent.added_at_unix_secs);
         states.insert(state.torrent_control_state.clone());
 
         let pct = torrent_completion_percent(state).clamp(0.0, 100.0);
@@ -1261,10 +1236,19 @@ where
         peer_count,
         download_bps,
         upload_bps,
-        activity_score,
         eta: (any_incomplete && !max_eta.is_zero()).then_some(max_eta),
         total_size,
+        added_at_unix_secs: latest_added_at_unix_secs,
     }
+}
+
+fn format_added_date(added_at_unix_secs: Option<u64>) -> String {
+    let Some(added_at_unix_secs) = added_at_unix_secs else {
+        return "-".to_string();
+    };
+    let system_time = UNIX_EPOCH + Duration::from_secs(added_at_unix_secs);
+    let datetime: DateTime<Local> = system_time.into();
+    datetime.format("%Y-%m-%d").to_string()
 }
 
 fn aggregate_state_label(states: &HashSet<TorrentControlState>, count: usize) -> String {
@@ -1513,6 +1497,7 @@ mod tests {
                 info_hash.clone(),
                 TorrentDisplayState {
                     latest_state: metrics,
+                    added_at_unix_secs: Some(1_700_000_000 + idx as u64 * 86_400),
                     smoothed_download_speed_bps: download_bps,
                     smoothed_upload_speed_bps: upload_bps,
                     ..Default::default()
@@ -1548,7 +1533,7 @@ mod tests {
 
     #[test]
     fn management_columns_restore_all_metrics_on_wide_widths() {
-        let visible = visible_management_column_ids(140);
+        let visible = visible_management_column_ids(150);
 
         assert_eq!(
             visible,
@@ -1560,9 +1545,9 @@ mod tests {
                 ManagementColumnId::Peers,
                 ManagementColumnId::DownSpeed,
                 ManagementColumnId::UpSpeed,
-                ManagementColumnId::Activity,
                 ManagementColumnId::Eta,
                 ManagementColumnId::Size,
+                ManagementColumnId::DateAdded,
             ]
         );
     }
@@ -1656,39 +1641,47 @@ mod tests {
     }
 
     #[test]
-    fn sorting_by_activity_orders_rows_by_explicit_activity_column() {
+    fn sorting_by_date_added_orders_newest_first_then_toggles() {
         let mut app_state = app_state_with_torrents(vec![
-            (hash(1), "Calm Seed", 100, 10, 2),
-            (hash(2), "Busy Seed", 100, 10, 2),
+            (hash(1), "Older Seed", 100, 10, 2),
+            (hash(2), "Newer Seed", 100, 10, 2),
         ]);
         app_state.ui.torrent_management.grouping_enabled = false;
         app_state.ui.torrent_management.selected_column_index =
-            management_column_index(ManagementColumnId::Activity).expect("activity column");
-
-        app_state
-            .torrents
-            .get_mut(&hash(1))
-            .expect("calm torrent")
-            .peer_connection_history
-            .push(1);
-        app_state
-            .torrents
-            .get_mut(&hash(2))
-            .expect("busy torrent")
-            .peer_connection_history
-            .push(7);
+            management_column_index(ManagementColumnId::DateAdded).expect("date added column");
 
         reduce_torrent_management_action(
             &mut app_state,
             TorrentManagementAction::SortBySelectedColumn,
         );
-
         let rows = build_management_rows(&app_state);
-        assert_eq!(rows[0].label, "Busy Seed");
+        assert_eq!(rows[0].label, "Newer Seed");
         assert_eq!(
             app_state.ui.torrent_management.sort_direction,
             SortDirection::Descending
         );
+
+        reduce_torrent_management_action(
+            &mut app_state,
+            TorrentManagementAction::SortBySelectedColumn,
+        );
+        let rows = build_management_rows(&app_state);
+        assert_eq!(rows[0].label, "Older Seed");
+        assert_eq!(
+            app_state.ui.torrent_management.sort_direction,
+            SortDirection::Ascending
+        );
+    }
+
+    #[test]
+    fn date_added_formats_as_local_calendar_date_or_dash() {
+        assert_eq!(format_added_date(None), "-");
+
+        let rendered = format_added_date(Some(1_700_000_000));
+
+        assert_eq!(rendered.len(), 10);
+        assert_eq!(rendered.chars().nth(4), Some('-'));
+        assert_eq!(rendered.chars().nth(7), Some('-'));
     }
 
     #[test]
