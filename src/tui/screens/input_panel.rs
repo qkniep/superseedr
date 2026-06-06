@@ -3,7 +3,7 @@
 
 use crate::theme::ThemeContext;
 use ratatui::layout::Rect;
-use ratatui::prelude::{Frame, Line, Span, Style, Stylize};
+use ratatui::prelude::{Frame, Line, Span, Style};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 
 pub(crate) fn draw_prompt_panel(

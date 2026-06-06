@@ -202,6 +202,13 @@ impl DailyRollingFileWriter {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "kept as the default-reporting wrapper and covered by logging tests"
+    )
+)]
 pub(crate) fn non_blocking_daily_file_writer(
     log_dir: &Path,
     filename_prefix: &str,
@@ -231,6 +238,13 @@ pub(crate) fn non_blocking_daily_file_writer_with_stderr_reporting(
     )
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "test-only date injection helper for rolling log coverage"
+    )
+)]
 fn non_blocking_daily_file_writer_with_date_provider(
     log_dir: &Path,
     filename_prefix: &str,

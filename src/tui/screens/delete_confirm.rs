@@ -7,7 +7,7 @@ use crate::tui::formatters::{centered_rect, sanitize_text};
 use crate::tui::screen_context::ScreenContext;
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode};
 use ratatui::layout::{Alignment, Constraint, Layout};
-use ratatui::prelude::{Frame, Line, Span, Style, Stylize};
+use ratatui::prelude::{Frame, Line, Span, Style};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 #[derive(Clone, Copy, Debug, PartialEq)]

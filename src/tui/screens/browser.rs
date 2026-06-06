@@ -13,7 +13,7 @@ use crate::tui::screen_context::ScreenContext;
 use crate::tui::tree::{RawNode, TreeAction, TreeFilter, TreeMathHelper, TreeViewState};
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::prelude::{Alignment, Frame, Line, Modifier, Span, Style, Stylize};
+use ratatui::prelude::{Alignment, Frame, Line, Modifier, Span, Style};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use std::collections::HashMap;
 use std::path::Path;

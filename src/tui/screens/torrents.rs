@@ -886,8 +886,7 @@ fn normalized_selected_column_from_visible(
     visible_columns
         .iter()
         .copied()
-        .filter(|idx| *idx <= selected_index)
-        .next_back()
+        .rfind(|idx| *idx <= selected_index)
         .or_else(|| visible_columns.first().copied())
         .unwrap_or(0)
 }

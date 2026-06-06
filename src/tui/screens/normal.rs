@@ -2381,14 +2381,11 @@ pub fn draw_details_panel(
         };
         let progress_ratio = (progress_pct / 100.0).clamp(0.0, 1.0);
         let progress_label_text = format!("{:.1}%", progress_pct);
-        let custom_line_set = symbols::line::Set {
-            horizontal: "⣿",
-            ..symbols::line::THICK
-        };
         let line_gauge = LineGauge::default()
             .ratio(progress_ratio)
             .label(progress_label_text)
-            .line_set(custom_line_set)
+            .filled_symbol("⣿")
+            .unfilled_symbol(symbols::line::THICK.horizontal)
             .filled_style(ctx.apply(Style::default().fg(ctx.state_success())));
         f.render_widget(line_gauge, progress_chunks[1]);
 

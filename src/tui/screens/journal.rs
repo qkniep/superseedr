@@ -10,7 +10,7 @@ use crate::tui::formatters::sanitize_text;
 use crate::tui::screen_context::ScreenContext;
 use chrono::{DateTime, Local};
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind};
-use ratatui::prelude::{Alignment, Constraint, Frame, Line, Modifier, Span, Style, Stylize};
+use ratatui::prelude::{Alignment, Constraint, Frame, Line, Modifier, Span, Style};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use std::path::{Component, Path};
 use tokio::sync::mpsc;
