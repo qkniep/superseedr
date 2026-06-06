@@ -282,6 +282,7 @@ pub struct TrackerState {
     pub next_announce_time: Instant,
     pub leeching_interval: Option<Duration>,
     pub seeding_interval: Option<Duration>,
+    pub has_responded: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1754,6 +1755,7 @@ impl TorrentState {
                 let mut effects = Vec::new();
 
                 if let Some(tracker) = self.trackers.get_mut(&url) {
+                    tracker.has_responded = true;
                     let seeding_secs = if interval > 0 { interval + 1 } else { 1800 };
                     tracker.seeding_interval = Some(Duration::from_secs(seeding_secs));
 
@@ -1882,6 +1884,7 @@ impl TorrentState {
                             next_announce_time: self.now,
                             leeching_interval: None,
                             seeding_interval: None,
+                            has_responded: false,
                         });
                         (announce, state)
                     })
@@ -3314,6 +3317,7 @@ mod tests {
                 next_announce_time: Instant::now(),
                 leeching_interval: None,
                 seeding_interval: None,
+                has_responded: false,
             },
         );
 
@@ -4876,6 +4880,7 @@ mod tests {
                 next_announce_time: state.now, // Ready to announce immediately
                 leeching_interval: Some(Duration::from_secs(60)),
                 seeding_interval: None,
+                has_responded: false,
             },
         );
 
@@ -4909,6 +4914,7 @@ mod tests {
                 next_announce_time: state.now,
                 leeching_interval: Some(Duration::from_secs(60)),
                 seeding_interval: None,
+                has_responded: false,
             },
         );
 
@@ -4946,6 +4952,7 @@ mod tests {
                 next_announce_time: state.now,
                 leeching_interval: None,
                 seeding_interval: None,
+                has_responded: false,
             },
         );
 
@@ -4978,6 +4985,7 @@ mod tests {
                 next_announce_time: state.now,
                 leeching_interval: None,
                 seeding_interval: None,
+                has_responded: false,
             },
         );
 
