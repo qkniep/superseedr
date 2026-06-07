@@ -108,7 +108,15 @@ pub async fn create_and_allocate_files(
         }
 
         let exists = try_exists(&file_info.path).await?;
-        if exists {
+        let existing_metadata = if exists {
+            Some(fs::metadata(&file_info.path).await?)
+        } else {
+            None
+        };
+        if existing_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        {
             is_fresh_download = false;
         }
         if file_info.is_skipped {
@@ -122,20 +130,18 @@ pub async fn create_and_allocate_files(
             }
         }
 
-        // Create and size the file if it doesn't exist. If it already exists
-        // at the wrong size, resize it so validation reads cannot loop forever
-        // on repeated short reads.
+        // Create fresh files without preallocating; some mounted filesystems can
+        // block indefinitely when resizing sparse placeholders up front.
         if !try_exists(&file_info.path).await? {
-            let file = OpenOptions::new()
+            OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(false)
                 .open(&file_info.path)
                 .await?;
-            file.set_len(file_info.length).await?;
         } else {
-            let metadata = fs::metadata(&file_info.path).await?;
-            if metadata.is_file() && metadata.len() != file_info.length {
+            let metadata = existing_metadata.expect("metadata checked for existing file");
+            if metadata.is_file() && metadata.len() > 0 && metadata.len() != file_info.length {
                 let file = OpenOptions::new()
                     .write(true)
                     .truncate(false)
@@ -454,20 +460,33 @@ mod tests {
         let file_path = &mfi.files[0].path;
         assert!(tokio::fs::try_exists(file_path).await.unwrap());
         let metadata = tokio::fs::metadata(file_path).await.unwrap();
-        assert_eq!(metadata.len(), 100);
+        assert_eq!(metadata.len(), 0);
     }
 
     #[tokio::test]
     async fn test_create_and_allocate_files_resizes_existing_short_file() {
         let (_dir, mfi) = setup_single_file();
         let file_path = &mfi.files[0].path;
-        tokio::fs::write(file_path, []).await.unwrap();
+        tokio::fs::write(file_path, b"partial").await.unwrap();
 
         let is_fresh = create_and_allocate_files(&mfi).await.unwrap();
 
         assert!(!is_fresh);
         let metadata = tokio::fs::metadata(file_path).await.unwrap();
         assert_eq!(metadata.len(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_create_and_allocate_treats_zero_byte_placeholder_as_fresh() {
+        let (_dir, mfi) = setup_single_file();
+        let file_path = &mfi.files[0].path;
+        File::create(file_path).await.unwrap();
+
+        let is_fresh = create_and_allocate_files(&mfi).await.unwrap();
+
+        assert!(is_fresh);
+        let metadata = tokio::fs::metadata(file_path).await.unwrap();
+        assert_eq!(metadata.len(), 0);
     }
 
     #[tokio::test]
@@ -482,11 +501,11 @@ mod tests {
         assert!(tokio::fs::try_exists(subdir_path).await.unwrap());
         assert!(tokio::fs::try_exists(file_a_path).await.unwrap());
         let metadata_a = tokio::fs::metadata(file_a_path).await.unwrap();
-        assert_eq!(metadata_a.len(), 50);
+        assert_eq!(metadata_a.len(), 0);
 
         assert!(tokio::fs::try_exists(file_b_path).await.unwrap());
         let metadata_b = tokio::fs::metadata(file_b_path).await.unwrap();
-        assert_eq!(metadata_b.len(), 70);
+        assert_eq!(metadata_b.len(), 0);
     }
 
     #[tokio::test]
