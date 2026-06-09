@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::errors::StorageError;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use tokio::fs::{self, try_exists, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
@@ -132,16 +133,12 @@ pub async fn create_and_allocate_files(
 
         // Create fresh files without preallocating; some mounted filesystems can
         // block indefinitely when resizing sparse placeholders up front.
-        if !try_exists(&file_info.path).await? {
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&file_info.path)
-                .await?;
-        } else {
-            let metadata = existing_metadata.expect("metadata checked for existing file");
-            if metadata.is_file() && metadata.len() > 0 && metadata.len() != file_info.length {
+        match fs::metadata(&file_info.path).await {
+            Ok(metadata)
+                if metadata.is_file()
+                    && metadata.len() > 0
+                    && metadata.len() != file_info.length =>
+            {
                 let file = OpenOptions::new()
                     .write(true)
                     .truncate(false)
@@ -149,6 +146,20 @@ pub async fn create_and_allocate_files(
                     .await?;
                 file.set_len(file_info.length).await?;
             }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let file = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&file_info.path)
+                    .await?;
+                let metadata = file.metadata().await?;
+                if metadata.is_file() && metadata.len() > 0 && metadata.len() != file_info.length {
+                    file.set_len(file_info.length).await?;
+                }
+            }
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(is_fresh_download)
