@@ -2153,7 +2153,7 @@ mod tests {
     }
 
     #[test]
-    fn anonymized_torrent_rows_preserve_name_shape() {
+    fn anonymized_torrent_rows_hide_release_markers() {
         let mut app_state =
             app_state_with_torrents(vec![(hash(1), "Harbor.Lights S01E01", 50, 5, 1)]);
         app_state.anonymize_torrent_names = true;
@@ -2163,16 +2163,14 @@ mod tests {
 
         assert_ne!(anonymized, "Harbor.Lights S01E01");
         assert_ne!(anonymized, "Torrent 1");
-        assert_eq!(
-            anonymized.chars().count(),
-            "Harbor.Lights S01E01".chars().count()
-        );
-        assert_eq!(anonymized.matches('.').count(), 1);
-        assert_eq!(anonymized.matches(' ').count(), 1);
+        assert!(!anonymized.contains('.'));
+        assert!(!anonymized.chars().any(|ch| ch.is_ascii_digit()));
+        assert!(!anonymized.contains("  "));
+        assert!(anonymized.matches(' ').count() >= 1);
     }
 
     #[test]
-    fn anonymized_rows_preserve_torrent_name_shape() {
+    fn anonymized_rows_hide_numbered_episode_markers() {
         let mut app_state = app_state_with_torrents(vec![
             (hash(1), "Meadow Saga S01E01", 100, 10, 2),
             (hash(2), "Meadow Saga S01E02", 300, 20, 3),
@@ -2183,11 +2181,9 @@ mod tests {
         let anonymized = &rows[0].label;
 
         assert_ne!(anonymized, "Meadow Saga S01E01");
-        assert_eq!(
-            anonymized.chars().count(),
-            "Meadow Saga S01E01".chars().count()
-        );
-        assert_eq!(anonymized.matches(' ').count(), 2);
+        assert!(!anonymized.chars().any(|ch| ch.is_ascii_digit()));
+        assert!(!anonymized.contains("  "));
+        assert!(anonymized.matches(' ').count() >= 2);
     }
 
     #[test]

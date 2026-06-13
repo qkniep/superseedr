@@ -2866,12 +2866,16 @@ impl App {
 
         let mut torrents_to_load = app.client_configs.torrents.clone();
         torrents_to_load.sort_by_key(|t| !t.validation_status);
+        let mut running_torrents_started = 0usize;
         for torrent_config in torrents_to_load {
-            let should_defer_running_torrent = matches!(
+            let is_running = matches!(
                 torrent_config.torrent_control_state,
                 TorrentControlState::Running
-            ) && !app
-                .should_suppress_follower_runtime_for_torrent(&torrent_config);
+            );
+            let should_roll_running_torrent =
+                is_running && !app.should_suppress_follower_runtime_for_torrent(&torrent_config);
+            let should_defer_running_torrent = should_roll_running_torrent
+                && running_torrents_started >= STARTUP_ROLLING_LOADS_PER_INTERVAL;
 
             if should_defer_running_torrent {
                 if let Some(info_hash) =
@@ -2891,6 +2895,9 @@ impl App {
                 }
             } else {
                 if app.load_runtime_torrent_from_settings(torrent_config).await {
+                    if should_roll_running_torrent {
+                        running_torrents_started = running_torrents_started.saturating_add(1);
+                    }
                     app.startup_loaded_torrent_count =
                         app.startup_loaded_torrent_count.saturating_add(1);
                 }

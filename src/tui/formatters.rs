@@ -200,11 +200,33 @@ pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
 
 pub(crate) fn anonymize_preserving_shape(input: &str) -> String {
     let seed = stable_string_seed(input);
-    input
-        .chars()
-        .enumerate()
-        .map(|(idx, ch)| anonymized_shape_char(seed, idx, ch))
-        .collect()
+    let mut anonymized = String::with_capacity(input.len());
+    let mut last_was_separator = false;
+
+    for (idx, ch) in input.chars().enumerate() {
+        if ch == '/' || ch == '\\' {
+            if anonymized.ends_with(' ') {
+                anonymized.pop();
+            }
+            anonymized.push(ch);
+            last_was_separator = false;
+        } else if ch.is_alphabetic() {
+            anonymized.push(anonymized_shape_letter(seed, idx));
+            last_was_separator = false;
+        } else if !anonymized.is_empty()
+            && !last_was_separator
+            && !anonymized.ends_with('/')
+            && !anonymized.ends_with('\\')
+        {
+            anonymized.push(' ');
+            last_was_separator = true;
+        }
+    }
+
+    if anonymized.ends_with(' ') {
+        anonymized.pop();
+    }
+    anonymized
 }
 
 fn stable_string_seed(input: &str) -> u64 {
@@ -216,7 +238,7 @@ fn stable_string_seed(input: &str) -> u64 {
     hash
 }
 
-fn anonymized_shape_char(seed: u64, idx: usize, ch: char) -> char {
+fn anonymized_shape_letter(seed: u64, idx: usize) -> char {
     let mut state = seed ^ ((idx as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15));
     state ^= state >> 30;
     state = state.wrapping_mul(0xbf58476d1ce4e5b9);
@@ -224,17 +246,7 @@ fn anonymized_shape_char(seed: u64, idx: usize, ch: char) -> char {
     state = state.wrapping_mul(0x94d049bb133111eb);
     state ^= state >> 31;
 
-    if ch.is_ascii_lowercase() {
-        (b'a' + (state % 26) as u8) as char
-    } else if ch.is_ascii_uppercase() {
-        (b'A' + (state % 26) as u8) as char
-    } else if ch.is_ascii_digit() {
-        (b'0' + (state % 10) as u8) as char
-    } else if ch.is_alphabetic() {
-        (b'a' + (state % 26) as u8) as char
-    } else {
-        ch
-    }
+    (b'a' + (state % 26) as u8) as char
 }
 
 pub fn calculate_nice_upper_bound(speed_bps: u64) -> u64 {

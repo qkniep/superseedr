@@ -7820,8 +7820,8 @@ mod tests {
     #[test]
     fn split_path_components_handles_windows_paths() {
         assert_eq!(
-            split_path_components(r"C:\Users\jagat\Documents\seedbox"),
-            vec!["C:", "Users", "jagat", "Documents", "seedbox"]
+            split_path_components(r"C:\Users\ExampleUser\Downloads\library"),
+            vec!["C:", "Users", "ExampleUser", "Downloads", "library"]
         );
     }
 
@@ -7835,10 +7835,10 @@ mod tests {
 
     #[test]
     fn middle_ellipsize_path_preserves_path_ends() {
-        let shaped = middle_ellipsize_path(r"C:\Users\jagat\Documents\seedbox", 18);
+        let shaped = middle_ellipsize_path(r"C:\Users\ExampleUser\Downloads\library", 18);
         assert!(shaped.chars().count() <= 18, "{shaped}");
         assert!(shaped.starts_with("C:"), "{shaped}");
-        assert!(shaped.ends_with("seedbox"), "{shaped}");
+        assert!(shaped.ends_with("library"), "{shaped}");
         assert!(shaped.contains("..."), "{shaped}");
     }
 
@@ -7854,7 +7854,7 @@ mod tests {
     #[test]
     fn torrent_root_path_label_uses_download_root_only() {
         let metrics = TorrentMetrics {
-            download_path: Some(PathBuf::from(r"C:\Users\jagat\Documents\seedbox")),
+            download_path: Some(PathBuf::from(r"C:\Users\ExampleUser\Downloads\library")),
             container_name: Some("[team] sample release".to_string()),
             is_multi_file: true,
             torrent_name: "episode 01.mkv".to_string(),
@@ -7864,16 +7864,15 @@ mod tests {
 
         assert_eq!(
             torrent_root_path_label(&metrics, false),
-            r"C:\Users\jagat\Documents\seedbox"
+            r"C:\Users\ExampleUser\Downloads\library"
         );
     }
 
     #[test]
-    fn anonymize_preserving_shape_keeps_length_and_path_separators() {
-        let original = r"C:\Users\jagat\Documents\seedbox\[Group] Episode_01.mkv";
+    fn anonymize_preserving_shape_keeps_path_separators() {
+        let original = r"C:\Users\ExampleUser\Downloads\library\[Group] Episode_01.mkv";
         let anonymized = anonymize_preserving_shape(original);
 
-        assert_eq!(anonymized.chars().count(), original.chars().count());
         assert_eq!(
             anonymized.matches('\\').count(),
             original.matches('\\').count()
@@ -7884,6 +7883,7 @@ mod tests {
         assert!(!anonymized.contains('['));
         assert!(!anonymized.contains(']'));
         assert!(!anonymized.chars().any(|ch| ch.is_ascii_digit()));
+        assert!(!anonymized.contains("  "));
         assert!(anonymized.chars().all(|ch| {
             ch.is_ascii_lowercase() || ch.is_whitespace() || ch == '/' || ch == '\\'
         }));
@@ -7895,8 +7895,7 @@ mod tests {
         let original = "[Group] Episode 01_sample S7 - 99 (2097y) [17AC1A4Z].qfo (1.36 GB)";
         let anonymized = anonymize_preserving_shape(original);
 
-        assert_eq!(anonymized.chars().count(), original.chars().count());
-        assert!(anonymized.matches(' ').count() > original.matches(' ').count());
+        assert!(!anonymized.contains("  "));
         assert!(!anonymized.contains("Episode"));
         assert!(!anonymized.contains("2097"));
         assert!(!anonymized.contains("qfo"));
@@ -7923,7 +7922,7 @@ mod tests {
     #[test]
     fn torrent_root_path_label_anonymize_preserves_path_shape() {
         let metrics = TorrentMetrics {
-            download_path: Some(PathBuf::from(r"C:\Users\jagat\Documents\seedbox")),
+            download_path: Some(PathBuf::from(r"C:\Users\ExampleUser\Downloads\library")),
             torrent_name: "episode 01.mkv".to_string(),
             ..Default::default()
         };
@@ -7931,12 +7930,12 @@ mod tests {
         let original = torrent_root_path_label(&metrics, false);
         let anonymized = torrent_root_path_label(&metrics, true);
 
-        assert_eq!(anonymized.chars().count(), original.chars().count());
         assert_eq!(
             anonymized.matches('\\').count(),
             original.matches('\\').count()
         );
         assert!(!anonymized.contains(':'));
+        assert!(!anonymized.contains("  "));
         assert_ne!(anonymized, original);
     }
 
@@ -7944,11 +7943,11 @@ mod tests {
     fn shaped_row_start_offsets_account_for_hidden_path_separators() {
         let rows = vec![
             r"C:\Users".to_string(),
-            "jagat".to_string(),
-            "seedbox".to_string(),
+            "ExampleUser".to_string(),
+            "library".to_string(),
         ];
 
-        assert_eq!(shaped_row_start_offsets(&rows), vec![0, 9, 15]);
+        assert_eq!(shaped_row_start_offsets(&rows), vec![0, 9, 21]);
     }
 
     #[test]
@@ -8012,7 +8011,7 @@ mod tests {
 
     #[test]
     fn shape_root_path_for_viewport_keeps_single_line_when_it_fits() {
-        let path = r"C:\Users\jagat\Documents";
+        let path = r"C:\Users\ExampleUser\Downloads";
         assert_eq!(
             shape_root_path_for_viewport(path, path.len(), 4),
             vec![path.to_string()]
@@ -8021,19 +8020,19 @@ mod tests {
 
     #[test]
     fn shape_root_path_for_viewport_uses_middle_ellipsis_when_only_one_row_is_available() {
-        let rows = shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 18, 1);
+        let rows = shape_root_path_for_viewport(r"C:\Users\ExampleUser\Downloads\library", 18, 1);
         assert_eq!(rows.len(), 1);
         assert!(rows_fit_in_box(&rows, 18, 1), "{rows:?}");
         assert!(rows[0].starts_with("C:"), "{rows:?}");
-        assert!(rows[0].ends_with("seedbox"), "{rows:?}");
+        assert!(rows[0].ends_with("library"), "{rows:?}");
         assert!(rows[0].contains("..."), "{rows:?}");
     }
 
     #[test]
     fn shape_root_path_for_viewport_splits_into_vertical_segments_when_narrow() {
         assert_eq!(
-            shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 10, 5),
-            vec!["C:\\Users", "jagat", "Documents", "seedbox"]
+            shape_root_path_for_viewport(r"C:\Users\ExampleUser\Downloads\library", 10, 5),
+            vec!["C:\\Users", "Example...", "Downloads", "library"]
         );
     }
 
@@ -8048,8 +8047,8 @@ mod tests {
     #[test]
     fn shape_root_path_for_viewport_regroups_segments_to_match_height_budget() {
         assert_eq!(
-            shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 16, 3),
-            vec!["C:\\Users\\jagat", "Documents", "seedbox"]
+            shape_root_path_for_viewport(r"C:\Users\ExampleUser\Downloads\library", 16, 3),
+            vec!["C:\\Users", "ExampleUser", "Downloads"]
         );
     }
 
@@ -8057,11 +8056,11 @@ mod tests {
     fn shape_root_path_for_viewport_truncates_overwide_group_when_needed() {
         assert_eq!(
             shape_root_path_for_viewport(
-                r"C:\Users\jagat\[251226][longlonglonglong] release",
+                r"C:\Users\ExampleUser\[251226][longlonglonglong] release",
                 12,
                 2
             ),
-            vec!["C:\\Users", "jagat"]
+            vec!["C:\\Users", "ExampleUser"]
         );
     }
 
@@ -8078,8 +8077,8 @@ mod tests {
     #[test]
     fn shaped_paths_fit_vertical_square_and_landscape_boxes() {
         let cases = [
-            r"C:\Users\jagat\Documents\seedbox",
-            r"C:\Users\jagat\Documents\seedbox\[251226][long-release-name] Episode 01.mkv",
+            r"C:\Users\ExampleUser\Downloads\library",
+            r"C:\Users\ExampleUser\Downloads\library\[251226][long-release-name] Episode 01.mkv",
             r"C:\seedbox\anime\season-01\episode-01.mkv",
             r"D:\dl\onefile.mkv",
             r"C:\very\deep\path\with\many\segments\and\a\long\final\component",
@@ -8109,7 +8108,8 @@ mod tests {
 
     #[test]
     fn wider_viewports_do_not_increase_row_count_or_truncation_for_same_height() {
-        let path = r"C:\Users\jagat\Documents\seedbox\[251226][long-release-name]\Episode 01.mkv";
+        let path =
+            r"C:\Users\ExampleUser\Downloads\library\[251226][long-release-name]\Episode 01.mkv";
 
         let narrow = shape_root_path_for_viewport(path, 12, 3);
         let medium = shape_root_path_for_viewport(path, 18, 3);
@@ -8130,8 +8130,7 @@ mod tests {
 
     #[test]
     fn taller_viewports_do_not_increase_truncation_for_same_width() {
-        let path =
-            r"C:\Users\jagat\Documents\seedbox\[251226][long-release-name]\subdir\Episode 01.mkv";
+        let path = r"C:\Users\ExampleUser\Downloads\library\[251226][long-release-name]\subdir\Episode 01.mkv";
 
         let short = shape_root_path_for_viewport(path, 14, 2);
         let medium = shape_root_path_for_viewport(path, 14, 4);
@@ -8183,12 +8182,12 @@ mod tests {
     #[test]
     fn root_path_shaping_peels_from_deepest_parent_first() {
         assert_eq!(
-            shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 24, 4),
-            vec!["C:\\Users\\jagat\\Documents", "seedbox"]
+            shape_root_path_for_viewport(r"C:\Users\ExampleUser\Downloads\library", 24, 4),
+            vec!["C:\\Users\\ExampleUser", "Downloads\\library"]
         );
         assert_eq!(
-            shape_root_path_for_viewport(r"C:\Users\jagat\Documents\seedbox", 18, 4),
-            vec!["C:\\Users\\jagat", "Documents\\seedbox"]
+            shape_root_path_for_viewport(r"C:\Users\ExampleUser\Downloads\library", 18, 4),
+            vec!["C:\\Users", "ExampleUser", "Downloads\\library"]
         );
     }
 

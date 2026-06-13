@@ -100,7 +100,7 @@ mod tests {
             vec![pause_command(1), pause_command(2), pause_command(3)],
         );
         tokio::time::timeout(Duration::from_secs(1), async {
-            while app_command_rx.len() == 0 {
+            while app_command_rx.is_empty() {
                 tokio::task::yield_now().await;
             }
         })

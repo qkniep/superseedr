@@ -52,14 +52,6 @@ fn map_key_to_journal_action(key_code: KeyCode, key_kind: KeyEventKind) -> Optio
     }
 }
 
-pub fn handle_event(
-    event: CrosstermEvent,
-    app_state: &mut AppState,
-    app_command_tx: &mpsc::Sender<AppCommand>,
-) {
-    handle_event_inner(event, app_state, app_command_tx, None);
-}
-
 pub fn handle_event_with_shutdown(
     event: CrosstermEvent,
     app_state: &mut AppState,
@@ -718,6 +710,14 @@ mod tests {
             ],
         };
         state
+    }
+
+    fn handle_event(
+        event: CrosstermEvent,
+        app_state: &mut AppState,
+        app_command_tx: &mpsc::Sender<AppCommand>,
+    ) {
+        handle_event_inner(event, app_state, app_command_tx, None);
     }
 
     #[test]

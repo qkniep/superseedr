@@ -772,15 +772,6 @@ fn apply_pasted_text(app_state: &mut AppState, pasted_text: &str) {
     }
 }
 
-pub fn handle_event(
-    event: CrosstermEvent,
-    app_state: &mut AppState,
-    settings: &crate::config::Settings,
-    app_command_tx: &mpsc::Sender<AppCommand>,
-) {
-    handle_event_inner(event, app_state, settings, app_command_tx, None);
-}
-
 pub fn handle_event_with_shutdown(
     event: CrosstermEvent,
     app_state: &mut AppState,
@@ -2244,6 +2235,15 @@ mod tests {
             mode: AppMode::Rss,
             ..Default::default()
         }
+    }
+
+    fn handle_event(
+        event: CrosstermEvent,
+        app_state: &mut AppState,
+        settings: &crate::config::Settings,
+        app_command_tx: &mpsc::Sender<AppCommand>,
+    ) {
+        handle_event_inner(event, app_state, settings, app_command_tx, None);
     }
 
     #[test]
