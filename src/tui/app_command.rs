@@ -22,14 +22,6 @@ pub(crate) fn spawn_app_command_batch_sender(
     })
 }
 
-pub(crate) async fn send_app_command_until_shutdown(
-    app_command_tx: &mpsc::Sender<AppCommand>,
-    shutdown_rx: &mut broadcast::Receiver<()>,
-    command: AppCommand,
-) {
-    send_app_command_batch_until_shutdown(app_command_tx, shutdown_rx, vec![command]).await;
-}
-
 pub(crate) async fn send_app_command_batch_until_shutdown(
     app_command_tx: &mpsc::Sender<AppCommand>,
     shutdown_rx: &mut broadcast::Receiver<()>,

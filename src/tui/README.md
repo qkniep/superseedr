@@ -51,12 +51,13 @@
   - `Esc` clears `system_error` (stays in `Normal`).
 - `TorrentManagement`:
   - `/` searches torrent names and paths.
-  - `g` toggles grouped folder view.
+  - `Tab` toggles search mode.
   - `x` toggles anonymized torrent names.
   - `h`/`l` or `←`/`→` moves between visible columns; `s` sorts by the focused column.
-  - `Act` sorts peer-event activity in the management table.
-  - `Space` multi-selects the focused row; group rows apply to their children.
-  - `p`, `d`, and `D` apply pause/resume, remove, and purge actions to selected torrents.
+  - `Space` multi-selects the focused torrent; `A` selects all visible torrents.
+  - `p`, `d`, and `D` queue pause/resume, remove, and purge actions for selected torrents.
+  - `Enter` opens the draft-command confirmation; `Y` submits confirmed draft commands.
+  - `u` clears draft commands for the current target set.
   - `Esc`/`q` returns to `Normal`.
 - `PowerSaving`: `z` -> `Normal`.
 - `Config`:
@@ -66,7 +67,7 @@
   - `Y` confirms current action.
   - `Esc` returns to `Normal` or `Config` depending on browser mode.
   - `/` enters browser search.
-- `DeleteConfirm`: `Enter` confirms and returns to `Normal`; `Esc` cancels.
+- `DeleteConfirm`: `Y` confirms and returns to `Normal`; `Esc` cancels.
 
 ## Navigation Contract (Minimal)
 This contract formalizes top-level screen transitions. Any transition behavior change should update this table and the transition tests.

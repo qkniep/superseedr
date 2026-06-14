@@ -7,7 +7,7 @@ use crate::app::{
 };
 use crate::theme::ThemeContext;
 use crate::torrent_manager::ManagerCommand;
-use crate::tui::app_command::send_app_command_until_shutdown;
+use crate::tui::app_command::spawn_app_command_sender;
 use crate::tui::formatters::{centered_rect, format_bytes, truncate_with_ellipsis};
 use crate::tui::layout::browser::calculate_file_browser_layout;
 use crate::tui::screen_context::ScreenContext;
@@ -1600,13 +1600,11 @@ pub async fn execute_confirm_decision(
                     payload.file_priorities.clone(),
                 ) {
                     Ok(request) => {
-                        let mut shutdown_rx = app.shutdown_tx.subscribe();
-                        send_app_command_until_shutdown(
-                            &app.app_command_tx,
-                            &mut shutdown_rx,
+                        spawn_app_command_sender(
+                            app.app_command_tx.clone(),
+                            app.shutdown_tx.subscribe(),
                             AppCommand::SubmitControlRequest(request),
-                        )
-                        .await;
+                        );
                     }
                     Err(error) => {
                         app.app_state.system_error = Some(error);
@@ -1619,13 +1617,11 @@ pub async fn execute_confirm_decision(
                     payload.container_name_to_use,
                     payload.file_priorities,
                 );
-                let mut shutdown_rx = app.shutdown_tx.subscribe();
-                send_app_command_until_shutdown(
-                    &app.app_command_tx,
-                    &mut shutdown_rx,
+                spawn_app_command_sender(
+                    app.app_command_tx.clone(),
+                    app.shutdown_tx.subscribe(),
                     AppCommand::SubmitControlRequest(request),
-                )
-                .await;
+                );
                 app.app_state.pending_torrent_link.clear();
             } else {
                 tracing::warn!(target: "superseedr", "SHIFT+Y pressed but no pending content was found");
@@ -1638,13 +1634,11 @@ pub async fn execute_confirm_decision(
                 .and_then(|n| n.to_str())
                 .is_some_and(|name| name.ends_with(".torrent"))
             {
-                let mut shutdown_rx = app.shutdown_tx.subscribe();
-                send_app_command_until_shutdown(
-                    &app.app_command_tx,
-                    &mut shutdown_rx,
+                spawn_app_command_sender(
+                    app.app_command_tx.clone(),
+                    app.shutdown_tx.subscribe(),
                     AppCommand::AddTorrentFromFile(path),
-                )
-                .await;
+                );
             }
             Some(BrowserTransition::ToNormal)
         }
