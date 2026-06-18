@@ -56,7 +56,7 @@
   - `h`/`l` or `←`/`→` moves between visible columns; `s` sorts by the focused column.
   - `Space` multi-selects the focused torrent; `A` selects all visible torrents.
   - `p`, `d`, and `D` queue pause/resume, remove, and purge actions for selected torrents.
-  - `Enter` opens the draft-command confirmation; `Y` submits confirmed draft commands.
+  - `Y` opens the draft-command confirmation when commands are queued; `Y` again submits confirmed draft commands.
   - `u` clears draft commands for the current target set.
   - `Esc`/`q` returns to `Normal`.
 - `PowerSaving`: `z` -> `Normal`.
@@ -112,7 +112,7 @@ Keep the current lightweight contract unless one or more of these happen:
 - Help now uses dedicated route mode: `AppMode::Help`.
 - Windows: `m` press toggles between `Normal` and `Help`.
 - Non-Windows: `m` press opens help from `Normal`; `m` release or `Esc` closes to `Normal`.
-- Help content is sectioned (`General`, `Torrents`, `Graphs`, `Legends`, `Screens`, `Paths`, `Build`) and scrolls with `Up`/`Down` or `k`/`j`; `Home` and `End` jump to the top or bottom.
+- Help content is sectioned (`General`, `Torrents`, `Graphs`, `Legends`, `Screens`, `Paths`, `Build`) and scrolls with `Up`/`Down` or `k`/`j`.
 - `Tab`/`Shift+Tab` or `h`/`l` moves between sections.
 - `/` opens a prompt-panel search across all help contents, including path and build rows; typed characters filter live, `Tab` toggles fuzzy/regex matching, `Enter` keeps results, and `Esc` clears search.
 

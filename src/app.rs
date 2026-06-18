@@ -1590,13 +1590,24 @@ pub enum HelpSection {
     Build,
 }
 
-#[derive(Default)]
 pub struct HelpUiState {
     pub active_section: HelpSection,
     pub scroll_offset: usize,
     pub is_searching: bool,
     pub search_query: String,
     pub search_mode: SearchMode,
+}
+
+impl Default for HelpUiState {
+    fn default() -> Self {
+        Self {
+            active_section: HelpSection::default(),
+            scroll_offset: 0,
+            is_searching: false,
+            search_query: String::new(),
+            search_mode: SearchMode::Regex,
+        }
+    }
 }
 
 pub fn build_torrent_preview_tree(

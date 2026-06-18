@@ -7,6 +7,7 @@ use crate::app::{
 };
 use crate::theme::ThemeContext;
 use crate::torrent_manager::ManagerCommand;
+use crate::tui::action_style::{footer_key_style, ActionTone};
 use crate::tui::app_command::spawn_app_command_sender;
 use crate::tui::formatters::{centered_rect, format_bytes, truncate_with_ellipsis};
 use crate::tui::layout::browser::calculate_file_browser_layout;
@@ -127,22 +128,22 @@ pub fn draw(
         FileBrowserMode::ConfigPathSelection { .. } | FileBrowserMode::Directory => {
             footer_spans.push(Span::styled(
                 "[Arrows/Vim]",
-                ctx.apply(Style::default().fg(ctx.state_info())),
+                footer_key_style(ctx, ActionTone::Navigate),
             ));
             footer_spans.push(Span::raw(" Nav | "));
             footer_spans.push(Span::styled(
                 "[Backspace]",
-                ctx.apply(Style::default().fg(ctx.state_warning())),
+                footer_key_style(ctx, ActionTone::Navigate),
             ));
             footer_spans.push(Span::raw(" Up | "));
             footer_spans.push(Span::styled(
                 "[Enter]",
-                ctx.apply(Style::default().fg(ctx.state_warning())),
+                footer_key_style(ctx, ActionTone::Navigate),
             ));
             footer_spans.push(Span::raw(" Down | "));
             footer_spans.push(Span::styled(
                 "[Y]",
-                ctx.apply(Style::default().fg(ctx.state_success())),
+                footer_key_style(ctx, ActionTone::Confirm),
             ));
             footer_spans.push(Span::raw(" Confirm Selection | "));
         }
@@ -153,42 +154,39 @@ pub fn draw(
         } => {
             footer_spans.push(Span::styled(
                 "[Tab]",
-                ctx.apply(Style::default().fg(ctx.accent_sapphire())),
+                footer_key_style(ctx, ActionTone::Mode),
             ));
             footer_spans.push(Span::raw(" Switch Pane | "));
 
             if matches!(focused_pane, BrowserPane::TorrentPreview) {
                 footer_spans.push(Span::styled(
                     "[Space]",
-                    ctx.apply(Style::default().fg(ctx.state_warning())),
+                    footer_key_style(ctx, ActionTone::Toggle),
                 ));
                 footer_spans.push(Span::raw(" Priority | "));
             }
 
             footer_spans.push(Span::styled(
                 "[x]",
-                ctx.apply(Style::default().fg(ctx.state_selected())),
+                footer_key_style(ctx, ActionTone::Toggle),
             ));
             footer_spans.push(Span::raw(" Container Folder | "));
 
             if *use_container {
-                footer_spans.push(Span::styled(
-                    "[r]",
-                    ctx.apply(Style::default().fg(ctx.accent_sky())),
-                ));
+                footer_spans.push(Span::styled("[r]", footer_key_style(ctx, ActionTone::Edit)));
                 footer_spans.push(Span::raw(" Rename | "));
             }
 
             footer_spans.push(Span::styled(
                 "[Y]",
-                ctx.apply(Style::default().fg(ctx.state_success())),
+                footer_key_style(ctx, ActionTone::Confirm),
             ));
             footer_spans.push(Span::raw(" Confirm"));
         }
         FileBrowserMode::File(_) => {
             footer_spans.push(Span::styled(
                 "[Y]",
-                ctx.apply(Style::default().fg(ctx.state_success())),
+                footer_key_style(ctx, ActionTone::Confirm),
             ));
             footer_spans.push(Span::raw(" Confirm File | "));
         }
@@ -196,7 +194,7 @@ pub fn draw(
     footer_spans.push(Span::raw(" | "));
     footer_spans.push(Span::styled(
         "[Esc]",
-        ctx.apply(Style::default().fg(ctx.state_error())),
+        footer_key_style(ctx, ActionTone::Cancel),
     ));
     footer_spans.push(Span::raw(" Cancel"));
 

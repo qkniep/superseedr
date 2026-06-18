@@ -26,6 +26,7 @@ use crate::persistence::activity_history::{ActivityHistoryPoint, ActivityHistory
 use crate::persistence::network_history::NetworkHistoryPoint;
 use crate::theme::{ThemeContext, ThemeName};
 use crate::torrent_manager::{ManagerCommand, TorrentFileProbeStatus};
+use crate::tui::action_style::{footer_key_style, ActionTone};
 use crate::tui::app_command::spawn_app_command_sender;
 use crate::tui::formatters::{
     anonymize_preserving_shape, auto_download_limit_applied, calculate_nice_upper_bound,
@@ -1832,98 +1833,34 @@ pub fn draw_footer(
     push_if_fits(
         "[arrows]",
         " nav",
-        ctx.apply(Style::default().fg(ctx.state_info())),
+        footer_key_style(ctx, ActionTone::Navigate),
     );
-    push_if_fits(
-        "[Q]",
-        "uit",
-        ctx.apply(Style::default().fg(ctx.state_error())),
-    );
-    push_if_fits(
-        "[Paste]",
-        "paste",
-        ctx.apply(Style::default().fg(ctx.accent_teal())),
-    );
-    push_if_fits(
-        "[p]",
-        "ause",
-        ctx.apply(Style::default().fg(ctx.state_success())),
-    );
-    push_if_fits(
-        "[a]",
-        "dd",
-        ctx.apply(Style::default().fg(ctx.state_success())),
-    );
+    push_if_fits("[Q]", "uit", footer_key_style(ctx, ActionTone::Destructive));
+    push_if_fits("[Paste]", "paste", footer_key_style(ctx, ActionTone::Paste));
+    push_if_fits("[p]", "ause", footer_key_style(ctx, ActionTone::Queue));
+    push_if_fits("[a]", "dd", footer_key_style(ctx, ActionTone::Add));
     push_if_fits(
         "[d]",
         "elete",
-        ctx.apply(Style::default().fg(ctx.state_warning())),
+        footer_key_style(ctx, ActionTone::Destructive),
     );
-    push_if_fits(
-        "[s]",
-        "ort",
-        ctx.apply(Style::default().fg(ctx.state_selected())),
-    );
-    push_if_fits(
-        "[t]",
-        "ime",
-        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
-    );
-    push_if_fits(
-        "[g]",
-        "raph",
-        ctx.apply(Style::default().fg(ctx.state_warning())),
-    );
-    push_if_fits(
-        "[<]theme[>]",
-        "",
-        ctx.apply(Style::default().fg(ctx.state_selected())),
-    );
-    push_if_fits(
-        "[/]",
-        "search",
-        ctx.apply(Style::default().fg(ctx.state_warning())),
-    );
-    push_if_fits(
-        "[c]",
-        "onfig",
-        ctx.apply(Style::default().fg(ctx.state_complete())),
-    );
-    push_if_fits(
-        "[r]",
-        "ss",
-        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
-    );
+    push_if_fits("[s]", "ort", footer_key_style(ctx, ActionTone::Sort));
+    push_if_fits("[t]", "ime", footer_key_style(ctx, ActionTone::Rate));
+    push_if_fits("[g]", "raph", footer_key_style(ctx, ActionTone::Mode));
+    push_if_fits("[<]theme[>]", "", footer_key_style(ctx, ActionTone::Theme));
+    push_if_fits("[/]", "search", footer_key_style(ctx, ActionTone::Search));
+    push_if_fits("[c]", "onfig", footer_key_style(ctx, ActionTone::Open));
+    push_if_fits("[r]", "ss", footer_key_style(ctx, ActionTone::Open));
     push_if_fits(
         "[d]",
         "elete",
-        ctx.apply(Style::default().fg(ctx.state_error())),
+        footer_key_style(ctx, ActionTone::Destructive),
     );
-    push_if_fits(
-        "[x]",
-        "anon",
-        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
-    );
-    push_if_fits(
-        "[z]",
-        "power",
-        ctx.apply(Style::default().fg(ctx.state_warning())),
-    );
-    push_if_fits(
-        "[T]",
-        "time++",
-        ctx.apply(Style::default().fg(ctx.accent_sapphire())),
-    );
-    push_if_fits(
-        "[[]",
-        "slower",
-        ctx.apply(Style::default().fg(ctx.state_info())),
-    );
-    push_if_fits(
-        "[]]",
-        "faster",
-        ctx.apply(Style::default().fg(ctx.state_success())),
-    );
+    push_if_fits("[x]", "anon", footer_key_style(ctx, ActionTone::Toggle));
+    push_if_fits("[z]", "power", footer_key_style(ctx, ActionTone::Toggle));
+    push_if_fits("[T]", "time++", footer_key_style(ctx, ActionTone::Rate));
+    push_if_fits("[[]", "slower", footer_key_style(ctx, ActionTone::Rate));
+    push_if_fits("[]]", "faster", footer_key_style(ctx, ActionTone::Rate));
 
     if !try_push_footer_command(
         &mut spans,
@@ -1931,7 +1868,7 @@ pub fn draw_footer(
         max_width,
         manual_key,
         manual_suffix,
-        ctx.apply(Style::default().fg(ctx.accent_teal())),
+        footer_key_style(ctx, ActionTone::Open),
     ) {
         let _ = try_push_footer_command(
             &mut spans,

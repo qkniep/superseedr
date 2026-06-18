@@ -5,6 +5,7 @@ use crate::app::{AppCommand, AppMode, AppState, JournalFilter};
 use crate::persistence::event_journal::{
     EventCategory, EventDetails, EventJournalEntry, EventType,
 };
+use crate::tui::action_style::{footer_key_style, ActionTone};
 use crate::tui::app_command::spawn_app_command_sender;
 use crate::tui::formatters::sanitize_text;
 use crate::tui::screen_context::ScreenContext;
@@ -579,42 +580,27 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
     );
 
     let footer_hint = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "[Tab]",
-            ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
-        ),
+        Span::styled("[Tab]", footer_key_style(ctx, ActionTone::Mode)),
         Span::styled(
             " Filter  ",
             ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
         ),
-        Span::styled(
-            "[Shift+Tab]",
-            ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
-        ),
+        Span::styled("[Shift+Tab]", footer_key_style(ctx, ActionTone::Mode)),
         Span::styled(
             " Back  ",
             ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
         ),
-        Span::styled(
-            "[j/k]",
-            ctx.apply(Style::default().fg(ctx.state_info()).bold()),
-        ),
+        Span::styled("[j/k]", footer_key_style(ctx, ActionTone::Navigate)),
         Span::styled(
             " Move  ",
             ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
         ),
-        Span::styled(
-            "[Shift+Y]",
-            ctx.apply(Style::default().fg(ctx.state_success()).bold()),
-        ),
+        Span::styled("[Shift+Y]", footer_key_style(ctx, ActionTone::Replay)),
         Span::styled(
             " Replay  ",
             ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),
         ),
-        Span::styled(
-            "[q]",
-            ctx.apply(Style::default().fg(ctx.state_error()).bold()),
-        ),
+        Span::styled("[q]", footer_key_style(ctx, ActionTone::Cancel)),
         Span::styled(
             " Close",
             ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)),

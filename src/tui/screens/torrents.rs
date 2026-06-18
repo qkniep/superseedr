@@ -8,6 +8,7 @@ use crate::app::{
 use crate::config::SortDirection;
 use crate::integrations::control::ControlRequest;
 use crate::theme::ThemeContext;
+use crate::tui::action_style::{footer_key_style, ActionTone};
 use crate::tui::app_command::spawn_app_command_batch_sender;
 use crate::tui::formatters::{
     anonymize_preserving_shape, centered_rect, format_bytes, format_duration, format_speed,
@@ -767,10 +768,10 @@ fn draw_management_footer(f: &mut Frame, app_state: &AppState, area: Rect, ctx: 
     }
 
     let mut footer_spans = Vec::new();
-    let mut push_action = |key: &str, action: &str, key_color: Color| {
+    let mut push_action = |key: &str, action: &str, tone: ActionTone| {
         footer_spans.push(Span::styled(
             format!("[{key}]"),
-            ctx.apply(Style::default().fg(key_color).bold()),
+            footer_key_style(ctx, tone),
         ));
         footer_spans.push(Span::styled(
             action.to_string(),
@@ -783,30 +784,30 @@ fn draw_management_footer(f: &mut Frame, app_state: &AppState, area: Rect, ctx: 
     };
 
     if app_state.ui.torrent_management.confirm_submit {
-        push_action("shift+y", "finalize changes", ctx.state_success());
-        push_action("Esc", "cancel", ctx.state_selected());
+        push_action("shift+y", "finalize changes", ActionTone::Confirm);
+        push_action("Esc", "cancel", ActionTone::Cancel);
     } else if app_state.ui.torrent_management.is_searching {
-        push_action("Enter", "apply", ctx.state_success());
-        push_action("Tab", "mode", ctx.state_selected());
-        push_action("Esc", "clear", ctx.state_error());
+        push_action("Enter", "apply", ActionTone::Confirm);
+        push_action("Tab", "mode", ActionTone::Mode);
+        push_action("Esc", "clear", ActionTone::Cancel);
     } else {
         let pending_count = app_state.ui.torrent_management.pending_commands.len();
         if pending_count > 0 {
-            push_action("shift+y", "review", ctx.state_success());
+            push_action("shift+y", "review", ActionTone::Confirm);
         }
-        push_action("arrows", "nav", ctx.state_info());
-        push_action("s", "ort", ctx.state_warning());
-        push_action("Space", "select", ctx.state_info());
-        push_action("A", "select-all", ctx.state_success());
-        push_action("u", "clear", ctx.accent_sapphire());
-        push_action("/", "search", ctx.accent_sapphire());
+        push_action("arrows", "nav", ActionTone::Navigate);
+        push_action("s", "ort", ActionTone::Sort);
+        push_action("Space", "select", ActionTone::Select);
+        push_action("A", "select-all", ActionTone::Select);
+        push_action("u", "clear", ActionTone::Clear);
+        push_action("/", "search", ActionTone::Search);
         if management_search_panel_active(app_state) {
-            push_action("Tab", "mode", ctx.state_selected());
+            push_action("Tab", "mode", ActionTone::Mode);
         }
-        push_action("x", "names", ctx.accent_sapphire());
-        push_action("p", "ause", ctx.state_warning());
-        push_action("d/D", "remove/purge", ctx.state_error());
-        push_action("Esc", "back", ctx.state_error());
+        push_action("x", "names", ActionTone::Toggle);
+        push_action("p", "ause", ActionTone::Queue);
+        push_action("d/D", "remove/purge", ActionTone::Destructive);
+        push_action("Esc", "back", ActionTone::Cancel);
     }
 
     if !footer_spans.is_empty() {
@@ -938,10 +939,7 @@ fn draw_management_review_footer(f: &mut Frame, popup_area: Rect, ctx: &ThemeCon
 
     let footer_area = Rect::new(popup_area.x, y, popup_area.width, 1);
     let footer = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "[shift+y]",
-            ctx.apply(Style::default().fg(ctx.state_success()).bold()),
-        ),
+        Span::styled("[shift+y]", footer_key_style(ctx, ActionTone::Confirm)),
         Span::styled(
             "finalize changes",
             ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),
@@ -950,10 +948,7 @@ fn draw_management_review_footer(f: &mut Frame, popup_area: Rect, ctx: &ThemeCon
             " | ",
             ctx.apply(Style::default().fg(ctx.theme.semantic.overlay0)),
         ),
-        Span::styled(
-            "[Esc]",
-            ctx.apply(Style::default().fg(ctx.state_selected()).bold()),
-        ),
+        Span::styled("[Esc]", footer_key_style(ctx, ActionTone::Cancel)),
         Span::styled(
             "cancel",
             ctx.apply(Style::default().fg(ctx.theme.semantic.subtext0)),

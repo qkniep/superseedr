@@ -7,6 +7,7 @@ use crate::config::{
     shared_inbox_path, shared_settings_path, Settings,
 };
 use crate::theme::ThemeContext;
+use crate::tui::action_style::{help_key_style, ActionTone};
 use crate::tui::formatters::{centered_rect, sanitize_text};
 use crate::tui::screen_context::ScreenContext;
 use crate::tui::screens::input_panel::draw_prompt_panel;
@@ -64,6 +65,19 @@ struct HelpItem {
     subsection: String,
     key: String,
     action: String,
+    key_style: HelpKeyStyle,
+    action_tone: ActionTone,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HelpKeyStyle {
+    Plain,
+    PeerDownloadOpportunity,
+    PeerDownloadBlocked,
+    PeerUploadOpportunity,
+    PeerUploadRestricted,
+    DiskRead,
+    DiskWrite,
 }
 
 impl HelpItem {
@@ -78,7 +92,19 @@ impl HelpItem {
             subsection: subsection.into(),
             key: key.into(),
             action: action.into(),
+            key_style: HelpKeyStyle::Plain,
+            action_tone: ActionTone::Info,
         }
+    }
+
+    fn with_action_tone(mut self, action_tone: ActionTone) -> Self {
+        self.action_tone = action_tone;
+        self
+    }
+
+    fn with_key_style(mut self, key_style: HelpKeyStyle) -> Self {
+        self.key_style = key_style;
+        self
     }
 
     fn matches_query(&self, query: &str, mode: SearchMode, matcher: &SkimMatcherV2) -> bool {
@@ -171,154 +197,183 @@ fn build_help_items(settings: &Settings, app_state: &AppState) -> Vec<HelpItem> 
             items.push(HelpItem::new($section, $subsection, $key, $action));
         };
     }
+    macro_rules! action_item {
+        ($section:expr, $subsection:expr, $key:expr, $action:expr, $action_tone:expr $(,)?) => {
+            items.push(
+                HelpItem::new($section, $subsection, $key, $action).with_action_tone($action_tone),
+            );
+        };
+    }
+    macro_rules! styled_item {
+        ($section:expr, $subsection:expr, $key:expr, $action:expr, $key_style:expr $(,)?) => {
+            items.push(
+                HelpItem::new($section, $subsection, $key, $action).with_key_style($key_style),
+            );
+        };
+    }
 
-    item!(
-        HelpSection::General,
-        "Help Navigation",
-        "Esc / m / q",
-        "Close help"
-    );
-    item!(
+    action_item!(
         HelpSection::General,
         "Help Navigation",
         "Tab / Shift+Tab",
-        "Move between help sections"
+        "Move between help sections",
+        ActionTone::Mode
     );
-    item!(
+    action_item!(
         HelpSection::General,
         "Help Navigation",
         "Up / Down / k / j",
-        "Scroll the visible help rows"
+        "Scroll the visible help rows",
+        ActionTone::Navigate
     );
-    item!(
-        HelpSection::General,
-        "Help Navigation",
-        "Home / End",
-        "Jump to the top or bottom of the current section"
-    );
-    item!(
+    action_item!(
         HelpSection::General,
         "Search",
         "/",
-        "Search every help section, path entry, and build detail"
+        "Open search in the current searchable view; in Help, search all help contents",
+        ActionTone::Search
     );
-    item!(
+    action_item!(
         HelpSection::General,
         "Search",
         "Tab",
-        "Toggle fuzzy or regex matching while the search prompt is open"
+        "Toggle fuzzy or regex matching where the active search supports modes",
+        ActionTone::Mode
     );
-    item!(
+    action_item!(
         HelpSection::General,
         "Global Routes",
-        "Q",
-        "Quit the application"
+        "Q (shift+q)",
+        "Quit the application",
+        ActionTone::Destructive
     );
-    item!(HelpSection::General, "Global Routes", "c", "Open Config");
-    item!(HelpSection::General, "Global Routes", "r", "Open RSS");
-    item!(
+    action_item!(
+        HelpSection::General,
+        "Global Routes",
+        "c",
+        "Open Config",
+        ActionTone::Open
+    );
+    action_item!(
+        HelpSection::General,
+        "Global Routes",
+        "r",
+        "Open RSS",
+        ActionTone::Open
+    );
+    action_item!(
         HelpSection::General,
         "Global Routes",
         "J",
-        "Open the event journal"
+        "Open the event journal",
+        ActionTone::Open
     );
-    item!(
+    action_item!(
         HelpSection::General,
         "Global Routes",
         "M",
-        "Open torrent management"
+        "Open torrent management",
+        ActionTone::Open
     );
-    item!(
+    action_item!(
         HelpSection::General,
         "Global Routes",
         "z",
-        "Toggle Zen / Power Saving mode"
+        "Toggle Zen / Power Saving mode",
+        ActionTone::Toggle
     );
 
-    item!(
-        HelpSection::Torrents,
-        "Dashboard Search",
-        "/",
-        "Search torrent names and download paths"
-    );
-    item!(
+    action_item!(
         HelpSection::Torrents,
         "Adding Torrents",
         "a",
-        "Choose a .torrent file"
+        "Choose a .torrent file",
+        ActionTone::Add
     );
-    item!(
+    action_item!(
         HelpSection::Torrents,
         "Adding Torrents",
         "Paste",
-        "Paste a magnet link or torrent file path"
+        "Paste a magnet link or torrent file path",
+        ActionTone::Paste
     );
-    item!(
+    action_item!(
         HelpSection::Torrents,
         "Adding Torrents",
         "CLI",
-        "Run superseedr add from another terminal"
+        "Run superseedr add from another terminal",
+        ActionTone::Add
     );
-    item!(
+    action_item!(
         HelpSection::Torrents,
         "Torrent Actions",
         "p",
-        "Pause or resume the selected torrent"
+        "Pause or resume the selected torrent",
+        ActionTone::Queue
     );
-    item!(
+    action_item!(
         HelpSection::Torrents,
         "Torrent Actions",
         "d / D",
-        "Remove the selected torrent; D also removes files after confirmation"
+        "Remove the selected torrent; D also removes files after confirmation",
+        ActionTone::Destructive
     );
-    item!(
+    action_item!(
         HelpSection::Torrents,
         "Table Control",
         "h / l / Left / Right",
-        "Move between table header columns"
+        "Move between table header columns",
+        ActionTone::Navigate
     );
-    item!(
+    action_item!(
         HelpSection::Torrents,
         "Table Control",
         "s",
-        "Sort by the focused table column"
+        "Sort by the focused table column",
+        ActionTone::Sort
     );
-    item!(
+    action_item!(
         HelpSection::Torrents,
         "Table Control",
         "S",
-        "Clear manual sorting and resume automatic sorting"
+        "Clear manual sorting and resume automatic sorting",
+        ActionTone::Clear
     );
 
-    item!(
+    action_item!(
         HelpSection::Graphs,
         "Chart Panels",
         "t / T",
-        "Switch graph time scale forward or backward"
+        "Switch graph time scale forward or backward",
+        ActionTone::Rate
     );
-    item!(
+    action_item!(
         HelpSection::Graphs,
         "Chart Panels",
         "g / G",
-        "Switch chart panel view forward or backward"
+        "Switch chart panel view forward or backward",
+        ActionTone::Mode
     );
-    item!(
+    action_item!(
         HelpSection::Graphs,
         "Chart Panels",
         "[ / ]",
-        "Change UI refresh rate"
+        "Change UI refresh rate",
+        ActionTone::Rate
     );
-    item!(
+    action_item!(
         HelpSection::Graphs,
         "Chart Panels",
         "< / >",
-        "Cycle UI theme"
+        "Cycle UI theme",
+        ActionTone::Theme
     );
-    item!(
+    action_item!(
         HelpSection::Graphs,
         "Layout",
         "x",
-        "Anonymize torrent names"
+        "Anonymize torrent names",
+        ActionTone::Toggle
     );
 
     item!(
@@ -327,59 +382,65 @@ fn build_help_items(settings: &Settings, app_state: &AppState) -> Vec<HelpItem> 
         "DHT panel",
         "Power multiplier, active queries, and unique peers found in the last 10s"
     );
-    item!(
+    styled_item!(
         HelpSection::Legends,
         "Peer Flags",
         "Blue",
-        "You are interested; download opportunity"
+        "You are interested (DL potential)",
+        HelpKeyStyle::PeerDownloadOpportunity
     );
-    item!(
+    styled_item!(
         HelpSection::Legends,
         "Peer Flags",
         "Red",
-        "Peer is choking you; download blocked"
+        "Peer is choking you (DL block)",
+        HelpKeyStyle::PeerDownloadBlocked
     );
-    item!(
+    styled_item!(
         HelpSection::Legends,
         "Peer Flags",
         "Teal",
-        "Peer is interested; upload opportunity"
+        "Peer is interested (UL opportunity)",
+        HelpKeyStyle::PeerUploadOpportunity
     );
-    item!(
+    styled_item!(
         HelpSection::Legends,
         "Peer Flags",
         "Peach",
-        "You are choking peer; upload restricted"
+        "You are choking peer (UL restriction)",
+        HelpKeyStyle::PeerUploadRestricted
     );
-    item!(
+    styled_item!(
         HelpSection::Legends,
         "Disk Metrics",
         "Read",
-        "Data read from disk"
+        "Data read from disk",
+        HelpKeyStyle::DiskRead
     );
-    item!(
+    styled_item!(
         HelpSection::Legends,
         "Disk Metrics",
         "Write",
-        "Data written to disk"
+        "Data written to disk",
+        HelpKeyStyle::DiskWrite
     );
     item!(
         HelpSection::Legends,
         "Disk Metrics",
         "Seek",
-        "Average distance between I/O operations; lower is better"
+        "Avg. distance between I/O ops; lower is better"
     );
     item!(
         HelpSection::Legends,
         "Disk Metrics",
         "Latency",
-        "Time to complete one I/O operation; lower is better"
+        "Time to complete one I/O op; lower is better"
     );
     item!(
         HelpSection::Legends,
         "Disk Metrics",
         "IOPS",
-        "I/O operations per second across the current workload"
+        "I/O Operations Per Second; total workload"
     );
     item!(
         HelpSection::Legends,
@@ -394,115 +455,145 @@ fn build_help_items(settings: &Settings, app_state: &AppState) -> Vec<HelpItem> 
         "Current limits for peers, reads, writes, and reserve capacity"
     );
 
-    item!(HelpSection::Screens, "RSS", "Esc / q", "Exit RSS mode");
-    item!(
+    action_item!(
         HelpSection::Screens,
         "RSS",
         "Tab / h",
-        "Move RSS focus or swap Explorer with History"
+        "Move RSS focus or swap Explorer with History",
+        ActionTone::Mode
     );
-    item!(HelpSection::Screens, "RSS", "s", "Sync feeds now");
-    item!(
+    action_item!(
         HelpSection::Screens,
         "RSS",
-        "a / d / Space",
-        "Add, delete, or toggle the focused RSS item"
+        "s",
+        "Sync feeds now",
+        ActionTone::Rate
     );
-    item!(
+    action_item!(
+        HelpSection::Screens,
+        "RSS",
+        "a / D / Space",
+        "Add, delete, or toggle the focused RSS item",
+        ActionTone::Toggle
+    );
+    action_item!(
         HelpSection::Screens,
         "RSS",
         "Enter",
-        "Confirm add or search input"
+        "Confirm add or search input",
+        ActionTone::Confirm
     );
-    item!(
-        HelpSection::Screens,
-        "RSS",
-        "/",
-        "Start Explorer search when Explorer is focused"
-    );
-    item!(
+    action_item!(
         HelpSection::Screens,
         "RSS",
         "Y",
-        "Download the selected Explorer item if it has not been downloaded"
+        "Download the selected Explorer item if it has not been downloaded",
+        ActionTone::Confirm
     );
-    item!(
+    action_item!(
         HelpSection::Screens,
         "Torrent Management",
-        "/",
-        "Search torrent names and paths"
+        "Up / Down / k / j",
+        "Move selection through visible torrents",
+        ActionTone::Navigate
     );
-    item!(
+    action_item!(
         HelpSection::Screens,
         "Torrent Management",
-        "Tab",
-        "Toggle search mode while the search panel is active"
+        "h / l / Left / Right",
+        "Move between table columns",
+        ActionTone::Navigate
     );
-    item!(
+    action_item!(
+        HelpSection::Screens,
+        "Torrent Management",
+        "s",
+        "Sort by the focused column",
+        ActionTone::Sort
+    );
+    action_item!(
+        HelpSection::Screens,
+        "Torrent Management",
+        "x",
+        "Toggle anonymized torrent names",
+        ActionTone::Toggle
+    );
+    action_item!(
         HelpSection::Screens,
         "Torrent Management",
         "Space / A",
-        "Select the current torrent or all visible torrents"
+        "Select the current torrent or all visible torrents",
+        ActionTone::Select
     );
-    item!(
+    action_item!(
         HelpSection::Screens,
         "Torrent Management",
-        "p / d / D",
-        "Queue pause, remove, or purge draft commands"
+        "p",
+        "Queue pause or resume for the current target set",
+        ActionTone::Queue
     );
-    item!(
+    action_item!(
         HelpSection::Screens,
         "Torrent Management",
-        "Enter / Y",
-        "Review and submit queued draft commands"
+        "d / D",
+        "Queue remove, or purge files with D, for the current target set",
+        ActionTone::Destructive
     );
-    item!(
+    action_item!(
+        HelpSection::Screens,
+        "Torrent Management",
+        "Y",
+        "Review queued commands; press Y again to submit",
+        ActionTone::Confirm
+    );
+    action_item!(
         HelpSection::Screens,
         "Torrent Management",
         "u",
-        "Clear draft commands for the current target set"
+        "Clear draft commands for the current target set",
+        ActionTone::Clear
     );
-    item!(
+    action_item!(
         HelpSection::Screens,
         "Journal",
         "Tab / Shift+Tab",
-        "Cycle event journal filters"
+        "Cycle event journal filters",
+        ActionTone::Mode
     );
-    item!(
+    action_item!(
         HelpSection::Screens,
         "Journal",
         "Y",
-        "Replay selected archived torrent, magnet, or path source"
+        "Replay selected archived torrent, magnet, or path source",
+        ActionTone::Replay
     );
-    item!(
+    action_item!(
         HelpSection::Screens,
         "Config",
         "Enter",
-        "Start or confirm editing"
+        "Start or confirm editing",
+        ActionTone::Edit
     );
-    item!(
+    action_item!(
         HelpSection::Screens,
         "Config",
         "h / l",
-        "Decrease or increase the focused value"
+        "Decrease or increase the focused value",
+        ActionTone::Navigate
     );
-    item!(
+    action_item!(
         HelpSection::Screens,
         "File Browser",
         "Y",
-        "Confirm the current file-browser action"
+        "Confirm the current file-browser action",
+        ActionTone::Confirm
     );
-    item!(
-        HelpSection::Screens,
-        "File Browser",
-        "/",
-        "Search files and folders"
-    );
-    item!(
+    action_item!(
         HelpSection::Screens,
         "Delete Confirm",
-        "Y / Esc",
-        "Confirm delete or cancel"
+        "Y",
+        "Confirm delete",
+        ActionTone::Destructive
     );
 
     let (lvl, progress) = calculate_player_stats(app_state);
@@ -596,7 +687,7 @@ fn help_items_for_view(settings: &Settings, app_state: &AppState) -> Vec<HelpIte
 
 enum HelpDisplayRow<'a> {
     Spacer,
-    Heading { section: HelpSection, title: String },
+    Heading { title: String },
     Item(&'a HelpItem),
 }
 
@@ -616,7 +707,6 @@ fn help_display_rows(items: &[HelpItem], search_view: bool) -> Vec<HelpDisplayRo
                 rows.push(HelpDisplayRow::Spacer);
             }
             rows.push(HelpDisplayRow::Heading {
-                section: item.section,
                 title: heading.clone(),
             });
             last_heading = heading;
@@ -634,8 +724,6 @@ pub enum HelpAction {
     SectionPrev,
     ScrollUp,
     ScrollDown,
-    Home,
-    End,
     SearchStart,
     SearchInsert(char),
     SearchBackspace,
@@ -676,8 +764,6 @@ fn map_key_to_help_action(key: KeyEvent, search_panel_active: bool) -> Option<He
             KeyCode::Char('u') if has_ctrl => Some(HelpAction::SearchClear),
             KeyCode::Up => Some(HelpAction::ScrollUp),
             KeyCode::Down => Some(HelpAction::ScrollDown),
-            KeyCode::Home => Some(HelpAction::Home),
-            KeyCode::End => Some(HelpAction::End),
             KeyCode::Char(c) if !has_ctrl && !has_alt => Some(HelpAction::SearchInsert(c)),
             _ => None,
         };
@@ -689,8 +775,6 @@ fn map_key_to_help_action(key: KeyEvent, search_panel_active: bool) -> Option<He
         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => Some(HelpAction::SectionPrev),
         KeyCode::Up | KeyCode::Char('k') => Some(HelpAction::ScrollUp),
         KeyCode::Down | KeyCode::Char('j') => Some(HelpAction::ScrollDown),
-        KeyCode::Home => Some(HelpAction::Home),
-        KeyCode::End => Some(HelpAction::End),
         KeyCode::Char('/') => Some(HelpAction::SearchStart),
         _ => None,
     }
@@ -732,22 +816,9 @@ pub fn reduce_help_action(app_state: &mut AppState, action: HelpAction) -> HelpR
                 effects: Vec::new(),
             }
         }
-        HelpAction::Home => {
-            app_state.ui.help.scroll_offset = 0;
-            HelpReduceResult {
-                consumed: true,
-                effects: Vec::new(),
-            }
-        }
-        HelpAction::End => {
-            app_state.ui.help.scroll_offset = usize::MAX;
-            HelpReduceResult {
-                consumed: true,
-                effects: Vec::new(),
-            }
-        }
         HelpAction::SearchStart => {
             app_state.ui.help.is_searching = true;
+            app_state.ui.help.search_mode = SearchMode::Regex;
             app_state.ui.help.scroll_offset = 0;
             HelpReduceResult {
                 consumed: true,
@@ -872,7 +943,7 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
     let outer_block = Block::default()
         .borders(Borders::ALL)
         .border_style(ctx.apply(Style::default().fg(ctx.theme.semantic.border)))
-        .padding(Padding::new(1, 1, 0, 0));
+        .padding(Padding::new(2, 2, 0, 0));
     let inner = outer_block.inner(panel_area);
     f.render_widget(outer_block, panel_area);
 
@@ -1012,6 +1083,45 @@ fn clamped_scroll_offset(scroll_offset: usize, len: usize, visible_count: usize)
     scroll_offset.min(len.saturating_sub(visible_count))
 }
 
+fn help_marker_key_cell(
+    marker: &'static str,
+    marker_color: Color,
+    label: &str,
+    ctx: &ThemeContext,
+) -> Cell<'static> {
+    Cell::from(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(marker, ctx.apply(Style::default().fg(marker_color).bold())),
+        Span::styled(
+            format!(" {label}"),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
+        ),
+    ]))
+}
+
+fn help_item_key_cell(item: &HelpItem, ctx: &ThemeContext) -> Cell<'static> {
+    match item.key_style {
+        HelpKeyStyle::Plain => Cell::from(Span::styled(
+            format!("  {}", item.key),
+            help_key_style(ctx, item.action_tone),
+        )),
+        HelpKeyStyle::PeerDownloadOpportunity => {
+            help_marker_key_cell("■", ctx.accent_sapphire(), &item.key, ctx)
+        }
+        HelpKeyStyle::PeerDownloadBlocked => {
+            help_marker_key_cell("■", ctx.accent_maroon(), &item.key, ctx)
+        }
+        HelpKeyStyle::PeerUploadOpportunity => {
+            help_marker_key_cell("■", ctx.accent_teal(), &item.key, ctx)
+        }
+        HelpKeyStyle::PeerUploadRestricted => {
+            help_marker_key_cell("■", ctx.accent_peach(), &item.key, ctx)
+        }
+        HelpKeyStyle::DiskRead => help_marker_key_cell("↑", ctx.state_success(), &item.key, ctx),
+        HelpKeyStyle::DiskWrite => help_marker_key_cell("↓", ctx.accent_sky(), &item.key, ctx),
+    }
+}
+
 fn draw_help_table(
     f: &mut Frame,
     area: Rect,
@@ -1057,18 +1167,15 @@ fn draw_help_table(
             .into_iter()
             .map(|row| match row {
                 HelpDisplayRow::Spacer => Row::new(vec![Cell::from(""), Cell::from("")]),
-                HelpDisplayRow::Heading { section, title } => {
-                    let color = help_section_color(*section, ctx);
-                    Row::new(vec![
-                        Cell::from(Span::styled(
-                            title.clone(),
-                            ctx.apply(Style::default().fg(color).bold()),
-                        )),
-                        Cell::from(""),
-                    ])
-                }
+                HelpDisplayRow::Heading { title, .. } => Row::new(vec![
+                    Cell::from(Span::styled(
+                        title.clone(),
+                        ctx.apply(Style::default().fg(ctx.theme.semantic.text).bold()),
+                    )),
+                    Cell::from(""),
+                ]),
                 HelpDisplayRow::Item(item) => Row::new(vec![
-                    Cell::from(format!("  {}", item.key)),
+                    help_item_key_cell(item, ctx),
                     Cell::from(Span::styled(
                         format!("  {}", item.action),
                         ctx.apply(Style::default().fg(ctx.theme.semantic.text)),
@@ -1090,26 +1197,25 @@ fn draw_help_controls(f: &mut Frame, area: Rect, app_state: &AppState, ctx: &The
 
     let search_panel_active =
         app_state.ui.help.is_searching || !app_state.ui.help.search_query.is_empty();
-    let entries: &[(&str, &str, Color)] = if search_panel_active {
+    let entries: &[(&str, &str, ActionTone)] = if search_panel_active {
         &[
-            ("type", "query", ctx.state_selected()),
-            ("Tab", "mode", ctx.state_warning()),
-            ("Enter", "keep", ctx.state_success()),
-            ("Esc", "clear", ctx.state_error()),
-            ("Up/Down", "scroll", ctx.state_info()),
+            ("type", "query", ActionTone::Edit),
+            ("Tab", "mode", ActionTone::Mode),
+            ("Enter", "keep", ActionTone::Confirm),
+            ("Esc", "clear", ActionTone::Cancel),
+            ("Up/Down", "scroll", ActionTone::Navigate),
         ]
     } else {
         &[
-            ("Esc/m/q", "close", ctx.state_error()),
-            ("Tab", "section", ctx.state_selected()),
-            ("/", "search", ctx.accent_sapphire()),
-            ("Up/Down", "scroll", ctx.state_info()),
-            ("Home/End", "jump", ctx.state_warning()),
+            ("Esc/m/q", "close", ActionTone::Cancel),
+            ("Tab", "section", ActionTone::Mode),
+            ("/", "search", ActionTone::Search),
+            ("Up/Down", "scroll", ActionTone::Navigate),
         ]
     };
 
     let mut spans = Vec::new();
-    for (idx, (key, label, color)) in entries.iter().enumerate() {
+    for (idx, (key, label, tone)) in entries.iter().enumerate() {
         if idx > 0 {
             spans.push(Span::styled(
                 " | ",
@@ -1118,7 +1224,7 @@ fn draw_help_controls(f: &mut Frame, area: Rect, app_state: &AppState, ctx: &The
         }
         spans.push(Span::styled(
             format!("[{key}]"),
-            ctx.apply(Style::default().fg(*color).bold()),
+            crate::tui::action_style::footer_key_style(ctx, *tone),
         ));
         spans.push(Span::styled(
             format!(" {label}"),
@@ -1252,6 +1358,26 @@ mod tests {
     }
 
     #[test]
+    fn help_legend_items_keep_visual_marker_styles() {
+        let settings = Settings::default();
+        let app_state = AppState::default();
+
+        let items = build_help_items(&settings, &app_state);
+
+        let blue_peer = items
+            .iter()
+            .find(|item| item.subsection == "Peer Flags" && item.key == "Blue")
+            .expect("blue peer flag help item");
+        assert_eq!(blue_peer.key_style, HelpKeyStyle::PeerDownloadOpportunity);
+
+        let read_metric = items
+            .iter()
+            .find(|item| item.subsection == "Disk Metrics" && item.key == "Read")
+            .expect("read disk metric help item");
+        assert_eq!(read_metric.key_style, HelpKeyStyle::DiskRead);
+    }
+
+    #[test]
     fn help_search_filters_across_all_sections() {
         let settings = Settings::default();
         let mut app_state = AppState {
@@ -1288,12 +1414,6 @@ mod tests {
             ..Default::default()
         };
         app_state.ui.help.is_searching = true;
-
-        handle_event(
-            CrosstermEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-            &mut app_state,
-        );
-
         assert_eq!(app_state.ui.help.search_mode, SearchMode::Regex);
 
         handle_event(
@@ -1302,6 +1422,30 @@ mod tests {
         );
 
         assert_eq!(app_state.ui.help.search_mode, SearchMode::Fuzzy);
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            &mut app_state,
+        );
+
+        assert_eq!(app_state.ui.help.search_mode, SearchMode::Regex);
+    }
+
+    #[test]
+    fn help_search_start_defaults_to_regex() {
+        let mut app_state = AppState {
+            mode: AppMode::Help,
+            ..Default::default()
+        };
+        app_state.ui.help.search_mode = SearchMode::Fuzzy;
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+            &mut app_state,
+        );
+
+        assert!(app_state.ui.help.is_searching);
+        assert_eq!(app_state.ui.help.search_mode, SearchMode::Regex);
     }
 
     #[test]
@@ -1313,13 +1457,13 @@ mod tests {
         };
         app_state.ui.help.is_searching = true;
         app_state.ui.help.search_mode = SearchMode::Regex;
-        app_state.ui.help.search_query = "Torrent Management Enter / Y".to_string();
+        app_state.ui.help.search_query = "Torrent Management Y Review queued".to_string();
 
         let items = help_items_for_view(&settings, &app_state);
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].subsection, "Torrent Management");
-        assert_eq!(items[0].key, "Enter / Y");
+        assert_eq!(items[0].key, "Y");
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::app::{AppCommand, AppMode, ConfigItem, FileBrowserMode};
 use crate::config::Settings;
 use crate::token_bucket::{rate_limit_bps_to_bucket_bytes_per_sec, TokenBucket};
+use crate::tui::action_style::{footer_key_style, ActionTone};
 use crate::tui::app_command::spawn_app_command_sender;
 use crate::tui::formatters::{format_limit_bps, path_to_string};
 use crate::tui::screen_context::ScreenContext;
@@ -391,12 +392,9 @@ pub fn draw(
         && items.get(selected_index) == Some(&ConfigItem::DefaultDownloadFolder);
     let help_text = if editing.is_some() {
         Line::from(vec![
-            Span::styled(
-                "[Enter]",
-                ctx.apply(Style::default().fg(ctx.state_success())),
-            ),
+            Span::styled("[Enter]", footer_key_style(ctx, ActionTone::Confirm)),
             Span::raw(" to confirm, "),
-            Span::styled("[Esc]", ctx.apply(Style::default().fg(ctx.state_error()))),
+            Span::styled("[Esc]", footer_key_style(ctx, ActionTone::Cancel)),
             Span::raw(" to cancel."),
         ])
     } else if shared_path_notice {
@@ -414,22 +412,13 @@ pub fn draw(
     } else {
         Line::from(vec![
             Span::raw("Use "),
-            Span::styled(
-                "↑/↓/k/j",
-                ctx.apply(Style::default().fg(ctx.state_warning())),
-            ),
+            Span::styled("↑/↓/k/j", footer_key_style(ctx, ActionTone::Navigate)),
             Span::raw(" to navigate. "),
-            Span::styled(
-                "[Enter]",
-                ctx.apply(Style::default().fg(ctx.state_warning())),
-            ),
+            Span::styled("[Enter]", footer_key_style(ctx, ActionTone::Edit)),
             Span::raw(" to edit. "),
-            Span::styled("[r]", ctx.apply(Style::default().fg(ctx.state_warning()))),
+            Span::styled("[r]", footer_key_style(ctx, ActionTone::Clear)),
             Span::raw("eset to default. "),
-            Span::styled(
-                "[Esc]|[Q]",
-                ctx.apply(Style::default().fg(ctx.state_success())),
-            ),
+            Span::styled("[Esc]|[Q]", footer_key_style(ctx, ActionTone::Confirm)),
             Span::raw(" to Save & Exit, "),
         ])
     };

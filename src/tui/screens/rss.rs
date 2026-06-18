@@ -3,6 +3,7 @@
 
 use crate::app::{AppCommand, AppMode, AppState, RssScreen, RssSectionFocus};
 use crate::config::RssFilterMode;
+use crate::tui::action_style::{footer_key_style, ActionTone};
 use crate::tui::app_command::spawn_app_command_sender;
 use crate::tui::formatters::centered_rect;
 use crate::tui::screen_context::ScreenContext;
@@ -869,10 +870,10 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     let ctx = screen.theme;
     let app_state = screen.app.state;
     let mut footer_spans = vec![];
-    let mut push_action = |key: &str, action: &str, key_color: Color| {
+    let mut push_action = |key: &str, action: &str, tone: ActionTone| {
         footer_spans.push(Span::styled(
             format!("[{}]", key),
-            ctx.apply(Style::default().fg(key_color).bold()),
+            footer_key_style(ctx, tone),
         ));
         footer_spans.push(Span::styled(
             action.to_string(),
@@ -885,41 +886,41 @@ fn draw_shared_footer(f: &mut Frame, area: Rect, screen: &ScreenContext<'_>) {
     };
 
     if app_state.ui.rss.delete_confirm_armed {
-        push_action("Y", "confirm-delete", ctx.state_error());
-        push_action("Esc", "cancel", ctx.state_selected());
+        push_action("Y", "confirm-delete", ActionTone::Destructive);
+        push_action("Esc", "cancel", ActionTone::Cancel);
     } else if app_state.ui.rss.is_editing {
-        push_action("Enter", "save", ctx.state_success());
-        push_action("Esc", "cancel", ctx.state_error());
+        push_action("Enter", "save", ActionTone::Confirm);
+        push_action("Esc", "cancel", ActionTone::Cancel);
         if matches!(app_state.ui.rss.focused_section, RssSectionFocus::Filters) {
-            push_action("Tab", "mode", ctx.state_selected());
+            push_action("Tab", "mode", ActionTone::Mode);
         }
     } else if app_state.ui.rss.is_searching {
-        push_action("Enter", "apply", ctx.state_success());
-        push_action("Esc", "clear", ctx.state_error());
+        push_action("Enter", "apply", ActionTone::Confirm);
+        push_action("Esc", "clear", ActionTone::Cancel);
     } else {
-        push_action("Tab", "next-pane", ctx.state_selected());
-        push_action("h", "history", ctx.accent_sapphire());
-        push_action("s", "ync", ctx.state_warning());
+        push_action("Tab", "next-pane", ActionTone::Mode);
+        push_action("h", "history", ActionTone::Toggle);
+        push_action("s", "ync", ActionTone::Rate);
         match app_state.ui.rss.active_screen {
             RssScreen::Unified => match app_state.ui.rss.focused_section {
                 RssSectionFocus::Links => {
-                    push_action("a", "dd", ctx.state_success());
-                    push_action("D", "elete", ctx.state_error());
-                    push_action("Space", "toggle", ctx.state_info());
+                    push_action("a", "dd", ActionTone::Add);
+                    push_action("D", "elete", ActionTone::Destructive);
+                    push_action("Space", "toggle", ActionTone::Toggle);
                 }
                 RssSectionFocus::Filters => {
-                    push_action("a", "dd", ctx.state_success());
-                    push_action("D", "elete", ctx.state_error());
-                    push_action("Space", "toggle", ctx.state_info());
+                    push_action("a", "dd", ActionTone::Add);
+                    push_action("D", "elete", ActionTone::Destructive);
+                    push_action("Space", "toggle", ActionTone::Toggle);
                 }
                 RssSectionFocus::Explorer => {
-                    push_action("/", "search", ctx.accent_sapphire());
-                    push_action("Y", "download", ctx.state_success());
+                    push_action("/", "search", ActionTone::Search);
+                    push_action("Y", "download", ActionTone::Confirm);
                 }
             },
             RssScreen::History => {}
         }
-        push_action("Esc", "back", ctx.state_error());
+        push_action("Esc", "back", ActionTone::Cancel);
     }
 
     if !footer_spans.is_empty() {
@@ -1017,15 +1018,9 @@ fn draw_delete_confirm_dialog(f: &mut Frame, area: Rect, screen: &ScreenContext<
     }
 
     let actions = Line::from(vec![
-        Span::styled(
-            "[Y]",
-            ctx.apply(Style::default().fg(ctx.state_success()).bold()),
-        ),
+        Span::styled("[Y]", footer_key_style(ctx, ActionTone::Destructive)),
         Span::raw(" Confirm  "),
-        Span::styled(
-            "[Esc]",
-            ctx.apply(Style::default().fg(ctx.state_error()).bold()),
-        ),
+        Span::styled("[Esc]", footer_key_style(ctx, ActionTone::Cancel)),
         Span::raw(" Cancel"),
     ]);
     f.render_widget(
