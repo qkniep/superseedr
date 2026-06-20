@@ -497,6 +497,7 @@ pub struct TorrentManager {
     global_dl_bucket: Arc<TokenBucket>,
     global_ul_bucket: Arc<TokenBucket>,
     telemetry: ManagerTelemetry,
+    data_rate_ms: u64,
     run_loop_started: bool,
 }
 
@@ -625,6 +626,7 @@ impl TorrentManager {
             file_priorities: _,
             ..
         } = torrent_parameters;
+        let data_rate_ms = settings.ui_refresh_rate.as_ms();
 
         let (torrent_manager_tx, torrent_manager_rx) = mpsc::channel::<TorrentCommand>(1000);
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -680,6 +682,7 @@ impl TorrentManager {
             global_dl_bucket,
             global_ul_bucket,
             telemetry: ManagerTelemetry::default(),
+            data_rate_ms,
             run_loop_started: false,
         }
     }
@@ -3082,8 +3085,7 @@ impl TorrentManager {
         self.run_loop_started = true;
         self.sync_dht_lookup_task();
 
-        let mut data_rate_ms = 1000;
-        let mut tick = tokio::time::interval(Duration::from_millis(data_rate_ms));
+        let mut tick = tokio::time::interval(Duration::from_millis(self.data_rate_ms));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_tick_time = Instant::now();
 
@@ -3207,8 +3209,8 @@ impl TorrentManager {
                             });
                         }
                         ManagerCommand::SetDataRate(new_rate_ms) => {
-                            data_rate_ms = new_rate_ms;
-                            tick = tokio::time::interval(Duration::from_millis(data_rate_ms));
+                            self.data_rate_ms = new_rate_ms;
+                            tick = tokio::time::interval(Duration::from_millis(self.data_rate_ms));
                             tick.reset();
                             last_tick_time = Instant::now();
                         },
@@ -4070,6 +4072,7 @@ mod tests {
 #[cfg(test)]
 mod resource_tests {
     use super::*;
+    use crate::app::DataRate;
     use crate::config::Settings;
     use crate::resource_manager::{ResourceManager, ResourceType};
     use crate::token_bucket::TokenBucket;
@@ -4146,6 +4149,19 @@ mod resource_tests {
             global_ul_bucket: Arc::new(TokenBucket::new(f64::INFINITY, f64::INFINITY)),
             file_priorities: HashMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn manager_initial_tick_rate_uses_restored_refresh_rate() {
+        let mut params = build_test_params();
+        let mut settings = (*params.settings).clone();
+        settings.ui_refresh_rate = DataRate::Rate20s;
+        params.settings = Arc::new(settings);
+
+        let manager = TorrentManager::from_torrent(params, create_dummy_torrent(1))
+            .expect("manager from torrent");
+
+        assert_eq!(manager.data_rate_ms, DataRate::Rate20s.as_ms());
     }
 
     #[tokio::test]
