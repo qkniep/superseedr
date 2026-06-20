@@ -1353,29 +1353,37 @@ fn visible_torrent_hashes(app_state: &AppState) -> Vec<Vec<u8>> {
 
 fn ordered_torrent_hashes(app_state: &AppState) -> Vec<Vec<u8>> {
     if !app_state.torrent_list_order.is_empty() {
-        return app_state
-            .torrent_list_order
-            .iter()
-            .filter(|info_hash| app_state.torrents.contains_key(*info_hash))
-            .cloned()
-            .collect();
+        let mut hashes = app_state.torrents.keys().cloned().collect::<Vec<_>>();
+        hashes.sort_by(|a, b| {
+            let a_rank = app_state
+                .torrent_list_order
+                .iter()
+                .position(|hash| hash == a);
+            let b_rank = app_state
+                .torrent_list_order
+                .iter()
+                .position(|hash| hash == b);
+            match (a_rank, b_rank) {
+                (Some(a_rank), Some(b_rank)) => a_rank.cmp(&b_rank),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => torrent_name(app_state, a).cmp(torrent_name(app_state, b)),
+            }
+        });
+        return hashes;
     }
 
     let mut hashes = app_state.torrents.keys().cloned().collect::<Vec<_>>();
-    hashes.sort_by(|a, b| {
-        let a_name = app_state
-            .torrents
-            .get(a)
-            .map(|torrent| torrent.latest_state.torrent_name.as_str())
-            .unwrap_or_default();
-        let b_name = app_state
-            .torrents
-            .get(b)
-            .map(|torrent| torrent.latest_state.torrent_name.as_str())
-            .unwrap_or_default();
-        a_name.cmp(b_name)
-    });
+    hashes.sort_by(|a, b| torrent_name(app_state, a).cmp(torrent_name(app_state, b)));
     hashes
+}
+
+fn torrent_name<'a>(app_state: &'a AppState, info_hash: &[u8]) -> &'a str {
+    app_state
+        .torrents
+        .get(info_hash)
+        .map(|torrent| torrent.latest_state.torrent_name.as_str())
+        .unwrap_or_default()
 }
 
 fn torrent_matches_query(
@@ -2161,6 +2169,25 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "Harbor Lights S01E01");
         assert_eq!(app_state.ui.search_query, "normal");
+    }
+
+    #[test]
+    fn empty_management_search_ignores_cached_normal_search_subset() {
+        let mut app_state = app_state_with_torrents(vec![
+            (hash(1), "Meadow Saga S01E01", 100, 10, 2),
+            (hash(2), "Harbor Lights S01E01", 50, 5, 1),
+            (hash(3), "Orchard Notes S01E01", 75, 8, 1),
+        ]);
+        app_state.ui.search_query = "harbor".to_string();
+        app_state.torrent_list_order = vec![hash(2)];
+        app_state.ui.torrent_management.search_query.clear();
+
+        let rows = build_management_rows(&app_state);
+
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().any(|row| row.info_hashes == vec![hash(1)]));
+        assert!(rows.iter().any(|row| row.info_hashes == vec![hash(2)]));
+        assert!(rows.iter().any(|row| row.info_hashes == vec![hash(3)]));
     }
 
     #[test]
