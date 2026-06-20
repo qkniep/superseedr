@@ -1834,7 +1834,7 @@ impl Default for TorrentManagementUiState {
             pending_commands: Vec::new(),
             is_searching: false,
             search_query: String::new(),
-            search_mode: SearchMode::Fuzzy,
+            search_mode: SearchMode::Regex,
             selected_column_index: 1,
             sort_column_index: Some(1),
             sort_direction: SortDirection::Ascending,

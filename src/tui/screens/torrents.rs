@@ -476,6 +476,7 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
     let ctx = screen.theme;
     let area = f.area();
     f.render_widget(Clear, area);
+    let content_area = management_content_area(area);
 
     let search_panel_active = management_search_panel_active(app_state);
     let chunks = if search_panel_active {
@@ -484,9 +485,9 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
             Constraint::Min(5),
             Constraint::Length(1),
         ])
-        .split(area)
+        .split(content_area)
     } else {
-        Layout::vertical([Constraint::Min(5), Constraint::Length(1)]).split(area)
+        Layout::vertical([Constraint::Min(5), Constraint::Length(1)]).split(content_area)
     };
 
     let (table_area, footer_area) = if search_panel_active {
@@ -504,6 +505,19 @@ pub fn draw(f: &mut Frame, screen: &ScreenContext<'_>) {
     if app_state.ui.torrent_management.confirm_submit {
         draw_management_review_panel(f, app_state, ctx);
     }
+}
+
+fn management_content_area(area: Rect) -> Rect {
+    if area.width < 90 || area.height < 18 {
+        return area;
+    }
+
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    )
 }
 
 fn management_search_panel_active(app_state: &AppState) -> bool {
@@ -1852,6 +1866,20 @@ mod tests {
     }
 
     #[test]
+    fn management_content_area_insets_roomy_viewports() {
+        let area = Rect::new(0, 0, 120, 32);
+
+        assert_eq!(management_content_area(area), Rect::new(1, 1, 118, 30));
+    }
+
+    #[test]
+    fn management_content_area_keeps_compact_viewports_full_width() {
+        let area = Rect::new(0, 0, 78, 16);
+
+        assert_eq!(management_content_area(area), area);
+    }
+
+    #[test]
     fn management_keymap_moves_columns_and_sorts_selected_column() {
         let app_state = app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
 
@@ -2093,7 +2121,7 @@ mod tests {
         app_state.ui.torrent_management.is_searching = true;
         assert!(matches!(
             app_state.ui.torrent_management.search_mode,
-            SearchMode::Fuzzy
+            SearchMode::Regex
         ));
         assert_eq!(
             map_key_to_management_action(KeyCode::Tab, &app_state),
@@ -2104,7 +2132,7 @@ mod tests {
 
         assert!(matches!(
             app_state.ui.torrent_management.search_mode,
-            SearchMode::Regex
+            SearchMode::Fuzzy
         ));
     }
 

@@ -368,7 +368,7 @@ pub fn draw(
                 path_to_string(settings.watch_folder.as_deref()),
             ),
             ConfigItem::AlwaysShowAddLocationPrompt => (
-                "Always Show Add Files/Location",
+                "Always Confirm Add Priority And Location",
                 if settings.always_show_add_location_prompt {
                     "[x] true".to_string()
                 } else {
