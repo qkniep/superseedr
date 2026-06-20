@@ -160,6 +160,7 @@ const WATCH_FOLDER_RESCAN_INTERVAL_SECS: u64 = 5;
 const SHARED_ROLE_RETRY_INTERVAL_SECS: u64 = 2;
 const STARTUP_ROLLING_BATCH_INTERVAL_SECS: u64 = 1;
 const STARTUP_ROLLING_LOADS_PER_INTERVAL: usize = 1;
+const REPEATED_HEALTH_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 const SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 const INCOMING_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
@@ -2436,6 +2437,8 @@ pub struct App {
     pub next_startup_load_at: Option<time::Instant>,
     pub last_dht_peer_slot_usage: Option<(usize, usize)>,
     persisted_torrent_metadata_cache: HashMap<Vec<u8>, TorrentMetadataEntry>,
+    data_availability_fault_log_cooldowns: HashMap<Vec<u8>, LogCooldown>,
+    probe_available_log_cooldowns: HashMap<Vec<u8>, LogCooldown>,
 }
 
 #[derive(Clone)]
@@ -2457,6 +2460,25 @@ pub struct PersistPayload {
     pub network_history: Option<NetworkHistoryPersistRequest>,
     pub activity_history: Option<ActivityHistoryPersistRequest>,
     pub event_journal_state: EventJournalState,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LogCooldown {
+    last_logged_at: Option<Instant>,
+}
+
+impl LogCooldown {
+    fn should_log(&mut self, now: Instant, interval: Duration) -> bool {
+        if self
+            .last_logged_at
+            .is_some_and(|last_logged_at| now.duration_since(last_logged_at) < interval)
+        {
+            return false;
+        }
+
+        self.last_logged_at = Some(now);
+        true
+    }
 }
 
 fn initial_cluster_role_for_runtime_mode(runtime_mode: AppRuntimeMode) -> Option<AppClusterRole> {
@@ -2649,6 +2671,7 @@ fn spawn_persistence_writer(
     let (persistence_tx, mut persistence_rx) = watch::channel::<Option<PersistPayload>>(None);
     let persistence_app_command_tx = app_command_tx.clone();
     let persistence_task = tokio::spawn(async move {
+        let mut persistence_error_log_cooldowns: HashMap<String, LogCooldown> = HashMap::new();
         while persistence_rx.changed().await.is_ok() {
             let Some(payload) = persistence_rx.borrow().clone() else {
                 continue;
@@ -2702,7 +2725,13 @@ fn spawn_persistence_writer(
                     }
                 }
                 Ok(Err(e)) => {
-                    tracing_event!(Level::ERROR, "{}", e);
+                    if persistence_error_log_cooldowns
+                        .entry(e.clone())
+                        .or_default()
+                        .should_log(Instant::now(), REPEATED_HEALTH_LOG_INTERVAL)
+                    {
+                        tracing_event!(Level::ERROR, "{}", e);
+                    }
                     if let Some(request_id) = network_history_request_id {
                         let _ = persistence_app_command_tx
                             .send(AppCommand::NetworkHistoryPersisted {
@@ -2984,6 +3013,8 @@ impl App {
             next_startup_load_at: None,
             last_dht_peer_slot_usage: None,
             persisted_torrent_metadata_cache,
+            data_availability_fault_log_cooldowns: HashMap::new(),
+            probe_available_log_cooldowns: HashMap::new(),
         };
         app.sync_cluster_role_label();
         app.refresh_system_warning();
@@ -5802,17 +5833,24 @@ impl App {
                     torrent.latest_state.data_available = false;
                 }
 
-                if let Some(torrent) = self.app_state.torrents.get(&info_hash) {
-                    let saved_location = Self::torrent_saved_location(&torrent.latest_state);
-                    tracing_event!(
-                        Level::WARN,
-                        info_hash = %hex::encode(&info_hash),
-                        torrent = %torrent.latest_state.torrent_name,
-                        piece = piece_index as usize,
-                        saved_location = ?saved_location,
-                        error = %error,
-                        "Foreground disk read marked torrent data unavailable"
-                    );
+                let should_log_fault = self
+                    .data_availability_fault_log_cooldowns
+                    .entry(info_hash.clone())
+                    .or_default()
+                    .should_log(Instant::now(), REPEATED_HEALTH_LOG_INTERVAL);
+                if should_log_fault {
+                    if let Some(torrent) = self.app_state.torrents.get(&info_hash) {
+                        let saved_location = Self::torrent_saved_location(&torrent.latest_state);
+                        tracing_event!(
+                            Level::WARN,
+                            info_hash = %hex::encode(&info_hash),
+                            torrent = %torrent.latest_state.torrent_name,
+                            piece = piece_index as usize,
+                            saved_location = ?saved_location,
+                            error = %error,
+                            "Foreground disk read marked torrent data unavailable"
+                        );
+                    }
                 }
 
                 if availability_changed {
@@ -5920,13 +5958,20 @@ impl App {
                 )) = availability_transition_log
                 {
                     if is_available {
-                        tracing_event!(
-                            Level::INFO,
-                            info_hash = %hex::encode(&info_hash),
-                            torrent = %torrent_name,
-                            saved_location = ?saved_location,
-                            "Torrent probe found data available; awaiting manager metrics confirmation"
-                        );
+                        let should_log_available = self
+                            .probe_available_log_cooldowns
+                            .entry(info_hash.clone())
+                            .or_default()
+                            .should_log(Instant::now(), REPEATED_HEALTH_LOG_INTERVAL);
+                        if should_log_available {
+                            tracing_event!(
+                                Level::INFO,
+                                info_hash = %hex::encode(&info_hash),
+                                torrent = %torrent_name,
+                                saved_location = ?saved_location,
+                                "Torrent probe found data available; awaiting manager metrics confirmation"
+                            );
+                        }
                     } else {
                         tracing_event!(
                             Level::WARN,
@@ -8913,7 +8958,7 @@ mod tests {
         AppRuntimeMode, AppState, BrowserPane, ColumnId, CommandIngestResult, DataRate,
         DhtWaveTargets, DhtWaveUiState, DiskBackpressureDecision, DiskBackpressureDownloadThrottle,
         DiskBackpressureSample, DownloadSelectionTarget, FileBrowserMode, FileMetadata,
-        FilePriority, IngestSource, ListenerSet, PeerInfo, PeerListenerTransportMode,
+        FilePriority, IngestSource, ListenerSet, LogCooldown, PeerInfo, PeerListenerTransportMode,
         PeerSortColumn, PersistPayload, ResolvedAddPayload, SelectedHeader, SortDirection,
         SwarmAvailabilityFlashState, TorrentControlState, TorrentDisplayState, TorrentMetrics,
         TorrentPreviewPayload, TorrentSortColumn, UiState, WakeLagPeerThrottle,
@@ -8956,6 +9001,16 @@ mod tests {
         assert!(!tcp_peer_listener_enabled(PeerListenerTransportMode::Utp));
         assert!(tcp_peer_listener_enabled(PeerListenerTransportMode::Tcp));
         assert!(tcp_peer_listener_enabled(PeerListenerTransportMode::All));
+    }
+
+    #[test]
+    fn log_cooldown_allows_first_event_and_then_only_after_interval() {
+        let now = Instant::now();
+        let mut cooldown = LogCooldown::default();
+
+        assert!(cooldown.should_log(now, Duration::from_secs(60)));
+        assert!(!cooldown.should_log(now + Duration::from_secs(59), Duration::from_secs(60)));
+        assert!(cooldown.should_log(now + Duration::from_secs(60), Duration::from_secs(60)));
     }
 
     fn mock_display(name: &str, peer_count: usize) -> TorrentDisplayState {
