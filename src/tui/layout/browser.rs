@@ -22,6 +22,7 @@ pub fn calculate_file_browser_layout(
     show_preview: bool,
     show_search: bool,
     focused_pane: &BrowserPane,
+    preview_only: bool,
 ) -> FileBrowserLayout {
     let mut plan = FileBrowserLayout::default();
     let main_chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
@@ -38,6 +39,13 @@ pub fn calculate_file_browser_layout(
     } else {
         plan.content
     };
+
+    if show_preview && preview_only {
+        plan.preview = Some(content_area);
+        plan.browser = Rect::default();
+        plan.list = Rect::default();
+        return plan;
+    }
 
     let is_narrow = area.width < 100 || (area.height as f32 > (area.width as f32 * 0.6));
 

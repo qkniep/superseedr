@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::app::{
-    App, AppCommand, AppMode, BrowserPane, BrowserSearchState, ConfigItem, ConfigUiState,
-    DownloadSelectionTarget, FileBrowserMode, FileMetadata, FilePriority, SearchMode,
-    TorrentDisplayState, TorrentPreviewPayload,
+    refresh_torrent_preview_directory_priorities, App, AppCommand, AppMode, BrowserPane,
+    BrowserSearchState, ConfigItem, ConfigUiState, DownloadSelectionTarget, FileBrowserMode,
+    FileMetadata, FilePriority, SearchMode, TorrentDisplayState, TorrentPreviewPayload,
 };
 use crate::integrations::control::{ControlFilePriorityOverride, ControlRequest};
 use crate::theme::ThemeContext;
@@ -15,7 +15,9 @@ use crate::tui::formatters::{centered_rect, format_bytes, sanitize_text, truncat
 use crate::tui::layout::browser::calculate_file_browser_layout;
 use crate::tui::screen_context::ScreenContext;
 use crate::tui::screens::input_panel::draw_prompt_panel;
-use crate::tui::tree::{RawNode, TreeAction, TreeFilter, TreeMathHelper, TreeViewState};
+use crate::tui::tree::{
+    RawNode, TreeAction, TreeFilter, TreeMathHelper, TreeProjection, TreeViewState,
+};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind};
@@ -58,6 +60,7 @@ pub fn draw(
         !app_state.pending_torrent_link.is_empty(),
         state.cursor_path.as_ref(),
     );
+    let existing_priority_only = existing_torrent_priority_only(browser_mode);
 
     let preview_file_path = match browser_mode {
         FileBrowserMode::DownloadLocSelection { .. } => app_state.pending_torrent_path.as_ref(),
@@ -76,6 +79,7 @@ pub fn draw(
         has_preview_content,
         search_panel_active,
         &focused_pane,
+        existing_priority_only,
     );
 
     let (files_border_style, preview_border_style) =
@@ -159,19 +163,21 @@ pub fn draw(
             use_container,
             ..
         } => {
-            footer_spans.push(Span::styled(
-                "[Tab]",
-                footer_key_style(ctx, ActionTone::Mode),
-            ));
-            if search_panel_active {
-                footer_spans.push(Span::raw(" Search Mode | "));
-            } else {
-                footer_spans.push(Span::raw(" Switch Pane | "));
+            if !existing_priority_only {
+                footer_spans.push(Span::styled(
+                    "[Tab]",
+                    footer_key_style(ctx, ActionTone::Mode),
+                ));
+                if search_panel_active {
+                    footer_spans.push(Span::raw(" Search Mode | "));
+                } else {
+                    footer_spans.push(Span::raw(" Switch Pane | "));
+                }
             }
             footer_spans.push(Span::styled("[/]", footer_key_style(ctx, ActionTone::Edit)));
             footer_spans.push(Span::raw(" Search | "));
 
-            if matches!(focused_pane, BrowserPane::TorrentPreview) {
+            if existing_priority_only || matches!(focused_pane, BrowserPane::TorrentPreview) {
                 footer_spans.push(Span::styled(
                     "[Space/p]",
                     footer_key_style(ctx, ActionTone::Toggle),
@@ -191,18 +197,20 @@ pub fn draw(
                     "[c]",
                     footer_key_style(ctx, ActionTone::Navigate),
                 ));
-                footer_spans.push(Span::raw(" Close | "));
+                footer_spans.push(Span::raw(" Collapse | "));
             }
 
-            footer_spans.push(Span::styled(
-                "[x]",
-                footer_key_style(ctx, ActionTone::Toggle),
-            ));
-            footer_spans.push(Span::raw(" Container Folder | "));
+            if !existing_priority_only {
+                footer_spans.push(Span::styled(
+                    "[x]",
+                    footer_key_style(ctx, ActionTone::Toggle),
+                ));
+                footer_spans.push(Span::raw(" Container Folder | "));
 
-            if *use_container {
-                footer_spans.push(Span::styled("[r]", footer_key_style(ctx, ActionTone::Edit)));
-                footer_spans.push(Span::raw(" Rename | "));
+                if *use_container {
+                    footer_spans.push(Span::styled("[r]", footer_key_style(ctx, ActionTone::Edit)));
+                    footer_spans.push(Span::raw(" Rename | "));
+                }
             }
 
             footer_spans.push(Span::styled(
@@ -230,6 +238,10 @@ pub fn draw(
         .alignment(Alignment::Center)
         .style(ctx.apply(Style::default().fg(ctx.theme.semantic.subtext1)));
     f.render_widget(footer, layout.footer);
+
+    if existing_priority_only {
+        return;
+    }
 
     let inner_height = layout.list.height.saturating_sub(2) as usize;
     let list_width = layout.list.width.saturating_sub(2) as usize;
@@ -371,6 +383,16 @@ pub fn draw(
     );
 }
 
+fn existing_torrent_priority_only(browser_mode: &FileBrowserMode) -> bool {
+    matches!(
+        browser_mode,
+        FileBrowserMode::DownloadLocSelection {
+            target: DownloadSelectionTarget::ExistingTorrent { .. },
+            ..
+        }
+    )
+}
+
 fn browser_search_panel_active(search_state: BrowserSearchState) -> bool {
     search_state.is_visible()
 }
@@ -465,7 +487,12 @@ fn draw_torrent_preview_panel(
         ..
     } = browser_mode
     {
-        let header_lines = if *use_container { 2 } else { 1 };
+        let priority_only = existing_torrent_priority_only(browser_mode);
+        let header_lines = if *use_container && !priority_only {
+            2
+        } else {
+            1
+        };
         let list_height = inner_area.height.saturating_sub(header_lines) as usize;
 
         let visible_rows = TreeMathHelper::get_visible_slice(
@@ -480,7 +507,9 @@ fn draw_torrent_preview_panel(
             .fg(ctx.state_info())
             .add_modifier(Modifier::BOLD);
 
-        let path_display = if is_narrow {
+        let path_display = if priority_only {
+            "Priority editor (location unchanged)".to_string()
+        } else if is_narrow {
             current_fs_path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -494,7 +523,7 @@ fn draw_torrent_preview_panel(
             Span::styled(path_display, root_style),
         ])));
 
-        if *use_container {
+        if *use_container && !priority_only {
             let container_style = if *is_editing_name {
                 Style::default()
                     .fg(ctx.accent_sky())
@@ -511,7 +540,8 @@ fn draw_torrent_preview_panel(
             ];
 
             if *is_editing_name {
-                let (before, after) = container_name.split_at(*cursor_pos);
+                let split_pos = clamp_to_char_boundary(container_name, *cursor_pos);
+                let (before, after) = container_name.split_at(split_pos);
                 spans.push(Span::styled(before, container_style));
                 spans.push(Span::styled(
                     "█",
@@ -538,7 +568,11 @@ fn draw_torrent_preview_panel(
             .iter()
             .map(|item| {
                 let is_cursor = item.is_cursor;
-                let base_indent_level = if *use_container { 2 } else { 1 };
+                let base_indent_level = if *use_container && !priority_only {
+                    2
+                } else {
+                    1
+                };
                 let indent_multiplier = if is_narrow { 1 } else { 2 };
                 let indent_str = " ".repeat((base_indent_level + item.depth) * indent_multiplier);
 
@@ -866,15 +900,19 @@ async fn handle_browser_download_key(key_code: KeyCode, app: &mut App) -> bool {
             focused_pane,
             preview_tree,
             preview_state,
+            target,
             ..
         } = browser_mode
         {
             if matches!(focused_pane, BrowserPane::TorrentPreview) {
+                let preview_only =
+                    matches!(target, DownloadSelectionTarget::ExistingTorrent { .. });
                 let list_height = calculate_preview_list_height(
                     screen_area,
                     search_panel_active,
                     focused_pane,
                     *use_container,
+                    preview_only,
                 );
                 reduce_browser_preview_action(
                     map_preview_key_to_action(key_code),
@@ -1009,6 +1047,19 @@ async fn handle_browser_common_key(key_code: KeyCode, app: &mut App) -> bool {
 
     let reduced = {
         let file_browser = &app.app_state.ui.file_browser;
+        if matches!(dialog_action, BrowserDialogAction::ConfirmSelection)
+            && matches!(file_browser.browser_mode, FileBrowserMode::File(_))
+            && !filesystem_cursor_visible(
+                &file_browser.data,
+                &file_browser.state,
+                &file_browser.browser_mode,
+                &file_browser.search_query,
+                file_browser.search_mode,
+                list_height,
+            )
+        {
+            return true;
+        }
         reduce_browser_dialog_action(
             dialog_action,
             &file_browser.state,
@@ -1294,6 +1345,7 @@ pub fn map_download_key_to_action(
     if let FileBrowserMode::DownloadLocSelection {
         is_editing_name,
         use_container,
+        target,
         ..
     } = browser_mode
     {
@@ -1301,6 +1353,10 @@ pub fn map_download_key_to_action(
             return Some(BrowserDownloadAction::Edit(
                 map_download_name_edit_key_to_action(key_code),
             ));
+        }
+
+        if matches!(target, DownloadSelectionTarget::ExistingTorrent { .. }) {
+            return None;
         }
 
         if let Some(action) = map_download_shortcut_key_to_action(key_code, *use_container) {
@@ -1317,6 +1373,8 @@ pub fn reduce_download_name_edit_action(
     cursor_pos: &mut usize,
     original_name_backup: &str,
 ) -> BrowserDownloadEditReduceResult {
+    *cursor_pos = clamp_to_char_boundary(container_name, *cursor_pos);
+
     match action {
         BrowserDownloadEditAction::Commit => {
             *is_editing_name = false;
@@ -1327,32 +1385,77 @@ pub fn reduce_download_name_edit_action(
             *cursor_pos = container_name.len();
         }
         BrowserDownloadEditAction::MoveLeft => {
-            *cursor_pos = cursor_pos.saturating_sub(1);
+            *cursor_pos = previous_char_boundary(container_name, *cursor_pos);
         }
         BrowserDownloadEditAction::MoveRight => {
-            if *cursor_pos < container_name.len() {
-                *cursor_pos += 1;
-            }
+            *cursor_pos = next_char_boundary(container_name, *cursor_pos);
         }
         BrowserDownloadEditAction::Backspace => {
             if *cursor_pos > 0 {
-                container_name.remove(*cursor_pos - 1);
-                *cursor_pos -= 1;
+                let previous = previous_char_boundary(container_name, *cursor_pos);
+                container_name.drain(previous..*cursor_pos);
+                *cursor_pos = previous;
             }
         }
         BrowserDownloadEditAction::Delete => {
             if *cursor_pos < container_name.len() {
-                container_name.remove(*cursor_pos);
+                let next = next_char_boundary(container_name, *cursor_pos);
+                container_name.drain(*cursor_pos..next);
             }
         }
         BrowserDownloadEditAction::Insert(c) => {
             container_name.insert(*cursor_pos, c);
-            *cursor_pos += 1;
+            *cursor_pos += c.len_utf8();
         }
         BrowserDownloadEditAction::Noop => {}
     }
 
     BrowserDownloadEditReduceResult { consumed: true }
+}
+
+fn clamp_to_char_boundary(value: &str, cursor_pos: usize) -> usize {
+    let mut pos = cursor_pos.min(value.len());
+    while pos > 0 && !value.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
+fn previous_char_boundary(value: &str, cursor_pos: usize) -> usize {
+    let pos = clamp_to_char_boundary(value, cursor_pos);
+    if pos == 0 {
+        return 0;
+    }
+    value[..pos]
+        .char_indices()
+        .last()
+        .map(|(idx, _)| idx)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(value: &str, cursor_pos: usize) -> usize {
+    let pos = clamp_to_char_boundary(value, cursor_pos);
+    if pos >= value.len() {
+        return value.len();
+    }
+    value[pos..]
+        .char_indices()
+        .nth(1)
+        .map(|(idx, _)| pos + idx)
+        .unwrap_or(value.len())
+}
+
+fn filesystem_cursor_visible(
+    data: &[RawNode<FileMetadata>],
+    state: &TreeViewState,
+    browser_mode: &FileBrowserMode,
+    search_query: &str,
+    search_mode: SearchMode,
+    list_height: usize,
+) -> bool {
+    let filter = build_filesystem_filter(browser_mode, search_query, search_mode);
+    let projection = TreeProjection::new(data, state, filter, list_height);
+    projection.cursor_index(state).is_some()
 }
 
 fn map_download_shortcut_key_to_action(
@@ -1496,7 +1599,7 @@ pub fn calculate_list_height(
 ) -> usize {
     let area = calculate_area(screen, has_preview_content);
     let layout =
-        calculate_file_browser_layout(area, has_preview_content, is_searching, focused_pane);
+        calculate_file_browser_layout(area, has_preview_content, is_searching, focused_pane, false);
     layout.list.height.saturating_sub(2) as usize
 }
 
@@ -1505,16 +1608,18 @@ pub fn calculate_preview_list_height(
     is_searching: bool,
     focused_pane: &BrowserPane,
     use_container: bool,
+    preview_only: bool,
 ) -> Option<usize> {
     let area = if screen.width < 60 {
         screen
     } else {
         centered_rect(90, 80, screen)
     };
-    let layout = calculate_file_browser_layout(area, true, is_searching, focused_pane);
+    let layout =
+        calculate_file_browser_layout(area, true, is_searching, focused_pane, preview_only);
     layout.preview.map(|preview_rect| {
         let inner_height = preview_rect.height.saturating_sub(2);
-        let header_rows = if use_container { 2 } else { 1 };
+        let header_rows = if use_container && !preview_only { 2 } else { 1 };
         inner_height.saturating_sub(header_rows) as usize
     })
 }
@@ -1556,9 +1661,16 @@ pub fn reduce_browser_preview_action(
             BrowserPreviewReduceResult { consumed: true }
         }
         BrowserPreviewAction::CyclePriority => {
-            if let Some(_height) = list_height {
-                if let Some(target) = &preview_state.cursor_path {
-                    apply_priority_cycle(preview_tree, target);
+            if let Some(height) = list_height {
+                let cursor_visible = {
+                    let projection =
+                        TreeProjection::new(preview_tree, preview_state, filter, height);
+                    projection.cursor_index(preview_state).is_some()
+                };
+                if cursor_visible {
+                    if let Some(target) = &preview_state.cursor_path {
+                        apply_priority_cycle(preview_tree, target);
+                    }
                 }
             }
             BrowserPreviewReduceResult { consumed: true }
@@ -1999,10 +2111,17 @@ pub async fn execute_confirm_decision(
                     } else {
                         existing_torrent_priorities(app, &info_hash)
                     };
+                    let existing = app.app_state.torrents.get(&info_hash).map(|torrent| {
+                        (
+                            torrent.latest_state.download_path.clone(),
+                            torrent.latest_state.container_name.clone(),
+                        )
+                    });
+                    let (download_path, container_name) = existing.unwrap_or_default();
                     let request = ControlRequest::SetTorrentConfig {
                         info_hash_hex: hex::encode(info_hash),
-                        download_path: Some(payload.base_path),
-                        container_name: payload.container_name_to_use,
+                        download_path,
+                        container_name,
                         file_priorities: priority_overrides(file_priorities),
                     };
                     spawn_app_command_sender(
@@ -2123,7 +2242,7 @@ pub fn apply_priority_cycle(
     nodes: &mut [RawNode<TorrentPreviewPayload>],
     target_path: &Path,
 ) -> bool {
-    for node in nodes {
+    for node in &mut *nodes {
         let found = node.find_and_act(target_path, &mut |target_node| {
             let new_priority = target_node.payload.priority.next();
             target_node.apply_recursive(&|n| {
@@ -2132,6 +2251,7 @@ pub fn apply_priority_cycle(
         });
 
         if found {
+            refresh_torrent_preview_directory_priorities(nodes);
             return true;
         }
     }
@@ -2205,11 +2325,12 @@ pub fn apply_priority_cycle_to_all(nodes: &mut [RawNode<TorrentPreviewPayload>])
         return false;
     };
 
-    for node in nodes {
+    for node in &mut *nodes {
         node.apply_recursive(&|target| {
             target.payload.priority = next_priority;
         });
     }
+    refresh_torrent_preview_directory_priorities(nodes);
     true
 }
 
@@ -2855,6 +2976,78 @@ mod tests {
 
         assert!(out.consumed);
         assert_eq!(tree[0].payload.priority, FilePriority::Skip);
+    }
+
+    #[test]
+    fn preview_reducer_does_not_cycle_hidden_filtered_cursor() {
+        let mut tree = sample_preview_tree();
+        let mut state = TreeViewState {
+            cursor_path: Some(PathBuf::from("root/group/alpha.bin")),
+            ..Default::default()
+        };
+
+        let out = reduce_browser_preview_action(
+            map_preview_key_to_action(KeyCode::Char('p')),
+            &mut state,
+            &mut tree,
+            build_torrent_preview_filter("beta", SearchMode::Fuzzy),
+            Some(10),
+        );
+
+        assert!(out.consumed);
+        assert_eq!(
+            tree[0].children[0].children[0].payload.priority,
+            FilePriority::Normal
+        );
+        assert_eq!(
+            tree[0].children[0].children[1].payload.priority,
+            FilePriority::Normal
+        );
+    }
+
+    #[test]
+    fn download_name_edit_preserves_utf8_boundaries() {
+        let mut name = String::from("Café Seed");
+        let mut is_editing = true;
+        let mut cursor_pos = "Café".len();
+
+        reduce_download_name_edit_action(
+            BrowserDownloadEditAction::Backspace,
+            &mut name,
+            &mut is_editing,
+            &mut cursor_pos,
+            "Café Seed",
+        );
+
+        assert_eq!(name, "Caf Seed");
+        assert!(name.is_char_boundary(cursor_pos));
+    }
+
+    #[test]
+    fn filesystem_cursor_visible_respects_search_filter() {
+        let tree = sample_filesystem_tree();
+        let mode = FileBrowserMode::File(vec![".bin".to_string()]);
+        let state = TreeViewState {
+            cursor_path: Some(PathBuf::from("root/group/alpha.bin")),
+            ..Default::default()
+        };
+
+        assert!(filesystem_cursor_visible(
+            &tree,
+            &state,
+            &mode,
+            "alpha",
+            SearchMode::Fuzzy,
+            10,
+        ));
+        assert!(!filesystem_cursor_visible(
+            &tree,
+            &state,
+            &mode,
+            "beta",
+            SearchMode::Fuzzy,
+            10,
+        ));
     }
 
     #[test]

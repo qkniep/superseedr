@@ -1692,7 +1692,8 @@ fn build_torrent_preview_tree_from_entries(
         })
         .collect();
 
-    let tree = RawNode::from_path_list(None, preview_payloads);
+    let mut tree = RawNode::from_path_list(None, preview_payloads);
+    refresh_torrent_preview_directory_priorities(&mut tree);
     tracing::debug!(
         target: "superseedr",
         file_count,
@@ -1700,6 +1701,38 @@ fn build_torrent_preview_tree_from_entries(
         "Built torrent preview tree"
     );
     tree
+}
+
+pub fn refresh_torrent_preview_directory_priorities(nodes: &mut [RawNode<TorrentPreviewPayload>]) {
+    for node in nodes {
+        refresh_torrent_preview_node_priority(node);
+    }
+}
+
+fn refresh_torrent_preview_node_priority(
+    node: &mut RawNode<TorrentPreviewPayload>,
+) -> FilePriority {
+    if !node.is_dir {
+        return node.payload.priority;
+    }
+
+    let mut common = None;
+    let mut mixed = false;
+    for child in &mut node.children {
+        let child_priority = refresh_torrent_preview_node_priority(child);
+        match common {
+            Some(priority) if priority != child_priority => mixed = true,
+            Some(_) => {}
+            None => common = Some(child_priority),
+        }
+    }
+
+    node.payload.priority = if mixed {
+        FilePriority::Mixed
+    } else {
+        common.unwrap_or(node.payload.priority)
+    };
+    node.payload.priority
 }
 
 fn collect_torrent_preview_files(
@@ -3792,18 +3825,8 @@ impl App {
         for node in &preview_tree {
             node.expand_all(&mut preview_state);
         }
+        preview_state.cursor_path = preview_tree.first().map(|node| node.full_path.clone());
 
-        let info_hash_hex = hex::encode(&info_hash);
-        let default_container_name = if metrics.torrent_name.is_empty() {
-            format!("Torrent [{}]", info_hash_hex)
-        } else {
-            format!("{} [{}]", metrics.torrent_name, info_hash_hex)
-        };
-        let (container_name, use_container) = match metrics.container_name.clone() {
-            Some(name) if !name.is_empty() => (name, true),
-            Some(_) => (default_container_name.clone(), false),
-            None => (default_container_name.clone(), metrics.is_multi_file),
-        };
         let initial_path = metrics
             .download_path
             .clone()
@@ -3812,24 +3835,30 @@ impl App {
 
         self.app_state.pending_torrent_path = None;
         self.app_state.pending_torrent_link.clear();
-        let browser_generation = self.app_state.ui.file_browser.next_browser_generation();
-        self.queue_app_command(AppCommand::FetchFileTree {
-            browser_generation,
-            path: initial_path,
-            browser_mode: FileBrowserMode::DownloadLocSelection {
-                target: DownloadSelectionTarget::ExistingTorrent { info_hash },
-                torrent_files: vec![],
-                container_name,
-                use_container,
-                is_editing_name: false,
-                preview_tree,
-                preview_state,
-                focused_pane: BrowserPane::TorrentPreview,
-                cursor_pos: 0,
-                original_name_backup: default_container_name,
-            },
-            highlight_path: None,
-        });
+        self.app_state
+            .ui
+            .file_browser
+            .invalidate_browser_generation();
+        self.app_state.ui.file_browser.state = TreeViewState {
+            current_path: initial_path,
+            ..TreeViewState::default()
+        };
+        self.app_state.ui.file_browser.data.clear();
+        self.app_state.ui.file_browser.search_state = BrowserSearchState::Closed;
+        self.app_state.ui.file_browser.search_query.clear();
+        self.app_state.ui.file_browser.browser_mode = FileBrowserMode::DownloadLocSelection {
+            target: DownloadSelectionTarget::ExistingTorrent { info_hash },
+            torrent_files: vec![],
+            container_name: String::new(),
+            use_container: false,
+            is_editing_name: false,
+            preview_tree,
+            preview_state,
+            focused_pane: BrowserPane::TorrentPreview,
+            cursor_pos: 0,
+            original_name_backup: String::new(),
+        };
+        self.app_state.mode = AppMode::FileBrowser;
     }
 
     fn queue_app_command(&self, command: AppCommand) {
@@ -12397,6 +12426,45 @@ mod tests {
         let _ = app.shutdown_tx.send(());
     }
 
+    #[test]
+    fn torrent_preview_tree_marks_only_ancestor_folders_mixed() {
+        let priorities = HashMap::from([(0, FilePriority::Skip)]);
+        let tree = build_torrent_preview_tree(
+            vec![
+                (vec!["changed".to_string(), "one.bin".to_string()], 10),
+                (vec!["changed".to_string(), "two.bin".to_string()], 20),
+                (vec!["unchanged".to_string(), "three.bin".to_string()], 30),
+            ],
+            &priorities,
+        );
+
+        let changed = tree
+            .iter()
+            .find(|node| node.name == "changed")
+            .expect("changed folder");
+        let unchanged = tree
+            .iter()
+            .find(|node| node.name == "unchanged")
+            .expect("unchanged folder");
+
+        assert_eq!(changed.payload.priority, FilePriority::Mixed);
+        assert_eq!(unchanged.payload.priority, FilePriority::Normal);
+    }
+
+    #[test]
+    fn torrent_preview_tree_marks_uniform_priority_folder_as_that_priority() {
+        let priorities = HashMap::from([(0, FilePriority::Skip), (1, FilePriority::Skip)]);
+        let tree = build_torrent_preview_tree(
+            vec![
+                (vec!["season".to_string(), "one.bin".to_string()], 10),
+                (vec!["season".to_string(), "two.bin".to_string()], 20),
+            ],
+            &priorities,
+        );
+
+        assert_eq!(tree[0].payload.priority, FilePriority::Skip);
+    }
+
     #[tokio::test]
     async fn open_existing_torrent_file_browser_starts_on_priority_preview() {
         let temp_dir = tempfile::tempdir().expect("create tempdir");
@@ -12434,28 +12502,28 @@ mod tests {
 
         app.open_existing_torrent_file_browser(info_hash.clone());
 
-        let command = loop {
-            match app.app_command_rx.try_recv() {
-                Ok(AppCommand::FetchFileTree { browser_mode, .. }) => break browser_mode,
-                Ok(_) => continue,
-                Err(_) => panic!("expected file browser fetch command"),
-            }
-        };
-        match command {
+        assert!(app.app_command_rx.try_recv().is_err());
+        assert!(matches!(app.app_state.mode, AppMode::FileBrowser));
+        assert!(app.app_state.ui.file_browser.data.is_empty());
+        match &app.app_state.ui.file_browser.browser_mode {
             FileBrowserMode::DownloadLocSelection {
                 target,
                 focused_pane,
                 preview_tree,
+                use_container,
+                container_name,
                 ..
             } => {
                 assert_eq!(
                     target,
-                    DownloadSelectionTarget::ExistingTorrent { info_hash }
+                    &DownloadSelectionTarget::ExistingTorrent { info_hash }
                 );
-                assert_eq!(focused_pane, BrowserPane::TorrentPreview);
+                assert_eq!(*focused_pane, BrowserPane::TorrentPreview);
                 assert!(!preview_tree.is_empty());
+                assert!(!*use_container);
+                assert!(container_name.is_empty());
             }
-            _ => panic!("expected download location selection"),
+            _ => panic!("expected priority-only existing torrent browser"),
         }
 
         let _ = app.shutdown_tx.send(());
