@@ -204,15 +204,18 @@ fn available_space_for_path(path: &Path) -> Option<u64> {
         .map(|disk| disk.available_space())
 }
 
-fn rename_replacing(tmp_path: &Path, path: &Path) -> io::Result<()> {
-    match fs::rename(tmp_path, path) {
+fn rename_replacing_with<R>(tmp_path: &Path, path: &Path, mut rename: R) -> io::Result<()>
+where
+    R: FnMut(&Path, &Path) -> io::Result<()>,
+{
+    match rename(tmp_path, path) {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            fs::remove_file(path)?;
-            fs::rename(tmp_path, path)
-        }
         Err(error) => Err(error),
     }
+}
+
+fn rename_replacing(tmp_path: &Path, path: &Path) -> io::Result<()> {
+    rename_replacing_with(tmp_path, path, |from, to| fs::rename(from, to))
 }
 
 fn rewrite_if_rename_left_empty(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -229,10 +232,6 @@ fn rewrite_if_rename_left_empty(path: &Path, bytes: &[u8]) -> io::Result<()> {
 async fn rename_replacing_async(tmp_path: &Path, path: &Path) -> io::Result<()> {
     match tokio::fs::rename(tmp_path, path).await {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            tokio::fs::remove_file(path).await?;
-            tokio::fs::rename(tmp_path, path).await
-        }
         Err(error) => Err(error),
     }
 }
@@ -334,5 +333,32 @@ mod tests {
             .filter(|name| name.contains(".tmp."))
             .collect();
         assert!(leftovers.is_empty(), "unexpected temp files: {leftovers:?}");
+    }
+
+    #[test]
+    fn rename_replacing_keeps_target_when_replace_reports_already_exists() {
+        let dir = tempdir().expect("create tempdir");
+        let path = dir.path().join("settings.toml");
+        let tmp_path = dir.path().join("settings.toml.tmp");
+        fs::write(&path, b"old settings").expect("write old file");
+        fs::write(&tmp_path, b"new settings").expect("write tmp file");
+
+        let error = rename_replacing_with(&tmp_path, &path, |_, _| {
+            Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "target exists",
+            ))
+        })
+        .expect_err("non-overwriting rename should fail without deleting target");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(&path).expect("read old file"),
+            "old settings"
+        );
+        assert_eq!(
+            fs::read_to_string(&tmp_path).expect("read tmp file"),
+            "new settings"
+        );
     }
 }
