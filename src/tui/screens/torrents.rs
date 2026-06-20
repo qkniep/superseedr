@@ -48,6 +48,7 @@ pub enum TorrentManagementAction {
     ToggleCurrentSelection,
     SelectAllVisible,
     ClearPendingForTargets,
+    OpenHighlightedTorrentFiles,
     TogglePauseTargets,
     StartDelete { delete_files: bool },
     ShowSubmitConfirmation,
@@ -64,6 +65,7 @@ pub enum TorrentManagementEffect {
         state: TorrentControlState,
         delete_files: bool,
     },
+    OpenExistingTorrentFileBrowser(Vec<u8>),
 }
 
 #[derive(Default)]
@@ -209,6 +211,7 @@ fn map_key_to_management_action(
         KeyCode::Char(' ') => Some(TorrentManagementAction::ToggleCurrentSelection),
         KeyCode::Char('A') => Some(TorrentManagementAction::SelectAllVisible),
         KeyCode::Char('u') => Some(TorrentManagementAction::ClearPendingForTargets),
+        KeyCode::Char('f') => Some(TorrentManagementAction::OpenHighlightedTorrentFiles),
         KeyCode::Char('p') => Some(TorrentManagementAction::TogglePauseTargets),
         KeyCode::Char('d') => Some(TorrentManagementAction::StartDelete {
             delete_files: false,
@@ -326,6 +329,18 @@ pub fn reduce_torrent_management_action(
             } else {
                 Some(format!("Cleared {cleared} draft commands"))
             };
+        }
+        TorrentManagementAction::OpenHighlightedTorrentFiles => {
+            if let Some(info_hash) = current_row_targets(app_state).into_iter().next() {
+                result
+                    .effects
+                    .push(TorrentManagementEffect::OpenExistingTorrentFileBrowser(
+                        info_hash,
+                    ));
+            } else {
+                app_state.ui.torrent_management.status_message =
+                    Some("No torrent highlighted".to_string());
+            }
         }
         TorrentManagementAction::TogglePauseTargets => {
             let targets = management_targets(app_state);
@@ -456,6 +471,9 @@ fn execute_management_effects(app: &mut App, effects: Vec<TorrentManagementEffec
                         torrent.latest_state.delete_files = delete_files;
                     }
                 }
+            }
+            TorrentManagementEffect::OpenExistingTorrentFileBrowser(info_hash) => {
+                app.open_existing_torrent_file_browser(info_hash);
             }
         }
     }
@@ -766,13 +784,13 @@ fn management_selection_marker(
     has_pending_action: bool,
 ) -> &'static str {
     if has_pending_action {
-        return "[!]";
+        return "!";
     }
 
     match selected_state {
-        SelectionState::None => "[ ]",
-        SelectionState::Partial => "[~]",
-        SelectionState::Full => "[x]",
+        SelectionState::None => "-",
+        SelectionState::Partial => "~",
+        SelectionState::Full => "x",
     }
 }
 
@@ -814,6 +832,7 @@ fn draw_management_footer(f: &mut Frame, app_state: &AppState, area: Rect, ctx: 
         push_action("Space", "select", ActionTone::Select);
         push_action("A", "select-all", ActionTone::Select);
         push_action("u", "clear", ActionTone::Clear);
+        push_action("f", "files", ActionTone::Navigate);
         push_action("/", "search", ActionTone::Search);
         if management_search_panel_active(app_state) {
             push_action("Tab", "mode", ActionTone::Mode);
@@ -1030,10 +1049,10 @@ fn management_columns() -> Vec<ManagementColumnDefinition> {
     vec![
         ManagementColumnDefinition {
             id: ManagementColumnId::Selection,
-            header: "Sel",
-            min_width: 4,
+            header: "=",
+            min_width: 2,
             priority: 0,
-            constraint: Constraint::Length(4),
+            constraint: Constraint::Length(2),
         },
         ManagementColumnDefinition {
             id: ManagementColumnId::Name,
@@ -1898,6 +1917,44 @@ mod tests {
     }
 
     #[test]
+    fn management_keymap_opens_highlighted_torrent_files() {
+        let app_state = app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+
+        assert_eq!(
+            map_key_to_management_action(KeyCode::Char('f'), &app_state),
+            Some(TorrentManagementAction::OpenHighlightedTorrentFiles)
+        );
+    }
+
+    #[test]
+    fn open_highlighted_torrent_files_ignores_multi_select_targets() {
+        let first_hash = hash(1);
+        let second_hash = hash(2);
+        let mut app_state = app_state_with_torrents(vec![
+            (first_hash.clone(), "Harbor Lights S01E01", 50, 5, 1),
+            (second_hash.clone(), "Harbor Lights S01E02", 60, 6, 2),
+        ]);
+        app_state.ui.torrent_management.selected_index = 1;
+        app_state
+            .ui
+            .torrent_management
+            .selected_hashes
+            .insert(first_hash);
+
+        let result = reduce_torrent_management_action(
+            &mut app_state,
+            TorrentManagementAction::OpenHighlightedTorrentFiles,
+        );
+
+        assert_eq!(
+            result.effects,
+            vec![TorrentManagementEffect::OpenExistingTorrentFileBrowser(
+                second_hash
+            )]
+        );
+    }
+
+    #[test]
     fn management_column_movement_stays_on_visible_columns() {
         let mut app_state =
             app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
@@ -2036,21 +2093,39 @@ mod tests {
 
     #[test]
     fn pending_action_marker_overrides_selection_marker() {
-        assert_eq!(
-            management_selection_marker(SelectionState::None, true),
-            "[!]"
-        );
+        assert_eq!(management_selection_marker(SelectionState::None, true), "!");
         assert_eq!(
             management_selection_marker(SelectionState::Partial, true),
-            "[!]"
+            "!"
+        );
+        assert_eq!(management_selection_marker(SelectionState::Full, true), "!");
+        assert_eq!(
+            management_selection_marker(SelectionState::Full, false),
+            "x"
+        );
+    }
+
+    #[test]
+    fn selection_marker_column_uses_equals_header_and_compact_values() {
+        let selection_column = management_columns()
+            .into_iter()
+            .find(|column| column.id == ManagementColumnId::Selection)
+            .expect("selection column");
+
+        assert_eq!(selection_column.header, "=");
+        assert_eq!(selection_column.min_width, 2);
+        assert_eq!(selection_column.constraint, Constraint::Length(2));
+        assert_eq!(
+            management_selection_marker(SelectionState::None, false),
+            "-"
         );
         assert_eq!(
-            management_selection_marker(SelectionState::Full, true),
-            "[!]"
+            management_selection_marker(SelectionState::Partial, false),
+            "~"
         );
         assert_eq!(
             management_selection_marker(SelectionState::Full, false),
-            "[x]"
+            "x"
         );
     }
 

@@ -1594,6 +1594,7 @@ pub struct FileBrowserUiState {
     pub search_mode: SearchMode,
     pub fetch_request_id: u64,
     pub browser_generation: u64,
+    pub return_to_torrent_management_on_close: bool,
 }
 
 impl Default for FileBrowserUiState {
@@ -1607,6 +1608,7 @@ impl Default for FileBrowserUiState {
             search_mode: SearchMode::Regex,
             fetch_request_id: 0,
             browser_generation: 0,
+            return_to_torrent_management_on_close: false,
         }
     }
 }
@@ -3830,6 +3832,8 @@ impl App {
         let Some(display) = self.app_state.torrents.get(&info_hash) else {
             return;
         };
+        let return_to_torrent_management_on_close =
+            matches!(self.app_state.mode, AppMode::TorrentManagement);
         let metrics = display.latest_state.clone();
         let mut preview_tree = display.file_preview_tree.clone();
         if preview_tree.is_empty() {
@@ -3877,6 +3881,10 @@ impl App {
         self.app_state.ui.file_browser.data.clear();
         self.app_state.ui.file_browser.search_state = BrowserSearchState::Closed;
         self.app_state.ui.file_browser.search_query.clear();
+        self.app_state
+            .ui
+            .file_browser
+            .return_to_torrent_management_on_close = return_to_torrent_management_on_close;
         self.app_state.ui.file_browser.browser_mode = FileBrowserMode::DownloadLocSelection {
             target: DownloadSelectionTarget::ExistingTorrent { info_hash },
             torrent_files: vec![],

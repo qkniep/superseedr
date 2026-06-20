@@ -1922,7 +1922,7 @@ pub async fn execute_browser_dialog_effects(app: &mut App, effects: Vec<BrowserD
                 );
             }
             BrowserDialogEffect::ToNormalAndClearPending => {
-                apply_browser_transition(app, BrowserTransition::ToNormal);
+                apply_browser_close_transition(app);
                 app.app_state.pending_torrent_path = None;
                 app.app_state.pending_torrent_link.clear();
             }
@@ -1941,6 +1941,10 @@ fn apply_browser_transition(app: &mut App, transition: BrowserTransition) {
                 .ui
                 .file_browser
                 .invalidate_browser_generation();
+            app.app_state
+                .ui
+                .file_browser
+                .return_to_torrent_management_on_close = false;
             app.app_state.mode = AppMode::Normal;
         }
         BrowserTransition::ToConfig => {
@@ -1948,9 +1952,34 @@ fn apply_browser_transition(app: &mut App, transition: BrowserTransition) {
                 .ui
                 .file_browser
                 .invalidate_browser_generation();
+            app.app_state
+                .ui
+                .file_browser
+                .return_to_torrent_management_on_close = false;
             app.app_state.mode = AppMode::Config;
         }
     }
+}
+
+fn apply_browser_close_transition(app: &mut App) {
+    let return_to_torrent_management = app
+        .app_state
+        .ui
+        .file_browser
+        .return_to_torrent_management_on_close;
+    app.app_state
+        .ui
+        .file_browser
+        .invalidate_browser_generation();
+    app.app_state
+        .ui
+        .file_browser
+        .return_to_torrent_management_on_close = false;
+    app.app_state.mode = if return_to_torrent_management {
+        AppMode::TorrentManagement
+    } else {
+        AppMode::Normal
+    };
 }
 
 pub fn confirm_config_path_selection(
@@ -2337,9 +2366,66 @@ pub fn apply_priority_cycle_to_all(nodes: &mut [RawNode<TorrentPreviewPayload>])
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{BrowserPane, ConfigItem, TorrentPreviewPayload};
+    use crate::app::{
+        AppRuntimeMode, BrowserPane, ConfigItem, TorrentMetrics, TorrentPreviewPayload,
+    };
+    use crate::config::Settings;
     use crate::tui::tree::{RawNode, TreeViewState};
+    use ratatui::crossterm::event::KeyModifiers;
     use std::path::PathBuf;
+
+    async fn app_with_existing_torrent(mode: AppMode) -> App {
+        let settings = Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        let info_hash = vec![7; 20];
+        app.app_state.mode = mode;
+        app.app_state.torrents.insert(
+            info_hash.clone(),
+            TorrentDisplayState {
+                latest_state: TorrentMetrics {
+                    info_hash: info_hash.clone(),
+                    torrent_name: "Sample Packet".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        app.open_existing_torrent_file_browser(info_hash);
+        app
+    }
+
+    #[tokio::test]
+    async fn escape_from_existing_torrent_browser_returns_to_torrent_management_origin() {
+        let mut app = app_with_existing_torrent(AppMode::TorrentManagement).await;
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &mut app,
+        )
+        .await;
+
+        assert!(matches!(app.app_state.mode, AppMode::TorrentManagement));
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn escape_from_normal_existing_torrent_browser_still_returns_to_normal() {
+        let mut app = app_with_existing_torrent(AppMode::Normal).await;
+
+        handle_event(
+            CrosstermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &mut app,
+        )
+        .await;
+
+        assert!(matches!(app.app_state.mode, AppMode::Normal));
+        let _ = app.shutdown_tx.send(());
+    }
 
     #[test]
     fn search_reducer_clears_on_escape() {

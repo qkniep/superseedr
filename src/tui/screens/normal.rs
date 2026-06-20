@@ -6597,13 +6597,6 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
                         torrent_column_id_for_index(visible_torrent_columns[pos - 1])
                             .map(SelectedHeader::Torrent)
                             .unwrap_or(SelectedHeader::Torrent(column_id))
-                    } else if selected_torrent_has_peers {
-                        visible_peer_columns
-                            .last()
-                            .copied()
-                            .and_then(peer_column_id_for_index)
-                            .map(SelectedHeader::Peer)
-                            .unwrap_or(SelectedHeader::Torrent(column_id))
                     } else {
                         SelectedHeader::Torrent(column_id)
                     }
@@ -6663,12 +6656,7 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
                             .map(SelectedHeader::Peer)
                             .unwrap_or(SelectedHeader::Peer(column_id))
                     } else {
-                        visible_torrent_columns
-                            .first()
-                            .copied()
-                            .and_then(torrent_column_id_for_index)
-                            .map(SelectedHeader::Torrent)
-                            .unwrap_or(SelectedHeader::Torrent(ColumnId::Name))
+                        SelectedHeader::Peer(column_id)
                     }
                 }
             };
@@ -7167,6 +7155,66 @@ mod tests {
         assert!(result.redraw);
         assert_eq!(app_state.ui.selected_torrent_index, 1);
         assert_eq!(app_state.ui.selected_peer_index, 0);
+    }
+
+    #[test]
+    fn reducer_left_from_first_torrent_column_does_not_wrap_to_peer_table() {
+        let mut app_state = create_test_app_state();
+        app_state.ui.selected_torrent_index = 0;
+        app_state.ui.selected_header = SelectedHeader::Torrent(ColumnId::Name);
+
+        let result = reduce_ui_action(&mut app_state, UiAction::Navigate(KeyCode::Left));
+
+        assert!(result.redraw);
+        assert_eq!(
+            app_state.ui.selected_header,
+            SelectedHeader::Torrent(ColumnId::Name)
+        );
+    }
+
+    #[test]
+    fn reducer_right_from_last_peer_column_does_not_wrap_to_torrent_list() {
+        let mut app_state = create_test_app_state();
+        app_state.ui.selected_torrent_index = 0;
+        app_state.ui.selected_header = SelectedHeader::Peer(PeerColumnId::Action);
+
+        let result = reduce_ui_action(&mut app_state, UiAction::Navigate(KeyCode::Right));
+
+        assert!(result.redraw);
+        assert_eq!(
+            app_state.ui.selected_header,
+            SelectedHeader::Peer(PeerColumnId::Action)
+        );
+    }
+
+    #[test]
+    fn reducer_right_from_last_torrent_column_still_enters_peer_table() {
+        let mut app_state = create_test_app_state();
+        app_state.ui.selected_torrent_index = 0;
+        app_state.ui.selected_header = SelectedHeader::Torrent(ColumnId::Name);
+
+        let result = reduce_ui_action(&mut app_state, UiAction::Navigate(KeyCode::Right));
+
+        assert!(result.redraw);
+        assert_eq!(
+            app_state.ui.selected_header,
+            SelectedHeader::Peer(PeerColumnId::Flags)
+        );
+    }
+
+    #[test]
+    fn reducer_left_from_first_peer_column_still_returns_to_torrent_list() {
+        let mut app_state = create_test_app_state();
+        app_state.ui.selected_torrent_index = 0;
+        app_state.ui.selected_header = SelectedHeader::Peer(PeerColumnId::Flags);
+
+        let result = reduce_ui_action(&mut app_state, UiAction::Navigate(KeyCode::Left));
+
+        assert!(result.redraw);
+        assert_eq!(
+            app_state.ui.selected_header,
+            SelectedHeader::Torrent(ColumnId::Name)
+        );
     }
 
     #[test]
