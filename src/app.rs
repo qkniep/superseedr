@@ -3590,8 +3590,7 @@ impl App {
         };
 
         if self.client_configs.always_show_add_location_prompt
-            && !is_host_watch_path
-            && !is_shared_inbox_path
+            && (!is_shared_inbox_path || matches!(self.runtime_mode, AppRuntimeMode::SharedLeader))
         {
             return AddIngressAction::OpenManualBrowser { payload };
         }
@@ -12476,6 +12475,93 @@ mod tests {
 
         assert_eq!(path, default_download_folder);
         let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn missing_default_download_folder_routes_magnet_to_manual_browser() {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let magnet_path = temp_dir.path().join("manual-input.magnet");
+        std::fs::write(
+            &magnet_path,
+            "magnet:?xt=urn:btih:5555555555555555555555555555555555555555",
+        )
+        .expect("write magnet");
+        let settings = crate::config::Settings {
+            client_port: 0,
+            default_download_folder: None,
+            always_show_add_location_prompt: false,
+            ..Default::default()
+        };
+        let app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+
+        let action = app.resolve_add_ingress_action(IngestSource::MagnetFile, &magnet_path);
+
+        assert!(matches!(
+            action,
+            super::AddIngressAction::OpenManualBrowser { .. }
+        ));
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn shared_leader_always_show_prompt_overrides_shared_inbox_magnet_fast_path() {
+        let _guard = lock_shared_env();
+        let shared_root = tempfile::tempdir().expect("create shared root");
+        let effective_root = shared_root.path().join("superseedr-config");
+        let original_shared_dir = env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let original_host_id = env::var_os("SUPERSEEDR_SHARED_HOST_ID");
+
+        env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", shared_root.path());
+        env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
+        clear_shared_config_state_for_tests();
+
+        std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
+            .expect("create hosts dir");
+        std::fs::write(
+            effective_root
+                .join("hosts")
+                .join("node-a")
+                .join("config.toml"),
+            "client_port = 0\ndefault_download_folder = '/tmp/superseedr-test-downloads'\nalways_show_add_location_prompt = true\n",
+        )
+        .expect("write host config");
+        let inbox = effective_root.join("inbox");
+        std::fs::create_dir_all(&inbox).expect("create shared inbox");
+        let magnet_path = inbox.join("manual-input.magnet");
+        std::fs::write(
+            &magnet_path,
+            "magnet:?xt=urn:btih:5555555555555555555555555555555555555555",
+        )
+        .expect("write magnet");
+
+        let app = App::new(
+            crate::config::load_settings().expect("load shared settings"),
+            AppRuntimeMode::SharedLeader,
+        )
+        .await
+        .expect("build shared app");
+
+        let action = app.resolve_add_ingress_action(IngestSource::MagnetFile, &magnet_path);
+
+        assert!(matches!(
+            action,
+            super::AddIngressAction::OpenManualBrowser { .. }
+        ));
+
+        let _ = app.shutdown_tx.send(());
+        if let Some(value) = original_shared_dir {
+            env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+        }
+        if let Some(value) = original_host_id {
+            env::set_var("SUPERSEEDR_SHARED_HOST_ID", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
+        }
+        clear_shared_config_state_for_tests();
     }
 
     #[test]
