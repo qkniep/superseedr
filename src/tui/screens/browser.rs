@@ -5,6 +5,7 @@ use crate::app::{
     refresh_torrent_preview_directory_priorities, App, AppCommand, AppMode, BrowserPane,
     BrowserSearchState, ConfigItem, ConfigUiState, DownloadSelectionTarget, FileBrowserMode,
     FileMetadata, FilePriority, SearchMode, TorrentDisplayState, TorrentPreviewPayload,
+    AWAITING_MAGNET_METADATA_LABEL,
 };
 use crate::integrations::control::{ControlFilePriorityOverride, ControlRequest};
 use crate::theme::ThemeContext;
@@ -2193,6 +2194,13 @@ pub fn build_download_confirm_payload(
         ..
     } = browser_mode
     {
+        if matches!(target, DownloadSelectionTarget::PendingAdd)
+            && preview_tree.is_empty()
+            && container_name == AWAITING_MAGNET_METADATA_LABEL
+        {
+            return None;
+        }
+
         let base_path = state.current_path.clone();
         let container_name_to_use = if *use_container {
             Some(container_name.clone())
@@ -2220,7 +2228,8 @@ pub fn pending_link_info_hash(pending_torrent_link: &str) -> Option<Vec<u8>> {
     if pending_torrent_link.is_empty() {
         return None;
     }
-    crate::app::parse_hybrid_hashes(pending_torrent_link).0
+    let (btih, btmh) = crate::app::parse_hybrid_hashes(pending_torrent_link);
+    btih.or(btmh)
 }
 
 pub fn cleanup_pending_link_on_escape(
@@ -3596,6 +3605,38 @@ mod tests {
         assert!(txs.is_empty());
         assert!(torrents.is_empty());
         assert!(order.is_empty());
+    }
+
+    #[test]
+    fn awaiting_magnet_metadata_cannot_confirm_as_container_name() {
+        let mode = FileBrowserMode::DownloadLocSelection {
+            target: DownloadSelectionTarget::PendingAdd,
+            torrent_files: vec![],
+            container_name: AWAITING_MAGNET_METADATA_LABEL.to_string(),
+            use_container: true,
+            is_editing_name: false,
+            focused_pane: BrowserPane::FileSystem,
+            preview_tree: vec![],
+            preview_state: TreeViewState::default(),
+            cursor_pos: 1,
+            original_name_backup: AWAITING_MAGNET_METADATA_LABEL.to_string(),
+        };
+        let state = TreeViewState::default();
+
+        assert!(build_download_confirm_payload(&state, &mode).is_none());
+    }
+
+    #[test]
+    fn pending_link_info_hash_falls_back_to_btmh_only_magnet() {
+        let pending_link = concat!(
+            "magnet:?xt=urn:btmh:1220",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+
+        let info_hash = pending_link_info_hash(pending_link).expect("btmh-only info hash");
+
+        assert_eq!(info_hash.len(), 20);
+        assert!(info_hash.iter().all(|byte| *byte == 0xaa));
     }
 
     #[test]

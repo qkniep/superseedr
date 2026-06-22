@@ -8,8 +8,9 @@ use crate::app::swarm_availability_counts;
 use crate::app::torrent_completion_percent;
 use crate::app::torrent_is_effectively_incomplete;
 use crate::app::AppCommand;
-use crate::app::BrowserPane;
+
 use crate::app::ChartPanelView;
+use crate::app::FileBrowserMode;
 use crate::app::FilePriority;
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
@@ -18,7 +19,6 @@ use crate::app::{
     App, AppMode, AppState, ConfigItem, RssScreen, SelectedHeader, TorrentControlState,
     TorrentDisplayState,
 };
-use crate::app::{DownloadSelectionTarget, FileBrowserMode};
 use crate::config::{PeerSortColumn, Settings, SortDirection, TorrentSortColumn};
 use crate::dht_service::{DhtStatus, DhtWaveTelemetry};
 use crate::integrations::control::ControlRequest;
@@ -6743,30 +6743,12 @@ async fn handle_pasted_text(app: &mut App, pasted_text: &str) {
                     AppCommand::SubmitControlRequest(request),
                 );
             } else {
-                app.app_state.pending_torrent_link = magnet_link.to_string();
-                let initial_path = app.get_initial_destination_path();
-                let browser_generation = app.app_state.ui.file_browser.next_browser_generation();
-                spawn_app_command_sender(
-                    app.app_command_tx.clone(),
-                    app.shutdown_tx.subscribe(),
-                    AppCommand::FetchFileTree {
-                        browser_generation,
-                        path: initial_path,
-                        browser_mode: FileBrowserMode::DownloadLocSelection {
-                            target: DownloadSelectionTarget::PendingAdd,
-                            torrent_files: vec![],
-                            container_name: String::new(),
-                            use_container: false,
-                            is_editing_name: false,
-                            focused_pane: BrowserPane::FileSystem,
-                            preview_tree: Vec::new(),
-                            preview_state: TreeViewState::default(),
-                            cursor_pos: 0,
-                            original_name_backup: "Magnet Download".to_string(),
-                        },
-                        highlight_path: None,
-                    },
-                );
+                if let Err(message) = app
+                    .open_manual_magnet_browser(magnet_link.to_string())
+                    .await
+                {
+                    app.app_state.system_error = Some(message);
+                }
             }
         }
         PastedContent::TorrentFile(path) => {

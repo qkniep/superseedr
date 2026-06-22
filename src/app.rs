@@ -471,6 +471,8 @@ pub enum DownloadSelectionTarget {
     },
 }
 
+pub(crate) const AWAITING_MAGNET_METADATA_LABEL: &str = "awaiting magnet metadata...";
+
 #[derive(Default, Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum FileBrowserMode {
@@ -1710,6 +1712,22 @@ pub fn refresh_torrent_preview_directory_priorities(nodes: &mut [RawNode<Torrent
     for node in nodes {
         refresh_torrent_preview_node_priority(node);
     }
+}
+
+pub fn apply_torrent_preview_file_priorities(
+    nodes: &mut [RawNode<TorrentPreviewPayload>],
+    file_priorities: &HashMap<usize, FilePriority>,
+) {
+    for node in nodes.iter_mut() {
+        if let Some(file_index) = node.payload.file_index {
+            node.payload.priority = file_priorities
+                .get(&file_index)
+                .copied()
+                .unwrap_or(FilePriority::Normal);
+        }
+        apply_torrent_preview_file_priorities(&mut node.children, file_priorities);
+    }
+    refresh_torrent_preview_directory_priorities(nodes);
 }
 
 fn refresh_torrent_preview_node_priority(
@@ -3590,6 +3608,7 @@ impl App {
         };
 
         if self.client_configs.always_show_add_location_prompt
+            && !is_host_watch_path
             && (!is_shared_inbox_path || matches!(self.runtime_mode, AppRuntimeMode::SharedLeader))
         {
             return AddIngressAction::OpenManualBrowser { payload };
@@ -3767,7 +3786,7 @@ impl App {
         Ok(())
     }
 
-    fn open_manual_browser_for_payload(
+    async fn open_manual_browser_for_payload(
         &mut self,
         source: IngestSource,
         payload: ResolvedAddPayload,
@@ -3802,29 +3821,60 @@ impl App {
                 }
             }
             ResolvedAddPayload::MagnetLink { magnet_link } => {
-                self.app_state.pending_torrent_link = magnet_link;
+                self.app_state.pending_torrent_link = magnet_link.clone();
+                let (btih, btmh) = parse_hybrid_hashes(&magnet_link);
+                let pending_info_hash = btih.or(btmh);
                 let initial_path = self.get_initial_destination_path();
                 let browser_generation = self.app_state.ui.file_browser.next_browser_generation();
-                self.queue_app_command(AppCommand::FetchFileTree {
+                self.start_file_browser_fetch(
                     browser_generation,
-                    path: initial_path,
-                    browser_mode: FileBrowserMode::DownloadLocSelection {
+                    initial_path,
+                    FileBrowserMode::DownloadLocSelection {
                         target: DownloadSelectionTarget::PendingAdd,
                         torrent_files: vec![],
-                        container_name: "Magnet Download".to_string(),
+                        container_name: AWAITING_MAGNET_METADATA_LABEL.to_string(),
                         use_container: true,
                         is_editing_name: false,
                         preview_tree: Vec::new(),
                         preview_state: TreeViewState::default(),
                         focused_pane: BrowserPane::FileSystem,
                         cursor_pos: 0,
-                        original_name_backup: "Magnet Download".to_string(),
+                        original_name_backup: AWAITING_MAGNET_METADATA_LABEL.to_string(),
                     },
-                    highlight_path: None,
-                });
+                    None,
+                );
+                let ingest_result = self
+                    .add_magnet_torrent(
+                        "Fetching name...".to_string(),
+                        magnet_link,
+                        None,
+                        false,
+                        TorrentControlState::Running,
+                        HashMap::new(),
+                        None,
+                    )
+                    .await;
+                if let CommandIngestResult::Failed { message, .. }
+                | CommandIngestResult::Invalid { message, .. } = ingest_result
+                {
+                    self.app_state.system_error = Some(message);
+                } else if let Some(info_hash) = pending_info_hash {
+                    self.hydrate_pending_magnet_browser_from_display(&info_hash);
+                }
                 Ok(())
             }
         }
+    }
+
+    pub(crate) async fn open_manual_magnet_browser(
+        &mut self,
+        magnet_link: String,
+    ) -> Result<(), String> {
+        self.open_manual_browser_for_payload(
+            IngestSource::MagnetFile,
+            ResolvedAddPayload::MagnetLink { magnet_link },
+        )
+        .await
     }
 
     pub(crate) fn open_existing_torrent_file_browser(&mut self, info_hash: Vec<u8>) {
@@ -3992,7 +4042,7 @@ impl App {
                 self.archive_processed_ingest(source, &path);
             }
             AddIngressAction::OpenManualBrowser { payload } => {
-                if let Err(message) = self.open_manual_browser_for_payload(source, payload) {
+                if let Err(message) = self.open_manual_browser_for_payload(source, payload).await {
                     self.app_state.system_error = Some(message.clone());
                     self.record_ingest_result(
                         &path,
@@ -5473,64 +5523,12 @@ impl App {
                 browser_mode,
                 highlight_path,
             } => {
-                if browser_generation != self.app_state.ui.file_browser.browser_generation {
-                    tracing::debug!(
-                        target: "superseedr",
-                        browser_generation,
-                        current_browser_generation =
-                            self.app_state.ui.file_browser.browser_generation,
-                        ?path,
-                        "Ignoring stale file browser fetch"
-                    );
-                    return;
-                }
-
-                let tx = self.app_command_tx.clone();
-                let mut shutdown_rx = self.shutdown_tx.subscribe();
-                let path_clone = path.clone();
-                let highlight_clone = highlight_path.clone();
-                let request_id = self
-                    .app_state
-                    .ui
-                    .file_browser
-                    .fetch_request_id
-                    .wrapping_add(1);
-                self.app_state.ui.file_browser.fetch_request_id = request_id;
-
-                // 1. Update or Initialize the UI state immediately
-                if matches!(self.app_state.mode, AppMode::FileBrowser) {
-                    // If already in browser, just update the path we are viewing
-                    self.app_state.ui.file_browser.state.current_path = path.clone();
-                    self.app_state.ui.file_browser.browser_mode = browser_mode;
-                } else {
-                    // Otherwise, initialize the mode
-                    let mut tree_state = crate::tui::tree::TreeViewState::new();
-                    tree_state.current_path = path.clone();
-                    self.app_state.ui.file_browser.state = tree_state;
-                    self.app_state.ui.file_browser.data = Vec::new();
-                    self.app_state.ui.file_browser.browser_mode = browser_mode;
-                    self.app_state.mode = AppMode::FileBrowser;
-                }
-
-                // 2. Spawn the background crawl
-                tokio::spawn(async move {
-                    tokio::select! {
-                        result = build_fs_tree(&path_clone, 0) => {
-                            if let Ok(nodes) = result {
-                                // Pass the highlight_path back so the Update arm can find it
-                                let _ = tx.send(AppCommand::UpdateFileBrowserData {
-                                    request_id,
-                                    path: path_clone,
-                                    data: nodes,
-                                    highlight_path: highlight_clone
-                                }).await;
-                            }
-                        }
-                        _ = shutdown_rx.recv() => {
-                            tracing::debug!("Aborting FileBrowser crawl due to shutdown");
-                        }
-                    }
-                });
+                self.start_file_browser_fetch(
+                    browser_generation,
+                    path,
+                    browser_mode,
+                    highlight_path,
+                );
             }
 
             AppCommand::UpdateFileBrowserData {
@@ -6146,6 +6144,106 @@ impl App {
                 tracing_event!(Level::ERROR, "File watcher error: {}", e);
             }
         }
+    }
+
+    fn start_file_browser_fetch(
+        &mut self,
+        browser_generation: u64,
+        path: PathBuf,
+        browser_mode: FileBrowserMode,
+        highlight_path: Option<PathBuf>,
+    ) {
+        if browser_generation != self.app_state.ui.file_browser.browser_generation {
+            tracing::debug!(
+                target: "superseedr",
+                browser_generation,
+                current_browser_generation = self.app_state.ui.file_browser.browser_generation,
+                ?path,
+                "Ignoring stale file browser fetch"
+            );
+            return;
+        }
+
+        let tx = self.app_command_tx.clone();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let path_clone = path.clone();
+        let highlight_clone = highlight_path.clone();
+        let request_id = self
+            .app_state
+            .ui
+            .file_browser
+            .fetch_request_id
+            .wrapping_add(1);
+        self.app_state.ui.file_browser.fetch_request_id = request_id;
+
+        if matches!(self.app_state.mode, AppMode::FileBrowser) {
+            self.app_state.ui.file_browser.state.current_path = path.clone();
+            self.app_state.ui.file_browser.browser_mode = browser_mode;
+        } else {
+            let mut tree_state = crate::tui::tree::TreeViewState::new();
+            tree_state.current_path = path.clone();
+            self.app_state.ui.file_browser.state = tree_state;
+            self.app_state.ui.file_browser.data = Vec::new();
+            self.app_state.ui.file_browser.browser_mode = browser_mode;
+            self.app_state.mode = AppMode::FileBrowser;
+        }
+
+        tokio::spawn(async move {
+            tokio::select! {
+                result = build_fs_tree(&path_clone, 0) => {
+                    if let Ok(nodes) = result {
+                        let _ = tx.send(AppCommand::UpdateFileBrowserData {
+                            request_id,
+                            path: path_clone,
+                            data: nodes,
+                            highlight_path: highlight_clone,
+                        }).await;
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    tracing::debug!("Aborting FileBrowser crawl due to shutdown");
+                }
+            }
+        });
+    }
+
+    fn hydrate_pending_magnet_browser_from_display(&mut self, info_hash: &[u8]) {
+        let Some(display) = self.app_state.torrents.get(info_hash) else {
+            return;
+        };
+        if display.file_preview_tree.is_empty() {
+            return;
+        }
+
+        let FileBrowserMode::DownloadLocSelection {
+            target,
+            preview_tree,
+            preview_state,
+            container_name,
+            original_name_backup,
+            use_container,
+            ..
+        } = &mut self.app_state.ui.file_browser.browser_mode
+        else {
+            return;
+        };
+        if !matches!(target, DownloadSelectionTarget::PendingAdd) || !preview_tree.is_empty() {
+            return;
+        }
+
+        let info_hash_hex = hex::encode(info_hash);
+        let name = format!("{} [{}]", display.latest_state.torrent_name, info_hash_hex);
+        *container_name = name.clone();
+        *original_name_backup = name;
+        *use_container = display.latest_state.file_count.unwrap_or(1) > 1;
+        *preview_tree = display.file_preview_tree.clone();
+        if let Some(first) = preview_tree.first() {
+            preview_state.cursor_path = Some(std::path::PathBuf::from(&first.name));
+        }
+        for node in preview_tree.iter_mut() {
+            node.expand_all(preview_state);
+        }
+        self.app_state.ui.needs_redraw = true;
     }
 
     async fn handle_port_change(&mut self, path: PathBuf) {
@@ -7033,6 +7131,15 @@ impl App {
                 self.clear_display_only_torrent(&info_hash);
             } else {
                 if let Some(path) = download_path {
+                    if let Some(display) = self.app_state.torrents.get_mut(&info_hash) {
+                        display.latest_state.download_path = Some(path.clone());
+                        display.latest_state.container_name = container_name.clone();
+                        display.latest_state.file_priorities = file_priorities.clone();
+                        apply_torrent_preview_file_priorities(
+                            &mut display.file_preview_tree,
+                            &file_priorities,
+                        );
+                    }
                     if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
                         self.send_manager_command_until_shutdown(
                             manager_tx,
@@ -8969,10 +9076,11 @@ mod tests {
         PeerSortColumn, PersistPayload, ResolvedAddPayload, SelectedHeader, SortDirection,
         SwarmAvailabilityFlashState, TorrentControlState, TorrentDisplayState, TorrentMetrics,
         TorrentPreviewPayload, TorrentSortColumn, UiState, WakeLagPeerThrottle,
-        BITTORRENT_PROTOCOL_STR, DHT_WAVE_PHASE_WRAP_PERIOD, DISK_WRITE_THROTTLE_MIN_BYTES_PER_SEC,
-        DISK_WRITE_THROTTLE_START_BYTES_PER_SEC, DISK_WRITE_THROTTLE_STEP_MAX,
-        DISK_WRITE_THROTTLE_STEP_MIN, DISK_WRITE_THROTTLE_TARGET_LATENCY_SECS,
-        DISK_WRITE_THROTTLE_WINDOW_TICKS, SWARM_AVAILABILITY_FLASH_DURATION,
+        AWAITING_MAGNET_METADATA_LABEL, BITTORRENT_PROTOCOL_STR, DHT_WAVE_PHASE_WRAP_PERIOD,
+        DISK_WRITE_THROTTLE_MIN_BYTES_PER_SEC, DISK_WRITE_THROTTLE_START_BYTES_PER_SEC,
+        DISK_WRITE_THROTTLE_STEP_MAX, DISK_WRITE_THROTTLE_STEP_MIN,
+        DISK_WRITE_THROTTLE_TARGET_LATENCY_SECS, DISK_WRITE_THROTTLE_WINDOW_TICKS,
+        SWARM_AVAILABILITY_FLASH_DURATION,
     };
     use crate::config::{
         clear_shared_config_state_for_tests, set_app_paths_override_for_tests, TorrentSettings,
@@ -8991,6 +9099,7 @@ mod tests {
     use crate::torrent_manager::{
         FileProbeBatchResult, FileProbeEntry, ManagerCommand, ManagerEvent, TorrentFileProbeStatus,
     };
+    use crate::tui::screens::browser::{build_download_confirm_payload, execute_confirm_decision};
     use crate::tui::tree::RawNode;
     use std::collections::{HashMap, VecDeque};
     use std::env;
@@ -12441,6 +12550,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn always_show_prompt_preserves_host_watch_folder_fast_path() {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let watch_folder = temp_dir.path().join("watch");
+        let download_folder = temp_dir.path().join("downloads");
+        std::fs::create_dir_all(&watch_folder).expect("create watch folder");
+        let magnet_path = watch_folder.join("automation-input.magnet");
+        std::fs::write(
+            &magnet_path,
+            "magnet:?xt=urn:btih:5555555555555555555555555555555555555555",
+        )
+        .expect("write magnet");
+        let settings = crate::config::Settings {
+            client_port: 0,
+            watch_folder: Some(watch_folder),
+            default_download_folder: Some(download_folder.clone()),
+            always_show_add_location_prompt: true,
+            ..Default::default()
+        };
+        let app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+
+        let action = app.resolve_add_ingress_action(IngestSource::MagnetFile, &magnet_path);
+
+        assert!(matches!(
+            action,
+            super::AddIngressAction::ApplyDirectly { download_path, .. }
+                if download_path == download_folder
+        ));
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn interactive_add_prompt_starts_at_default_download_folder() {
         let temp_dir = tempfile::tempdir().expect("create tempdir");
         let default_download_folder = temp_dir.path().join("downloads");
@@ -12463,17 +12605,200 @@ mod tests {
                     .to_string(),
             },
         )
+        .await
         .expect("open manual browser");
 
-        let path = loop {
-            match app.app_command_rx.try_recv() {
-                Ok(AppCommand::FetchFileTree { path, .. }) => break path,
-                Ok(_) => continue,
-                Err(_) => panic!("expected file browser fetch command"),
-            }
+        assert_eq!(
+            app.app_state.ui.file_browser.state.current_path,
+            default_download_folder
+        );
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn manual_magnet_browser_shows_awaiting_metadata_and_starts_pending_runtime() {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let settings = crate::config::Settings {
+            client_port: 0,
+            default_download_folder: Some(temp_dir.path().join("downloads")),
+            always_show_add_location_prompt: true,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        while app.app_command_rx.try_recv().is_ok() {}
+
+        let magnet_link = "magnet:?xt=urn:btih:5555555555555555555555555555555555555555";
+        app.open_manual_magnet_browser(magnet_link.to_string())
+            .await
+            .expect("open manual magnet browser");
+
+        let info_hash = vec![0x55; 20];
+        assert_eq!(app.app_state.pending_torrent_link, magnet_link);
+        assert!(app.app_state.torrents.contains_key(&info_hash));
+        assert!(app.torrent_manager_command_txs.contains_key(&info_hash));
+
+        let FileBrowserMode::DownloadLocSelection {
+            target,
+            container_name,
+            original_name_backup,
+            preview_tree,
+            use_container,
+            ..
+        } = &app.app_state.ui.file_browser.browser_mode
+        else {
+            panic!("expected download location selection browser");
+        };
+        assert!(matches!(app.app_state.mode, AppMode::FileBrowser));
+        assert_eq!(target, &DownloadSelectionTarget::PendingAdd);
+        assert_eq!(container_name, AWAITING_MAGNET_METADATA_LABEL);
+        assert_eq!(original_name_backup, AWAITING_MAGNET_METADATA_LABEL);
+        assert!(preview_tree.is_empty());
+        assert!(*use_container);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn hydrated_pending_magnet_confirm_queues_selected_location_container_and_priorities() {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let selected_download_path = temp_dir.path().join("chosen-downloads");
+        let settings = crate::config::Settings {
+            client_port: 0,
+            default_download_folder: Some(temp_dir.path().join("downloads")),
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        while app.app_command_rx.try_recv().is_ok() {}
+
+        let magnet_link = "magnet:?xt=urn:btih:5555555555555555555555555555555555555555";
+        app.app_state.pending_torrent_link = magnet_link.to_string();
+        app.app_state.ui.file_browser.state.current_path = selected_download_path.clone();
+        let preview_tree = build_torrent_preview_tree(
+            vec![(vec!["folder".to_string(), "file.bin".to_string()], 42)],
+            &HashMap::from([(0, FilePriority::Skip)]),
+        );
+        app.app_state.ui.file_browser.browser_mode = FileBrowserMode::DownloadLocSelection {
+            target: DownloadSelectionTarget::PendingAdd,
+            torrent_files: vec![],
+            container_name: "Hydrated Magnet".to_string(),
+            use_container: true,
+            is_editing_name: false,
+            preview_tree,
+            preview_state: Default::default(),
+            focused_pane: BrowserPane::TorrentPreview,
+            cursor_pos: 0,
+            original_name_backup: "Hydrated Magnet".to_string(),
         };
 
-        assert_eq!(path, default_download_folder);
+        let payload = build_download_confirm_payload(
+            &app.app_state.ui.file_browser.state,
+            &app.app_state.ui.file_browser.browser_mode,
+        )
+        .expect("confirm payload");
+        let transition = execute_confirm_decision(
+            &mut app,
+            crate::tui::screens::browser::ConfirmDecision::Download(payload),
+        )
+        .await;
+
+        assert!(matches!(
+            transition,
+            Some(crate::tui::screens::browser::BrowserTransition::ToNormal)
+        ));
+        let command = time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(command) = app.app_command_rx.recv().await {
+                    if matches!(command, AppCommand::SubmitControlRequest(_)) {
+                        break command;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("queued submit control request");
+
+        let AppCommand::SubmitControlRequest(ControlRequest::AddMagnet {
+            magnet_link: queued_link,
+            download_path,
+            container_name,
+            file_priorities,
+            ..
+        }) = command
+        else {
+            panic!("expected add magnet control request");
+        };
+        assert_eq!(queued_link, magnet_link);
+        assert_eq!(download_path, Some(selected_download_path));
+        assert_eq!(container_name, Some("Hydrated Magnet".to_string()));
+        assert_eq!(file_priorities.len(), 1);
+        assert_eq!(file_priorities[0].file_index, 0);
+        assert_eq!(file_priorities[0].priority, FilePriority::Skip);
+        assert!(app.app_state.pending_torrent_link.is_empty());
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn duplicate_magnet_config_update_persists_file_priorities_in_app_state() {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let initial_download_path = temp_dir.path().join("initial-downloads");
+        let selected_download_path = temp_dir.path().join("chosen-downloads");
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        let magnet_link = "magnet:?xt=urn:btih:5555555555555555555555555555555555555555";
+
+        let first = app
+            .add_magnet_torrent(
+                "Fetching name...".to_string(),
+                magnet_link.to_string(),
+                Some(initial_download_path),
+                false,
+                TorrentControlState::Running,
+                HashMap::new(),
+                None,
+            )
+            .await;
+        assert!(matches!(first, CommandIngestResult::Added { .. }));
+
+        let selected_priorities = HashMap::from([(0, FilePriority::Skip), (2, FilePriority::High)]);
+        let second = app
+            .add_magnet_torrent(
+                "Hydrated Magnet".to_string(),
+                magnet_link.to_string(),
+                Some(selected_download_path.clone()),
+                false,
+                TorrentControlState::Running,
+                selected_priorities.clone(),
+                Some("Hydrated Magnet".to_string()),
+            )
+            .await;
+
+        let info_hash = vec![0x55; 20];
+        assert!(matches!(second, CommandIngestResult::Duplicate { .. }));
+        let display = app
+            .app_state
+            .torrents
+            .get(&info_hash)
+            .expect("existing preview torrent should remain in app state");
+        assert_eq!(
+            display.latest_state.download_path,
+            Some(selected_download_path)
+        );
+        assert_eq!(
+            display.latest_state.container_name,
+            Some("Hydrated Magnet".to_string())
+        );
+        assert_eq!(display.latest_state.file_priorities, selected_priorities);
+
         let _ = app.shutdown_tx.send(());
     }
 
