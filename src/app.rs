@@ -935,6 +935,7 @@ pub enum ConfigItem {
     ClientPort,
     DefaultDownloadFolder,
     WatchFolder,
+    UiLayoutMode,
     AlwaysShowAddLocationPrompt,
     GlobalDownloadLimit,
     GlobalUploadLimit,

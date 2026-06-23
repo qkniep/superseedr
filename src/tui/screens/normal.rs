@@ -631,8 +631,12 @@ pub fn reduce_ui_action(app_state: &mut AppState, action: UiAction) -> ReduceRes
             }
         }
         UiAction::SortBySelectedColumn => {
-            let layout_ctx =
-                LayoutContext::new(app_state.screen_area, app_state, DEFAULT_SIDEBAR_PERCENT);
+            let layout_ctx = LayoutContext::new(
+                app_state.screen_area,
+                app_state,
+                crate::config::UiLayoutMode::Auto,
+                DEFAULT_SIDEBAR_PERCENT,
+            );
             let layout_plan = calculate_layout(app_state.screen_area, &layout_ctx);
             let (_, visible_torrent_columns) =
                 compute_visible_torrent_columns(app_state, layout_plan.list.width);
@@ -4086,8 +4090,7 @@ pub fn draw_block_stream_and_disk_orb(
                 draw_disk_health_panel(f, app_state, split[2], ctx);
             } else {
                 let split =
-                    Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)])
-                        .split(area);
+                    Layout::vertical([Constraint::Min(4), Constraint::Length(7)]).split(area);
                 draw_vertical_block_stream_panel(f, app_state, split[0], ctx);
                 draw_disk_health_panel(f, app_state, split[1], ctx);
             }
@@ -4099,9 +4102,15 @@ pub fn draw_block_stream_and_disk_orb(
 }
 
 fn should_insert_dht_between_blocks_and_disk(screen_area: Rect, area: Rect) -> bool {
+    const MIN_STACKED_BLOCK_HEIGHT: u16 = 4;
+    const MIN_DHT_HEIGHT: u16 = 6;
+    const MIN_DISK_PANEL_HEIGHT: u16 = 7;
+
     let is_horizontal_mode =
         screen_area.width >= 100 && (screen_area.height as f32 <= screen_area.width as f32 * 0.6);
-    is_horizontal_mode && area.height >= 14 && area.width >= 10
+    is_horizontal_mode
+        && area.height >= MIN_STACKED_BLOCK_HEIGHT + MIN_DHT_HEIGHT + MIN_DISK_PANEL_HEIGHT
+        && area.width >= 10
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4114,6 +4123,8 @@ enum BlockStreamDiskLayoutMode {
 fn block_stream_and_disk_layout_mode(screen_area: Rect, area: Rect) -> BlockStreamDiskLayoutMode {
     const FORCE_STACKED_WIDTH: u16 = 34;
     const HIDE_BLOCKS_SCREEN_WIDTH: u16 = 64;
+    const MIN_STACKED_BLOCK_HEIGHT: u16 = 4;
+    const MIN_DISK_PANEL_HEIGHT: u16 = 7;
 
     // Decide split shape using the local pane geometry first; global screen mode can be too coarse
     // and causes unreadable side-by-side micro-panels at transition widths.
@@ -4121,6 +4132,10 @@ fn block_stream_and_disk_layout_mode(screen_area: Rect, area: Rect) -> BlockStre
         area.width < FORCE_STACKED_WIDTH || area.height > area.width.saturating_mul(2);
     let is_vertical_mode =
         screen_area.width < 100 || (screen_area.height as f32 > screen_area.width as f32 * 0.6);
+
+    if force_stacked && area.height < MIN_STACKED_BLOCK_HEIGHT + MIN_DISK_PANEL_HEIGHT {
+        return BlockStreamDiskLayoutMode::DiskOnly;
+    }
 
     if is_vertical_mode && force_stacked && screen_area.width < HIDE_BLOCKS_SCREEN_WIDTH {
         return BlockStreamDiskLayoutMode::DiskOnly;
@@ -6540,7 +6555,12 @@ pub(crate) fn handle_navigation(app_state: &mut AppState, key_code: KeyCode) {
     let selected_torrent_peer_count =
         selected_torrent.map_or(0, |torrent| torrent.latest_state.peers.len());
 
-    let layout_ctx = LayoutContext::new(app_state.screen_area, app_state, DEFAULT_SIDEBAR_PERCENT);
+    let layout_ctx = LayoutContext::new(
+        app_state.screen_area,
+        app_state,
+        crate::config::UiLayoutMode::Auto,
+        DEFAULT_SIDEBAR_PERCENT,
+    );
     let layout_plan = calculate_layout(app_state.screen_area, &layout_ctx);
     let (_, visible_torrent_columns) =
         compute_visible_torrent_columns(app_state, layout_plan.list.width);
@@ -9482,6 +9502,13 @@ mod tests {
         let mode =
             block_stream_and_disk_layout_mode(Rect::new(0, 0, 64, 90), Rect::new(0, 0, 33, 18));
         assert_eq!(mode, BlockStreamDiskLayoutMode::Stacked);
+    }
+
+    #[test]
+    fn block_stream_and_disk_layout_uses_disk_only_when_stacked_area_is_too_short() {
+        let mode =
+            block_stream_and_disk_layout_mode(Rect::new(0, 0, 90, 70), Rect::new(0, 0, 17, 10));
+        assert_eq!(mode, BlockStreamDiskLayoutMode::DiskOnly);
     }
 
     #[test]
