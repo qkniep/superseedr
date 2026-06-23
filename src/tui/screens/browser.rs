@@ -2114,7 +2114,6 @@ pub async fn execute_confirm_decision(
                         AppCommand::SubmitControlRequest(request),
                     );
                     app.app_state.pending_torrent_link.clear();
-                    app.app_state.pending_magnet_preview_info_hash = None;
                 } else {
                     tracing::warn!(target: "superseedr", "SHIFT+Y pressed but no pending content was found");
                 }
@@ -2177,16 +2176,16 @@ pub fn build_download_confirm_payload(
         ..
     } = browser_mode
     {
-        if matches!(target, DownloadSelectionTarget::PendingAdd)
-            && preview_tree.is_empty()
-            && container_name == AWAITING_MAGNET_METADATA_LABEL
-        {
-            return None;
-        }
-
         let base_path = state.current_path.clone();
+        let is_unhydrated_pending_magnet = matches!(target, DownloadSelectionTarget::PendingAdd)
+            && preview_tree.is_empty()
+            && container_name == AWAITING_MAGNET_METADATA_LABEL;
         let container_name_to_use = if *use_container {
-            Some(container_name.clone())
+            if is_unhydrated_pending_magnet {
+                None
+            } else {
+                Some(container_name.clone())
+            }
         } else {
             Some(String::new())
         };
@@ -3527,7 +3526,7 @@ mod tests {
     }
 
     #[test]
-    fn awaiting_magnet_metadata_cannot_confirm_as_container_name() {
+    fn awaiting_magnet_metadata_confirms_without_placeholder_container_name() {
         let mode = FileBrowserMode::DownloadLocSelection {
             target: DownloadSelectionTarget::PendingAdd,
             torrent_files: vec![],
@@ -3542,7 +3541,34 @@ mod tests {
         };
         let state = TreeViewState::default();
 
-        assert!(build_download_confirm_payload(&state, &mode).is_none());
+        let payload = build_download_confirm_payload(&state, &mode)
+            .expect("unhydrated magnet can still be confirmed");
+
+        assert_eq!(payload.container_name_to_use, None);
+        assert!(payload.file_priorities.is_empty());
+        assert!(!payload.has_preview_files);
+    }
+
+    #[test]
+    fn awaiting_magnet_metadata_confirm_keeps_disabled_container_empty() {
+        let mode = FileBrowserMode::DownloadLocSelection {
+            target: DownloadSelectionTarget::PendingAdd,
+            torrent_files: vec![],
+            container_name: AWAITING_MAGNET_METADATA_LABEL.to_string(),
+            use_container: false,
+            is_editing_name: false,
+            focused_pane: BrowserPane::FileSystem,
+            preview_tree: vec![],
+            preview_state: TreeViewState::default(),
+            cursor_pos: 1,
+            original_name_backup: AWAITING_MAGNET_METADATA_LABEL.to_string(),
+        };
+        let state = TreeViewState::default();
+
+        let payload = build_download_confirm_payload(&state, &mode)
+            .expect("unhydrated magnet can be confirmed without a container");
+
+        assert_eq!(payload.container_name_to_use, Some(String::new()));
     }
 
     #[test]

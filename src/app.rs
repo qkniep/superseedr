@@ -4157,6 +4157,26 @@ impl App {
         }
     }
 
+    fn clear_pending_magnet_preview_if_applied(&mut self, result: &CommandIngestResult) {
+        let applied_info_hash = match result {
+            CommandIngestResult::Added {
+                info_hash: Some(info_hash),
+                ..
+            }
+            | CommandIngestResult::Duplicate {
+                info_hash: Some(info_hash),
+                ..
+            } => info_hash,
+            _ => return,
+        };
+
+        if self.app_state.pending_magnet_preview_info_hash.as_deref()
+            == Some(applied_info_hash.as_slice())
+        {
+            self.app_state.pending_magnet_preview_info_hash = None;
+        }
+    }
+
     async fn maybe_promote_to_shared_leader(&mut self) {
         if !self.is_current_shared_follower() {
             return;
@@ -7878,6 +7898,7 @@ impl App {
                 validation_status,
                 file_priorities,
             } => {
+                let has_applied_download_path = download_path.is_some();
                 let ingest_result = self
                     .add_magnet_torrent(
                         "Fetching name...".to_string(),
@@ -7893,6 +7914,9 @@ impl App {
                     ingest_result,
                     CommandIngestResult::Added { .. } | CommandIngestResult::Duplicate { .. }
                 ) {
+                    if has_applied_download_path {
+                        self.clear_pending_magnet_preview_if_applied(&ingest_result);
+                    }
                     self.save_state_to_disk();
                     self.trigger_status_dump_after_successful_cluster_mutation();
                 }
@@ -8926,12 +8950,24 @@ fn build_persist_payload(
         .collect();
     let previous_torrents = client_configs.torrents.clone();
     let deferred_hashes: HashSet<Vec<u8>> = startup_deferred_load_queue.iter().cloned().collect();
-    let mut persisted_info_hashes: HashSet<Vec<u8>> = app_state.torrents.keys().cloned().collect();
+    let pending_preview_info_hash = app_state.pending_magnet_preview_info_hash.clone();
+    let is_pending_preview =
+        |info_hash: &[u8]| pending_preview_info_hash.as_deref() == Some(info_hash);
+    let mut persisted_info_hashes: HashSet<Vec<u8>> = app_state
+        .torrents
+        .keys()
+        .filter(|info_hash| !is_pending_preview(info_hash.as_slice()))
+        .cloned()
+        .collect();
 
     let mut persisted_torrents: Vec<TorrentSettings> = app_state
         .torrents
-        .values()
-        .map(|torrent| {
+        .iter()
+        .filter_map(|(info_hash, torrent)| {
+            if is_pending_preview(info_hash) {
+                return None;
+            }
+
             let torrent_state = &torrent.latest_state;
             let previous_validation_status = old_validation_statuses
                 .get(&torrent_state.torrent_or_magnet)
@@ -8941,7 +8977,7 @@ fn build_persist_payload(
             let final_validation_status =
                 persisted_validation_status_from_metrics(torrent_state, previous_validation_status);
 
-            TorrentSettings {
+            Some(TorrentSettings {
                 torrent_or_magnet: torrent_state.torrent_or_magnet.clone(),
                 name: torrent_state.torrent_name.clone(),
                 added_at_unix_secs: torrent.added_at_unix_secs.or_else(|| {
@@ -8956,7 +8992,7 @@ fn build_persist_payload(
                 torrent_control_state: torrent_state.torrent_control_state.clone(),
                 delete_files: torrent_state.delete_files,
                 file_priorities: torrent_state.file_priorities.clone(),
-            }
+            })
         })
         .collect();
 
@@ -9803,6 +9839,36 @@ mod tests {
             torrent.torrent_or_magnet == loaded_magnet
                 && torrent.added_at_unix_secs == Some(1_700_000_000)
         }));
+    }
+
+    #[test]
+    fn build_persist_payload_skips_pending_magnet_preview_runtime() {
+        let info_hash = vec![0x55; 20];
+        let magnet = "magnet:?xt=urn:btih:5555555555555555555555555555555555555555".to_string();
+        let mut settings = crate::config::Settings::default();
+        let mut app_state = AppState {
+            pending_magnet_preview_info_hash: Some(info_hash.clone()),
+            ..Default::default()
+        };
+        app_state.torrents.insert(
+            info_hash.clone(),
+            TorrentDisplayState {
+                latest_state: TorrentMetrics {
+                    info_hash: info_hash.clone(),
+                    torrent_or_magnet: magnet,
+                    torrent_name: "sample-preview".to_string(),
+                    torrent_control_state: TorrentControlState::Running,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        app_state.torrent_list_order.push(info_hash.clone());
+
+        let payload = build_persist_payload(&mut settings, &mut app_state, &VecDeque::new());
+
+        assert!(payload.settings.torrents.is_empty());
+        assert!(app_state.torrents.contains_key(&info_hash));
     }
 
     #[test]
@@ -13018,7 +13084,26 @@ mod tests {
         while app.app_command_rx.try_recv().is_ok() {}
 
         let magnet_link = "magnet:?xt=urn:btih:5555555555555555555555555555555555555555";
+        let info_hash = vec![0x55; 20];
         app.app_state.pending_torrent_link = magnet_link.to_string();
+        app.app_state.pending_magnet_preview_info_hash = Some(info_hash.clone());
+        app.app_state.torrents.insert(
+            info_hash.clone(),
+            TorrentDisplayState {
+                latest_state: TorrentMetrics {
+                    info_hash: info_hash.clone(),
+                    torrent_or_magnet: magnet_link.to_string(),
+                    torrent_name: "sample-preview".to_string(),
+                    torrent_control_state: TorrentControlState::Running,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        app.app_state.torrent_list_order.push(info_hash.clone());
+        let (manager_tx, mut manager_rx) = mpsc::channel(1);
+        app.torrent_manager_command_txs
+            .insert(info_hash.clone(), manager_tx);
         app.app_state.ui.file_browser.state.current_path = selected_download_path.clone();
         let preview_tree = build_torrent_preview_tree(
             vec![(vec!["folder".to_string(), "file.bin".to_string()], 42)],
@@ -13070,17 +13155,82 @@ mod tests {
             container_name,
             file_priorities,
             ..
-        }) = command
+        }) = &command
         else {
             panic!("expected add magnet control request");
         };
-        assert_eq!(queued_link, magnet_link);
-        assert_eq!(download_path, Some(selected_download_path));
-        assert_eq!(container_name, Some("Hydrated Magnet".to_string()));
+        assert_eq!(queued_link.as_str(), magnet_link);
+        assert_eq!(download_path.as_ref(), Some(&selected_download_path));
+        assert_eq!(container_name.as_deref(), Some("Hydrated Magnet"));
         assert_eq!(file_priorities.len(), 1);
         assert_eq!(file_priorities[0].file_index, 0);
         assert_eq!(file_priorities[0].priority, FilePriority::Skip);
         assert!(app.app_state.pending_torrent_link.is_empty());
+        assert_eq!(
+            app.app_state.pending_magnet_preview_info_hash,
+            Some(info_hash.clone())
+        );
+
+        let mut pending_settings = app.client_configs.clone();
+        let pending_payload =
+            build_persist_payload(&mut pending_settings, &mut app.app_state, &VecDeque::new());
+        assert!(pending_payload.settings.torrents.is_empty());
+
+        app.handle_app_command(command).await;
+
+        let manager_command = manager_rx
+            .try_recv()
+            .expect("selected magnet config should be sent to preview runtime");
+        match manager_command {
+            ManagerCommand::SetUserTorrentConfig {
+                torrent_data_path,
+                file_priorities,
+                container_name,
+            } => {
+                assert_eq!(torrent_data_path, selected_download_path);
+                assert_eq!(container_name.as_deref(), Some("Hydrated Magnet"));
+                assert_eq!(file_priorities, HashMap::from([(0, FilePriority::Skip)]));
+            }
+            other => panic!("unexpected manager command: {:?}", other),
+        }
+        assert!(app.app_state.pending_magnet_preview_info_hash.is_none());
+
+        let display = app
+            .app_state
+            .torrents
+            .get(&info_hash)
+            .expect("configured magnet should remain in app state");
+        assert_eq!(
+            display.latest_state.download_path.as_ref(),
+            Some(&selected_download_path)
+        );
+        assert_eq!(
+            display.latest_state.container_name.as_deref(),
+            Some("Hydrated Magnet")
+        );
+        assert_eq!(
+            display.latest_state.file_priorities,
+            HashMap::from([(0, FilePriority::Skip)])
+        );
+
+        let mut applied_settings = app.client_configs.clone();
+        let applied_payload =
+            build_persist_payload(&mut applied_settings, &mut app.app_state, &VecDeque::new());
+        let persisted = applied_payload
+            .settings
+            .torrents
+            .iter()
+            .find(|torrent| torrent.torrent_or_magnet == magnet_link)
+            .expect("configured magnet should be persisted after apply");
+        assert_eq!(
+            persisted.download_path.as_ref(),
+            Some(&selected_download_path)
+        );
+        assert_eq!(persisted.container_name.as_deref(), Some("Hydrated Magnet"));
+        assert_eq!(
+            persisted.file_priorities,
+            HashMap::from([(0, FilePriority::Skip)])
+        );
 
         let _ = app.shutdown_tx.send(());
     }
