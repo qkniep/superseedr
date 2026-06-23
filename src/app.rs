@@ -3843,23 +3843,25 @@ impl App {
                     },
                     None,
                 );
-                let ingest_result = self
-                    .add_magnet_torrent(
-                        "Fetching name...".to_string(),
-                        magnet_link,
-                        None,
-                        false,
-                        TorrentControlState::Running,
-                        HashMap::new(),
-                        None,
-                    )
-                    .await;
-                if let CommandIngestResult::Failed { message, .. }
-                | CommandIngestResult::Invalid { message, .. } = ingest_result
-                {
-                    self.app_state.system_error = Some(message);
-                } else if let Some(info_hash) = pending_info_hash {
-                    self.hydrate_pending_magnet_browser_from_display(&info_hash);
+                if !self.is_current_shared_follower() {
+                    let ingest_result = self
+                        .add_magnet_torrent(
+                            "Fetching name...".to_string(),
+                            magnet_link,
+                            None,
+                            false,
+                            TorrentControlState::Running,
+                            HashMap::new(),
+                            None,
+                        )
+                        .await;
+                    if let CommandIngestResult::Failed { message, .. }
+                    | CommandIngestResult::Invalid { message, .. } = ingest_result
+                    {
+                        self.app_state.system_error = Some(message);
+                    } else if let Some(info_hash) = pending_info_hash {
+                        self.hydrate_pending_magnet_browser_from_display(&info_hash);
+                    }
                 }
                 Ok(())
             }
@@ -12656,6 +12658,46 @@ mod tests {
         assert_eq!(original_name_backup, AWAITING_MAGNET_METADATA_LABEL);
         assert!(preview_tree.is_empty());
         assert!(*use_container);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn shared_follower_manual_magnet_browser_does_not_start_local_runtime() {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let settings = crate::config::Settings {
+            client_port: 0,
+            default_download_folder: Some(temp_dir.path().join("downloads")),
+            always_show_add_location_prompt: true,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::SharedFollower)
+            .await
+            .expect("build app");
+        while app.app_command_rx.try_recv().is_ok() {}
+
+        let magnet_link = "magnet:?xt=urn:btih:5555555555555555555555555555555555555555";
+        app.open_manual_magnet_browser(magnet_link.to_string())
+            .await
+            .expect("open manual magnet browser");
+
+        assert_eq!(app.app_state.pending_torrent_link, magnet_link);
+        assert!(matches!(app.app_state.mode, AppMode::FileBrowser));
+        assert!(app.app_state.torrents.is_empty());
+        assert!(app.torrent_manager_command_txs.is_empty());
+
+        let FileBrowserMode::DownloadLocSelection {
+            target,
+            container_name,
+            preview_tree,
+            ..
+        } = &app.app_state.ui.file_browser.browser_mode
+        else {
+            panic!("expected download location selection browser");
+        };
+        assert_eq!(target, &DownloadSelectionTarget::PendingAdd);
+        assert_eq!(container_name, AWAITING_MAGNET_METADATA_LABEL);
+        assert!(preview_tree.is_empty());
 
         let _ = app.shutdown_tx.send(());
     }
