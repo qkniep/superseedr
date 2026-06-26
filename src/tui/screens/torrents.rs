@@ -1960,7 +1960,7 @@ mod tests {
 
     #[test]
     fn management_keymap_moves_columns_and_sorts_selected_column() {
-        let app_state = app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+        let app_state = app_state_with_torrents(vec![(hash(1), "Mock Release S01E01", 50, 5, 1)]);
 
         assert_eq!(
             map_key_to_management_action(KeyCode::Left, &app_state),
@@ -1978,7 +1978,7 @@ mod tests {
 
     #[test]
     fn management_keymap_maps_page_home_end_vertical_movement() {
-        let app_state = app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+        let app_state = app_state_with_torrents(vec![(hash(1), "Mock Release S01E01", 50, 5, 1)]);
 
         assert_eq!(
             map_key_to_management_action(KeyCode::PageUp, &app_state),
@@ -2001,18 +2001,18 @@ mod tests {
     #[test]
     fn management_page_home_end_move_selected_row_vertically() {
         let mut app_state = app_state_with_torrents(vec![
-            (hash(0), "Harbor Lights S01E00", 50, 5, 1),
-            (hash(1), "Harbor Lights S01E01", 50, 5, 1),
-            (hash(2), "Harbor Lights S01E02", 50, 5, 1),
-            (hash(3), "Harbor Lights S01E03", 50, 5, 1),
-            (hash(4), "Harbor Lights S01E04", 50, 5, 1),
-            (hash(5), "Harbor Lights S01E05", 50, 5, 1),
-            (hash(6), "Harbor Lights S01E06", 50, 5, 1),
-            (hash(7), "Harbor Lights S01E07", 50, 5, 1),
-            (hash(8), "Harbor Lights S01E08", 50, 5, 1),
-            (hash(9), "Harbor Lights S01E09", 50, 5, 1),
-            (hash(10), "Harbor Lights S01E10", 50, 5, 1),
-            (hash(11), "Harbor Lights S01E11", 50, 5, 1),
+            (hash(0), "Mock Release S01E00", 50, 5, 1),
+            (hash(1), "Mock Release S01E01", 50, 5, 1),
+            (hash(2), "Mock Release S01E02", 50, 5, 1),
+            (hash(3), "Mock Release S01E03", 50, 5, 1),
+            (hash(4), "Mock Release S01E04", 50, 5, 1),
+            (hash(5), "Mock Release S01E05", 50, 5, 1),
+            (hash(6), "Mock Release S01E06", 50, 5, 1),
+            (hash(7), "Mock Release S01E07", 50, 5, 1),
+            (hash(8), "Mock Release S01E08", 50, 5, 1),
+            (hash(9), "Mock Release S01E09", 50, 5, 1),
+            (hash(10), "Mock Release S01E10", 50, 5, 1),
+            (hash(11), "Mock Release S01E11", 50, 5, 1),
         ]);
         app_state.screen_area = Rect::new(0, 0, 200, 100);
 
@@ -2032,7 +2032,7 @@ mod tests {
 
     #[test]
     fn management_keymap_opens_highlighted_torrent_files() {
-        let app_state = app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+        let app_state = app_state_with_torrents(vec![(hash(1), "Mock Release S01E01", 50, 5, 1)]);
 
         assert_eq!(
             map_key_to_management_action(KeyCode::Char('f'), &app_state),
@@ -2045,8 +2045,8 @@ mod tests {
         let first_hash = hash(1);
         let second_hash = hash(2);
         let mut app_state = app_state_with_torrents(vec![
-            (first_hash.clone(), "Harbor Lights S01E01", 50, 5, 1),
-            (second_hash.clone(), "Harbor Lights S01E02", 60, 6, 2),
+            (first_hash.clone(), "Mock Release S01E01", 50, 5, 1),
+            (second_hash.clone(), "Mock Release S01E02", 60, 6, 2),
         ]);
         app_state.ui.torrent_management.selected_index = 1;
         app_state
@@ -2071,7 +2071,7 @@ mod tests {
     #[test]
     fn management_column_movement_stays_on_visible_columns() {
         let mut app_state =
-            app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+            app_state_with_torrents(vec![(hash(1), "Mock Release S01E01", 50, 5, 1)]);
         app_state.screen_area = Rect::new(0, 0, 80, 24);
         app_state.ui.torrent_management.selected_column_index =
             management_column_index(ManagementColumnId::Name).expect("name column");
@@ -2266,14 +2266,14 @@ mod tests {
     fn search_filters_torrent_rows_without_mutating_dashboard_search() {
         let mut app_state = app_state_with_torrents(vec![
             (hash(1), "Meadow Saga S01E01", 100, 10, 2),
-            (hash(2), "Harbor Lights S01E01", 50, 5, 1),
+            (hash(2), "Mock Release S01E01", 50, 5, 1),
         ]);
         app_state.ui.search_query = "normal".to_string();
-        app_state.ui.torrent_management.search_query = "harbor".to_string();
+        app_state.ui.torrent_management.search_query = "mock".to_string();
 
         let rows = build_management_rows(&app_state);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].label, "Harbor Lights S01E01");
+        assert_eq!(rows[0].label, "Mock Release S01E01");
         assert_eq!(app_state.ui.search_query, "normal");
     }
 
@@ -2281,10 +2281,10 @@ mod tests {
     fn empty_management_search_ignores_cached_normal_search_subset() {
         let mut app_state = app_state_with_torrents(vec![
             (hash(1), "Meadow Saga S01E01", 100, 10, 2),
-            (hash(2), "Harbor Lights S01E01", 50, 5, 1),
+            (hash(2), "Mock Release S01E01", 50, 5, 1),
             (hash(3), "Orchard Notes S01E01", 75, 8, 1),
         ]);
-        app_state.ui.search_query = "harbor".to_string();
+        app_state.ui.search_query = "mock".to_string();
         app_state.torrent_list_order = vec![hash(2)];
         app_state.ui.torrent_management.search_query.clear();
 
@@ -2300,22 +2300,22 @@ mod tests {
     fn committed_management_search_keeps_search_panel_visible() {
         let mut app_state = app_state_with_torrents(vec![
             (hash(1), "Meadow Saga S01E01", 100, 10, 2),
-            (hash(2), "Harbor Lights S01E01", 50, 5, 1),
+            (hash(2), "Mock Release S01E01", 50, 5, 1),
         ]);
         app_state.ui.torrent_management.is_searching = true;
-        app_state.ui.torrent_management.search_query = "harbor".to_string();
+        app_state.ui.torrent_management.search_query = "mock".to_string();
 
         reduce_torrent_management_action(&mut app_state, TorrentManagementAction::SearchCommit);
 
         assert!(!app_state.ui.torrent_management.is_searching);
-        assert_eq!(app_state.ui.torrent_management.search_query, "harbor");
+        assert_eq!(app_state.ui.torrent_management.search_query, "mock");
         assert!(management_search_panel_active(&app_state));
     }
 
     #[test]
     fn empty_management_search_panel_stays_hidden_outside_search_mode() {
         let mut app_state =
-            app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+            app_state_with_torrents(vec![(hash(1), "Mock Release S01E01", 50, 5, 1)]);
         app_state.ui.torrent_management.is_searching = false;
         app_state.ui.torrent_management.search_query.clear();
 
@@ -2325,7 +2325,7 @@ mod tests {
     #[test]
     fn tab_toggles_management_search_mode_while_searching() {
         let mut app_state =
-            app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+            app_state_with_torrents(vec![(hash(1), "Mock Release S01E01", 50, 5, 1)]);
         app_state.ui.torrent_management.is_searching = true;
         assert!(matches!(
             app_state.ui.torrent_management.search_mode,
@@ -2347,9 +2347,9 @@ mod tests {
     #[test]
     fn tab_toggles_management_search_mode_for_committed_search() {
         let mut app_state =
-            app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+            app_state_with_torrents(vec![(hash(1), "Mock Release S01E01", 50, 5, 1)]);
         app_state.ui.torrent_management.is_searching = false;
-        app_state.ui.torrent_management.search_query = "Harbor".to_string();
+        app_state.ui.torrent_management.search_query = "Mock".to_string();
 
         assert_eq!(
             map_key_to_management_action(KeyCode::Tab, &app_state),
@@ -2361,7 +2361,7 @@ mod tests {
     fn regex_management_search_filters_torrent_rows() {
         let mut app_state = app_state_with_torrents(vec![
             (hash(1), "Meadow Saga S01E01", 100, 10, 2),
-            (hash(2), "Harbor Lights S01E02", 50, 5, 1),
+            (hash(2), "Mock Release S01E02", 50, 5, 1),
         ]);
         app_state.ui.torrent_management.search_mode = SearchMode::Regex;
         app_state.ui.torrent_management.search_query = r"S01E0[12]".to_string();
@@ -2374,7 +2374,7 @@ mod tests {
     #[test]
     fn invalid_regex_management_search_matches_no_rows() {
         let mut app_state =
-            app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+            app_state_with_torrents(vec![(hash(1), "Mock Release S01E01", 50, 5, 1)]);
         app_state.ui.torrent_management.search_mode = SearchMode::Regex;
         app_state.ui.torrent_management.search_query = "[".to_string();
 
@@ -2386,13 +2386,13 @@ mod tests {
     #[test]
     fn anonymized_torrent_rows_hide_release_markers() {
         let mut app_state =
-            app_state_with_torrents(vec![(hash(1), "Harbor.Lights S01E01", 50, 5, 1)]);
+            app_state_with_torrents(vec![(hash(1), "Mock.Release S01E01", 50, 5, 1)]);
         app_state.anonymize_torrent_names = true;
 
         let rows = build_management_rows(&app_state);
         let anonymized = &rows[0].label;
 
-        assert_ne!(anonymized, "Harbor.Lights S01E01");
+        assert_ne!(anonymized, "Mock.Release S01E01");
         assert_ne!(anonymized, "Torrent 1");
         assert!(!anonymized.contains('.'));
         assert!(!anonymized.chars().any(|ch| ch.is_ascii_digit()));
@@ -2420,7 +2420,7 @@ mod tests {
     #[test]
     fn x_toggles_anonymized_names_in_management_screen() {
         let mut app_state =
-            app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+            app_state_with_torrents(vec![(hash(1), "Mock Release S01E01", 50, 5, 1)]);
         assert!(!app_state.anonymize_torrent_names);
         assert_eq!(
             map_key_to_management_action(KeyCode::Char('x'), &app_state),
@@ -2443,7 +2443,7 @@ mod tests {
     #[test]
     fn x_still_types_into_management_search() {
         let mut app_state =
-            app_state_with_torrents(vec![(hash(1), "Harbor Lights S01E01", 50, 5, 1)]);
+            app_state_with_torrents(vec![(hash(1), "Mock Release S01E01", 50, 5, 1)]);
         app_state.ui.torrent_management.is_searching = true;
 
         assert_eq!(
