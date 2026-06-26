@@ -1857,6 +1857,7 @@ pub fn handle_filesystem_navigation(
                             browser_generation: ctx.browser_generation,
                             path,
                             browser_mode,
+                            preserve_browser_mode: true,
                             highlight_path,
                         },
                     );

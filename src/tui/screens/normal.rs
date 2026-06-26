@@ -6992,6 +6992,7 @@ async fn execute_ui_effect(app: &mut App, effect: UiEffect) {
                     browser_generation,
                     path: initial_path,
                     browser_mode: FileBrowserMode::File(vec![".torrent".to_string()]),
+                    preserve_browser_mode: false,
                     highlight_path: None,
                 },
             );

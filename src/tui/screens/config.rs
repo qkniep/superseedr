@@ -172,6 +172,7 @@ pub fn reduce_config_action(
                                 selected_index: *selected_index,
                                 items: items.to_vec(),
                             },
+                            preserve_browser_mode: false,
                             highlight_path: None,
                         },
                     )));

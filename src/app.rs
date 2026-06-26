@@ -867,6 +867,7 @@ pub enum AppCommand {
         browser_generation: u64,
         path: PathBuf,
         browser_mode: FileBrowserMode,
+        preserve_browser_mode: bool,
         highlight_path: Option<PathBuf>,
     },
     UpdateFileBrowserData {
@@ -3844,6 +3845,7 @@ impl App {
                 cursor_pos: 0,
                 original_name_backup: default_container_name,
             },
+            preserve_browser_mode: false,
             highlight_path: None,
         });
         Ok(())
@@ -3879,6 +3881,7 @@ impl App {
                             cursor_pos: 0,
                             original_name_backup: "New Torrent".to_string(),
                         },
+                        preserve_browser_mode: false,
                         highlight_path: None,
                     });
                     Ok(())
@@ -3911,6 +3914,7 @@ impl App {
                         cursor_pos: 0,
                         original_name_backup: container_name,
                     },
+                    false,
                     None,
                 );
                 if !self.is_current_shared_follower() {
@@ -5657,12 +5661,14 @@ impl App {
                 browser_generation,
                 path,
                 browser_mode,
+                preserve_browser_mode,
                 highlight_path,
             } => {
                 self.start_file_browser_fetch(
                     browser_generation,
                     path,
                     browser_mode,
+                    preserve_browser_mode,
                     highlight_path,
                 );
             }
@@ -6287,6 +6293,7 @@ impl App {
         browser_generation: u64,
         path: PathBuf,
         browser_mode: FileBrowserMode,
+        preserve_browser_mode: bool,
         highlight_path: Option<PathBuf>,
     ) {
         if browser_generation != self.app_state.ui.file_browser.browser_generation {
@@ -6314,10 +6321,14 @@ impl App {
 
         if matches!(self.app_state.mode, AppMode::FileBrowser) {
             self.app_state.ui.file_browser.state.current_path = path.clone();
-            self.app_state.ui.file_browser.browser_mode = merge_file_browser_mode_for_fetch(
-                &self.app_state.ui.file_browser.browser_mode,
-                browser_mode,
-            );
+            self.app_state.ui.file_browser.browser_mode = if preserve_browser_mode {
+                merge_file_browser_mode_for_fetch(
+                    &self.app_state.ui.file_browser.browser_mode,
+                    browser_mode,
+                )
+            } else {
+                browser_mode
+            };
         } else {
             let mut tree_state = crate::tui::tree::TreeViewState::new();
             tree_state.current_path = path.clone();
@@ -13688,6 +13699,7 @@ mod tests {
             browser_generation: 1,
             path: stale_dir.path().to_path_buf(),
             browser_mode: FileBrowserMode::Directory,
+            preserve_browser_mode: false,
             highlight_path: None,
         })
         .await;
@@ -13756,6 +13768,7 @@ mod tests {
                 cursor_pos: 0,
                 original_name_backup: AWAITING_MAGNET_METADATA_LABEL.to_string(),
             },
+            preserve_browser_mode: true,
             highlight_path: None,
         })
         .await;
@@ -13779,6 +13792,94 @@ mod tests {
         assert_eq!(*focused_pane, BrowserPane::TorrentPreview);
         assert_eq!(preview_tree.len(), 1);
         assert_eq!(preview_tree[0].name, "hydrated.bin");
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn file_browser_fetch_replaces_pending_add_preview_for_new_open() {
+        let current_dir = tempfile::tempdir().expect("create current dir");
+        let next_dir = tempfile::tempdir().expect("create next dir");
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        app.app_state.mode = AppMode::FileBrowser;
+        app.app_state.ui.file_browser.browser_generation = 1;
+        app.app_state.ui.file_browser.state.current_path = current_dir.path().to_path_buf();
+        app.app_state.ui.file_browser.browser_mode = FileBrowserMode::DownloadLocSelection {
+            target: DownloadSelectionTarget::PendingAdd,
+            torrent_files: vec![],
+            container_name: "Old Pending [aaaa]".to_string(),
+            use_container: true,
+            is_editing_name: false,
+            preview_tree: vec![RawNode {
+                name: "old.bin".to_string(),
+                full_path: PathBuf::from("old.bin"),
+                children: vec![],
+                payload: TorrentPreviewPayload {
+                    size: 10,
+                    priority: FilePriority::Normal,
+                    file_index: Some(0),
+                },
+                is_dir: false,
+            }],
+            preview_state: TreeViewState::default(),
+            focused_pane: BrowserPane::TorrentPreview,
+            cursor_pos: 0,
+            original_name_backup: "Old Pending [aaaa]".to_string(),
+        };
+
+        app.handle_app_command(AppCommand::FetchFileTree {
+            browser_generation: 1,
+            path: next_dir.path().to_path_buf(),
+            browser_mode: FileBrowserMode::DownloadLocSelection {
+                target: DownloadSelectionTarget::PendingAdd,
+                torrent_files: vec![],
+                container_name: "New Pending [bbbb]".to_string(),
+                use_container: false,
+                is_editing_name: false,
+                preview_tree: vec![RawNode {
+                    name: "new.bin".to_string(),
+                    full_path: PathBuf::from("new.bin"),
+                    children: vec![],
+                    payload: TorrentPreviewPayload {
+                        size: 20,
+                        priority: FilePriority::Normal,
+                        file_index: Some(0),
+                    },
+                    is_dir: false,
+                }],
+                preview_state: TreeViewState::default(),
+                focused_pane: BrowserPane::FileSystem,
+                cursor_pos: 0,
+                original_name_backup: "New Pending [bbbb]".to_string(),
+            },
+            preserve_browser_mode: false,
+            highlight_path: None,
+        })
+        .await;
+
+        let FileBrowserMode::DownloadLocSelection {
+            container_name,
+            original_name_backup,
+            preview_tree,
+            focused_pane,
+            use_container,
+            ..
+        } = &app.app_state.ui.file_browser.browser_mode
+        else {
+            panic!("expected download selection browser");
+        };
+        assert_eq!(container_name, "New Pending [bbbb]");
+        assert_eq!(original_name_backup, "New Pending [bbbb]");
+        assert_eq!(*focused_pane, BrowserPane::FileSystem);
+        assert!(!use_container);
+        assert_eq!(preview_tree.len(), 1);
+        assert_eq!(preview_tree[0].name, "new.bin");
 
         let _ = app.shutdown_tx.send(());
     }
