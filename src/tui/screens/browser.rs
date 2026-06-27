@@ -2123,6 +2123,7 @@ pub async fn execute_confirm_decision(
         ConfirmDecision::Download(payload) => match payload.target {
             DownloadSelectionTarget::PendingAdd => {
                 if let Some(pending_path) = app.app_state.pending_torrent_path.take() {
+                    let pending_ingest = app.app_state.pending_manual_ingest.take();
                     match app.prepare_add_torrent_file_request(
                         pending_path,
                         Some(payload.base_path.clone()),
@@ -2133,7 +2134,10 @@ pub async fn execute_confirm_decision(
                             spawn_app_command_sender(
                                 app.app_command_tx.clone(),
                                 app.shutdown_tx.subscribe(),
-                                AppCommand::SubmitManualAddRequest(request),
+                                AppCommand::SubmitManualAddRequest {
+                                    request,
+                                    pending_ingest,
+                                },
                             );
                         }
                         Err(error) => {
@@ -2141,6 +2145,7 @@ pub async fn execute_confirm_decision(
                         }
                     }
                 } else if !app.app_state.pending_torrent_link.is_empty() {
+                    let pending_ingest = app.app_state.pending_manual_ingest.take();
                     let request = app.prepare_add_magnet_request(
                         app.app_state.pending_torrent_link.clone(),
                         Some(payload.base_path),
@@ -2150,7 +2155,10 @@ pub async fn execute_confirm_decision(
                     spawn_app_command_sender(
                         app.app_command_tx.clone(),
                         app.shutdown_tx.subscribe(),
-                        AppCommand::SubmitManualAddRequest(request),
+                        AppCommand::SubmitManualAddRequest {
+                            request,
+                            pending_ingest,
+                        },
                     );
                     app.app_state.pending_torrent_link.clear();
                 } else {

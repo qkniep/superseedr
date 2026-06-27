@@ -857,7 +857,10 @@ pub enum AppCommand {
     MarkPortOpen(SocketAddr),
     ReloadClusterState(PathBuf),
     SubmitControlRequest(ControlRequest),
-    SubmitManualAddRequest(ControlRequest),
+    SubmitManualAddRequest {
+        request: ControlRequest,
+        pending_ingest: Option<PendingManualIngest>,
+    },
     ControlRequest {
         path: PathBuf,
         request: ControlRequest,
@@ -1034,7 +1037,7 @@ pub(crate) struct PendingIngestRecord {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PendingManualIngest {
+pub struct PendingManualIngest {
     source: IngestSource,
     path: PathBuf,
 }
@@ -5622,24 +5625,23 @@ impl App {
     async fn handle_submit_control_request(
         &mut self,
         request: ControlRequest,
-        archive_pending_manual_ingest: bool,
+        pending_manual_ingest: Option<PendingManualIngest>,
     ) {
-        let should_archive_pending_manual_ingest = archive_pending_manual_ingest
-            && matches!(
+        let pending_manual_ingest = pending_manual_ingest.filter(|_| {
+            matches!(
                 &request,
                 ControlRequest::AddTorrentFile { .. } | ControlRequest::AddMagnet { .. }
-            );
+            )
+        });
 
         match self
             .dispatch_cluster_control_request(request, ControlOrigin::CliOnline)
             .await
         {
             Ok(_message) => {
-                if should_archive_pending_manual_ingest {
-                    if let Some(pending) = self.app_state.pending_manual_ingest.take() {
-                        self.archive_processed_ingest(pending.source, &pending.path);
-                        self.save_state_to_disk();
-                    }
+                if let Some(pending) = pending_manual_ingest {
+                    self.archive_processed_ingest(pending.source, &pending.path);
+                    self.save_state_to_disk();
                 }
             }
             Err(error) => {
@@ -5670,10 +5672,14 @@ impl App {
                 self.mark_peer_port_open(peer_addr);
             }
             AppCommand::SubmitControlRequest(request) => {
-                self.handle_submit_control_request(request, false).await;
+                self.handle_submit_control_request(request, None).await;
             }
-            AppCommand::SubmitManualAddRequest(request) => {
-                self.handle_submit_control_request(request, true).await;
+            AppCommand::SubmitManualAddRequest {
+                request,
+                pending_ingest,
+            } => {
+                self.handle_submit_control_request(request, pending_ingest)
+                    .await;
             }
             AppCommand::ControlRequest { path, request } => {
                 if self.is_current_shared_follower() && self.is_host_watch_path(&path) {
@@ -13483,7 +13489,7 @@ mod tests {
         let command = time::timeout(Duration::from_secs(1), async {
             loop {
                 if let Some(command) = app.app_command_rx.recv().await {
-                    if matches!(command, AppCommand::SubmitManualAddRequest(_)) {
+                    if matches!(command, AppCommand::SubmitManualAddRequest { .. }) {
                         break command;
                     }
                 }
@@ -13492,13 +13498,17 @@ mod tests {
         .await
         .expect("queued manual add request");
 
-        let AppCommand::SubmitManualAddRequest(ControlRequest::AddMagnet {
-            magnet_link: queued_link,
-            download_path,
-            container_name,
-            file_priorities,
+        let AppCommand::SubmitManualAddRequest {
+            request:
+                ControlRequest::AddMagnet {
+                    magnet_link: queued_link,
+                    download_path,
+                    container_name,
+                    file_priorities,
+                    ..
+                },
             ..
-        }) = &command
+        } = &command
         else {
             panic!("expected add magnet control request");
         };
@@ -13612,6 +13622,77 @@ mod tests {
         assert_eq!(pending.path, source_path);
         assert!(source_path.exists());
         assert!(!archived_path.exists());
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn failed_manual_add_request_does_not_archive_stale_ingest_on_later_success() {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let download_folder = temp_dir.path().join("downloads");
+        std::fs::create_dir_all(&download_folder).expect("create download folder");
+        let stale_source_path = temp_dir.path().join("stale-manual.magnet");
+        let later_source_path = temp_dir.path().join("later-manual.magnet");
+        std::fs::write(
+            &stale_source_path,
+            "magnet:?xt=urn:btih:5555555555555555555555555555555555555555",
+        )
+        .expect("write stale manual source");
+        std::fs::write(
+            &later_source_path,
+            "magnet:?xt=urn:btih:6666666666666666666666666666666666666666",
+        )
+        .expect("write later manual source");
+        let stale_archived_path = stale_source_path.with_extension("magnet.added");
+        let settings = crate::config::Settings {
+            client_port: 0,
+            default_download_folder: Some(download_folder.clone()),
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        while app.app_command_rx.try_recv().is_ok() {}
+
+        app.handle_app_command(AppCommand::SubmitManualAddRequest {
+            request: ControlRequest::AddTorrentFile {
+                source_path: temp_dir.path().join("missing.torrent"),
+                download_path: Some(download_folder.clone()),
+                container_name: None,
+                validation_status: false,
+                file_priorities: Vec::new(),
+            },
+            pending_ingest: Some(PendingManualIngest {
+                source: IngestSource::MagnetFile,
+                path: stale_source_path.clone(),
+            }),
+        })
+        .await;
+
+        assert!(app.app_state.system_error.is_some());
+        assert!(app.app_state.pending_manual_ingest.is_none());
+        assert!(stale_source_path.exists());
+        assert!(!stale_archived_path.exists());
+
+        app.handle_app_command(AppCommand::SubmitManualAddRequest {
+            request: ControlRequest::AddMagnet {
+                magnet_link: "magnet:?xt=urn:btih:6666666666666666666666666666666666666666"
+                    .to_string(),
+                download_path: Some(download_folder),
+                container_name: None,
+                validation_status: false,
+                file_priorities: Vec::new(),
+            },
+            pending_ingest: Some(PendingManualIngest {
+                source: IngestSource::MagnetFile,
+                path: later_source_path.clone(),
+            }),
+        })
+        .await;
+
+        assert!(stale_source_path.exists());
+        assert!(!stale_archived_path.exists());
+        assert!(!later_source_path.exists());
 
         let _ = app.shutdown_tx.send(());
     }
