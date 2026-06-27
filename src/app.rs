@@ -4109,8 +4109,6 @@ impl App {
                 payload,
                 download_path,
             } => {
-                let should_clear_pending_magnet_preview =
-                    matches!(&payload, ResolvedAddPayload::MagnetLink { .. });
                 let ingest_result = match payload {
                     ResolvedAddPayload::TorrentFile { source_path } => {
                         self.add_torrent_from_file(
@@ -4149,9 +4147,7 @@ impl App {
                         "Direct ingest added torrent to runtime before persistence"
                     );
                 }
-                if should_clear_pending_magnet_preview {
-                    self.clear_pending_magnet_preview_if_applied(&ingest_result);
-                }
+                self.clear_pending_magnet_preview_if_applied(&ingest_result);
                 self.record_ingest_result(&path, &ingest_result);
                 self.save_state_to_disk();
                 self.archive_processed_ingest(source, &path);
@@ -7089,7 +7085,32 @@ impl App {
             if !self.has_live_runtime_for_torrent(&info_hash) {
                 self.clear_display_only_torrent(&info_hash);
             } else {
-                let message = format!("Ignoring already present torrent: {}", torrent.info.name);
+                if let Some(path) = download_path {
+                    if let Some(display) = self.app_state.torrents.get_mut(&info_hash) {
+                        display.latest_state.download_path = Some(path.clone());
+                        display.latest_state.container_name = container_name.clone();
+                        display.latest_state.file_priorities = file_priorities.clone();
+                        apply_torrent_preview_file_priorities(
+                            &mut display.file_preview_tree,
+                            &file_priorities,
+                        );
+                    }
+                    if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
+                        self.send_manager_command_until_shutdown(
+                            manager_tx,
+                            ManagerCommand::SetUserTorrentConfig {
+                                torrent_data_path: path,
+                                file_priorities: file_priorities.clone(),
+                                container_name,
+                            },
+                        )
+                        .await;
+                    }
+                }
+                let message = format!(
+                    "Updated path for existing torrent from file: {}",
+                    torrent.info.name
+                );
                 tracing_event!(Level::INFO, "{}", message);
                 return CommandIngestResult::Duplicate {
                     info_hash: Some(info_hash),
@@ -9330,7 +9351,7 @@ mod tests {
     };
     use crate::persistence::event_journal::{EventCategory, EventJournalEntry};
     use crate::telemetry::ui_telemetry::UiTelemetry;
-    use crate::torrent_identity::info_hash_from_torrent_source;
+    use crate::torrent_identity::{info_hash_from_torrent_bytes, info_hash_from_torrent_source};
     use crate::torrent_manager::{
         FileProbeBatchResult, FileProbeEntry, ManagerCommand, ManagerEvent, TorrentFileProbeStatus,
     };
@@ -13840,6 +13861,113 @@ mod tests {
         app.cleanup_pending_magnet_preview_runtime();
         assert!(app.app_state.torrents.contains_key(&info_hash));
         assert!(app.torrent_manager_command_txs.contains_key(&info_hash));
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn direct_torrent_file_apply_clears_pending_preview_before_persistence() {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let watch_folder = temp_dir.path().join("watch");
+        let download_folder = temp_dir.path().join("downloads");
+        std::fs::create_dir_all(&watch_folder).expect("create watch folder");
+        std::fs::create_dir_all(&download_folder).expect("create downloads");
+
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("integration_tests")
+            .join("torrents")
+            .join("v1")
+            .join("single_4k.bin.torrent");
+        let ingest_path = watch_folder.join("same-hash.torrent");
+        std::fs::copy(&fixture, &ingest_path).expect("copy fixture");
+        let torrent_bytes = std::fs::read(&ingest_path).expect("read torrent");
+        let info_hash = info_hash_from_torrent_bytes(&torrent_bytes).expect("torrent info hash");
+        let magnet_link = format!("magnet:?xt=urn:btih:{}", hex::encode(&info_hash));
+
+        let settings = crate::config::Settings {
+            client_port: 0,
+            watch_folder: Some(watch_folder),
+            default_download_folder: Some(download_folder.clone()),
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        while app.app_command_rx.try_recv().is_ok() {}
+
+        app.app_state.pending_torrent_link = magnet_link.clone();
+        app.app_state.pending_magnet_preview_info_hash = Some(info_hash.clone());
+        app.app_state.torrents.insert(
+            info_hash.clone(),
+            TorrentDisplayState {
+                latest_state: TorrentMetrics {
+                    info_hash: info_hash.clone(),
+                    torrent_or_magnet: magnet_link.clone(),
+                    torrent_name: "sample-preview".to_string(),
+                    torrent_control_state: TorrentControlState::Running,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        app.app_state.torrent_list_order.push(info_hash.clone());
+        let (manager_tx, mut manager_rx) = mpsc::channel(1);
+        app.torrent_manager_command_txs
+            .insert(info_hash.clone(), manager_tx);
+
+        app.execute_add_ingress_action(
+            IngestSource::TorrentFile,
+            ingest_path.clone(),
+            super::AddIngressAction::ApplyDirectly {
+                payload: ResolvedAddPayload::TorrentFile {
+                    source_path: ingest_path.clone(),
+                },
+                download_path: download_folder.clone(),
+            },
+        )
+        .await;
+
+        let manager_command = manager_rx
+            .try_recv()
+            .expect("direct add should apply config to the preview runtime");
+        match manager_command {
+            ManagerCommand::SetUserTorrentConfig {
+                torrent_data_path,
+                file_priorities,
+                container_name,
+            } => {
+                assert_eq!(torrent_data_path, download_folder);
+                assert!(file_priorities.is_empty());
+                assert!(container_name.is_none());
+            }
+            other => panic!("unexpected manager command: {:?}", other),
+        }
+        let display = app
+            .app_state
+            .torrents
+            .get(&info_hash)
+            .expect("preview runtime should remain");
+        assert_eq!(
+            display.latest_state.download_path.as_ref(),
+            Some(&download_folder)
+        );
+        assert!(app.app_state.pending_magnet_preview_info_hash.is_none());
+
+        let mut applied_settings = app.client_configs.clone();
+        let applied_payload =
+            build_persist_payload(&mut applied_settings, &mut app.app_state, &VecDeque::new());
+        let persisted = applied_payload
+            .settings
+            .torrents
+            .iter()
+            .find(|torrent| torrent.torrent_or_magnet == magnet_link)
+            .expect("directly applied torrent file should persist after marker clears");
+        assert_eq!(persisted.download_path.as_ref(), Some(&download_folder));
+
+        app.cleanup_pending_magnet_preview_runtime();
+        assert!(app.app_state.torrents.contains_key(&info_hash));
+        assert!(app.torrent_manager_command_txs.contains_key(&info_hash));
+        assert!(!ingest_path.exists());
 
         let _ = app.shutdown_tx.send(());
     }
