@@ -11,7 +11,6 @@ use crate::app::AppCommand;
 
 use crate::app::ChartPanelView;
 use crate::app::FileBrowserMode;
-use crate::app::FilePriority;
 use crate::app::GraphDisplayMode;
 use crate::app::PeerInfo;
 use crate::app::SwarmAvailabilityFlashState;
@@ -5499,8 +5498,7 @@ fn build_torrent_file_tree_list_items(
         };
         let relative_path = normalize_tree_relative_path(item.path.as_path());
 
-        let (name_style, suffix) =
-            file_priority_style(item.node.payload.priority, item.node.is_dir, ctx);
+        let name_style = dashboard_file_name_style(item.node.is_dir, ctx);
         let mut spans = vec![
             Span::styled(
                 indent,
@@ -5533,13 +5531,6 @@ fn build_torrent_file_tree_list_items(
             ));
         }
 
-        if let Some(suffix) = suffix {
-            spans.push(Span::styled(
-                suffix,
-                ctx.apply(Style::default().fg(ctx.theme.semantic.surface1)),
-            ));
-        }
-
         ListItem::new(Line::from(spans))
     }));
 
@@ -5550,7 +5541,6 @@ fn build_torrent_file_tree_list_items(
 struct ActivitySortedFileRow {
     relative_path: String,
     size: u64,
-    priority: FilePriority,
 }
 
 fn build_activity_sorted_torrent_file_list_items(
@@ -5613,7 +5603,6 @@ fn activity_sorted_file_rows(torrent: &TorrentDisplayState) -> Vec<ActivitySorte
         rows.push(ActivitySortedFileRow {
             relative_path: torrent.latest_state.torrent_name.clone(),
             size: torrent.latest_state.total_size,
-            priority: FilePriority::Normal,
         });
     }
 
@@ -5634,7 +5623,6 @@ fn collect_activity_sorted_file_rows(
     rows.push(ActivitySortedFileRow {
         relative_path: normalize_tree_relative_path(node.full_path.as_path()),
         size: node.payload.size,
-        priority: node.payload.priority,
     });
 }
 
@@ -5673,7 +5661,7 @@ fn render_activity_sorted_file_row(
     upload_phase: f64,
     ctx: &ThemeContext,
 ) -> ListItem<'static> {
-    let (name_style, suffix) = file_priority_style(row.priority, false, ctx);
+    let name_style = dashboard_file_name_style(false, ctx);
     let display_name = anonymize_tree_name(&row.relative_path, false, anonymize);
     let mut spans = vec![Span::styled(
         ASCII_TREE_FILE_ICON,
@@ -5697,13 +5685,6 @@ fn render_activity_sorted_file_row(
         spans.push(Span::styled(
             format!(" ({})", format_bytes(row.size)),
             ctx.apply(Style::default().fg(ctx.theme.semantic.surface2)),
-        ));
-    }
-
-    if let Some(suffix) = suffix {
-        spans.push(Span::styled(
-            suffix,
-            ctx.apply(Style::default().fg(ctx.theme.semantic.surface1)),
         ));
     }
 
@@ -5735,45 +5716,12 @@ fn render_activity_sorted_overflow_row(
     ]))
 }
 
-fn file_priority_style(
-    priority: FilePriority,
-    is_dir: bool,
-    ctx: &ThemeContext,
-) -> (Style, Option<String>) {
-    match priority {
-        FilePriority::Skip => (
-            ctx.apply(
-                Style::default()
-                    .fg(ctx.theme.semantic.surface1)
-                    .add_modifier(Modifier::CROSSED_OUT),
-            ),
-            Some(" [S]".to_string()),
-        ),
-        FilePriority::High => (
-            ctx.apply(
-                Style::default()
-                    .fg(ctx.state_success())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Some(" [H]".to_string()),
-        ),
-        FilePriority::Mixed => (
-            ctx.apply(
-                Style::default()
-                    .fg(ctx.state_warning())
-                    .add_modifier(Modifier::ITALIC),
-            ),
-            Some(" [*]".to_string()),
-        ),
-        FilePriority::Normal => (
-            ctx.apply(Style::default().fg(if is_dir {
-                ctx.state_info()
-            } else {
-                ctx.theme.semantic.text
-            })),
-            None,
-        ),
-    }
+fn dashboard_file_name_style(is_dir: bool, ctx: &ThemeContext) -> Style {
+    ctx.apply(Style::default().fg(if is_dir {
+        ctx.state_info()
+    } else {
+        ctx.theme.semantic.text
+    }))
 }
 
 fn file_tree_activity_sort_rank(
@@ -9474,6 +9422,102 @@ mod tests {
             spans[0].style,
             ctx.apply(base_style.fg(ctx.theme.semantic.surface1))
         );
+    }
+
+    #[test]
+    fn dashboard_file_name_style_ignores_priority_colors() {
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+
+        assert_eq!(
+            dashboard_file_name_style(false, &ctx),
+            ctx.apply(Style::default().fg(ctx.theme.semantic.text))
+        );
+        assert_eq!(
+            dashboard_file_name_style(true, &ctx),
+            ctx.apply(Style::default().fg(ctx.state_info()))
+        );
+    }
+
+    #[test]
+    fn dashboard_files_panel_hides_priority_markers_in_tree_mode() {
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        let priorities = HashMap::from([
+            (0, crate::app::FilePriority::High),
+            (1, crate::app::FilePriority::Skip),
+        ]);
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            vec![
+                (vec!["folder".to_string(), "high.bin".to_string()], 1_u64),
+                (vec!["folder".to_string(), "skip.bin".to_string()], 1_u64),
+            ],
+            &priorities,
+        );
+
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let lines = render_list_item_plain_lines(
+            build_torrent_file_list_items(
+                &torrent,
+                TorrentFilesListRenderOptions {
+                    width: 60,
+                    height: 10,
+                    anonymize: false,
+                    download_phase: 0.0,
+                    upload_phase: 0.0,
+                    mode: TorrentFilesRenderMode::Tree,
+                },
+                &ctx,
+            ),
+            60,
+        );
+        let rendered = lines.join("\n");
+
+        assert!(rendered.contains("high.bin"));
+        assert!(rendered.contains("skip.bin"));
+        assert!(!rendered.contains("[H]"));
+        assert!(!rendered.contains("[S]"));
+        assert!(!rendered.contains("[*]"));
+    }
+
+    #[test]
+    fn dashboard_files_panel_hides_priority_markers_in_activity_mode() {
+        let mut torrent = create_mock_display_state(0);
+        torrent.latest_state.torrent_name = "sample-tree".to_string();
+        let priorities = HashMap::from([
+            (0, crate::app::FilePriority::High),
+            (1, crate::app::FilePriority::Skip),
+        ]);
+        torrent.file_preview_tree = crate::app::build_torrent_preview_tree(
+            vec![
+                (vec!["high.bin".to_string()], 1_u64),
+                (vec!["skip.bin".to_string()], 1_u64),
+            ],
+            &priorities,
+        );
+
+        let ctx = ThemeContext::new(Theme::builtin(ThemeName::CatppuccinMocha), 0.0);
+        let lines = render_list_item_plain_lines(
+            build_torrent_file_list_items(
+                &torrent,
+                TorrentFilesListRenderOptions {
+                    width: 60,
+                    height: 10,
+                    anonymize: false,
+                    download_phase: 0.0,
+                    upload_phase: 0.0,
+                    mode: TorrentFilesRenderMode::ActivitySorted,
+                },
+                &ctx,
+            ),
+            60,
+        );
+        let rendered = lines.join("\n");
+
+        assert!(rendered.contains("high.bin"));
+        assert!(rendered.contains("skip.bin"));
+        assert!(!rendered.contains("[H]"));
+        assert!(!rendered.contains("[S]"));
+        assert!(!rendered.contains("[*]"));
     }
 
     fn render_list_item_plain_lines(items: Vec<ListItem<'static>>, width: u16) -> Vec<String> {

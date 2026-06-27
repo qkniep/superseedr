@@ -1943,6 +1943,7 @@ pub async fn execute_browser_dialog_effects(app: &mut App, effects: Vec<BrowserD
                 app.app_state.pending_torrent_path = None;
                 app.app_state.pending_torrent_link.clear();
                 app.app_state.pending_magnet_preview_info_hash = None;
+                app.app_state.pending_manual_ingest = None;
             }
             BrowserDialogEffect::ClearSearch => {
                 app.app_state.ui.file_browser.search_state = BrowserSearchState::Closed;
