@@ -4170,6 +4170,8 @@ impl App {
                         source,
                         path: path.clone(),
                     });
+                } else {
+                    self.app_state.pending_manual_ingest = None;
                 }
                 if !matches!(source, IngestSource::TorrentFile) && !should_defer_archive {
                     self.archive_processed_ingest(source, &path);
@@ -4227,10 +4229,22 @@ impl App {
         request: ControlRequest,
         origin: ControlOrigin,
     ) -> Result<String, String> {
+        self.dispatch_cluster_control_request_with_ingest_result(request, origin)
+            .await
+            .map(|(message, _)| message)
+    }
+
+    async fn dispatch_cluster_control_request_with_ingest_result(
+        &mut self,
+        request: ControlRequest,
+        origin: ControlOrigin,
+    ) -> Result<(String, Option<CommandIngestResult>), String> {
         if self.is_current_shared_follower() {
             self.queue_control_request_for_leader(request, origin)
+                .map(|message| (message, None))
         } else {
-            self.apply_control_request(&request).await
+            self.apply_control_request_with_ingest_result(&request)
+                .await
         }
     }
 
@@ -5631,12 +5645,14 @@ impl App {
         });
 
         match self
-            .dispatch_cluster_control_request(request, ControlOrigin::CliOnline)
+            .dispatch_cluster_control_request_with_ingest_result(request, ControlOrigin::CliOnline)
             .await
         {
-            Ok(_message) => {
-                if let Some(pending) = pending_manual_ingest {
+            Ok((_message, ingest_result)) => {
+                if let (Some(pending), Some(ingest_result)) = (pending_manual_ingest, ingest_result)
+                {
                     self.archive_processed_ingest(pending.source, &pending.path);
+                    self.record_ingest_result(&pending.path, &ingest_result);
                     self.save_state_to_disk();
                 }
             }
@@ -8004,22 +8020,34 @@ impl App {
     }
 
     async fn apply_control_request(&mut self, request: &ControlRequest) -> Result<String, String> {
+        self.apply_control_request_with_ingest_result(request)
+            .await
+            .map(|(message, _)| message)
+    }
+
+    async fn apply_control_request_with_ingest_result(
+        &mut self,
+        request: &ControlRequest,
+    ) -> Result<(String, Option<CommandIngestResult>), String> {
         match plan_control_request(&self.client_configs, request)? {
             ControlExecutionPlan::StatusNow => {
                 self.trigger_status_dump_now();
-                Ok("Wrote fresh status snapshot".to_string())
+                Ok(("Wrote fresh status snapshot".to_string(), None))
             }
             ControlExecutionPlan::StatusFollowStart { interval_secs } => {
                 self.set_runtime_status_dump_interval_override(Some(interval_secs));
                 self.trigger_status_dump_now();
-                Ok(format!(
-                    "Enabled runtime status dumps every {} seconds",
-                    interval_secs
+                Ok((
+                    format!(
+                        "Enabled runtime status dumps every {} seconds",
+                        interval_secs
+                    ),
+                    None,
                 ))
             }
             ControlExecutionPlan::StatusFollowStop => {
                 self.set_runtime_status_dump_interval_override(Some(0));
-                Ok("Stopped runtime status dumps".to_string())
+                Ok(("Stopped runtime status dumps".to_string(), None))
             }
             ControlExecutionPlan::ApplySettings {
                 next_settings,
@@ -8027,7 +8055,7 @@ impl App {
             } => {
                 self.apply_settings_update(next_settings, true).await;
                 self.trigger_status_dump_after_successful_cluster_mutation();
-                Ok(success_message)
+                Ok((success_message, None))
             }
             ControlExecutionPlan::AddTorrentFile {
                 source_path,
@@ -8054,7 +8082,8 @@ impl App {
                     self.save_state_to_disk();
                     self.trigger_status_dump_after_successful_cluster_mutation();
                 }
-                Self::map_add_result_to_control_response(ingest_result)
+                let response = Self::map_add_result_to_control_response(ingest_result.clone())?;
+                Ok((response, Some(ingest_result)))
             }
             ControlExecutionPlan::AddMagnet {
                 magnet_link,
@@ -8085,7 +8114,8 @@ impl App {
                     self.save_state_to_disk();
                     self.trigger_status_dump_after_successful_cluster_mutation();
                 }
-                Self::map_add_result_to_control_response(ingest_result)
+                let response = Self::map_add_result_to_control_response(ingest_result.clone())?;
+                Ok((response, Some(ingest_result)))
             }
         }
     }
@@ -13648,6 +13678,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_shared_manual_prompt_replacement_clears_deferred_manual_ingest() {
+        let _guard = lock_shared_env();
+        let _temp_paths = configure_temp_app_paths_for_test();
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let download_folder = temp_dir.path().join("downloads");
+        std::fs::create_dir_all(&download_folder).expect("create download folder");
+        let stale_source_path = temp_dir.path().join("stale-shared.magnet");
+        let later_source_path = temp_dir.path().join("later-local.magnet");
+        let later_magnet = "magnet:?xt=urn:btih:6666666666666666666666666666666666666666";
+        std::fs::write(
+            &stale_source_path,
+            "magnet:?xt=urn:btih:5555555555555555555555555555555555555555",
+        )
+        .expect("write stale manual source");
+        std::fs::write(&later_source_path, later_magnet).expect("write later manual source");
+        let stale_archived_path = stale_source_path.with_extension("magnet.added");
+        let settings = crate::config::Settings {
+            client_port: 0,
+            default_download_folder: Some(download_folder.clone()),
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        while app.app_command_rx.try_recv().is_ok() {}
+        app.app_state.pending_manual_ingest = Some(PendingManualIngest {
+            source: IngestSource::MagnetFile,
+            path: stale_source_path.clone(),
+        });
+
+        app.execute_add_ingress_action(
+            IngestSource::MagnetFile,
+            later_source_path.clone(),
+            super::AddIngressAction::OpenManualBrowser {
+                payload: ResolvedAddPayload::MagnetLink {
+                    magnet_link: later_magnet.to_string(),
+                },
+            },
+        )
+        .await;
+
+        assert!(app.app_state.pending_manual_ingest.is_none());
+        app.app_state.ui.file_browser.state.current_path = download_folder.clone();
+        let payload = build_download_confirm_payload(
+            &app.app_state.ui.file_browser.state,
+            &app.app_state.ui.file_browser.browser_mode,
+        )
+        .expect("confirm payload");
+        let transition = execute_confirm_decision(
+            &mut app,
+            crate::tui::screens::browser::ConfirmDecision::Download(payload),
+        )
+        .await;
+        assert!(matches!(
+            transition,
+            Some(crate::tui::screens::browser::BrowserTransition::ToNormal)
+        ));
+
+        let command = time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(command) = app.app_command_rx.recv().await {
+                    if matches!(command, AppCommand::SubmitManualAddRequest { .. }) {
+                        break command;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("queued manual add request");
+
+        let AppCommand::SubmitManualAddRequest { pending_ingest, .. } = command else {
+            panic!("expected manual add request");
+        };
+        assert!(pending_ingest.is_none());
+        assert!(stale_source_path.exists());
+        assert!(!stale_archived_path.exists());
+
+        let _ = app.shutdown_tx.send(());
+        set_app_paths_override_for_tests(None);
+    }
+
+    #[tokio::test]
     async fn failed_manual_add_request_does_not_archive_stale_ingest_on_later_success() {
         let temp_dir = tempfile::tempdir().expect("create tempdir");
         let download_folder = temp_dir.path().join("downloads");
@@ -13716,6 +13828,102 @@ mod tests {
         assert!(!later_source_path.exists());
 
         let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn deferred_manual_add_records_ingest_result_and_retires_pending_path() {
+        let _guard = lock_shared_env();
+        let _temp_paths = configure_temp_app_paths_for_test();
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let download_folder = temp_dir.path().join("downloads");
+        std::fs::create_dir_all(&download_folder).expect("create download folder");
+        let source_path = temp_dir.path().join("manual-input.magnet");
+        let magnet_link = "magnet:?xt=urn:btih:7777777777777777777777777777777777777777";
+        std::fs::write(&source_path, magnet_link).expect("write manual source");
+        let settings = crate::config::Settings {
+            client_port: 0,
+            default_download_folder: Some(download_folder.clone()),
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        while app.app_command_rx.try_recv().is_ok() {}
+        let initial_entry_count = app.app_state.event_journal_state.entries.len();
+        let source_watch_folder = Some(temp_dir.path().to_path_buf());
+        assert!(app.record_ingest_queued(
+            source_path.clone(),
+            IngestOrigin::WatchFolder,
+            IngestKind::MagnetFile,
+            source_watch_folder.clone(),
+        ));
+
+        app.handle_app_command(AppCommand::SubmitManualAddRequest {
+            request: ControlRequest::AddMagnet {
+                magnet_link: magnet_link.to_string(),
+                download_path: Some(download_folder.clone()),
+                container_name: None,
+                validation_status: false,
+                file_priorities: Vec::new(),
+            },
+            pending_ingest: Some(PendingManualIngest {
+                source: IngestSource::MagnetFile,
+                path: source_path.clone(),
+            }),
+        })
+        .await;
+
+        assert!(!app
+            .app_state
+            .pending_ingest_by_path
+            .contains_key(&source_path));
+        let entries = &app.app_state.event_journal_state.entries[initial_entry_count..];
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].event_type, EventType::IngestQueued);
+        assert_eq!(entries[1].event_type, EventType::IngestAdded);
+        assert_eq!(entries[0].correlation_id, entries[1].correlation_id);
+        let archived_path = entries[1]
+            .source_path
+            .clone()
+            .expect("terminal ingest should record archived source");
+        assert_ne!(archived_path, source_path);
+        assert!(!source_path.exists());
+        assert!(archived_path.exists());
+        assert_eq!(entries[0].source_path.as_ref(), Some(&archived_path));
+        assert_eq!(entries[1].source_path.as_ref(), Some(&archived_path));
+        let EventDetails::Ingest {
+            origin,
+            ingest_kind,
+            download_path,
+            container_name,
+            ..
+        } = &entries[1].details
+        else {
+            panic!("expected ingest event details");
+        };
+        assert_eq!(*origin, IngestOrigin::WatchFolder);
+        assert_eq!(*ingest_kind, IngestKind::MagnetFile);
+        assert_eq!(download_path.as_ref(), Some(&download_folder));
+        assert!(container_name.is_none());
+
+        std::fs::write(
+            &source_path,
+            "magnet:?xt=urn:btih:8888888888888888888888888888888888888888",
+        )
+        .expect("write replacement source");
+        assert!(app.record_ingest_queued(
+            source_path.clone(),
+            IngestOrigin::WatchFolder,
+            IngestKind::MagnetFile,
+            source_watch_folder,
+        ));
+        assert!(app
+            .app_state
+            .pending_ingest_by_path
+            .contains_key(&source_path));
+
+        let _ = app.shutdown_tx.send(());
+        set_app_paths_override_for_tests(None);
     }
 
     #[tokio::test]
