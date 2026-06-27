@@ -2122,15 +2122,16 @@ pub async fn execute_confirm_decision(
         }
         ConfirmDecision::Download(payload) => match payload.target {
             DownloadSelectionTarget::PendingAdd => {
-                if let Some(pending_path) = app.app_state.pending_torrent_path.take() {
-                    let pending_ingest = app.app_state.pending_manual_ingest.take();
+                if let Some(pending_path) = app.app_state.pending_torrent_path.clone() {
                     match app.prepare_add_torrent_file_request(
-                        pending_path,
+                        pending_path.clone(),
                         Some(payload.base_path.clone()),
                         payload.container_name_to_use.clone(),
                         payload.file_priorities.clone(),
                     ) {
                         Ok(request) => {
+                            app.app_state.pending_torrent_path = None;
+                            let pending_ingest = app.app_state.pending_manual_ingest.take();
                             spawn_app_command_sender(
                                 app.app_command_tx.clone(),
                                 app.shutdown_tx.subscribe(),
@@ -2142,6 +2143,7 @@ pub async fn execute_confirm_decision(
                         }
                         Err(error) => {
                             app.app_state.system_error = Some(error);
+                            return None;
                         }
                     }
                 } else if !app.app_state.pending_torrent_link.is_empty() {

@@ -3779,14 +3779,20 @@ impl App {
         }
     }
 
-    fn open_manual_browser_for_torrent_file(&mut self, path: PathBuf) -> Result<(), String> {
+    fn open_manual_browser_for_torrent_file_with_archive(
+        &mut self,
+        path: PathBuf,
+        archive_watched_input: bool,
+    ) -> Result<(), String> {
         let buffer = fs::read(&path).map_err(|error| {
             format_filesystem_path_error("Failed to read torrent file", &path, &error)
         })?;
         let torrent = from_bytes(&buffer)
             .map_err(|_| "Failed to parse torrent file for preview.".to_string())?;
 
-        let final_path = if self.is_host_watch_path(&path) || self.is_shared_inbox_path(&path) {
+        let final_path = if archive_watched_input
+            && (self.is_host_watch_path(&path) || self.is_shared_inbox_path(&path))
+        {
             match archive_watch_file(&path, "torrent.added") {
                 Ok(final_path) => {
                     self.update_pending_ingest_source_path(&path, final_path.clone());
@@ -3872,7 +3878,11 @@ impl App {
         match payload {
             ResolvedAddPayload::TorrentFile { source_path } => {
                 if matches!(source, IngestSource::TorrentFile) {
-                    self.open_manual_browser_for_torrent_file(source_path)
+                    let archive_watched_input = !self.is_shared_inbox_path(&source_path);
+                    self.open_manual_browser_for_torrent_file_with_archive(
+                        source_path,
+                        archive_watched_input,
+                    )
                 } else {
                     self.cleanup_pending_magnet_preview_runtime();
                     self.app_state.pending_torrent_link.clear();
@@ -7101,32 +7111,43 @@ impl App {
             if !self.has_live_runtime_for_torrent(&info_hash) {
                 self.clear_display_only_torrent(&info_hash);
             } else {
-                if let Some(path) = download_path {
-                    if let Some(display) = self.app_state.torrents.get_mut(&info_hash) {
-                        display.latest_state.download_path = Some(path.clone());
-                        display.latest_state.container_name = container_name.clone();
-                        display.latest_state.file_priorities = file_priorities.clone();
-                        apply_torrent_preview_file_priorities(
-                            &mut display.file_preview_tree,
-                            &file_priorities,
-                        );
-                    }
-                    if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
-                        self.send_manager_command_until_shutdown(
-                            manager_tx,
-                            ManagerCommand::SetUserTorrentConfig {
-                                torrent_data_path: path,
-                                file_priorities: file_priorities.clone(),
-                                container_name,
-                            },
-                        )
-                        .await;
+                let should_apply_duplicate_config =
+                    self.app_state.pending_magnet_preview_info_hash.as_deref()
+                        == Some(info_hash.as_slice());
+                let mut applied_duplicate_config = false;
+                if should_apply_duplicate_config {
+                    if let Some(path) = download_path {
+                        applied_duplicate_config = true;
+                        if let Some(display) = self.app_state.torrents.get_mut(&info_hash) {
+                            display.latest_state.download_path = Some(path.clone());
+                            display.latest_state.container_name = container_name.clone();
+                            display.latest_state.file_priorities = file_priorities.clone();
+                            apply_torrent_preview_file_priorities(
+                                &mut display.file_preview_tree,
+                                &file_priorities,
+                            );
+                        }
+                        if let Some(manager_tx) = self.torrent_manager_command_txs.get(&info_hash) {
+                            self.send_manager_command_until_shutdown(
+                                manager_tx,
+                                ManagerCommand::SetUserTorrentConfig {
+                                    torrent_data_path: path,
+                                    file_priorities: file_priorities.clone(),
+                                    container_name,
+                                },
+                            )
+                            .await;
+                        }
                     }
                 }
-                let message = format!(
-                    "Updated path for existing torrent from file: {}",
-                    torrent.info.name
-                );
+                let message = if applied_duplicate_config {
+                    format!(
+                        "Updated path for existing torrent from file: {}",
+                        torrent.info.name
+                    )
+                } else {
+                    format!("Ignoring already present torrent: {}", torrent.info.name)
+                };
                 tracing_event!(Level::INFO, "{}", message);
                 return CommandIngestResult::Duplicate {
                     info_hash: Some(info_hash),
@@ -8064,6 +8085,7 @@ impl App {
                 validation_status,
                 file_priorities,
             } => {
+                let has_applied_download_path = download_path.is_some();
                 let ingest_result = self
                     .add_torrent_from_file(
                         source_path.clone(),
@@ -8079,6 +8101,9 @@ impl App {
                     ingest_result,
                     CommandIngestResult::Added { .. } | CommandIngestResult::Duplicate { .. }
                 ) {
+                    if has_applied_download_path {
+                        self.clear_pending_magnet_preview_if_applied(&ingest_result);
+                    }
                     self.save_state_to_disk();
                     self.trigger_status_dump_after_successful_cluster_mutation();
                 }
@@ -12622,7 +12647,7 @@ mod tests {
             .expect("build app");
 
         app.record_watch_path_discovered(&watched_path);
-        app.open_manual_browser_for_torrent_file(watched_path.clone())
+        app.open_manual_browser_for_torrent_file_with_archive(watched_path.clone(), true)
             .expect("open manual browser");
 
         let final_path = processed_dir.join("manual-input.torrent");
@@ -12688,7 +12713,7 @@ mod tests {
             IngestKind::TorrentFile,
             crate::config::shared_inbox_path(),
         ));
-        app.open_manual_browser_for_torrent_file(watched_path.clone())
+        app.open_manual_browser_for_torrent_file_with_archive(watched_path.clone(), true)
             .expect("open manual browser");
 
         let final_path = effective_root
@@ -13760,6 +13785,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_torrent_request_prepare_keeps_deferred_manual_ingest() {
+        let _guard = lock_shared_env();
+        let shared_root = tempfile::tempdir().expect("create shared root");
+        let original_shared_dir = env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let original_host_id = env::var_os("SUPERSEEDR_SHARED_HOST_ID");
+        env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", shared_root.path());
+        env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
+        clear_shared_config_state_for_tests();
+
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let download_folder = temp_dir.path().join("downloads");
+        std::fs::create_dir_all(&download_folder).expect("create download folder");
+        let missing_torrent_path = temp_dir.path().join("missing.torrent");
+        let inbox_path = temp_dir.path().join("manual-input.path");
+        std::fs::write(
+            &inbox_path,
+            missing_torrent_path.to_string_lossy().as_bytes(),
+        )
+        .expect("write path input");
+
+        let settings = crate::config::Settings {
+            client_port: 0,
+            default_download_folder: Some(download_folder.clone()),
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::SharedFollower)
+            .await
+            .expect("build app");
+        while app.app_command_rx.try_recv().is_ok() {}
+        app.app_state.pending_torrent_path = Some(missing_torrent_path.clone());
+        app.app_state.pending_manual_ingest = Some(PendingManualIngest {
+            source: IngestSource::TorrentPathFile,
+            path: inbox_path.clone(),
+        });
+        app.app_state.ui.file_browser.state.current_path = download_folder;
+        app.app_state.ui.file_browser.browser_mode = FileBrowserMode::DownloadLocSelection {
+            target: DownloadSelectionTarget::PendingAdd,
+            torrent_files: vec![],
+            container_name: "New Torrent".to_string(),
+            use_container: false,
+            is_editing_name: false,
+            preview_tree: Vec::new(),
+            preview_state: TreeViewState::default(),
+            focused_pane: BrowserPane::FileSystem,
+            cursor_pos: 0,
+            original_name_backup: "New Torrent".to_string(),
+        };
+
+        let payload = build_download_confirm_payload(
+            &app.app_state.ui.file_browser.state,
+            &app.app_state.ui.file_browser.browser_mode,
+        )
+        .expect("confirm payload");
+        let transition = execute_confirm_decision(
+            &mut app,
+            crate::tui::screens::browser::ConfirmDecision::Download(payload),
+        )
+        .await;
+
+        assert!(transition.is_none());
+        assert!(app.app_state.system_error.is_some());
+        assert_eq!(
+            app.app_state.pending_torrent_path.as_ref(),
+            Some(&missing_torrent_path)
+        );
+        let pending_manual = app
+            .app_state
+            .pending_manual_ingest
+            .as_ref()
+            .expect("failed preparation should keep deferred ingest");
+        assert_eq!(pending_manual.path, inbox_path);
+        assert_eq!(pending_manual.source, IngestSource::TorrentPathFile);
+
+        let _ = app.shutdown_tx.send(());
+        if let Some(value) = original_shared_dir {
+            env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+        }
+        if let Some(value) = original_host_id {
+            env::set_var("SUPERSEEDR_SHARED_HOST_ID", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
+        }
+        clear_shared_config_state_for_tests();
+    }
+
+    #[tokio::test]
     async fn failed_manual_add_request_does_not_archive_stale_ingest_on_later_success() {
         let temp_dir = tempfile::tempdir().expect("create tempdir");
         let download_folder = temp_dir.path().join("downloads");
@@ -14181,6 +14294,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn torrent_file_control_add_clears_pending_preview_before_persistence() {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let download_folder = temp_dir.path().join("downloads");
+        std::fs::create_dir_all(&download_folder).expect("create downloads");
+
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("integration_tests")
+            .join("torrents")
+            .join("v1")
+            .join("single_4k.bin.torrent");
+        let source_path = temp_dir.path().join("same-hash.torrent");
+        std::fs::copy(&fixture, &source_path).expect("copy fixture");
+        let torrent_bytes = std::fs::read(&source_path).expect("read torrent");
+        let info_hash = info_hash_from_torrent_bytes(&torrent_bytes).expect("torrent info hash");
+        let magnet_link = format!("magnet:?xt=urn:btih:{}", hex::encode(&info_hash));
+
+        let settings = crate::config::Settings {
+            client_port: 0,
+            default_download_folder: Some(download_folder.clone()),
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        while app.app_command_rx.try_recv().is_ok() {}
+
+        app.app_state.pending_torrent_link = magnet_link.clone();
+        app.app_state.pending_magnet_preview_info_hash = Some(info_hash.clone());
+        app.app_state.torrents.insert(
+            info_hash.clone(),
+            TorrentDisplayState {
+                latest_state: TorrentMetrics {
+                    info_hash: info_hash.clone(),
+                    torrent_or_magnet: magnet_link.clone(),
+                    torrent_name: "sample-preview".to_string(),
+                    torrent_control_state: TorrentControlState::Running,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        app.app_state.torrent_list_order.push(info_hash.clone());
+        let (manager_tx, mut manager_rx) = mpsc::channel(1);
+        app.torrent_manager_command_txs
+            .insert(info_hash.clone(), manager_tx);
+
+        app.apply_control_request(&ControlRequest::AddTorrentFile {
+            source_path: source_path.clone(),
+            download_path: Some(download_folder.clone()),
+            container_name: None,
+            validation_status: false,
+            file_priorities: Vec::new(),
+        })
+        .await
+        .expect("control torrent add");
+
+        let manager_command = manager_rx
+            .try_recv()
+            .expect("control add should apply config to the preview runtime");
+        match manager_command {
+            ManagerCommand::SetUserTorrentConfig {
+                torrent_data_path,
+                file_priorities,
+                container_name,
+            } => {
+                assert_eq!(torrent_data_path, download_folder);
+                assert!(file_priorities.is_empty());
+                assert!(container_name.is_none());
+            }
+            other => panic!("unexpected manager command: {:?}", other),
+        }
+        assert!(app.app_state.pending_magnet_preview_info_hash.is_none());
+
+        let mut applied_settings = app.client_configs.clone();
+        let applied_payload =
+            build_persist_payload(&mut applied_settings, &mut app.app_state, &VecDeque::new());
+        let persisted = applied_payload
+            .settings
+            .torrents
+            .iter()
+            .find(|torrent| torrent.torrent_or_magnet == magnet_link)
+            .expect("control-applied torrent file should persist after marker clears");
+        assert_eq!(persisted.download_path.as_ref(), Some(&download_folder));
+
+        app.cleanup_pending_magnet_preview_runtime();
+        assert!(app.app_state.torrents.contains_key(&info_hash));
+        assert!(app.torrent_manager_command_txs.contains_key(&info_hash));
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn duplicate_torrent_file_ingest_keeps_existing_config_without_pending_preview() {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let initial_download_path = temp_dir.path().join("initial-downloads");
+        let duplicate_download_path = temp_dir.path().join("duplicate-downloads");
+        std::fs::create_dir_all(&initial_download_path).expect("create initial downloads");
+        std::fs::create_dir_all(&duplicate_download_path).expect("create duplicate downloads");
+
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("integration_tests")
+            .join("torrents")
+            .join("v1")
+            .join("single_4k.bin.torrent");
+        let source_path = temp_dir.path().join("duplicate.torrent");
+        std::fs::copy(&fixture, &source_path).expect("copy fixture");
+        let torrent_bytes = std::fs::read(&source_path).expect("read torrent");
+        let info_hash = info_hash_from_torrent_bytes(&torrent_bytes).expect("torrent info hash");
+        let original_priorities = HashMap::from([(0, FilePriority::Skip)]);
+
+        let settings = crate::config::Settings {
+            client_port: 0,
+            ..Default::default()
+        };
+        let mut app = App::new(settings, AppRuntimeMode::Normal)
+            .await
+            .expect("build app");
+        while app.app_command_rx.try_recv().is_ok() {}
+        app.app_state.torrents.insert(
+            info_hash.clone(),
+            TorrentDisplayState {
+                latest_state: TorrentMetrics {
+                    info_hash: info_hash.clone(),
+                    torrent_name: "existing-sample".to_string(),
+                    torrent_control_state: TorrentControlState::Running,
+                    download_path: Some(initial_download_path.clone()),
+                    container_name: Some("Existing Sample".to_string()),
+                    file_priorities: original_priorities.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        app.app_state.torrent_list_order.push(info_hash.clone());
+        let (manager_tx, mut manager_rx) = mpsc::channel(1);
+        app.torrent_manager_command_txs
+            .insert(info_hash.clone(), manager_tx);
+
+        let result = app
+            .add_torrent_from_file(
+                source_path,
+                Some(duplicate_download_path),
+                false,
+                TorrentControlState::Running,
+                HashMap::new(),
+                None,
+            )
+            .await;
+
+        assert!(matches!(result, CommandIngestResult::Duplicate { .. }));
+        assert!(manager_rx.try_recv().is_err());
+        let display = app
+            .app_state
+            .torrents
+            .get(&info_hash)
+            .expect("existing runtime should remain");
+        assert_eq!(
+            display.latest_state.download_path.as_ref(),
+            Some(&initial_download_path)
+        );
+        assert_eq!(
+            display.latest_state.container_name.as_deref(),
+            Some("Existing Sample")
+        );
+        assert_eq!(display.latest_state.file_priorities, original_priorities);
+
+        let _ = app.shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn duplicate_magnet_config_update_persists_file_priorities_in_app_state() {
         let temp_dir = tempfile::tempdir().expect("create tempdir");
         let initial_download_path = temp_dir.path().join("initial-downloads");
@@ -14325,6 +14608,91 @@ mod tests {
             .expect("manual ingest should wait for confirmation");
         assert_eq!(pending_manual.path, magnet_path);
         assert_eq!(pending_manual.source, IngestSource::MagnetFile);
+
+        let _ = app.shutdown_tx.send(());
+        if let Some(value) = original_shared_dir {
+            env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_CONFIG_DIR");
+        }
+        if let Some(value) = original_host_id {
+            env::set_var("SUPERSEEDR_SHARED_HOST_ID", value);
+        } else {
+            env::remove_var("SUPERSEEDR_SHARED_HOST_ID");
+        }
+        clear_shared_config_state_for_tests();
+    }
+
+    #[tokio::test]
+    async fn shared_leader_always_show_prompt_defers_shared_inbox_torrent_archive() {
+        let _guard = lock_shared_env();
+        let shared_root = tempfile::tempdir().expect("create shared root");
+        let effective_root = shared_root.path().join("superseedr-config");
+        let original_shared_dir = env::var_os("SUPERSEEDR_SHARED_CONFIG_DIR");
+        let original_host_id = env::var_os("SUPERSEEDR_SHARED_HOST_ID");
+
+        env::set_var("SUPERSEEDR_SHARED_CONFIG_DIR", shared_root.path());
+        env::set_var("SUPERSEEDR_SHARED_HOST_ID", "node-a");
+        clear_shared_config_state_for_tests();
+
+        std::fs::create_dir_all(effective_root.join("hosts").join("node-a"))
+            .expect("create hosts dir");
+        std::fs::write(
+            effective_root
+                .join("hosts")
+                .join("node-a")
+                .join("config.toml"),
+            "client_port = 0\ndefault_download_folder = '/tmp/superseedr-test-downloads'\nalways_show_add_location_prompt = true\n",
+        )
+        .expect("write host config");
+        let inbox = effective_root.join("inbox");
+        std::fs::create_dir_all(&inbox).expect("create shared inbox");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("integration_tests")
+            .join("torrents")
+            .join("v1")
+            .join("single_4k.bin.torrent");
+        let torrent_path = inbox.join("manual-input.torrent");
+        std::fs::copy(&fixture, &torrent_path).expect("copy fixture");
+
+        let mut app = App::new(
+            crate::config::load_settings().expect("load shared settings"),
+            AppRuntimeMode::SharedLeader,
+        )
+        .await
+        .expect("build shared app");
+        while app.app_command_rx.try_recv().is_ok() {}
+        assert!(app.record_ingest_queued(
+            torrent_path.clone(),
+            IngestOrigin::WatchFolder,
+            IngestKind::TorrentFile,
+            crate::config::shared_inbox_path(),
+        ));
+
+        let action = app.resolve_add_ingress_action(IngestSource::TorrentFile, &torrent_path);
+
+        assert!(matches!(
+            action,
+            super::AddIngressAction::OpenManualBrowser { .. }
+        ));
+        app.execute_add_ingress_action(IngestSource::TorrentFile, torrent_path.clone(), action)
+            .await;
+        let processed_path = effective_root
+            .join("processed")
+            .join("manual-input.torrent");
+        assert!(torrent_path.exists());
+        assert!(!processed_path.exists());
+        assert_eq!(
+            app.app_state.pending_torrent_path.as_ref(),
+            Some(&torrent_path)
+        );
+        let pending_manual = app
+            .app_state
+            .pending_manual_ingest
+            .as_ref()
+            .expect("manual ingest should wait for confirmation");
+        assert_eq!(pending_manual.path, torrent_path);
+        assert_eq!(pending_manual.source, IngestSource::TorrentFile);
 
         let _ = app.shutdown_tx.send(());
         if let Some(value) = original_shared_dir {
